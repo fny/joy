@@ -18,16 +18,52 @@
  *    AbortSignal handed to the fetcher is a courtesy for fetchers that can
  *    stop early — the generation check is what guarantees the drop, so a
  *    fetcher that ignores the signal still cannot land a stale write.
+ *  - A REQUIREMENT THAT ARRIVES DURING A READ IS NOT LOST. The read in flight
+ *    answers for the requirement it started with. An ensure for a NEWER
+ *    version, an `invalidate`, a focus/reconnect policy that lands while it
+ *    runs is recorded beside it and served by exactly ONE trailing read once
+ *    it settles (the newest requirement wins; the callers waiting on it share
+ *    that read). A read clears `invalidated` only for invalidations that
+ *    predate its start — one that arrived mid-read stays until the trailing
+ *    read lands.
  *  - FOUR DISTINCT STATES. `data` (the last good value, kept across failures),
  *    `error` (the newest request ran and failed), `unavailable` (the newest
  *    request could not be made: no machine context, no live session) and an
  *    authoritative empty result (an `ok` outcome whose data IS the empty
  *    value — null, [] — which replaces the last good value like any other).
+ *    `error` and `unavailable` describe the NEWEST request only: each clears
+ *    the other, so `error ?? unavailable` is always the current state.
  *  - FOCUS, RECONNECT AND INVALIDATION ARE POLICIES. `invalidate` marks a key
- *    stale and refetches it when it is observed; app focus and relay
- *    reconnect refetch observed keys whose spec opted in.
+ *    stale and refetches it when it is actively observed; app focus and relay
+ *    reconnect refetch actively observed keys whose spec opted in; context
+ *    readiness (`onContextReady`: machine keys hydrated) refetches every
+ *    actively observed key whose newest outcome was `unavailable`. A PASSIVE
+ *    observer (`subscribe(..., { passive: true })`: a disabled hook, a badge)
+ *    keeps the entry alive and receives every change but never triggers a
+ *    read.
+ *  - OBSERVED KEYS HAVE A STABLE SNAPSHOT. While anyone subscribes to a key
+ *    its entry object is the same reference until the store publishes a
+ *    change (useSyncExternalStore depends on this). `remove` of an observed
+ *    key resets it to an idle entry IN PLACE — subscriptions and observer
+ *    counts survive, the next ensure/refresh recreates it under the same
+ *    observers — and only an unobserved key leaves the map.
+ *  - MEMORY IS BOUNDED PER FAMILY, AND RECLAIMED WHEN READERS LEAVE. A
+ *    family budget (`defineFamily`) caps entries and bytes and can expire
+ *    idle entries; every entry counts toward `maxEntries` (failed,
+ *    unavailable and empty ones included), bytes count for entries with
+ *    data. The budget is enforced after every write AND when the last
+ *    observer of a key leaves. Observed and in-flight entries are exempt
+ *    ONLY while observed/in flight: an oversized mounted entry (a huge diff on
+ *    screen) stays for as long as it is mounted, however far over budget the
+ *    family is, and is reclaimed on unmount. An idle entry nobody observes
+ *    and that holds nothing (no spec, no data) is dropped on unsubscribe.
  *  - UNSENT USER INTENT STAYS OUT. Drafts, edits, pending saves live in
  *    component/session state; `setData` is how a mutation's RESULT enters.
+ *  - MUTATION RESULTS ARE ORDERED. `beginMutation` hands a write a ticket;
+ *    `setData` with that ticket publishes only while no later write of the
+ *    key has committed — a delayed acknowledgement of an older write is
+ *    dropped and the key revalidated from disk instead, so two panels
+ *    saving the same file cannot regress the shared cache.
  *
  * Pure module: no React, no react-native, so the contract is unit-tested in
  * node. hooks/useResource.ts binds it to components.
@@ -60,7 +96,7 @@ export interface ResourceSpec<T> {
     equal?: (a: T, b: T) => boolean;
     /** Bounded retry for THROWN fetch errors. */
     retry?: { attempts: number; delayMs: number };
-    /** Refetch observed entries when the app regains focus / the relay reconnects. */
+    /** Refetch actively observed entries when the app regains focus / the relay reconnects. */
     refetchOnFocus?: boolean;
     refetchOnReconnect?: boolean;
     /** Eviction budget group (see `defineFamily`). */
@@ -76,14 +112,18 @@ export interface ResourceEntry<T> {
     dataUpdatedAt: number;
     /** When the newest ok outcome landed, equal or not (freshness). */
     checkedAt: number;
+    /** How many ok outcomes (fetched or written) have landed, equal or not:
+     *  a MONOTONIC identity for "the answer I saw" — unlike `checkedAt`,
+     *  two answers can never share it and a clock step cannot reorder it. */
+    revision: number;
     /** The `version` the data was fetched under. */
     dataVersion: string | undefined;
     fetching: boolean;
-    /** The newest request failed (thrown or `error` outcome). Cleared by the next ok. */
+    /** The newest request failed (thrown or `error` outcome). Cleared by the next ok or unavailable. */
     error: string | null;
     /** The newest request could not run. Cleared by the next ok or error. */
     unavailable: string | null;
-    /** Explicitly invalidated since the last ok. */
+    /** Explicitly invalidated since the last ok that started after the invalidation. */
     invalidated: boolean;
 }
 
@@ -93,12 +133,29 @@ export interface EnsureOptions {
 }
 
 export interface FamilyBudget {
+    /** Every member counts: with data, failed, unavailable or empty. */
     maxEntries?: number;
+    /** Sum of `size` over members with data. */
     maxBytes?: number;
     size?: (data: unknown) => number;
+    /** An unobserved member not touched (ensured, refreshed, written) for this
+     *  long is reclaimed at the next budget pass, budget or not. */
+    maxAgeMs?: number;
+}
+
+export interface SubscribeOptions {
+    /** Keep the entry alive and hear every change, but never trigger a read
+     *  (invalidate / focus / reconnect policies ignore passive observers). */
+    passive?: boolean;
 }
 
 type Listener = () => void;
+
+interface Trailing<T> {
+    spec: ResourceSpec<T>;
+    promise: Promise<ResourceEntry<T>>;
+    resolve: (entry: ResourceEntry<T> | Promise<ResourceEntry<T>>) => void;
+}
 
 interface Internal<T> {
     entry: ResourceEntry<T>;
@@ -106,27 +163,51 @@ interface Internal<T> {
     gen: number;
     controller: AbortController | null;
     inFlight: Promise<ResourceEntry<T>> | null;
+    /** The spec the read in flight runs under (its version is what it will record). */
+    inFlightSpec: ResourceSpec<T> | null;
+    /** A requirement that arrived during the read in flight: served once it settles. */
+    trailing: Trailing<T> | null;
+    /** Bumped by every `invalidate`; a read captures it at start. */
+    invalidationGen: number;
+    /** The store's context generation when the newest `unavailable` landed. */
+    unavailableAtContext: number;
+    /** Mutation tickets: the newest handed out, and the newest whose result landed. */
+    mutationIssued: number;
+    mutationCommitted: number;
+    /** Active observers: their presence makes policies (invalidate, focus, reconnect) refetch. */
     observers: number;
+    /** Passive observers: keep the entry alive, never trigger a read. */
+    passive: number;
     lastTouched: number;
 }
 
 const IDLE = <T>(key: string): ResourceEntry<T> => ({
-    key, data: undefined, hasData: false, dataUpdatedAt: 0, checkedAt: 0, dataVersion: undefined,
+    key, data: undefined, hasData: false, dataUpdatedAt: 0, checkedAt: 0, revision: 0, dataVersion: undefined,
     fetching: false, error: null, unavailable: null, invalidated: false,
 });
+
+/** Idle snapshots handed out for keys the store does not hold: bounded so a
+ *  burst of peeks at unknown keys cannot grow without limit. */
+const IDLE_CACHE_MAX = 512;
 
 export function errorText(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
 }
 
-/** Race a promise against `ms` and the resource's abort signal. */
+/** Race a promise against `ms` and the resource's abort signal. An already-
+ *  aborted signal rejects at once; the abort listener never outlives the race. */
 export function withTimeout<T>(p: Promise<T>, ms: number, signal?: AbortSignal, label = 'timeout'): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(label)), ms);
-        const onAbort = () => { clearTimeout(timer); reject(new Error('aborted')); };
-        signal?.addEventListener('abort', onAbort, { once: true });
-        p.then((v) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); resolve(v); },
-            (e) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(e); });
+        if (signal?.aborted) { reject(new Error('aborted')); return; }
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const cleanup = () => {
+            if (timer !== null) { clearTimeout(timer); timer = null; }
+            signal?.removeEventListener('abort', onAbort);
+        };
+        const onAbort = () => { cleanup(); reject(new Error('aborted')); };
+        timer = setTimeout(() => { cleanup(); reject(new Error(label)); }, ms);
+        signal?.addEventListener('abort', onAbort);
+        p.then((v) => { cleanup(); resolve(v); }, (e) => { cleanup(); reject(e); });
     });
 }
 
@@ -134,6 +215,10 @@ export class ResourceStore {
     private entries = new Map<string, Internal<unknown>>();
     private listeners = new Map<string, Set<Listener>>();
     private families = new Map<string, FamilyBudget>();
+    private idles = new Map<string, ResourceEntry<unknown>>();
+    /** Bumped by `onContextReady`: an `unavailable` recorded under an older
+     *  generation is stale (the context it lacked may exist now). */
+    private contextGen = 0;
     private now: () => number;
 
     constructor(opts: { now?: () => number } = {}) {
@@ -144,26 +229,41 @@ export class ResourceStore {
         this.families.set(name, budget);
     }
 
-    /** The entry as it is now (an idle entry for an unknown key). */
+    /** The entry as it is now (a stable idle entry for an unknown key). */
     peek<T>(key: string): ResourceEntry<T> {
-        return (this.entries.get(key)?.entry as ResourceEntry<T> | undefined) ?? this.idle<T>(key);
+        const held = this.entries.get(key);
+        if (held) return held.entry as ResourceEntry<T>;
+        return this.idle<T>(key);
     }
 
-    subscribe(key: string, listener: Listener): () => void {
+    /**
+     * Hear every change of the key. The entry exists (idle) from now on and is
+     * exempt from eviction until the last observer leaves. Active observers
+     * (default) make the policies refetch; passive ones only keep it alive.
+     */
+    subscribe(key: string, listener: Listener, opts: SubscribeOptions = {}): () => void {
         let set = this.listeners.get(key);
         if (!set) { set = new Set(); this.listeners.set(key, set); }
         set.add(listener);
         const internal = this.internal(key);
-        internal.observers++;
+        const passive = opts.passive === true;
+        if (passive) internal.passive++; else internal.observers++;
+        let done = false;
         return () => {
+            if (done) return;
+            done = true;
             set!.delete(listener);
             if (set!.size === 0) this.listeners.delete(key);
-            internal.observers = Math.max(0, internal.observers - 1);
+            if (passive) internal.passive = Math.max(0, internal.passive - 1);
+            else internal.observers = Math.max(0, internal.observers - 1);
+            if (internal.observers + internal.passive === 0) this.reclaim(internal);
         };
     }
 
+    /** Anyone (active or passive) subscribes to the key. */
     isObserved(key: string): boolean {
-        return (this.entries.get(key)?.observers ?? 0) > 0;
+        const i = this.entries.get(key);
+        return !!i && i.observers + i.passive > 0;
     }
 
     /** Freshness under the spec's (or the override's) staleTime and version. */
@@ -171,6 +271,7 @@ export class ResourceStore {
         const e = this.peek<T>(spec.key);
         if (!e.hasData || e.invalidated) return true;
         if (spec.version !== undefined && e.dataVersion !== spec.version) return true;
+        if (e.unavailable !== null && (this.entries.get(spec.key)?.unavailableAtContext ?? 0) < this.contextGen) return true;
         const staleTime = opts.staleTime ?? spec.staleTime ?? 0;
         if (staleTime === Infinity) return false;
         return this.now() - e.checkedAt >= staleTime;
@@ -178,14 +279,21 @@ export class ResourceStore {
 
     /**
      * Fetch unless the entry is fresh. Coalesces with a request already in
-     * flight for the key (it will answer for this caller too). Resolves with
-     * the entry once the read that answers it settled.
+     * flight for the key when that request answers this requirement (same
+     * version); a NEWER version is queued as the one trailing read that
+     * runs once the active read settles. Resolves with the entry once the
+     * read that answers this caller settled.
      */
     ensure<T>(spec: ResourceSpec<T>, opts: EnsureOptions = {}): Promise<ResourceEntry<T>> {
         const internal = this.internal<T>(spec.key);
         internal.spec = spec;
         internal.lastTouched = this.now();
-        if (internal.inFlight) return internal.inFlight;
+        if (internal.inFlight) {
+            const wanted = spec.version;
+            const running = internal.inFlightSpec?.version;
+            if (wanted === undefined || wanted === running) return internal.inFlight;
+            return this.queueTrailing(internal, spec);
+        }
         if (!this.isStale(spec, opts)) return Promise.resolve(internal.entry);
         return this.run(internal, spec);
     }
@@ -199,53 +307,94 @@ export class ResourceStore {
     }
 
     /**
-     * Mark stale. Observed keys refetch right away (with their last spec);
-     * unobserved keys refetch on their next ensure. `prefix` form invalidates
-     * every key under it.
+     * Mark stale. Actively observed keys refetch right away (with their last
+     * spec) — or, while a read is active, once it settles; unobserved keys
+     * refetch on their next ensure. `prefix` form invalidates every key
+     * under it.
      */
     invalidate(key: string, opts: { prefix?: boolean; refetch?: boolean } = {}): void {
         const targets = opts.prefix
             ? Array.from(this.entries.values()).filter((i) => i.entry.key.startsWith(key))
             : [this.entries.get(key)].filter((i): i is Internal<unknown> => !!i);
         for (const internal of targets) {
+            internal.invalidationGen++;
             this.publish(internal, { ...internal.entry, invalidated: true });
             const refetch = opts.refetch ?? internal.observers > 0;
-            if (refetch && internal.spec && !internal.inFlight) void this.run(internal, internal.spec);
+            if (refetch && internal.spec) this.requestRead(internal, internal.spec);
         }
     }
 
     /**
-     * A mutation's result enters the cache. Unconditional and generation-
-     * bumping: every read in flight for the key (a poll, a prefetch, a
-     * background revalidation that started before the write landed) is
-     * superseded, so a pre-write read can never overwrite what was just
-     * written. `version` stamps the data's revision when the caller has one.
+     * A mutation is about to be sent: the ticket orders its result against
+     * the other mutations of the key. Hand it to `setData` with the result.
      */
-    setData<T>(key: string, data: T, opts: { version?: string } = {}): void {
+    beginMutation(key: string): number {
+        const internal = this.internal(key);
+        return ++internal.mutationIssued;
+    }
+
+    /**
+     * A mutation's result enters the cache. Generation-bumping: every read
+     * in flight for the key (a poll, a prefetch, a background revalidation
+     * that started before the write landed) is superseded, so a pre-write
+     * read can never overwrite what was just written. `version` stamps the
+     * data's revision when the caller has one (a daemon content hash).
+     *
+     * Mutation results are fenced by `ticket` (from `beginMutation`): a
+     * result whose ticket is older than the newest committed one is a
+     * delayed acknowledgement of a write that later writes have already
+     * replaced on disk — it is NOT published (returns false) and, when the
+     * key has a spec, a revalidating read is started instead, so the cache
+     * converges on what is on disk. A result whose `version` equals the
+     * cached version is the same content (published as an equal refetch).
+     * Without a ticket the write is unconditional.
+     *
+     * A requirement queued behind the superseded read is answered by the
+     * written entry (its caller re-ensures if it still needs another version).
+     */
+    setData<T>(key: string, data: T, opts: { version?: string; ticket?: number } = {}): boolean {
         const internal = this.internal<T>(key);
-        this.supersede(internal);
+        if (opts.ticket !== undefined) {
+            const sameContent = opts.version !== undefined && internal.entry.hasData && internal.entry.dataVersion === opts.version;
+            if (opts.ticket < internal.mutationCommitted && !sameContent) {
+                if (internal.spec && !internal.inFlight) void this.run(internal, internal.spec);
+                return false;
+            }
+            internal.mutationCommitted = Math.max(internal.mutationCommitted, opts.ticket);
+        }
+        const waiting = this.supersede(internal);
+        internal.lastTouched = this.now();
         const now = this.now();
         const prev = internal.entry;
         const same = prev.hasData && this.eq(internal.spec, prev.data as T, data);
         this.publish(internal, {
             ...prev, data: same ? prev.data : data, hasData: true,
-            dataUpdatedAt: same ? prev.dataUpdatedAt : now, checkedAt: now,
+            dataUpdatedAt: same ? prev.dataUpdatedAt : now, checkedAt: now, revision: prev.revision + 1,
             dataVersion: opts.version ?? prev.dataVersion,
             fetching: false, error: null, unavailable: null, invalidated: false,
         });
+        waiting?.resolve(internal.entry);
         this.enforceBudget(internal.spec?.family);
+        return true;
     }
 
-    /** Abort what is in flight; its completion publishes nothing. */
+    /** Abort what is in flight (and drop what was queued behind it); its
+     *  completion publishes nothing. */
     cancel(key: string): void {
         const internal = this.entries.get(key);
         if (!internal) return;
-        this.supersede(internal);
+        const waiting = this.supersede(internal);
         if (internal.entry.fetching) this.publish(internal, { ...internal.entry, fetching: false });
+        waiting?.resolve(internal.entry);
     }
 
-    /** Drop the key (or every key under `prefix`) entirely: in-flight requests
-     *  are superseded and the last good value is gone. */
+    /**
+     * Drop the key (or every key under `prefix`) entirely: in-flight requests
+     * are superseded and the last good value is gone. An observed key is
+     * reset to idle IN PLACE (its subscribers keep their subscription and see
+     * the idle entry; the next ensure/refresh recreates it under them);
+     * an unobserved key leaves the map.
+     */
     remove(key: string, opts: { prefix?: boolean } = {}): void {
         const keys = opts.prefix
             ? Array.from(this.entries.keys()).filter((k) => k.startsWith(key))
@@ -253,20 +402,42 @@ export class ResourceStore {
         for (const k of keys) {
             const internal = this.entries.get(k);
             if (!internal) continue;
-            this.supersede(internal);
-            this.entries.delete(k);
-            this.publish(internal, this.idle(k), { detached: true });
+            const waiting = this.supersede(internal);
+            internal.spec = null;
+            internal.lastTouched = this.now();
+            if (internal.observers + internal.passive > 0) {
+                this.publish(internal, this.idle(k, { fresh: true }));
+            } else {
+                this.entries.delete(k);
+                this.publish(internal, this.idle(k), { detached: true });
+            }
+            waiting?.resolve(internal.observers + internal.passive > 0 ? internal.entry : this.idle(k));
         }
     }
 
-    /** App regained focus: refetch observed entries whose spec opted in. */
+    /** App regained focus: refetch actively observed entries whose spec opted in. */
     onFocus(): void {
         this.refetchObserved((s) => s.refetchOnFocus === true);
     }
 
-    /** Relay reconnected: refetch observed entries whose spec opted in. */
+    /** Relay reconnected: refetch actively observed entries whose spec opted in. */
     onReconnect(): void {
         this.refetchObserved((s) => s.refetchOnReconnect === true);
+    }
+
+    /**
+     * Context arrived (machine keys hydrated, the relay key derived): every
+     * actively observed entry whose newest outcome was `unavailable` is read
+     * again — once, whatever its focus/reconnect policy — and an unobserved
+     * one is stale for its next ensure. An `unavailable` that lands after
+     * this call waits for the next context change.
+     */
+    onContextReady(): void {
+        this.contextGen++;
+        for (const internal of this.entries.values()) {
+            if (internal.entry.unavailable === null || internal.observers === 0 || !internal.spec) continue;
+            this.requestRead(internal, internal.spec);
+        }
     }
 
     /** Every key currently held (tests and diagnostics). */
@@ -276,14 +447,32 @@ export class ResourceStore {
 
     // ── internals ──────────────────────────────────────────────────────────
 
-    private idle<T>(key: string): ResourceEntry<T> {
-        return IDLE<T>(key);
+    /** The idle entry for a key the store does not hold: one object per key
+     *  (a bounded cache), so repeated peeks are referentially stable. `fresh`
+     *  mints a new one (a removal must publish a CHANGE to subscribers). */
+    private idle<T>(key: string, opts: { fresh?: boolean } = {}): ResourceEntry<T> {
+        if (opts.fresh) return IDLE<T>(key);
+        let e = this.idles.get(key);
+        if (!e) {
+            if (this.idles.size >= IDLE_CACHE_MAX) this.idles.clear();
+            e = IDLE<T>(key);
+            this.idles.set(key, e);
+        }
+        return e as ResourceEntry<T>;
     }
 
     private internal<T>(key: string): Internal<T> {
         let i = this.entries.get(key) as Internal<T> | undefined;
         if (!i) {
-            i = { entry: this.idle<T>(key), spec: null, gen: 0, controller: null, inFlight: null, observers: 0, lastTouched: this.now() };
+            // Adopt the idle snapshot already handed out for this key so a
+            // subscriber that peeked before subscribing sees no change.
+            const entry = this.idle<T>(key);
+            this.idles.delete(key);
+            i = {
+                entry, spec: null, gen: 0, controller: null, inFlight: null, inFlightSpec: null, trailing: null,
+                invalidationGen: 0, unavailableAtContext: 0, mutationIssued: 0, mutationCommitted: 0,
+                observers: 0, passive: 0, lastTouched: this.now(),
+            };
             this.entries.set(key, i as Internal<unknown>);
         }
         return i;
@@ -293,11 +482,17 @@ export class ResourceStore {
         return (spec?.equal ?? equal)(a, b);
     }
 
-    private supersede<T>(internal: Internal<T>): void {
+    /** Orphan the read in flight; returns the requirement queued behind it
+     *  (the caller decides what answers it). */
+    private supersede<T>(internal: Internal<T>): Trailing<T> | null {
         internal.gen++;
         internal.controller?.abort();
         internal.controller = null;
         internal.inFlight = null;
+        internal.inFlightSpec = null;
+        const waiting = internal.trailing;
+        internal.trailing = null;
+        return waiting;
     }
 
     private publish<T>(internal: Internal<T>, next: ResourceEntry<T>, opts: { detached?: boolean } = {}): void {
@@ -306,24 +501,55 @@ export class ResourceStore {
         if (set) for (const l of Array.from(set)) l();
     }
 
+    /** A policy wants a read: now, or — while one is active — once it settles. */
+    private requestRead<T>(internal: Internal<T>, spec: ResourceSpec<T>): void {
+        if (internal.inFlight) void this.queueTrailing(internal, spec);
+        else void this.run(internal, spec);
+    }
+
+    /** Exactly one trailing read per active read: the newest requirement
+     *  replaces the spec, every caller shares the promise. */
+    private queueTrailing<T>(internal: Internal<T>, spec: ResourceSpec<T>): Promise<ResourceEntry<T>> {
+        if (internal.trailing) {
+            internal.trailing.spec = spec;
+            return internal.trailing.promise;
+        }
+        let resolve!: Trailing<T>['resolve'];
+        const promise = new Promise<ResourceEntry<T>>((r) => { resolve = r; });
+        internal.trailing = { spec, promise, resolve };
+        return promise;
+    }
+
     private refetchObserved(policy: (spec: ResourceSpec<unknown>) => boolean): void {
         for (const internal of this.entries.values()) {
-            if (internal.observers === 0 || !internal.spec || internal.inFlight) continue;
+            if (internal.observers === 0 || !internal.spec) continue;
             if (!policy(internal.spec)) continue;
-            void this.run(internal, internal.spec);
+            this.requestRead(internal, internal.spec);
         }
     }
 
     private run<T>(internal: Internal<T>, spec: ResourceSpec<T>): Promise<ResourceEntry<T>> {
-        this.supersede(internal);
+        const waiting = this.supersede(internal);
         const gen = internal.gen;
+        const startedAfterInvalidation = internal.invalidationGen;
         const controller = new AbortController();
         internal.controller = controller;
         internal.spec = spec;
+        internal.inFlightSpec = spec;
         this.publish(internal, { ...internal.entry, fetching: true });
         const current = () => internal.gen === gen;
 
-        const promise = (async (): Promise<ResourceEntry<T>> => {
+        // The in-flight record is installed BEFORE the fetcher runs, so a
+        // fetcher that throws synchronously settles (and clears) it like any
+        // other failure instead of leaving a settled promise behind.
+        let settle!: (entry: ResourceEntry<T>) => void;
+        const promise = new Promise<ResourceEntry<T>>((r) => { settle = r; });
+        internal.inFlight = promise;
+        // A requirement queued behind the read we just superseded is answered
+        // by this newer read.
+        waiting?.resolve(promise);
+
+        const body = async (): Promise<ResourceEntry<T>> => {
             let attempt = 0;
             let outcome: ResourceOutcome<T> | null = null;
             let thrown: unknown = null;
@@ -346,49 +572,79 @@ export class ResourceStore {
             if (!current()) return internal.entry;
             internal.controller = null;
             internal.inFlight = null;
+            internal.inFlightSpec = null;
             const now = this.now();
             const prev = internal.entry;
+            // An invalidation that arrived during this read is not satisfied by it.
+            const invalidated = internal.invalidationGen !== startedAfterInvalidation;
             if (!outcome) {
                 this.publish(internal, { ...prev, fetching: false, error: errorText(thrown), unavailable: null });
             } else if (outcome.kind === 'ok') {
                 const same = prev.hasData && this.eq(spec, prev.data as T, outcome.data);
                 this.publish(internal, {
                     ...prev, data: same ? prev.data : outcome.data, hasData: true,
-                    dataUpdatedAt: same ? prev.dataUpdatedAt : now, checkedAt: now, dataVersion: spec.version,
-                    fetching: false, error: null, unavailable: null, invalidated: false,
+                    dataUpdatedAt: same ? prev.dataUpdatedAt : now, checkedAt: now, revision: prev.revision + 1,
+                    dataVersion: spec.version,
+                    fetching: false, error: null, unavailable: null, invalidated,
                 });
-                this.enforceBudget(spec.family);
             } else if (outcome.kind === 'error') {
                 this.publish(internal, { ...prev, fetching: false, error: outcome.reason, unavailable: null });
             } else {
-                this.publish(internal, { ...prev, fetching: false, unavailable: outcome.reason });
+                internal.unavailableAtContext = this.contextGen;
+                this.publish(internal, { ...prev, fetching: false, error: null, unavailable: outcome.reason });
             }
-            return internal.entry;
-        })();
-        internal.inFlight = promise;
+            const answer = internal.entry;
+            // The requirement that arrived while we ran: exactly one trailing read.
+            const trailing = internal.trailing;
+            internal.trailing = null;
+            if (trailing) trailing.resolve(this.run(internal, trailing.spec));
+            else this.enforceBudget(spec.family);
+            return answer;
+        };
+        body().then(settle, () => settle(internal.entry));
         return promise;
+    }
+
+    /** The last observer left: the entry is fair game for its family budget,
+     *  and an idle entry holding nothing is dropped outright. */
+    private reclaim<T>(internal: Internal<T>): void {
+        if (internal.inFlight) return;
+        if (!internal.spec && !internal.entry.hasData) {
+            this.entries.delete(internal.entry.key);
+            return;
+        }
+        this.enforceBudget(internal.spec?.family);
     }
 
     private enforceBudget(family: string | undefined): void {
         if (!family) return;
         const budget = this.families.get(family);
         if (!budget) return;
-        const members = Array.from(this.entries.values())
-            .filter((i) => i.spec?.family === family && i.entry.hasData);
+        const members = Array.from(this.entries.values()).filter((i) => i.spec?.family === family);
         const size = budget.size ?? (() => 0);
-        let total = members.reduce((n, i) => n + size(i.entry.data), 0);
+        const bytesOf = (i: Internal<unknown>) => (i.entry.hasData ? size(i.entry.data) : 0);
+        const evictable = (i: Internal<unknown>) => i.observers + i.passive === 0 && !i.inFlight;
+        let total = members.reduce((n, i) => n + bytesOf(i), 0);
         let count = members.length;
+        const drop = (i: Internal<unknown>) => {
+            total -= bytesOf(i);
+            count--;
+            this.entries.delete(i.entry.key);
+        };
+        // Expiry first: an unobserved member idle past maxAgeMs goes regardless of the caps.
+        if (budget.maxAgeMs !== undefined) {
+            const cutoff = this.now() - budget.maxAgeMs;
+            for (const i of members) if (evictable(i) && i.lastTouched < cutoff) drop(i);
+        }
         const over = () => (budget.maxEntries !== undefined && count > budget.maxEntries)
             || (budget.maxBytes !== undefined && total > budget.maxBytes);
         if (!over()) return;
         // Evict least-recently-touched, unobserved entries first.
-        members.sort((a, b) => a.lastTouched - b.lastTouched);
-        for (const i of members) {
+        const candidates = members.filter((i) => this.entries.has(i.entry.key) && evictable(i))
+            .sort((a, b) => a.lastTouched - b.lastTouched);
+        for (const i of candidates) {
             if (!over()) break;
-            if (i.observers > 0 || i.inFlight) continue;
-            total -= size(i.entry.data);
-            count--;
-            this.entries.delete(i.entry.key);
+            drop(i);
         }
     }
 }
