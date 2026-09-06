@@ -399,9 +399,17 @@ export class SessionCoordinator {
     try {
       this.ledger.tx(() => {
         for (const row of before) {
-          if (row.state !== "cancelling") continue;
-          const t = nextState("cancelling", { type: "generation_closed", reason, keepQueued })!;
-          this.ledger.transition(row.id, ["cancelling"], t.to, { terminalReason: t.terminalReason });
+          if (row.state === "cancelling") {
+            const t = nextState("cancelling", { type: "generation_closed", reason, keepQueued })!;
+            this.ledger.transition(row.id, ["cancelling"], t.to, { terminalReason: t.terminalReason });
+          } else if (keepQueued && (row.state === "running" || row.state === "accepted")) {
+            // The runtime had this turn live and is being torn down on
+            // purpose (restart) or died (process_exited): the turn is over,
+            // and re-running a prompt the agent already took would duplicate
+            // it. Design table: interrupted{reason}. Only rows with no
+            // evidence of delivery (submitting → unknown) are reconciled.
+            this.ledger.transition(row.id, [row.state], "interrupted", { terminalReason: reason });
+          }
         }
         this.ledger.closeGeneration(sessionId, generation, reason, { keepQueued });
       }, "retire");

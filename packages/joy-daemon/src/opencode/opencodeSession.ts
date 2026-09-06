@@ -31,7 +31,9 @@ import type { AgentSession } from "../domain/agentSession";
 import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
 import { opencodeJoyPreamble, joyPromptReinjection } from "../domain/agentTagsPrompt";
-import { ledgerFor, type Ledger, type CommandRow, StaleCommandError, StaleGenerationError } from "../domain/ledger";
+import { ledgerFor, type Ledger } from "../domain/ledger";
+import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
+import { OpencodeDriver, type OpencodeRuntimePort } from "./opencodeDriver";
 
 export interface OpencodeInit {
   id: string;
@@ -101,8 +103,6 @@ export function messagesForReplay(
 }
 
 const WAIT_TIMEOUT_MS = 10 * 60_000;
-const INTERRUPT_RETRY_MS = 2_000;
-const INTERRUPT_RETRY_MAX = 5;
 
 // The full joy tag vocabulary rides the FIRST prompt of a fresh session
 // (config `instructions` — like `permission` — is present-but-ignored on the
@@ -138,10 +138,16 @@ export class OpencodeSession implements AgentSession {
   #started = false;
   #activeTurn: string | null = null;
   #archivePromise: Promise<boolean> | null = null;
-  // Durable inbound queue: ledger commands, committed before delivery; each
-  // prompt POST is a ledger attempt committed before the request goes out.
+  // Durable inbound queue: ledger commands the coordinator owns; this
+  // session's driver POSTs them (each prompt is an attempt committed before
+  // the request goes out).
   #ledger: Ledger;
   #generation: number;
+  #coordinator: SessionCoordinator;
+  #driver: OpencodeDriver;
+  #unsubscribeQueue: () => void = () => {};
+  /** The message id most recently admitted (HTTP ack or SSE confirm). */
+  #lastAdmitted: string | null = null;
   // Reconcile checkpoint — `checkpoints(kind='opencode_msg')` in the ledger:
   // last message id fully delivered to the relay, committed only once its
   // outbox rows are acked. Advanced on live turn completion and after
@@ -184,10 +190,34 @@ export class OpencodeSession implements AgentSession {
       // one can run here.
       for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session" });
     }
+    this.#coordinator = deps.coordinator ?? coordinatorFor(this.#ledger);
+    // Adopted before the relay pull can start; the pump waits for `ready`.
+    this.#driver = new OpencodeDriver(this.#runtimePort(), this.#generation);
+    this.#coordinator.adopt(this.id, this.#driver);
+    this.#unsubscribeQueue = this.#coordinator.subscribe((ev) => {
+      if (ev.type !== "session" && ev.type !== "command") return;
+      if (ev.sessionId !== this.id || !this.#relay) return;
+      void this.#relay.updateQueue(this.#coordinator.snapshot(this.id));
+    });
+  }
+
+  #runtimePort(): OpencodeRuntimePort {
+    return {
+      sessionId: this.id,
+      client: () => (this.status === "ended" ? null : this.#client),
+      ocSessionId: () => this.#ocSessionId,
+      currentTurn: () => this.#norm?.currentTurn ?? null,
+      lastAdmitted: () => this.#lastAdmitted,
+      takePreamble: () => { if (!this.#needsPreamble) return ""; this.#needsPreamble = false; return opencodeJoyPreamble(); },
+      turnInterrupted: () => { if (this.#activeTurn) this.#endTurn(this.#activeTurn, "cancelled"); },
+      handleCommand: (text, opts) => this.#handleCommand(text, opts),
+      mirrorAccepted: (cmd) => this.#mirrorAccepted(cmd),
+    };
   }
 
   /** Test/diagnostic access to the session's ledger generation. */
   get ledgerGeneration(): number { return this.#generation; }
+  get coordinator(): SessionCoordinator { return this.#coordinator; }
 
   get relayAttached(): boolean { return this.#relay !== null; }
   get opencodeSessionId(): string | undefined { return this.#ocSessionId ?? this.#resumeOcSessionId; }
@@ -272,7 +302,10 @@ export class OpencodeSession implements AgentSession {
       this.#persistRecord();
       if (this.status === "starting") this.status = "active";
       this.#deps.broadcast("session_update", this.toJSON());
-      await this.#drainInbound();
+      // The server is up and history replayed: the coordinator reconciles
+      // anything still unknown (our message ids in the session's messages)
+      // and pumps the queued rows.
+      this.#driver.emit({ kind: "ready" });
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] start failed: ${e}\n`);
       this.end("process_exited");
@@ -304,105 +337,43 @@ export class OpencodeSession implements AgentSession {
 
   // ── inbound ────────────────────────────────────────────────────────────────
 
-  /** /joy-prompt — re-deliver the CURRENT joy instructions in-band. Opencode's
-   *  preamble rides the FIRST prompt only, so after enough turns (or a
-   *  compaction) it genuinely scrolls out of context; this refreshes it. The
-   *  body goes out as its own unmirrored message — only the /joy-prompt row
-   *  (when mirror) appears in chat. Clears #needsPreamble: the reinjection IS
-   *  the (newer) preamble. */
-  #handleJoyPrompt(text: string, mirror: boolean, seq?: number): string | false {
-    if (!/^\/joy-prompt(?:\s|$)/.test(text.trim())) return false;
-    this.#needsPreamble = false;
-    if (mirror && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
-    const rein = this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
-    return rein.id; // the reinjection item, so a cancelled relay turn can pluck it (#77)
+  /** Joy-owned slash commands the harness executes itself (never forwarded
+   *  to the model); the coordinator completes their row in the accept
+   *  transaction (#65).
+   *   - /title: with text set + lock, bare unlock (next agent <joy-title> applies again);
+   *   - /joy-prompt: re-deliver the CURRENT joy instructions in-band.
+   *     Opencode's preamble rides the FIRST prompt only, so after enough turns
+   *     (or a compaction) it scrolls out of context; the reinjection is a
+   *     hidden follow-up command and IS the (newer) preamble, so the pending
+   *     first-prompt preamble is cleared. */
+  #handleCommand(text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }): HandledCommand | null {
+    const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());
+    if (titleCmd) {
+      const t = (titleCmd[1] ?? "").trim();
+      if (t) {
+        this.#titleLocked = true;
+        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true });
+        this.summary = t;
+        void this.#relay?.updateSummary(t);
+      } else {
+        this.#titleLocked = false;
+        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false });
+      }
+      this.#deps.broadcast("session_update", this.toJSON());
+      if (opts.mirrorToRelay && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${opts.seq ?? Date.now()}`);
+      return { handled: true };
+    }
+    if (/^\/joy-prompt(?:\s|$)/.test(text.trim())) {
+      this.#needsPreamble = false;
+      if (opts.mirrorToRelay && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${opts.seq ?? Date.now()}`);
+      return { handled: true, reinjection: joyPromptReinjection() };
+    }
+    return null;
   }
 
-  #draining = false;
-  async #drainInbound(): Promise<void> {
-    const client = this.#client;
-    if (!client || !this.#ocSessionId) return;
-    // One ordered drain at a time — but a wakeup that arrives while one is
-    // running is REMEMBERED, so an item enqueued after the snapshot is sent
-    // by a fresh pass instead of waiting for unrelated intake (Astra, #79).
-    if (this.#draining) { this.#drainAgain = true; return; }
-    this.#draining = true;
-    try {
-      do { this.#drainAgain = false; await this.#drainInboundInner(client, this.#ocSessionId); } while (this.#drainAgain && this.status !== "ended");
-    } finally { this.#draining = false; }
-  }
-  #drainAgain = false;
-  /** Read through a call so TS does not narrow `status` across an await. */
-  #isEnded(): boolean { return this.status === "ended"; }
-  async #drainInboundInner(client: OpencodeClient, ocSessionId: string): Promise<void> {
-    // queued rows, plus unknown ones (a transport failure mid-request): the
-    // deterministic message id makes the retry idempotent server-side.
-    for (const item of this.#ledger.listPending(this.id, ["queued", "unknown"])) {
-      if (this.status === "ended") return; // a killed generation sends nothing more (#43)
-      // The attempt is COMMITTED before the request goes out. The ledger
-      // refuses a row whose cancel landed during the previous await (#77),
-      // a stale generation (#481), and — should the commit itself fail —
-      // the prompt is simply not sent this pass.
-      let attemptId: string;
-      try {
-        if (item.state === "unknown" && !this.#ledger.requeueCommand(item.id)) continue;
-        attemptId = this.#ledger.recordAttempt(item.id, this.#generation, item.id, "prompt").id;
-      } catch (e) {
-        if (e instanceof StaleGenerationError) return;
-        if (e instanceof StaleCommandError) { this.#recordOutcome(item.id, this.#ledger.getCommand(item.id)?.state === "cancelled" ? "cancelled" : "delivered"); continue; }
-        process.stderr.write(`[opencode ${this.id}] could not commit the prompt attempt for ${item.id}: ${e instanceof Error ? e.message : e} — holding the send\n`);
-        this.#drainAgain = true;
-        return;
-      }
-      try {
-        // delivery:'steer' (the server default, claude-parity UX): idle →
-        // starts a turn; busy → injected into the RUNNING turn between tool
-        // calls (verified live 2026-08-03 — in-flight work continues and the
-        // model incorporates the addition).
-        const outText = this.#needsPreamble ? opencodeJoyPreamble() + item.text : item.text;
-        const r = await client.prompt(ocSessionId, outText, { id: item.id, delivery: "steer" });
-        this.#needsPreamble = false;
-        // Admission ack = durable server-side; prompt.admitted event confirms
-        // via the normalizer too, but the ack alone is safe to settle on
-        // (admittedSeq is the server's own ordering receipt).
-        if (this.#isEnded()) return; // retired mid-request: this generation owns nothing now (#43)
-        if (r.messageID) {
-          this.#noteAdmitted(item.id, r.admittedSeq >= 0 ? r.admittedSeq : undefined);
-          // A cancel that raced the reply wins: confirmDelivery on a cancelled
-          // row only adds the receipt (the terminal state stands).
-          try { this.#ledger.confirmDelivery(item.id, [{ kind: "opencode_msg", ref: r.messageID }, ...(item.seq != null ? [{ kind: "seq", ref: String(item.seq) }] : [])], { attemptId }); }
-          catch (e) { process.stderr.write(`[opencode ${this.id}] admission commit for ${item.id} failed: ${e instanceof Error ? e.message : e}\n`); }
-          this.#recordOutcome(item.id, "delivered");
-        } else {
-          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: "no messageID in the prompt reply" }); } catch { /* logged below on the next pass */ }
-        }
-        // The HTTP ack is admission evidence too: a prompt cancelled while
-        // this request was in flight (tombstoned by cancelQueued) is now
-        // running — interrupt it here, not only on the SSE confirm, which a
-        // dropped stream never delivers (Astra on 170ec279, #77).
-        if (r.messageID && this.#cancelledIds.has(item.id)) {
-          process.stderr.write(`[opencode ${this.id}] ${item.id} was cancelled — interrupting the admitted prompt\n`);
-          this.#interruptCancelled(item.id, client, ocSessionId);
-        }
-      } catch (e) {
-        if (this.#isEnded()) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/→ \d{3}:/.test(msg)) {
-          // The server ANSWERED and refused: this prompt is terminal. Leaving
-          // it unknown re-ran it on the next unrelated intake, after the app
-          // had already shown it failed (#79). A cancel that raced the reply
-          // keeps its outcome (the row is already terminal).
-          process.stderr.write(`[opencode ${this.id}] prompt rejected: ${msg} — dropped\n`);
-          const wasOurs = !this.#cancelledIds.has(item.id) && this.#ledger.getCommand(item.id)?.state === "submitting";
-          try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: msg.slice(0, 200) }); } catch { /* best effort */ }
-          if (wasOurs) this.#recordOutcome(item.id, "failed");
-        } else {
-          process.stderr.write(`[opencode ${this.id}] prompt failed: ${msg}\n`);
-          // transport failure: an explicit unknown — the deterministic id makes the retry idempotent.
-          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: msg.slice(0, 200) }); } catch { /* best effort */ }
-        }
-      }
-    }
+  #mirrorAccepted(cmd: CommandView): void {
+    if (cmd.mirrorToRelay && this.#relay) this.#relay.send(encodeUserMessage(cmd.text, cmd.createdAt), `oc:in:${this.id}:${cmd.seq ?? cmd.createdAt}`);
+    this.#maybeTitle(cmd.text);
   }
 
   /** Silent-drop guard: /wait is unusable (permanent 503 on 1.18.10), so turn
@@ -451,6 +422,9 @@ export class OpencodeSession implements AgentSession {
     this.#activeTurn = null;
     this.#thinking = false;
     this.#relay?.setThinking(false);
+    // Every command that rode this turn (a fresh prompt, the steers that
+    // joined it) ends with it — the coordinator settles them.
+    this.#driver.emit({ kind: "turn_ended", runtimeTurnId: turn, status });
   }
 
   #applyEffects(effects: OpencodeEffect[]): void {
@@ -464,22 +438,20 @@ export class OpencodeSession implements AgentSession {
           if (data?.ev?.t === "text" && data.ev.text && eff.localId) this.#mirrorChat(eff.localId, data.ev.text);
           break;
         }
-        case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
+        case "thinking":
+          this.#thinking = eff.value;
+          this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null;
+          this.#relay?.setThinking(eff.value);
+          if (eff.value && this.#activeTurn) this.#driver.emit({ kind: "turn_started", runtimeTurnId: this.#activeTurn });
+          break;
         case "confirmPrompt":
           if (eff.messageID) {
-            this.#noteAdmitted(eff.messageID, eff.seq);
-            // Admission proven by SSE: settle the attempt + row (idempotent
-            // after the HTTP ack's confirm; a cancelled row keeps its state).
-            const att = this.#ledger.matchAttemptByRef(this.id, eff.messageID);
-            if (att || this.#ledger.getCommand(eff.messageID)?.sessionId === this.id) {
-              try { this.#ledger.confirmDelivery(att?.commandId ?? eff.messageID, [{ kind: "opencode_msg", ref: eff.messageID }], { attemptId: att?.id }); }
-              catch (e) { process.stderr.write(`[opencode ${this.id}] admission commit for ${eff.messageID} failed: ${e instanceof Error ? e.message : e}\n`); }
-            }
-            this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
-            if (this.#cancelledIds.has(eff.messageID) && this.#client && this.#ocSessionId) {
-              // Admitted after the user cancelled it: interrupt now (#77).
-              this.#interruptCancelled(eff.messageID, this.#client, this.#ocSessionId);
-            }
+            // Admission proven by SSE: the coordinator pairs it with its
+            // attempt (idempotent after the HTTP ack's echo; a cancelled row
+            // is interrupted from there — the tombstone rule, #77).
+            this.#lastAdmitted = eff.messageID;
+            this.#driver.emit({ kind: "echo", runtimeRef: eff.messageID, runtimeTurnId: this.#norm?.currentTurn ?? eff.messageID, receiptKind: "opencode_msg" });
+            this.#armTurnDeadline(eff.messageID);
           }
           break; // admission proven by SSE too (#79)
         case "model": if (eff.code !== this.currentModel) { this.currentModel = eff.code; void this.#relay?.updateModelCode(eff.code); } break;
@@ -594,202 +566,12 @@ export class OpencodeSession implements AgentSession {
 
   busy(): boolean { return this.#thinking; }
 
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
-    const seq = opts?.seq;
-    // /title — joy-level command, never forwarded to the model. With text:
-    // set + lock. Bare: unlock (next agent <joy-title> applies again).
-    const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());
-    if (titleCmd) {
-      const t = (titleCmd[1] ?? "").trim();
-      if (t) {
-        this.#titleLocked = true;
-        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true });
-        this.summary = t;
-        void this.#relay?.updateSummary(t);
-      } else {
-        this.#titleLocked = false;
-        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false });
-      }
-      this.#deps.broadcast("session_update", this.toJSON());
-      if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${seq ?? Date.now()}`);
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command" }; // (#65)
-    }
-    const rein = this.#handleJoyPrompt(text, opts?.mirrorToRelay ?? true, seq);
-    if (rein) {
-      return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command", reinjectionId: rein };
-    }
-    // Acceptance = the ledger commit (throws when it cannot commit, or when
-    // the session has ended — #553). A redelivered seq dedupes against the
-    // pending row or the retained receipt: the same logical message, never a
-    // second prompt.
-    const at = Date.now();
-    const accepted = this.#ledger.acceptCommand({
-      sessionId: this.id, id: seq != null ? `msg_joy${this.id}s${seq}` : `msg_joy${this.id}r${randomUUID().replace(/-/g, "").slice(0, 12)}`, text,
-      origin: seq != null ? "relay" : "local", source: opts?.source ?? "rpc", seq,
-      visible: opts?.visible ?? false, mirrorToRelay: opts?.mirrorToRelay ?? true, createdAt: at,
-    });
-    if (accepted.deduped !== "none") { void this.#drainInbound(); return { id: accepted.id, text, createdAt: accepted.row?.createdAt ?? at }; }
-    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `oc:in:${this.id}:${seq ?? at}`);
-    this.#maybeTitle(text);
-    void this.#drainInbound();
-    return { id: accepted.id, text, createdAt: at }; // the durable command id is the queue item id (#79)
-  }
-
-  queueState(): QueueState {
-    const pending = this.#ledger.listPending(this.id, ["queued"]).length;
-    return { queue: [], pendingCount: pending, hidden: [], inFlight: this.#activeTurn, paused: false };
-  }
-
-  resumeQueue(): void { void this.#drainInbound(); }
-  editQueued(): boolean { return false; }
-  cancelQueued(id: string): boolean {
-    const row = this.#ledger.getCommand(id);
-    if (!row || row.sessionId !== this.id || ["completed", "failed", "cancelled", "interrupted"].includes(row.state)) return false;
-    const inFlight = row.state !== "queued";
-    try { this.#ledger.requestCancel(id); if (inFlight) this.#ledger.transition(id, ["submitting", "accepted", "unknown", "running", "cancelling"], "cancelled", { terminalReason: "cancelled" }); }
-    catch (e) { process.stderr.write(`[opencode ${this.id}] ledger cancel ${id} failed: ${e instanceof Error ? e.message : e}\n`); }
-    this.#recordOutcome(id, "cancelled");
-    if (inFlight) {
-      // The HTTP prompt is in flight: it may be admitted after this. Tombstone
-      // it (admission interrupts) and report "not plucked" so the caller aborts
-      // now (Astra on 4b70d70c, #77).
-      this.#cancelledIds.add(id);
-      return false;
-    }
-    return true;
-  }
-  /** Cancelled while their prompt request was in flight (see cancelQueued). */
-  #cancelledIds = new Set<string>();
-  /** Interrupt a cancelled prompt that was admitted anyway. The tombstone is
-   *  consumed only once the interrupt SUCCEEDS: consuming it first and
-   *  swallowing the rejection lost the cancellation for good when the
-   *  interrupt failed, leaving work active while queueItemState said
-   *  cancelled (Astra on cde740c1, #77). A kept tombstone lets the next
-   *  admission evidence (HTTP ack or SSE confirm) retry it. */
-  /** Admission order is MONOTONIC: an id's first admission (HTTP ack or SSE
-   *  confirm, whichever arrives first) assigns it a sequence; a duplicate or
-   *  late admission of an already-admitted id never bumps it, so stale
-   *  evidence for an OLD prompt cannot make it "the latest" again and steer
-   *  an interrupt at newer work (Astra on 7c27b926, #77). */
-  #noteAdmitted(id: string, serverSeq?: number): void {
-    const known = this.#admissionSeq.get(id);
-    if (known) {
-      // Late evidence for a known id may still carry a server seq we lacked
-      // (HTTP ack lost, SSE later): record it, never re-rank as newest.
-      if (serverSeq !== undefined && known.server === undefined) { known.server = serverSeq; if (this.#lastAdmitted === id && this.#lastAdmittedRank) this.#lastAdmittedRank.server = serverSeq; }
-      return;
-    }
-    const rank = { server: serverSeq, local: ++this.#admissionClock };
-    this.#admissionSeq.set(id, rank);
-    // Newest = SERVER order when both sides have it (admittedSeq / durable.seq
-    // are the server's own counter); arrival order only as a fallback. First-
-    // observed order let a delayed admission of an OLD prompt (seq 10) rank
-    // above a newer one (seq 20) and interrupt the newer work (Astra on
-    // a1c76416, #77).
-    // The current admission's ordering evidence lives in #lastAdmittedRank,
-    // independent of the cache: 500 older admissions arriving after B could
-    // evict B's entry, and A's delayed first admission then found no current
-    // rank, became newest and interrupted B (Astra on 94053e4f, #77).
-    const cur = this.#lastAdmittedRank;
-    const newer = !cur || (rank.server !== undefined && cur.server !== undefined ? rank.server > cur.server : rank.local > cur.local);
-    if (newer) { this.#lastAdmitted = id; this.#lastAdmittedRank = rank; }
-    // Admission identity must outlive any tombstone for the same id: evicting
-    // a cancelled prompt's entry while its tombstone stayed let a later
-    // unsequenced duplicate admission count as first-seen → newest → a
-    // session-wide interrupt at current work (Astra on b8dc2bf6). Evict only
-    // ids with no outstanding tombstone; a tombstone that outlives the cache
-    // window is obsolete and retired with its identity.
-    if (this.#admissionSeq.size > 500) {
-      for (const key of this.#admissionSeq.keys()) {
-        if (this.#admissionSeq.size <= 400) break;
-        if (this.#cancelledIds.has(key) && this.#admissionSeq.size < 1000) continue; // keep fencing evidence while the tombstone lives
-        this.#admissionSeq.delete(key); this.#cancelledIds.delete(key); this.#interruptAttempts.delete(key);
-      }
-    }
-  }
-  #admissionSeq = new Map<string, { server: number | undefined; local: number }>();
-  #lastAdmittedRank: { server: number | undefined; local: number } | undefined;
-  #admissionClock = 0;
-  /** May an interrupt on behalf of cancelled `id` still fire? Only while no
-   *  newer prompt has been admitted — the endpoint interrupts the SESSION. */
-  #ownsInterrupt(id: string): boolean {
-    return this.#cancelledIds.has(id) && !this.#isEnded() && this.#lastAdmitted === id;
-  }
-
-  #interruptCancelled(id: string, client: OpencodeClient, ocSessionId: string): void {
-    if (!this.#ownsInterrupt(id)) return; // every path — first attempt, coalesced retry, timer retry
-    // One interrupt in flight per tombstone: the HTTP ack and the SSE confirm
-    // of the same prompt both arrive as admission evidence, and two interrupts
-    // could stop the NEXT turn (the endpoint has no turn identity; Astra on
-    // 343e3bb6). Later evidence retries only after a failure settled.
-    if (this.#interrupting.has(id)) { this.#interruptAgain.add(id); return; } // evidence during an in-flight interrupt = retry if it fails
-    this.#interrupting.add(id);
-    void client.interrupt(ocSessionId)
-      .then(() => { this.#cancelledIds.delete(id); this.#interruptAgain.delete(id); this.#interruptAttempts.delete(id); const t = this.#interruptTimers.get(id); if (t) { clearTimeout(t); this.#interruptTimers.delete(id); } })
-      .catch((e) => {
-        process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`);
-        // No further admission evidence may ever come (HTTP-only admission,
-        // SSE dropped), so a failed interrupt also schedules its own bounded
-        // retry: the tombstone alone is the evidence (Astra on 5b06ba5c, #77).
-        const n = (this.#interruptAttempts.get(id) ?? 0) + 1;
-        this.#interruptAttempts.set(id, n);
-        // Fenced to the cancelled work: the endpoint interrupts the SESSION,
-        // so once a newer prompt was admitted the retry would stop that one
-        // instead (Astra on af76c787). The tombstone then stays for the next
-        // admission evidence of THIS prompt, if any.
-        // One pending retry timer per id: an HTTP failure and a later SSE
-        // failure used to arm two (Astra on 7c27b926).
-        const prior = this.#interruptTimers.get(id); if (prior) clearTimeout(prior);
-        if (n < INTERRUPT_RETRY_MAX) {
-          const t = setTimeout(() => { this.#interruptTimers.delete(id); this.#interruptCancelled(id, client, ocSessionId); }, INTERRUPT_RETRY_MS);
-          t.unref?.(); this.#interruptTimers.set(id, t);
-        }
-        else process.stderr.write(`[opencode ${this.id}] giving up interrupting cancelled ${id} after ${n} attempts\n`);
-      })
-      .finally(() => {
-        this.#interrupting.delete(id);
-        // Admission evidence that arrived while this attempt was pending was
-        // coalesced away; if the attempt failed, that evidence still owes a
-        // retry (Astra on 03b558f0).
-        if (this.#interruptAgain.delete(id)) this.#interruptCancelled(id, client, ocSessionId); // ownership re-checked inside
-      });
-  }
-  #interrupting = new Set<string>();
-  #interruptAgain = new Set<string>();
-  #interruptAttempts = new Map<string, number>();
-  #interruptTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** clientId of the most recently admitted prompt (HTTP ack or SSE confirm). */
-  #lastAdmitted: string | null = null;
-  #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
-  #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
-    // Terminal outcomes are monotonic: a late admission or reply for an item
-    // the user cancelled must not turn "cancelled" into "delivered".
-    const prev = this.#itemOutcome.get(id);
-    if ((prev === "cancelled" || prev === "failed") && outcome === "delivered") return;
-    this.#itemOutcome.set(id, outcome);
-    if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
-  }
-  queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
-    const local = this.#itemOutcome.get(id);
-    if (local) return local;
-    const row = this.#ledger.getCommand(id);
-    if (!row || row.sessionId !== this.id) return this.#ledger.hasReceipt(this.id, "opencode_msg", id) ? "delivered" : "unknown";
-    switch (row.state) {
-      case "completed": return "delivered";
-      case "failed": return "failed";
-      case "cancelled": case "interrupted": return "cancelled";
-      default: return "pending";
-    }
-  }
-  reorderQueued(): boolean { return false; }
-
+  /** Stop what is executing: every command in flight is cancelled durably
+   *  and the session-wide interrupt is sent (the coordinator retries until
+   *  the turn's end confirms it). A failed interrupt is reported: the turn
+   *  is NOT over locally (#8). */
   async abort(): Promise<{ ok: boolean; error?: string }> {
-    if (this.#client && this.#ocSessionId) {
-      try { await this.#client.interrupt(this.#ocSessionId); }
-      catch (e) { return { ok: false, error: `interrupt failed: ${e instanceof Error ? e.message : e}` }; } // the turn is NOT over locally (#8)
-      this.#endTurn(this.#activeTurn ?? "", "cancelled");
-    }
-    return { ok: true };
+    return this.#coordinator.abortRunning(this.id);
   }
 
   // No tmux window: pane/keys/resize degrade gracefully (app hides these for
@@ -835,6 +617,10 @@ export class OpencodeSession implements AgentSession {
     this.#client = null;
     if (this.#proc?.pid) killOpencodeServerPid(this.#proc.pid);
     this.#proc = null;
+    // The coordinator is retired FIRST: the turn-end below must not be
+    // mistaken for the runtime's verdict on a dead generation's commands.
+    this.#unsubscribeQueue();
+    this.#coordinator.retire(this.id, reason);
     if (this.#activeTurn) this.#endTurn(this.#activeTurn, "cancelled");
     this.#relay?.setThinking(false);
     if (reason === "process_exited") {
@@ -845,11 +631,6 @@ export class OpencodeSession implements AgentSession {
       this.#relay?.stop();
       if (reason !== "restart") this.#recordTerminated = deleteWindowRecord(this.id);
     }
-    // A killed session will never deliver: its queued rows are interrupted.
-    // A restart's replacement takes them; a process exit keeps them for the
-    // restart that follows (the record — and the server session — remain).
-    try { this.#ledger.closeGeneration(this.id, this.#generation, reason, { keepQueued: reason === "restart" || reason === "process_exited" }); }
-    catch (e) { process.stderr.write(`[opencode ${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
   }
@@ -870,8 +651,7 @@ export class OpencodeSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       this.#recordTerminated = deleteWindowRecord(this.id);
-      try { this.#ledger.closeGeneration(this.id, this.#generation, "killed"); } // nothing left to deliver (#43)
-      catch (e) { process.stderr.write(`[opencode ${this.id}] ledger close on kill failed: ${e instanceof Error ? e.message : e}\n`); }
+      this.#coordinator.retire(this.id, "killed"); // nothing left to deliver (#43)
       this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }

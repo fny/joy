@@ -41,6 +41,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 import { PiSession, type PiInit } from "./piSession";
 import { loadWindowRecord } from "../domain/windowRecord";
+import { queueFor } from "../domain/queueFacade";
 
 let home: string;
 beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-pi-")); process.env.JOY_HOME_DIR = home; });
@@ -104,9 +105,9 @@ test("#576: continueLast records the pi session id the get_state response names"
 test("#577: a rejected prompt is surfaced instead of silently dropped", async () => {
   H.procs.length = 0;
   const { s, p, sent, chat } = harness("pi-577");
-  const item = s.enqueue("do the thing", { mirrorToRelay: false });
+  const item = queueFor(s).accept("do the thing", { mirrorToRelay: false });
   await vi.waitFor(() => expect(p.commands.some((c: any) => c.type === "prompt")).toBe(true));
-  expect(s.queueItemState(item.id)).toBe("pending"); // tracked from acceptance: the lane polls this, not chat activity
+  expect(queueFor(s).itemState(item.id)).toBe("pending"); // tracked from acceptance: the lane polls this, not chat activity
   const cmd = p.commands.find((c: any) => c.type === "prompt");
   expect(cmd.message).toBe("do the thing");
   expect(typeof cmd.id).toBe("string"); // correlatable
@@ -119,11 +120,11 @@ test("#577: a rejected prompt is surfaced instead of silently dropped", async ()
   // rejected → command failed) — the nucleus lane's tracked path terminalizes
   // the relay turn on it (prompt_rejected_by_agent) instead of waiting out
   // the 180s no_agent_activity deadline; busy/pendingCount stay clean.
-  expect(s.queueItemState(item.id)).toBe("failed");
+  expect(queueFor(s).itemState(item.id)).toBe("failed");
   expect(s.busy()).toBe(false);
-  expect(s.queueState().pendingCount).toBe(0);
+  expect(queueFor(s).state().pendingCount).toBe(0);
   // A success response for a later prompt produces no note.
-  s.enqueue("again", { mirrorToRelay: false });
+  queueFor(s).accept("again", { mirrorToRelay: false });
   await vi.waitFor(() => expect(p.commands.filter((c: any) => c.type === "prompt")).toHaveLength(2));
   const cmd2 = p.commands.filter((c: any) => c.type === "prompt")[1];
   p.stdout.write(line({ type: "response", id: cmd2.id, command: "prompt", success: true }));
@@ -137,8 +138,8 @@ test("#577: a prompt that never reaches pi's stdin is surfaced too", async () =>
   const { s, p, sent } = harness("pi-577-stdin");
   p.stdin.destroy(); // pi shut its stdin
   await settle(10);
-  s.enqueue("into the void", { mirrorToRelay: false });
-  expect(sent.some((e) => e.role === "user" && /rejected/.test(e.text ?? ""))).toBe(true);
+  queueFor(s).accept("into the void", { mirrorToRelay: false });
+  await vi.waitFor(() => expect(sent.some((e) => e.role === "user" && /rejected/.test(e.text ?? ""))).toBe(true));
   s.end("killed");
 });
 
@@ -160,13 +161,13 @@ test("#578: tool_execution_end forwards the result text and the error flag", asy
 test("#115: /title and /joy-prompt report themselves as handled commands", async () => {
   H.procs.length = 0;
   const { s, p } = harness("pi-115");
-  const titled = s.enqueue("/title Release review", { mirrorToRelay: false });
+  const titled = queueFor(s).accept("/title Release review", { mirrorToRelay: false });
   expect(titled.handled).toBe("command");
   expect(s.summary).toBe("Release review");
   expect(p.commands.filter((c: any) => c.type === "prompt")).toHaveLength(0); // never forwarded
-  const reinjected = s.enqueue("/joy-prompt", { mirrorToRelay: false });
+  const reinjected = queueFor(s).accept("/joy-prompt", { mirrorToRelay: false });
   expect(reinjected.handled).toBe("command");
-  const plain = s.enqueue("hello", { mirrorToRelay: false });
+  const plain = queueFor(s).accept("hello", { mirrorToRelay: false });
   expect(plain.handled).toBeUndefined();
   s.end("killed");
 });

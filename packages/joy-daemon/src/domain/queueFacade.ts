@@ -4,8 +4,8 @@
 // adapter not yet ported keeps its own enqueue/cancelQueued/queueState and
 // is proxied. The facade disappears with the last legacy adapter.
 import type { AgentSession } from "./agentSession";
-import type { QueueItemState, QueueState } from "../claude/session";
-import { coordinatorFor, type SessionCoordinator, type CommandState } from "./coordinator";
+import type { QueueItemState } from "../claude/session";
+import { coordinatorFor, type SessionCoordinator, type CommandState, type QueueSnapshot } from "./coordinator";
 
 export interface QueueAccept {
   id: string; text: string; createdAt: number;
@@ -16,7 +16,7 @@ export interface QueueAccept {
 export interface QueueFacade {
   /** Durable by contract: returns after the ledger commit or throws. */
   accept(text: string, opts?: { source?: "relay" | "web" | "rpc"; mirrorToRelay?: boolean; visible?: boolean; seq?: number; id?: string; relayTurnId?: string; relayCommandId?: string }): QueueAccept;
-  state(): QueueState;
+  state(): QueueSnapshot;
   itemState(id: string): QueueItemState;
   cancel(id: string): boolean;
   edit(id: string, text: string): boolean;
@@ -40,7 +40,9 @@ export function itemStateOf(state: CommandState | null): QueueItemState {
 }
 
 export function queueFor(session: AgentSession, coordinator: SessionCoordinator = coordinatorFor()): QueueFacade {
-  if (coordinator.has(session.id)) {
+  // A ported adapter has no queue surface of its own — its rows are the
+  // coordinator's, live or ended (an ended one refuses with SessionEndedError).
+  if (!session.enqueue) {
     const id = session.id;
     return {
       coordinated: true,
@@ -68,7 +70,10 @@ export function queueFor(session: AgentSession, coordinator: SessionCoordinator 
       const q = s.enqueue(text, { source: opts.source, mirrorToRelay: opts.mirrorToRelay, visible: opts.visible, seq: opts.seq, id: opts.id });
       return { id: q.id, text: q.text, createdAt: q.createdAt, ...(q.handled ? { handled: q.handled } : {}), ...(q.reinjectionId ? { reinjectionId: q.reinjectionId } : {}) };
     },
-    state: () => s.queueState?.() ?? { queue: [], pendingCount: 0, hidden: [], inFlight: null, paused: false },
+    state: () => {
+      const q = s.queueState?.() ?? { queue: [], pendingCount: 0, hidden: [], inFlight: null, paused: false };
+      return { ...q, running: null, busy: typeof s.busy === "function" ? s.busy() : false, provenance: null, unresolvedCancels: [], drafts: [], commands: [] };
+    },
     itemState: (cid) => s.queueItemState?.(cid) ?? "unknown",
     cancel: (cid) => s.cancelQueued?.(cid) ?? false,
     edit: (cid, text) => s.editQueued?.(cid, text) ?? false,

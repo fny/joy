@@ -11,8 +11,9 @@
 // for free: the next prompt just resumes the conversation. (Probed live
 // 2026-09-03 on agy 1.0.12: docs/plans has the captured stream.)
 //
-// The daemon owns the queue (one prompt in flight, the rest FIFO), so edit /
-// cancel / reorder work for real. `--add-dir <cwd>` is REQUIRED: without it a
+// The daemon owns the queue (the session coordinator: one prompt in flight,
+// the rest FIFO), so edit / cancel / reorder work for real; this session is
+// the agy DRIVER (agyDriver.ts): a submission spawns the turn's process. `--add-dir <cwd>` is REQUIRED: without it a
 // headless run treats the folder as untrusted and writes land in agy's own
 // scratch dir (~/.gemini/antigravity-cli/scratch) instead of the repo.
 // Permissions: `--dangerously-skip-permissions` — the daemon's bypass default;
@@ -28,9 +29,10 @@ import {
   type RelaySession,
 } from "../relay/relay";
 import type { AgentSession } from "../domain/agentSession";
-import type { DeliverySource } from "../domain/agentSession";
-import { ledgerFor, type Ledger, LedgerWriteError, StaleCommandError, StaleGenerationError } from "../domain/ledger";
-import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, SessionDeps } from "../claude/session";
+import { ledgerFor, type Ledger } from "../domain/ledger";
+import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand, type AttemptRef } from "../domain/coordinator";
+import { AgyDriver, type AgyRuntimePort } from "./agyDriver";
+import type { SessionStatus, SessionRecord, SessionDeps } from "../claude/session";
 import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { titleFromPrompt } from "../opencode/opencodeSession";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
@@ -85,11 +87,13 @@ interface AgyRun {
   exit: { code: number | null } | null;
   /** stdout reached EOF and readline emitted every line. */
   stdoutDone: boolean;
-  /** Settled: the queue advanced (or the run was retired). */
+  /** Settled: the coordinator was told (or the run was retired). */
   finalized: boolean;
   /** The ledger command this run executes, and the attempt the spawn made. */
   commandId: string;
   attemptId: string;
+  /** abort()/end() pre-empted the run: its terminal is `cancelled`. */
+  cancelled: boolean;
   // agent_response text arrives as deltas per step_index; emitted once per
   // step at DONE (one clean row per response, not a re-render storm).
   textByStep: Map<number, string>;
@@ -119,13 +123,14 @@ export class AgySession implements AgentSession {
   #started = false;
   #archivePromise: Promise<boolean> | null = null;
 
-  // The queue is OURS: one prompt in flight, the rest waiting in order. The
-  // in-memory array mirrors the ledger's queued rows for this session
-  // (accepted = committed; a restart's replacement reloads them, #49).
-  #queue: QueuedMessage[] = [];
-  #inFlight: QueuedMessage | null = null;
+  // The queue is the coordinator's: one prompt in flight, the rest waiting
+  // in order as ledger rows (accepted = committed; a restart's replacement
+  // takes them, #49).
   #ledger: Ledger;
   #generation: number;
+  #coordinator: SessionCoordinator;
+  #driver: AgyDriver;
+  #unsubscribeQueue: () => void = () => {};
   #proc: ChildProcess | null = null;
   /** The process end() sent SIGTERM to, for awaitExit. */
   #dying: ChildProcess | null = null;
@@ -170,17 +175,31 @@ export class AgySession implements AgentSession {
     // is an explicit unknown, re-run at-least-once.
     this.#ledger = deps.ledger ?? ledgerFor();
     this.#generation = this.#ledger.openGeneration(init.id, "agy");
-    if (this.status !== "ended") {
-      for (const r of this.#ledger.listPending(init.id)) {
-        if (r.state !== "queued" && !this.#ledger.requeueCommand(r.id)) continue;
-        this.#queue.push({ id: r.id, text: r.text, createdAt: r.createdAt });
-      }
-      if (this.#queue.length) process.stderr.write(`[agy ${this.id}] restored ${this.#queue.length} queued prompt(s) from the ledger\n`);
-    }
+    this.#coordinator = deps.coordinator ?? coordinatorFor(this.#ledger);
+    this.#driver = new AgyDriver(this.#runtimePort(), this.#generation);
+    this.#coordinator.adopt(this.id, this.#driver);
+    this.#unsubscribeQueue = this.#coordinator.subscribe((ev) => {
+      if (ev.type !== "session" && ev.type !== "command") return;
+      if (ev.sessionId !== this.id || !this.#relay) return;
+      void this.#relay.updateQueue(this.#coordinator.snapshot(this.id));
+    });
+    const restored = this.status !== "ended" ? this.#ledger.listPending(init.id).length : 0;
+    if (restored) process.stderr.write(`[agy ${this.id}] ${restored} prompt(s) from the ledger await this generation\n`);
+  }
+
+  #runtimePort(): AgyRuntimePort {
+    return {
+      sessionId: this.id,
+      startTurn: (text, attempt) => this.#startTurn(text, attempt),
+      abortTurn: (turn) => this.#abortTurn(turn),
+      handleCommand: (text, opts) => this.#handleCommand(text, opts),
+      mirrorAccepted: (cmd) => this.#mirrorAccepted(cmd),
+    };
   }
 
   /** Test/diagnostic access to the session's ledger generation. */
   get ledgerGeneration(): number { return this.#generation; }
+  get coordinator(): SessionCoordinator { return this.#coordinator; }
 
   get relayAttached(): boolean { return this.#relay !== null; }
   get conversationId(): string | undefined { return this.#conversationId; }
@@ -211,7 +230,9 @@ export class AgySession implements AgentSession {
     if (this.status === "starting") this.status = "active";
     this.#persistRecord();
     this.#deps.broadcast("session_update", this.toJSON());
-    this.#drain();
+    // Live: the coordinator re-runs what a previous daemon left in flight
+    // (one process per turn — it died with it) and pumps the queued rows.
+    this.#driver.emit({ kind: "ready" });
   }
 
   #persistRecord(): void {
@@ -229,39 +250,16 @@ export class AgySession implements AgentSession {
     saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "agy", agySettings });
   }
 
-  // ── queue → one process per turn ──────────────────────────────────────────
+  // ── one process per turn ───────────────────────────────────────────────────
 
-  #drain(): void {
-    if (this.status === "ended" || this.#proc || this.#inFlight) return;
-    const next = this.#queue.shift();
-    if (!next) return;
-    this.#inFlight = next;
-    this.#broadcastQueue();
-    this.#runTurn(next);
-  }
-
-  #runTurn(item: QueuedMessage): void {
-    // The attempt is committed BEFORE the process is spawned: a crash between
-    // the spawn and the result is an explicit unknown the next generation
-    // re-runs. A row cancelled (or delivered) meanwhile is skipped here.
+  /** Spawn the turn's process for a submission and hand it the prompt. The
+   *  coordinator committed the attempt BEFORE this call (a crash between the
+   *  spawn and the result is an explicit unknown the next generation
+   *  re-runs); the process taking the prompt is the delivery. */
+  #startTurn(text: string, attempt: AttemptRef): { ok: true; turn: string } | { ok: false; error: string } {
+    if (this.status === "ended") return { ok: false, error: "session ended" };
+    if (this.#run) return { ok: false, error: `turn ${this.#run.turn} is still running` };
     const turn = `agy:${this.id}:${this.#boot}:t${++this.#turnSeq}`;
-    let attemptId: string;
-    try {
-      attemptId = this.#ledger.recordAttempt(item.id, this.#generation, turn, "agy").id;
-    } catch (e) {
-      this.#inFlight = null;
-      if (e instanceof StaleGenerationError) return;
-      if (e instanceof StaleCommandError) { this.#broadcastQueue(); this.#drain(); return; }
-      if (e instanceof LedgerWriteError) {
-        // Nothing spawned: the prompt stays queued (head) until the ledger accepts writes.
-        this.#queue.unshift(item);
-        this.#broadcastQueue();
-        process.stderr.write(`[agy ${this.id}] could not commit the attempt for ${item.id}: ${e.message} — retrying in 2s\n`);
-        setTimeout(() => this.#drain(), 2_000).unref();
-        return;
-      }
-      throw e;
-    }
     // The prompt goes over stdin, not argv (#56): argv is readable by every
     // local uid via /proc/<pid>/cmdline for the whole turn (prompts carry
     // pasted secrets, handoff notes, joy-messages from other sessions), and a
@@ -285,7 +283,7 @@ export class AgySession implements AgentSession {
     const model = this.currentModel ?? this.model;
     if (model) args.push("--model", model);
 
-    const run: AgyRun = { turn, proc: null, sawResult: false, turnEnded: false, exit: null, stdoutDone: false, finalized: false, textByStep: new Map(), commandId: item.id, attemptId };
+    const run: AgyRun = { turn, proc: null, sawResult: false, turnEnded: false, exit: null, stdoutDone: false, finalized: false, textByStep: new Map(), commandId: attempt.commandId, attemptId: attempt.attemptId, cancelled: false };
     this.#run = run;
     this.#relay?.send(encodeTurnStart({ turn }), `${turn}:start`);
     this.#relay?.setThinking(true);
@@ -297,8 +295,13 @@ export class AgySession implements AgentSession {
       // variables the claude launch line exports.
       proc = spawn("agy", args, { cwd: this.cwd, env: { ...process.env, JOY_SESSION_ID: this.id, JOY_DAEMON_FILE: daemonFilePath() }, stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
-      this.#finalize(run, "failed", `spawn failed: ${e}`);
-      return;
+      // Nothing ran: the turn ends failed on the wire and the submission is
+      // a permanent rejection (the row fails instead of reading as delivered).
+      run.finalized = true; run.turnEnded = true;
+      this.#run = null;
+      this.#relay?.send(encodeTurnEnd("failed", { turn }), `${turn}:end`);
+      this.#relay?.setThinking(false);
+      return { ok: false, error: `spawn failed: ${e}` };
     }
     run.proc = proc;
     this.#proc = proc;
@@ -331,11 +334,25 @@ export class AgySession implements AgentSession {
     // EPIPE (agy died before reading its prompt) must not become an uncaught
     // exception that takes the daemon down; exit/close settle the run.
     proc.stdin?.on("error", (e) => process.stderr.write(`[agy ${this.id}] stdin error: ${e instanceof Error ? e.message : e}\n`));
-    proc.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: item.text } }) + "\n");
-    // The prompt is with the harness: delivered. (Its RESULT is the turn's
-    // outcome, reported through the turn-end record; #finalize settles it.)
-    try { this.#ledger.confirmDelivery(item.id, [], { attemptId }); }
-    catch (e) { process.stderr.write(`[agy ${this.id}] ledger confirm for ${item.id} failed: ${e instanceof Error ? e.message : e}\n`); }
+    proc.stdin?.end(JSON.stringify({ event: "user", message: { role: "user", content: text } }) + "\n");
+    // The prompt is with the harness: delivered (the driver reports the
+    // echo). Its RESULT is the turn's outcome — #finalize reports it.
+    return { ok: true, turn };
+  }
+
+  /** Kill the named turn's process (or the current one): the run settles as
+   *  cancelled once its exit and stdout EOF arrive (#466) — the coordinator
+   *  waits for that terminal before the next turn may start. */
+  #abortTurn(turn: string | null): "sent" | "noop" {
+    const run = this.#run;
+    const proc = run?.proc;
+    if (!run || !proc || proc.exitCode !== null) return "noop";
+    if (turn && run.turn !== turn) return "noop";
+    run.sawResult = true; // the exit handler must not report "failed"
+    run.cancelled = true;
+    try { proc.kill("SIGTERM"); } catch { /* gone */ }
+    this.#endTurn(run, "cancelled");
+    return "sent";
   }
 
   /** Settle a run once its exit status AND its stdout EOF have both arrived. */
@@ -446,37 +463,29 @@ export class AgySession implements AgentSession {
       this.#relay?.send(encodeUserMessage(`⚠ agy: ${why}`, Date.now()));
     }
     this.#endTurn(run, status);
-    // A spawn that never delivered the prompt (error before stdin) is a
-    // rejected attempt: the row fails instead of reading as delivered.
-    if (status === "failed") {
-      try {
-        const cmd = this.#ledger.getCommand(run.commandId);
-        if (cmd && cmd.state === "submitting") this.#ledger.settleAttempt(run.attemptId, "rejected", { detail: why.slice(0, 200) });
-      } catch (e) { process.stderr.write(`[agy ${this.id}] ledger settle for ${run.commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
-    }
-    if (this.#run !== run) return; // retired by end() / superseded — not ours to advance
+    if (this.#run !== run) return; // retired by end() / superseded — not ours to settle
     this.#run = null;
     this.#proc = null;
-    this.#inFlight = null;
     this.#relay?.setThinking(false);
-    this.#broadcastQueue();
     this.#deps.broadcast("session_update", this.toJSON());
-    this.#drain();
-  }
-
-  #broadcastQueue(): void {
-    void this.#relay?.updateQueue(this.queueState());
+    // The run's settlement IS the command's terminal: the coordinator ends
+    // the command that rode this turn and starts the next one.
+    this.#driver.emit({ kind: "turn_ended", runtimeTurnId: run.turn, status: run.cancelled ? "cancelled" : status, detail: why || undefined });
   }
 
   // ── AgentSession surface ───────────────────────────────────────────────────
 
-  busy(): boolean { return this.#proc !== null || this.#inFlight !== null || this.#queue.length > 0; }
+  busy(): boolean { return this.#run !== null || this.#coordinator.busy(this.id); }
 
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
+  /** Joy-owned slash commands the harness executes itself; the coordinator
+   *  completes their row at accept time.
+   *   - /title: joy-level, never forwarded; the title is persisted with its lock (#469);
+   *   - /joy-prompt: re-deliver the current joy instructions in-band (agy has
+   *     no launch-time preamble; this is how it learns the tag vocabulary). */
+  #handleCommand(text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }): HandledCommand | null {
     const at = Date.now();
-    const mirror = (opts?.mirrorToRelay ?? true) && this.#relay;
-    const item: QueuedMessage = { id: String(opts?.seq ?? randomUUID().slice(0, 8)), text, createdAt: at };
-    // /title — joy-level, never forwarded.
+    const mirror = opts.mirrorToRelay && this.#relay;
+    const localId = `agy:in:${this.id}:${opts.seq ?? at}`;
     const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());
     if (titleCmd) {
       const t = (titleCmd[1] ?? "").trim();
@@ -485,47 +494,19 @@ export class AgySession implements AgentSession {
       if (t) { this.summary = t; void this.#relay?.updateSummary(t); }
       this.#persistRecord(); // the title is persisted with its lock (#469)
       this.#deps.broadcast("session_update", this.toJSON());
-      if (mirror) this.#relay!.send(encodeUserMessage(text, at), `agy:in:${this.id}:${item.id}`);
-      return { ...item, handled: "command" };
+      if (mirror) this.#relay!.send(encodeUserMessage(text, at), localId);
+      return { handled: true };
     }
-    // /joy-prompt — re-deliver the current joy instructions in-band (agy has
-    // no launch-time preamble; this is how it learns the tag vocabulary).
     if (/^\/joy-prompt(?:\s|$)/.test(text.trim())) {
-      if (mirror) this.#relay!.send(encodeUserMessage(text, at), `agy:in:${this.id}:${item.id}`);
-      this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
-      return { ...item, handled: "command" };
+      if (mirror) this.#relay!.send(encodeUserMessage(text, at), localId);
+      return { handled: true, reinjection: joyPromptReinjection() };
     }
-    // Acceptance = the ledger commit (throws when it cannot commit, or when
-    // the session has ended — #553); a redelivered seq / carried id dedupes.
-    const accepted = this.#ledger.acceptCommand({
-      sessionId: this.id, id: item.id, text, origin: opts?.seq != null ? "relay" : "local", source: opts?.source ?? "rpc",
-      seq: opts?.seq, visible: opts?.visible ?? true, mirrorToRelay: opts?.mirrorToRelay ?? true, createdAt: at,
-    });
-    if (accepted.deduped !== "none") {
-      const dup = this.#queue.find((q) => q.id === accepted.id) ?? (this.#inFlight?.id === accepted.id ? this.#inFlight : undefined);
-      if (accepted.deduped === "pending" && !dup && accepted.row) { this.#queue.push({ id: accepted.row.id, text: accepted.row.text, createdAt: accepted.row.createdAt }); this.#broadcastQueue(); this.#drain(); }
-      return { id: accepted.id, text: dup?.text ?? text, createdAt: dup?.createdAt ?? at };
-    }
-    if (mirror) this.#relay!.send(encodeUserMessage(text, at), `agy:in:${this.id}:${item.id}`);
-    this.#queue.push(item);
-    this.#maybeTitle(text);
-    this.#broadcastQueue();
-    this.#drain();
-    return item;
+    return null;
   }
 
-  /** Delivery state of one command: the prompt reached the harness (delivered),
-   *  never spawned (failed), or was plucked (cancelled). */
-  queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
-    if (this.#queue.some((q) => q.id === id) || this.#inFlight?.id === id) return "pending";
-    const row = this.#ledger.getCommand(id);
-    if (!row || row.sessionId !== this.id) return "unknown";
-    switch (row.state) {
-      case "completed": return "delivered";
-      case "failed": return "failed";
-      case "cancelled": case "interrupted": return "cancelled";
-      default: return "pending";
-    }
+  #mirrorAccepted(cmd: CommandView): void {
+    if (cmd.mirrorToRelay && this.#relay) this.#relay.send(encodeUserMessage(cmd.text, cmd.createdAt), `agy:in:${this.id}:${cmd.seq ?? cmd.id}`);
+    this.#maybeTitle(cmd.text);
   }
 
   #maybeTitle(text: string): void {
@@ -535,44 +516,11 @@ export class AgySession implements AgentSession {
     if (title) { this.summary = title; void this.#relay.updateSummary(title); }
   }
 
-  queueState(): QueueState {
-    return { queue: [...this.#queue], pendingCount: this.#queue.length, hidden: [], inFlight: this.#inFlight?.text ?? null, paused: false };
-  }
-
-  resumeQueue(): void { this.#drain(); }
-  editQueued(id: string, text: string): boolean {
-    const q = this.#queue.find((m) => m.id === id);
-    if (!q) return false;
-    if (!this.#ledger.editCommand(id, text)) return false;
-    q.text = text; this.#broadcastQueue(); return true;
-  }
-  cancelQueued(id: string): boolean {
-    const i = this.#queue.findIndex((m) => m.id === id);
-    if (i < 0) return false;
-    this.#queue.splice(i, 1);
-    try { this.#ledger.requestCancel(id); } catch (e) { process.stderr.write(`[agy ${this.id}] ledger cancel ${id} failed: ${e instanceof Error ? e.message : e}\n`); }
-    this.#broadcastQueue(); return true;
-  }
-  reorderQueued(id: string, toIndex: number): boolean {
-    const i = this.#queue.findIndex((m) => m.id === id);
-    if (i < 0) return false;
-    const [m] = this.#queue.splice(i, 1);
-    const to = Math.max(0, Math.min(toIndex, this.#queue.length));
-    this.#queue.splice(to, 0, m);
-    this.#ledger.reorderCommand(id, to);
-    this.#broadcastQueue(); return true;
-  }
-
+  /** Stop the running turn: its command is cancelled durably and the
+   *  process killed; the coordinator confirms the cancel when the run
+   *  settles (exit + stdout EOF). */
   async abort(): Promise<{ ok: boolean; error?: string }> {
-    const run = this.#run;
-    const proc = run?.proc;
-    if (run && proc && proc.exitCode === null) {
-      run.sawResult = true; // the exit handler must not report "failed"
-      try { proc.kill("SIGTERM"); } catch { /* gone */ }
-      this.#endTurn(run, "cancelled");
-      try { this.#ledger.recordObservation({ sessionId: this.id, generation: this.#generation, attemptId: run.attemptId, kind: "interrupted", ref: run.turn }); } catch { /* informational */ }
-    }
-    return { ok: true };
+    return this.#coordinator.abortRunning(this.id);
   }
 
   // No tmux window: pane surface degrades gracefully (pi/opencode precedent).
@@ -616,14 +564,12 @@ export class AgySession implements AgentSession {
       try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
     }
     this.#proc = null;
-    this.#inFlight = null;
     if (run) { this.#endTurn(run, "cancelled"); run.finalized = true; } // stragglers from the dying child are rejected by #onEvent
     this.#run = null; // whatever the dying child still emits is not ours (#466; Astra on ddc89de1: clearing #run alone let a drained answer reach the ended session)
     // Queued rows survive a restart / process exit for the replacement (#49);
-    // a kill interrupts them. The in-flight run's row is already delivered.
-    this.#queue = [];
-    try { this.#ledger.closeGeneration(this.id, this.#generation, reason, { keepQueued: reason !== "killed" }); }
-    catch (e) { process.stderr.write(`[agy ${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
+    // a kill interrupts them. The coordinator settles the in-flight run's row.
+    this.#unsubscribeQueue();
+    this.#coordinator.retire(this.id, reason);
     this.#relay?.setThinking(false);
     if (reason === "process_exited") {
       void this.#relay?.updateJoyState("detached");
@@ -653,7 +599,7 @@ export class AgySession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       this.#recordTerminated = deleteWindowRecord(this.id);
-      try { this.#ledger.closeGeneration(this.id, this.#generation, "killed"); } catch { /* logged by end() paths */ }
+      this.#coordinator.retire(this.id, "killed");
       this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }
