@@ -85,6 +85,12 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     // Track whether we've ever populated results — only show the global spinner
     // on the very first load, not on subsequent file-set changes.
     const [hasLoadedOnce, setHasLoadedOnce] = React.useState(false);
+    // Request generation per path: the empty-list branch clears inFlight while
+    // old requests still run, so a path removed and re-added with the same
+    // signature could have its NEW result overwritten by the OLD completion
+    // (Astra on 81489690, #91). Only the latest request for a path commits.
+    const fetchGen = React.useRef(new Map<string, number>());
+    const genCounter = React.useRef(0);
 
     const fileSignature = (f: GitFileStatus) =>
         `${f.status}|${f.isStaged ? 1 : 0}|${f.linesAdded}|${f.linesRemoved}`;
@@ -137,6 +143,8 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
             const path = file.fullPath;
             const sig = fileSignature(file);
             inFlight.current.add(path);
+            const myGen = ++genCounter.current;
+            fetchGen.current.set(path, myGen);
             const result: FileDiffResult = await (async (): Promise<FileDiffResult> => {
             if (!sessionPath) {
                 return { file, content: null, error: 'No session path' };
@@ -189,6 +197,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                 return { file, content: null, error: err instanceof Error ? err.message : 'Failed to fetch diff' };
             }
             })();
+            if (fetchGen.current.get(path) !== myGen) return; // a newer request owns this path
             inFlight.current.delete(path);
             const current = filesRef.current.find((f) => f.fullPath === path);
             if (!current) return; // removed while fetching

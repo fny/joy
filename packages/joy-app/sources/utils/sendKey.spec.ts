@@ -26,8 +26,15 @@ describe('sendKey — relay idempotency keys', () => {
     it('one failed payload is retained independently of another scope\'s success', () => {
         const kb = beginSend('s4', 'B');
         sendFailed('s4', kb);
-        const ka = beginSend('s4', 'A');
-        sendSucceeded('s4', ka);
+        const ka = beginSend('s5', 'A');
+        sendSucceeded('s5', ka);
         expect(beginSend('s4', 'B')).toBe(kb);
+    });
+    it('a later successful send in the same scope ends an older failure\'s retry candidacy', () => {
+        const ka = beginSend('s6', 'A');
+        sendFailed('s6', ka);                 // A restored into the composer…
+        const kb = beginSend('s6', 'B');      // …replaced with B and sent
+        sendSucceeded('s6', kb);
+        expect(beginSend('s6', 'A')).not.toBe(ka); // typing A again is a new message
     });
 });

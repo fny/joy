@@ -207,5 +207,9 @@ export async function v2MessagesBefore(
         if (!hasMore || rows.length >= limit) break;
     }
     const tail = rows.slice(-limit);
-    return { messages: tail, hasMore: olderExists || rows.length > tail.length, lifecycle, unopenable: stats.unopenable };
+    // `cursor` is the oldest seq scanned — the exclusive bound for the next
+    // backward page. It matters when `messages` is empty with hasMore true:
+    // 20 pages of non-renderable rows must still let the caller keep walking
+    // instead of declaring history exhausted (Astra on 9664fd12, #4).
+    return { messages: tail, hasMore: olderExists || rows.length > tail.length, lifecycle, unopenable: stats.unopenable, cursor: bound };
 }

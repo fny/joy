@@ -49,6 +49,7 @@ import { isVersionSupported, MINIMUM_CLI_VERSION } from '@/utils/versionUtils';
 import * as Clipboard from 'expo-clipboard';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import * as React from 'react';
 import { useMemo } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View, useWindowDimensions } from 'react-native';
@@ -1012,6 +1013,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             }
         };
     }, [sessionId]);
+
+    // The viewing marker follows FOCUS, not mount. Polling and the staleness
+    // probe are scoped to currentViewingSessionId (#2), and a retained screen
+    // under the navigation stack (A → A's info → B → back) never remounts:
+    // B's unmount cleared the marker and A, visible again, stopped polling
+    // (Astra on 9664fd12). Focus re-marks it; blur clears it.
+    useFocusEffect(React.useCallback(() => {
+        storage.getState().setCurrentViewingSession(sessionId);
+        sync.onSessionVisible(sessionId);
+        return () => {
+            if (storage.getState().currentViewingSessionId === sessionId) storage.getState().setCurrentViewingSession(null);
+        };
+    }, [sessionId]));
 
     // Staleness backstop for the open chat: a missed live update (zombie
     // socket, silently dropped frame) froze the conversation until the user

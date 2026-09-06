@@ -24,13 +24,16 @@ export function beginSend(scope: string, text: string, attachmentIds: readonly s
     const failed = list.find((e) => e.state === 'failed' && e.payload === payload);
     if (failed) { failed.state = 'pending'; return failed.key; }
     const entry: Entry = { key: randomUUID(), payload, state: 'pending' };
-    entries.set(scope, [...list, entry]);
+    entries.set(scope, [...list, entry].slice(-50)); // bounded: abandoned failures never pile up
     return entry.key;
 }
 
-/** The relay accepted this key: forget it (an identical later message is new). */
+/** The relay accepted this key: forget it (an identical later message is new).
+ *  Earlier FAILED entries in the scope are forgotten too: the user moved past
+ *  that text to send something else, so typing it again later is a new
+ *  message, not a retry of the abandoned one (Astra on 7d4cd645, #7). */
 export function sendSucceeded(scope: string, key: string): void {
-    const list = (entries.get(scope) ?? []).filter((e) => e.key !== key);
+    const list = (entries.get(scope) ?? []).filter((e) => e.key !== key && e.state !== 'failed');
     if (list.length) entries.set(scope, list); else entries.delete(scope);
 }
 

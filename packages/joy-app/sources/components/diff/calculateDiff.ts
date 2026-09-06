@@ -138,7 +138,16 @@ export function calculateUnifiedDiff(
 /**
  * Calculate inline diff between two lines
  */
+const INLINE_DIFF_MAX_CHARS = 500;
+
 function calculateInlineDiff(oldLine: string, newLine: string): DiffToken[] {
+    // diffWordsWithSpace is unbounded in the token count: a paired pair of
+    // long lines (minified JS, a string literal) stalled the JS thread for
+    // seconds — 3.7 s at 5k chars (Astra on 9664fd12, #18). Past the cap the
+    // pair is shown whole, removed line + added line, with no inline marks.
+    if (oldLine.length > INLINE_DIFF_MAX_CHARS || newLine.length > INLINE_DIFF_MAX_CHARS) {
+        return [{ value: oldLine, removed: true, added: false }, { value: newLine, added: true, removed: false }];
+    }
     // Use word-level diff for better readability
     const wordDiff = diffWordsWithSpace(oldLine, newLine);
 

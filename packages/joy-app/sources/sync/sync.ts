@@ -1003,7 +1003,7 @@ class Sync {
         const v2ctx = this.v2ReadCtx(sessionId);
         if (!v2ctx) throw new Error(`Failed to fetch initial page for ${sessionId}: no v2 link`);
         for (let page = 0; page < MAX_INITIAL_PAGES; page++) {
-            let data: { messages: ApiMessage[]; hasMore: boolean; unopenable?: number; lifecycle: V2Lifecycle[] };
+            let data: { messages: ApiMessage[]; hasMore: boolean; unopenable?: number; lifecycle: V2Lifecycle[]; cursor?: number };
             try {
                 data = await v2MessagesBefore({ ...v2ctx, beforeSeq });
                 // Same rule as the forward path (#3): with no key yet, a page
@@ -1024,7 +1024,10 @@ class Sync {
                 break; // keep what we have — older pages are a bonus
             }
             const messages = Array.isArray(data.messages) ? data.messages : [];
-            hasMore = !!data.hasMore && messages.length > 0;
+            // A page of only non-renderable rows still moves the bound: the
+            // reader reports the oldest seq it scanned (#4).
+            const scannedTo = typeof data.cursor === 'number' && data.cursor < beforeSeq ? data.cursor : undefined;
+            hasMore = !!data.hasMore && (messages.length > 0 || scannedTo !== undefined);
             collected.push(...messages);
             lifecycle.push(...data.lifecycle);
 
@@ -1053,8 +1056,9 @@ class Sync {
                 }
             }
             if (!hasMore || renderable >= MIN_RENDERABLE) break;
-            if (!Number.isFinite(pageMin)) break; // empty page — nothing older
-            beforeSeq = pageMin;
+            const nextBound = Math.min(pageMin, scannedTo ?? Number.POSITIVE_INFINITY);
+            if (!Number.isFinite(nextBound)) break; // empty page — nothing older
+            beforeSeq = nextBound;
         }
         // v2 pages can repeat the same rows when paging backward (the log only
         // pages forward), so de-dup by id before the ordered apply — the
@@ -1284,11 +1288,17 @@ class Sync {
                 for (const message of messages) {
                     if (message.seq < minSeq) minSeq = message.seq;
                 }
-                if (messages.length > 0) {
+                // The reader's cursor is the oldest seq it scanned, which may be
+                // below every returned row — or the only progress when a page
+                // held nothing renderable. Without it, 20 pages of lifecycle
+                // rows left older history unreachable by scrolling (#4).
+                if (typeof data.cursor === 'number' && data.cursor < minSeq) minSeq = data.cursor;
+                const advanced = minSeq < beforeSeq;
+                if (advanced) {
                     this.sessionOldestSeq.set(sessionId, minSeq);
                 }
                 storage.getState().applyOlderMessagesPagination(sessionId, {
-                    hasMore: !!data.hasMore && messages.length > 0
+                    hasMore: !!data.hasMore && advanced
                 });
             });
         } finally {

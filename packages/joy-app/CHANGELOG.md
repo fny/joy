@@ -1,3 +1,11 @@
+# Sep 6 — Review fixes
+
+- **A chat you return to keeps updating.** Going back to a session that stayed open under another screen could leave it frozen: the app had stopped treating it as the one on screen, so it no longer polled. Focus now decides which session is live.
+- **Scrolling up reaches all of the history.** A long run of invisible bookkeeping rows could make the app decide there was nothing older even though the relay said there was; the page bound now advances through them.
+- **Drafts send once.** Tapping Send twice on a saved draft before the relay answered sent it twice.
+- **Diff views with very long lines stay responsive**: paired long lines are shown whole instead of computing a word-by-word highlight that took seconds.
+- **The all-files diff never shows a stale result** for a file that was cleaned and changed again while an earlier fetch was still running.
+
 # Sep 5 (5) — Faster chat loading
 
 - **Opening a long session is fast again, and scrolling up costs one request.** Loading older messages used to re-read the whole conversation from the beginning every time; the relay now serves pages backwards. *Needs the updated relay first — an older relay ignores the new page request.*
