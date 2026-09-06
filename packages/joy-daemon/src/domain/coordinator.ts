@@ -453,11 +453,11 @@ export class SessionCoordinator {
       const h = actor.driver.handleCommand(input.text, { source: input.source, mirrorToRelay: input.mirrorToRelay, seq: input.seq });
       if (h) {
         const out = this.ledger.tx(() => {
-          const r = this.ledger.acceptCommand({ ...input, origin: "command", state: "queued" });
-          if (r.deduped === "none") this.ledger.transition(r.id, ["queued"], "completed", { terminalReason: "handled_as_command" });
+          const r = this.ledger.acceptCommand({ ...input, origin: "command", state: "queued", generation: actor.generation });
+          if (r.deduped === "none") this.ledger.transition(r.id, ["queued"], "completed", { terminalReason: "handled_as_command", generation: actor.generation });
           let reinjectionId: string | undefined;
           if (h.reinjection && r.deduped === "none") {
-            reinjectionId = this.ledger.acceptCommand({ sessionId: input.sessionId, text: h.reinjection, origin: "reinjection", source: input.source, visible: false, mirrorToRelay: false }).id;
+            reinjectionId = this.ledger.acceptCommand({ sessionId: input.sessionId, text: h.reinjection, origin: "reinjection", source: input.source, visible: false, mirrorToRelay: false, generation: actor.generation }).id;
           }
           return { id: r.id, deduped: r.deduped, reinjectionId, createdAt: r.row?.createdAt ?? this.#now() };
         }, "accept");
@@ -466,7 +466,7 @@ export class SessionCoordinator {
         return { id: out.id, state: "completed", deduped: out.deduped, handled: "command", reinjectionId: out.reinjectionId, createdAt: out.createdAt };
       }
     }
-    const r = this.ledger.acceptCommand({ ...input, origin });
+    const r = this.ledger.acceptCommand({ ...input, origin, generation: actor.generation });
     if (r.deduped === "none") {
       const view = this.#view(r.row!);
       try { actor.driver.accepted?.(view); } catch (e) { this.#log(`${input.sessionId}: driver.accepted threw: ${e instanceof Error ? e.message : e}`); }
@@ -485,9 +485,10 @@ export class SessionCoordinator {
     if (!row) return { kind: "unknown", state: null };
     if (isTerminalState(row.state)) return { kind: "already", state: row.state };
     const t = nextState(row.state, { type: "cancel" })!;
+    const actor = this.#actors.get(row.sessionId);
     this.ledger.tx(() => {
       if (row.cancelRequestedAt == null) this.ledger.requestCancel(commandId);
-      if (row.state !== "queued") this.ledger.transition(commandId, [row.state], t.to, { terminalReason: t.terminalReason });
+      if (row.state !== "queued") this.ledger.transition(commandId, [row.state], t.to, { terminalReason: t.terminalReason, ...(actor ? { generation: actor.generation } : {}) });
     }, "cancel");
     const after = this.#emitCommand(commandId);
     const actor = this.#actors.get(row.sessionId);
@@ -722,17 +723,17 @@ export class SessionCoordinator {
           // close, a restart): record what the runtime said, apply nothing.
           orphanAccepted = result.kind === "accepted";
           const a = this.ledger.getAttempt(ref.attemptId);
-          if (a && a.state === "submitting") this.ledger.settleAttempt(ref.attemptId, result.kind === "accepted" ? "accepted" : result.kind === "unknown" ? "unknown" : "rejected", { runtimeTurnId: result.kind === "accepted" ? result.runtimeTurnId ?? undefined : undefined, detail: "orphaned: the op no longer owns the row", command: null });
+          if (a && a.state === "submitting") this.ledger.settleAttempt(ref.attemptId, result.kind === "accepted" ? "accepted" : result.kind === "unknown" ? "unknown" : "rejected", { runtimeTurnId: result.kind === "accepted" ? result.runtimeTurnId ?? undefined : undefined, detail: "orphaned: the op no longer owns the row", command: null, generation: actor.generation });
           return;
         }
         if (result.kind === "accepted") {
           const a = this.ledger.getAttempt(ref.attemptId);
           // An echo that beat the response already settled the attempt as
           // done: the response only binds the turn id (R18).
-          if (a?.state === "submitting") this.ledger.settleAttempt(ref.attemptId, "accepted", { runtimeTurnId: result.runtimeTurnId ?? undefined, command: null });
+          if (a?.state === "submitting") this.ledger.settleAttempt(ref.attemptId, "accepted", { runtimeTurnId: result.runtimeTurnId ?? undefined, command: null, generation: actor.generation });
           else if (result.runtimeTurnId && a && a.runtimeTurnId !== result.runtimeTurnId) this.ledger.setAttemptTurn(ref.attemptId, result.runtimeTurnId);
           const t = nextState(row!.state, { type: "submit_accepted" });
-          if (t) this.ledger.transition(commandId, [row!.state], t.to, { terminalReason: t.terminalReason });
+          if (t) this.ledger.transition(commandId, [row!.state], t.to, { terminalReason: t.terminalReason, generation: actor.generation, expectedAttemptId: ref.attemptId });
           const after = this.ledger.getCommand(commandId)!;
           if (after.state === "cancelling") followUp = "interrupt";
           // R18: the runtime already reported this turn while the response
@@ -740,17 +741,17 @@ export class SessionCoordinator {
           if (result.runtimeTurnId) this.#applyBackloggedTurn(actor, after, ref.attemptId, result.runtimeTurnId);
           if (actor.foreignTurn && result.runtimeTurnId && actor.foreignTurn.runtimeTurnId === result.runtimeTurnId) actor.foreignTurn = null;
         } else if (result.kind === "unknown") {
-          this.ledger.settleAttempt(ref.attemptId, "unknown", { detail: result.detail.slice(0, 200), command: null });
+          this.ledger.settleAttempt(ref.attemptId, "unknown", { detail: result.detail.slice(0, 200), command: null, generation: actor.generation });
           const t = nextState(row!.state, { type: "submit_unknown" });
-          if (t) this.ledger.transition(commandId, [row!.state], t.to, { terminalReason: t.terminalReason });
+          if (t) this.ledger.transition(commandId, [row!.state], t.to, { terminalReason: t.terminalReason, generation: actor.generation, expectedAttemptId: ref.attemptId });
           if (this.ledger.getCommand(commandId)?.state === "cancelling") followUp = "interrupt";
         } else {
           const detail = (result.busy ? `busy:${result.detail}` : result.detail).slice(0, 200);
-          this.ledger.settleAttempt(ref.attemptId, "rejected", { detail, command: null });
+          this.ledger.settleAttempt(ref.attemptId, "rejected", { detail, command: null, generation: actor.generation });
           const transient = this.ledger.attemptsForCommand(commandId).filter((a) => a.state === "rejected" && !(a.detail ?? "").startsWith("busy:")).length;
           const permanent = result.permanent || transient >= this.#o.maxTransientRejections;
           const t = nextState(row!.state, { type: "submit_rejected", permanent })!;
-          this.ledger.transition(commandId, [row!.state], t.to, { terminalReason: t.to === "failed" ? detail : t.terminalReason });
+          this.ledger.transition(commandId, [row!.state], t.to, { terminalReason: t.to === "failed" ? detail : t.terminalReason, generation: actor.generation, expectedAttemptId: ref.attemptId });
           if (t.to === "queued") {
             // A busy refusal is retried when the runtime goes idle (turn_ended,
             // idle, resume lift the hold) or after a plain backoff — never in a
@@ -782,7 +783,7 @@ export class SessionCoordinator {
     const endedObs = obs.filter((o) => o.kind === "turn_ended").pop();
     if (started && !endedObs) {
       const t = nextState(row.state, { type: "evidence" });
-      if (t) this.ledger.transition(row.id, [row.state], t.to);
+      if (t) this.ledger.transition(row.id, [row.state], t.to, { generation: actor.generation, expectedAttemptId: attemptId });
     }
     if (endedObs) {
       const status = ((endedObs.payload as { status?: TurnStatus } | null)?.status ?? "completed");
@@ -999,7 +1000,7 @@ export class SessionCoordinator {
         return;
       }
       case "checkpoint": {
-        this.ledger.setCheckpoint(sid, o.checkpointKind, o.ref, o.offset, { throughSeq: "latest" });
+        this.ledger.setCheckpoint(sid, o.checkpointKind, o.ref, o.offset, { throughSeq: "latest", generation: actor.generation });
         return;
       }
       case "paused": { actor.paused = true; actor.pauseReason = o.reason; this.#emit({ type: "session", sessionId: sid }); return; }

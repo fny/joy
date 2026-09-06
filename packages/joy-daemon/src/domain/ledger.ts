@@ -24,7 +24,17 @@
 //     not the session's current one (StaleGenerationError — #481, #36);
 //   - a checkpoint recorded while its outputs are still unacked stays
 //     PENDING until the outbox acks them; a crash before that replays from
-//     the previous checkpoint, receipt-deduped, never skipping output (#67).
+//     the previous checkpoint, receipt-deduped, never skipping output (#67);
+//   - a SETTLEMENT (settleAttempt / confirmDelivery, and the attempt effects
+//     of recordObservation) changes the command only under the current-owner
+//     rule: the claimed generation (explicit, else the attempt's own) is the
+//     session's current open one AND the attempt is the command's newest.
+//     Anything else is a late/stale echo: it is recorded as a
+//     `stale_settlement` observation on ITS OWN attempt (ownership of a late
+//     echo is preserved) but never moves the command's state or supersedes
+//     the newer attempt (review 95c4781e, wave C1). transition / setCheckpoint
+//     / acceptCommand take an optional generation (+ expectedAttemptId) and
+//     refuse when it is not current.
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -123,6 +133,10 @@ export interface NewCommand {
   createdAt?: number;
   /** Initial state (default queued). The import uses it for rows that were mid-flight. */
   state?: CommandState;
+  /** The accepting owner's generation: refused (StaleGenerationError) when it
+   *  is not the session's current open one. Omitted by the import (no
+   *  generation is open) and by callers with no runtime of their own. */
+  generation?: number;
 }
 export interface NewReceipt { kind: string; ref: string; commandId?: string | null; attemptId?: string | null; at?: number }
 export interface NewOutbound {
@@ -206,7 +220,14 @@ CREATE TABLE IF NOT EXISTS spawn_intents (
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL,
   payload TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS import_sources (
+  path TEXT PRIMARY KEY, content_hash TEXT NOT NULL, imported_at INTEGER NOT NULL);
 `;
+
+/** Observation kind recorded for a settlement that failed the current-owner rule. */
+export const STALE_SETTLEMENT_KIND = "stale_settlement";
+export interface ImportSourceRow { path: string; contentHash: string; importedAt: number }
+interface StaleSettlement { reason: string; claimedGeneration: number; claimIsCurrent: boolean; currentGeneration: number | null; currentAttemptId: string | null }
 
 const b = (v: boolean | undefined | null): number => (v ? 1 : 0);
 const placeholders = (n: number): string => Array.from({ length: n }, () => "?").join(",");
@@ -349,6 +370,18 @@ export class Ledger {
     this.tx(() => { this.#run("INSERT OR REPLACE INTO schema_meta(key,value) VALUES(?,?)", key, value); }, "meta");
   }
 
+  // ── import markers ──
+  /** The legacy-import marker for a source file (its state-dir-relative
+   *  name): committed INSIDE the file's import transaction, so "this file is
+   *  done" is a ledger fact, not an inference from the file having moved. */
+  getImportSource(path: string): ImportSourceRow | null {
+    const r = this.#get("SELECT * FROM import_sources WHERE path=?", path);
+    return r ? { path: r.path as string, contentHash: r.content_hash as string, importedAt: r.imported_at as number } : null;
+  }
+  recordImportSource(path: string, contentHash: string): void {
+    this.tx(() => { this.#run("INSERT OR REPLACE INTO import_sources(path,content_hash,imported_at) VALUES(?,?,?)", path, contentHash, this.#now()); }, "importSource");
+  }
+
   // ── generations ──
   /** Open a new generation for a session (1 = first launch of the id). Any
    *  generation still open is closed as superseded; attempts that were
@@ -408,9 +441,12 @@ export class Ledger {
   listGenerations(sessionId: string): GenerationRow[] {
     return this.#all("SELECT * FROM session_generations WHERE session_id=? ORDER BY generation", sessionId).map(rowGeneration);
   }
-  #fence(sessionId: string, generation: number): void {
+  #isCurrent(sessionId: string, generation: number): boolean {
     const cur = this.currentGeneration(sessionId);
-    if (!cur || cur.generation !== generation || !cur.open) throw new StaleGenerationError(sessionId, generation, cur?.generation ?? null);
+    return !!cur && cur.generation === generation && cur.open;
+  }
+  #fence(sessionId: string, generation: number): void {
+    if (!this.#isCurrent(sessionId, generation)) throw new StaleGenerationError(sessionId, generation, this.currentGeneration(sessionId)?.generation ?? null);
   }
 
   // ── commands ──
@@ -423,6 +459,7 @@ export class Ledger {
     return this.tx(() => {
       const gen = this.currentGeneration(c.sessionId);
       if (gen && !gen.open) throw new SessionEndedError(c.sessionId);
+      if (c.generation != null) this.#fence(c.sessionId, c.generation);
       const now = c.createdAt ?? this.#now();
       if (c.id) {
         const existing = this.getCommand(c.id);
@@ -524,10 +561,18 @@ export class Ledger {
    *  confirmed by another signal is still expected and must pair with the
    *  attempt) settles any attempt still awaiting evidence as superseded, or
    *  done when the command completed. False = precondition failed, nothing
-   *  changed. */
-  transition(id: string, from: readonly CommandState[], to: CommandState, patch: { activeOp?: string | null; terminalReason?: string; settleAttempts?: boolean } = {}): boolean {
+   *  changed. `generation` / `expectedAttemptId` are further preconditions:
+   *  the generation must be the session's current open one and the attempt
+   *  must be the command's newest (a stale owner's transition is a no-op). */
+  transition(id: string, from: readonly CommandState[], to: CommandState, patch: { activeOp?: string | null; terminalReason?: string; settleAttempts?: boolean; generation?: number; expectedAttemptId?: string } = {}): boolean {
     return this.tx(() => {
       const now = this.#now();
+      if (patch.generation != null || patch.expectedAttemptId) {
+        const cmd = this.getCommand(id);
+        if (!cmd) return false;
+        if (patch.generation != null && !this.#isCurrent(cmd.sessionId, patch.generation)) return false;
+        if (patch.expectedAttemptId && this.latestAttempt(id)?.id !== patch.expectedAttemptId) return false;
+      }
       const sets = ["state=?", "updated_at=?"];
       const params: Array<string | number | null> = [to, now];
       if (isTerminalState(to)) { sets.push("active_op=NULL"); sets.push("terminal_reason=?"); params.push(patch.terminalReason ?? null); }
@@ -549,8 +594,12 @@ export class Ledger {
   recordAttempt(commandId: string, generation: number, runtimeRef: string | null, op: string | null = null): AttemptRow {
     const pre = this.getCommand(commandId);
     if (pre && pre.cancelRequestedAt != null && !isTerminalState(pre.state)) {
-      // Committed on its own so the refusal below (a throw) does not roll it back.
-      this.transition(commandId, NON_TERMINAL_STATES, "cancelled", { terminalReason: "cancelled" });
+      // A stale owner has no authority to terminalise the row either: the
+      // fence comes FIRST (review 95c4781e — the cancel used to commit before
+      // the generation was checked). Committed on its own so the refusal
+      // below (a throw) does not roll it back.
+      this.#fence(pre.sessionId, generation);
+      this.transition(commandId, NON_TERMINAL_STATES, "cancelled", { terminalReason: "cancelled", generation });
       throw new StaleCommandError(commandId, "cancel requested — row cancelled, not dispatched");
     }
     return this.tx(() => {
@@ -568,13 +617,50 @@ export class Ledger {
     }, "attempt");
   }
 
+  /** The current-owner rule for a settlement naming attempt `a` (see the
+   *  header): null when the caller owns the command's current execution,
+   *  else why not. */
+  #staleSettlement(a: AttemptRow, generation: number | undefined): StaleSettlement | null {
+    const claimed = generation ?? a.generation;
+    const cur = this.currentGeneration(a.sessionId);
+    const latest = this.latestAttempt(a.commandId);
+    const base = { claimedGeneration: claimed, claimIsCurrent: !!cur && cur.open && cur.generation === claimed, currentGeneration: cur?.generation ?? null, currentAttemptId: latest?.id ?? null };
+    if (!cur || !cur.open || cur.generation !== claimed) return { reason: `generation ${claimed} is not current (${cur ? `${cur.generation}${cur.open ? "" : ", closed"}` : "none"})`, ...base };
+    if (latest && latest.id !== a.id) return { reason: `attempt ${a.attemptNo} is not the command's current attempt (${latest.attemptNo})`, ...base };
+    return null;
+  }
+  /** A settlement that failed the current-owner rule: recorded on its own
+   *  attempt as an observation; the command and every other attempt are
+   *  untouched. The attempt's own row takes the outcome only while it still
+   *  awaits evidence AND the claim comes from someone entitled to speak
+   *  about it — the current owner (reporting a late echo of an older
+   *  attempt) or the attempt's own generation (its owner, late). A stale
+   *  owner naming someone else's attempt leaves only the observation. */
+  #recordStaleSettlement(a: AttemptRow, outcome: AttemptState, patch: { runtimeTurnId?: string; detail?: string }, why: StaleSettlement, via: string): void {
+    const now = this.#now();
+    this.#run("INSERT INTO observations(session_id,generation,attempt_id,kind,ref,payload,at) VALUES(?,?,?,?,?,?,?)",
+      a.sessionId, a.generation, a.id, STALE_SETTLEMENT_KIND, outcome,
+      JSON.stringify({ outcome, via, detail: patch.detail ?? null, runtimeTurnId: patch.runtimeTurnId ?? null, ...why }), now);
+    const entitled = why.claimIsCurrent || why.claimedGeneration === a.generation;
+    if (entitled && (AWAITING_ATTEMPT_STATES as readonly string[]).includes(a.state) && outcome !== "submitting") {
+      this.#run("UPDATE attempts SET state=?, settled_at=?, runtime_turn_id=COALESCE(?,runtime_turn_id), detail=COALESCE(?,detail) WHERE id=?",
+        outcome, now, patch.runtimeTurnId ?? null, patch.detail ?? null, a.id);
+    }
+  }
+
   /** Settle an attempt. The command follows unless `command` says otherwise:
    *  accepted→accepted, unknown→unknown, done→completed(delivered),
-   *  rejected→failed, superseded→(no change). */
-  settleAttempt(attemptId: string, outcome: AttemptState, patch: { runtimeTurnId?: string; detail?: string; command?: { to: CommandState; terminalReason?: string } | null } = {}): AttemptRow {
+   *  rejected→failed, superseded→(no change). Fenced by the current-owner
+   *  rule: `generation` is the caller's (a replacement reconciling its
+   *  predecessor's attempt names its OWN generation); omitted, the attempt's
+   *  generation is the claim. A stale settlement never changes the command
+   *  (see #recordStaleSettlement). */
+  settleAttempt(attemptId: string, outcome: AttemptState, patch: { runtimeTurnId?: string; detail?: string; command?: { to: CommandState; terminalReason?: string } | null; generation?: number } = {}): AttemptRow {
     return this.tx(() => {
       const a = this.getAttempt(attemptId);
       if (!a) throw new StaleCommandError(attemptId, "no such attempt");
+      const stale = this.#staleSettlement(a, patch.generation);
+      if (stale) { this.#recordStaleSettlement(a, outcome, patch, stale, "settleAttempt"); return this.getAttempt(attemptId)!; }
       const now = this.#now();
       const settled = outcome === "submitting" ? null : now;
       this.#run("UPDATE attempts SET state=?, settled_at=?, runtime_turn_id=COALESCE(?,runtime_turn_id), detail=COALESCE(?,detail) WHERE id=?",
@@ -673,13 +759,13 @@ export class Ledger {
         obs.sessionId, obs.generation, obs.attemptId ?? null, obs.kind, obs.ref ?? null, obs.payload === undefined ? null : JSON.stringify(obs.payload), now);
       const observationId = Number((r as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0);
       for (const rc of effects.receipts ?? []) this.#addReceiptInner(obs.sessionId, rc, now);
-      if (effects.attempt) this.settleAttempt(effects.attempt.id, effects.attempt.outcome, { runtimeTurnId: effects.attempt.runtimeTurnId, detail: effects.attempt.detail, command: null });
+      if (effects.attempt) this.settleAttempt(effects.attempt.id, effects.attempt.outcome, { runtimeTurnId: effects.attempt.runtimeTurnId, detail: effects.attempt.detail, command: null, generation: obs.generation });
       if (effects.command) {
-        const ok = this.transition(effects.command.id, effects.command.from ?? NON_TERMINAL_STATES, effects.command.to, { terminalReason: effects.command.terminalReason });
+        const ok = this.transition(effects.command.id, effects.command.from ?? NON_TERMINAL_STATES, effects.command.to, { terminalReason: effects.command.terminalReason, generation: obs.generation });
         if (!ok) throw new StaleCommandError(effects.command.id, `not in ${(effects.command.from ?? NON_TERMINAL_STATES).join("|")}`);
       }
       const outboxSeqs = effects.outbox?.length ? this.enqueueOutbound(effects.outbox.map((o) => ({ generation: obs.generation, ...o }))) : [];
-      if (effects.checkpoint) this.setCheckpoint(obs.sessionId, effects.checkpoint.kind, effects.checkpoint.ref, effects.checkpoint.offset, { throughSeq: "latest" });
+      if (effects.checkpoint) this.setCheckpoint(obs.sessionId, effects.checkpoint.kind, effects.checkpoint.ref, effects.checkpoint.offset, { throughSeq: "latest", generation: obs.generation });
       return { observationId, outboxSeqs };
     }, "observe");
   }
@@ -695,8 +781,12 @@ export class Ledger {
    *  the command but leaves its attempt awaiting: the proof came from a
    *  signal other than the runtime's echo (a hook, a dialog) and the echo,
    *  when it arrives, must still pair with the attempt instead of being
-   *  mirrored back as a new user message. */
-  confirmDelivery(commandId: string, receipts: NewReceipt | NewReceipt[], opts: { attemptId?: string | null; to?: CommandState; terminalReason?: string; settleAttempts?: boolean } = {}): CommandRow | null {
+   *  mirrored back as a new user message. Fenced by the current-owner rule
+   *  when it names an attempt or a generation: the receipts are facts and
+   *  always land, a stale confirmation settles only its own attempt. A call
+   *  naming neither (a hook-proven delivery with no attempt) is a plain
+   *  command transition. */
+  confirmDelivery(commandId: string, receipts: NewReceipt | NewReceipt[], opts: { attemptId?: string | null; to?: CommandState; terminalReason?: string; settleAttempts?: boolean; generation?: number } = {}): CommandRow | null {
     return this.tx(() => {
       const cmd = this.getCommand(commandId);
       const now = this.#now();
@@ -705,7 +795,15 @@ export class Ledger {
       if (!cmd) return null;
       if (opts.attemptId) {
         const a = this.getAttempt(opts.attemptId);
-        if (a && (AWAITING_ATTEMPT_STATES as readonly string[]).includes(a.state)) this.settleAttempt(opts.attemptId, "done", { command: null });
+        if (a) {
+          const stale = this.#staleSettlement(a, opts.generation);
+          if (stale) { this.#recordStaleSettlement(a, "done", {}, stale, "confirmDelivery"); return this.getCommand(commandId); }
+          if ((AWAITING_ATTEMPT_STATES as readonly string[]).includes(a.state)) this.settleAttempt(opts.attemptId, "done", { command: null, generation: opts.generation });
+        }
+      } else if (opts.generation != null && !this.#isCurrent(cmd.sessionId, opts.generation)) {
+        this.#run("INSERT INTO observations(session_id,generation,attempt_id,kind,ref,payload,at) VALUES(?,?,NULL,?,?,?,?)",
+          cmd.sessionId, opts.generation, STALE_SETTLEMENT_KIND, "done", JSON.stringify({ outcome: "done", via: "confirmDelivery", commandId, claimedGeneration: opts.generation, currentGeneration: this.currentGeneration(cmd.sessionId)?.generation ?? null }), now);
+        return cmd;
       } else if (opts.settleAttempts !== false) {
         this.#run("UPDATE attempts SET state='done', settled_at=? WHERE command_id=? AND state IN ('submitting','accepted','unknown')", now, commandId);
       }
@@ -837,8 +935,9 @@ export class Ledger {
    *  outbox row up to that seq is acked or dropped; until then it is held as
    *  pending and a restart replays from the previous committed cursor — or
    *  from nothing (`ref` is "" while no cursor has ever been committed). */
-  setCheckpoint(sessionId: string, kind: string, ref: string, offset: number, opts: { throughSeq?: number | "latest" } = {}): { committed: boolean } {
+  setCheckpoint(sessionId: string, kind: string, ref: string, offset: number, opts: { throughSeq?: number | "latest"; generation?: number } = {}): { committed: boolean } {
     return this.tx(() => {
+      if (opts.generation != null) this.#fence(sessionId, opts.generation);
       const now = this.#now();
       const through = opts.throughSeq === "latest" ? this.lastOutboundSeq(sessionId) : opts.throughSeq;
       const blocked = through != null && through > 0

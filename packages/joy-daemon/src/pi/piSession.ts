@@ -360,6 +360,7 @@ export class PiSession implements AgentSession {
 
   #turnId(n: number): string { return `pi:${this.id}:${this.#boot}:t${n}`; }
 
+
   /** Surface a prompt/steer pi refused (or never received) instead of
    *  acknowledging an unchecked stdin write (#577). */
   #rejected(kind: string, text: string, error: string): void {

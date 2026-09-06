@@ -112,15 +112,21 @@ writeDaemonState(PORT);
 // stores (queue-*.json, *.receipts.json, v2-outbound.json, codex-*.json,
 // v2-spawns.json, the execution fields of window-*.json) — originals moved
 // to state/imported-v1/. Terminal rows are pruned on a 7-day retention.
-{
+// A source that fails to import is left in place and retried next boot; the
+// sessions it belongs to are quarantined below (review 95c4781e).
+const importReport = (() => {
   const ledger = ledgerFor(STATE_DIR);
   const creds = loadCredentials();
   const report = importLegacyState(ledger, STATE_DIR, { sealsContent: !!creds?.encryption?.publicKey, log: (line) => process.stderr.write(line + "\n") });
-  if (report.failed.length) process.stderr.write(`[ledger-import] ${report.failed.length} file(s) could not be imported: ${report.failed.map((f) => f.file).join(", ")}\n`);
+  if (report.failed.length) {
+    process.stderr.write(`[ledger-import] ${report.failed.length} file(s) could not be imported (left in place, retried next boot): ${report.failed.map((f) => `${f.file} (${f.error})`).join(", ")}`
+      + (report.quarantine.length ? `; quarantined until then: ${report.quarantine.join(", ")}` : "") + "\n");
+  }
   const prune = () => { try { const r = ledger.prune(); if (r.commands || r.outbox || r.receipts) process.stderr.write(`[ledger] pruned ${r.commands} commands, ${r.outbox} outbox rows, ${r.receipts} receipts\n`); } catch (e) { process.stderr.write(`[ledger] prune failed: ${e instanceof Error ? e.message : e}\n`); } };
   prune();
   setInterval(prune, 24 * 3_600_000).unref();
-}
+  return report;
+})();
 
 const relayClient = initRelay();
 
@@ -147,6 +153,10 @@ const registry = new SessionRegistry({
     void registry.commands.onSessionAttached(session.cwd, rs, session.agentFlavor);
   },
 });
+// Boot gate: a session whose legacy source failed to import must not accept
+// or recover work until the import completes — recover() skips it (logged
+// once) and create({ id }) refuses it.
+if (importReport.quarantine.length) registry.quarantine(importReport.quarantine, "legacy import failed");
 
 startHttpServer({
   registry, port: PORT, publicDir: PUBLIC_DIR, token: SERVER_TOKEN,

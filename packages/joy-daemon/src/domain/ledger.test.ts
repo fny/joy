@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   Ledger, ledgerFor, closeAllLedgers, SessionEndedError, StaleGenerationError, StaleCommandError, LedgerWriteError,
-  OUTBOX_MAX_ROWS,
+  OUTBOX_MAX_ROWS, NON_TERMINAL_STATES, STALE_SETTLEMENT_KIND,
 } from "./ledger";
 
 let dir: string;
@@ -276,4 +276,109 @@ test("tx: a throw inside rolls back everything and surfaces as LedgerWriteError"
     throw new Error("boom");
   })).toThrow(LedgerWriteError);
   expect(ledger.listPending("s1")).toEqual([]);
+});
+
+// ── settlement fence: the current-owner rule (review 95c4781e) ──
+
+test("a stale settlement (older generation, superseded attempt) never changes the command or the newer attempt; it is recorded on its own attempt", () => {
+  const g1 = ledger.openGeneration("s1", "codex");
+  const c = accept("s1", "c");
+  const a1 = ledger.recordAttempt(c.id, g1, "c");
+  const g2 = ledger.openGeneration("s1", "codex"); // a1 → unknown, the command → unknown
+  expect(ledger.requeueCommand(c.id)).toBe(true);
+  const a2 = ledger.recordAttempt(c.id, g2, "c#a2");
+  // The reviewer's reproduction: the old owner's late rejection of attempt 1.
+  ledger.settleAttempt(a1.id, "rejected", { detail: "late refusal" });
+  expect(ledger.getCommand(c.id)?.state).toBe("submitting");
+  expect(ledger.getAttempt(a2.id)?.state).toBe("submitting");
+  expect(ledger.latestAttempt(c.id)?.id).toBe(a2.id);
+  const obs = ledger.listObservations("s1", STALE_SETTLEMENT_KIND);
+  expect(obs).toHaveLength(1);
+  expect(obs[0]).toMatchObject({ attemptId: a1.id, generation: g1, ref: "rejected" });
+  expect(obs[0].payload).toMatchObject({ outcome: "rejected", detail: "late refusal", claimedGeneration: g1, currentGeneration: g2, currentAttemptId: a2.id });
+  // Its own row takes the outcome (its owner spoke about it while it still awaited evidence)...
+  expect(ledger.getAttempt(a1.id)).toMatchObject({ state: "rejected", detail: "late refusal" });
+  // ...but a stale owner naming the CURRENT attempt leaves only the observation.
+  ledger.settleAttempt(a2.id, "rejected", { generation: g1, detail: "impostor" });
+  expect(ledger.getAttempt(a2.id)).toMatchObject({ state: "submitting", detail: null });
+  expect(ledger.getCommand(c.id)?.state).toBe("submitting");
+  expect(ledger.listObservations("s1", STALE_SETTLEMENT_KIND)).toHaveLength(2);
+  // The current owner settling the current attempt moves the command as before.
+  ledger.settleAttempt(a2.id, "accepted", { generation: g2, runtimeTurnId: "turn-2" });
+  expect(ledger.getCommand(c.id)?.state).toBe("accepted");
+  expect(ledger.getAttempt(a2.id)).toMatchObject({ state: "accepted", runtimeTurnId: "turn-2" });
+});
+
+test("a late echo confirming a superseded attempt lands its receipts and settles only that attempt; the current attempt keeps the command", () => {
+  const g1 = ledger.openGeneration("s1", "claude");
+  const c = accept("s1", "hi", { seq: 9, source: "relay" });
+  const a1 = ledger.recordAttempt(c.id, g1, "hi");
+  const g2 = ledger.openGeneration("s1", "claude");
+  ledger.requeueCommand(c.id);
+  const a2 = ledger.recordAttempt(c.id, g2, "hi#a2");
+  // The replacement (current owner) sees attempt 1's echo in the transcript.
+  ledger.confirmDelivery(c.id, [{ kind: "transcript_uuid", ref: "u-late" }], { attemptId: a1.id, generation: g2 });
+  expect(ledger.hasReceipt("s1", "transcript_uuid", "u-late")).toBe(true);
+  expect(ledger.getAttempt(a1.id)?.state).toBe("done"); // the current owner may settle the old attempt's own row
+  expect(ledger.getAttempt(a2.id)?.state).toBe("submitting");
+  expect(ledger.getCommand(c.id)?.state).toBe("submitting");
+  expect(ledger.listObservations("s1", STALE_SETTLEMENT_KIND).map((o) => [o.attemptId, (o.payload as { via: string }).via])).toEqual([[a1.id, "confirmDelivery"]]);
+  // The retired owner confirming the current attempt: receipt lands, nothing else moves.
+  ledger.confirmDelivery(c.id, [{ kind: "seq", ref: "9" }], { attemptId: a2.id, generation: g1 });
+  expect(ledger.hasReceipt("s1", "seq", "9")).toBe(true);
+  expect(ledger.getAttempt(a2.id)?.state).toBe("submitting");
+  expect(ledger.getCommand(c.id)?.state).toBe("submitting");
+  // The current owner confirming the current attempt completes the command.
+  ledger.confirmDelivery(c.id, [], { attemptId: a2.id, generation: g2 });
+  expect(ledger.getCommand(c.id)).toMatchObject({ state: "completed", terminalReason: "delivered" });
+  expect(ledger.getAttempt(a2.id)?.state).toBe("done");
+});
+
+test("recordAttempt from a stale generation is refused BEFORE it terminalises a cancel-requested row", () => {
+  const g1 = ledger.openGeneration("s1", "claude");
+  const c = accept("s1", "x");
+  const a1 = ledger.recordAttempt(c.id, g1, "x");
+  ledger.settleAttempt(a1.id, "accepted", { generation: g1 });
+  ledger.requestCancel(c.id); // in flight: flagged, state kept
+  const g2 = ledger.openGeneration("s1", "claude"); // → unknown
+  ledger.requeueCommand(c.id);
+  expect(() => ledger.recordAttempt(c.id, g1, "x")).toThrow(StaleGenerationError);
+  expect(ledger.getCommand(c.id)?.state).toBe("queued"); // the retired owner cancelled nothing
+  expect(() => ledger.recordAttempt(c.id, g2, "x")).toThrow(StaleCommandError); // the current owner honours the cancel
+  expect(ledger.getCommand(c.id)?.state).toBe("cancelled");
+});
+
+test("transition, setCheckpoint and acceptCommand refuse a generation that is not current (transition: a no-op false; expectedAttemptId likewise)", () => {
+  const g1 = ledger.openGeneration("s1", "claude");
+  const c = accept("s1", "x");
+  const a1 = ledger.recordAttempt(c.id, g1, "x");
+  const g2 = ledger.openGeneration("s1", "claude");
+  expect(ledger.transition(c.id, NON_TERMINAL_STATES, "failed", { terminalReason: "stale", generation: g1 })).toBe(false);
+  expect(ledger.getCommand(c.id)?.state).toBe("unknown");
+  ledger.requeueCommand(c.id);
+  const a2 = ledger.recordAttempt(c.id, g2, "x#a2");
+  expect(ledger.transition(c.id, NON_TERMINAL_STATES, "failed", { generation: g2, expectedAttemptId: a1.id })).toBe(false);
+  expect(ledger.getCommand(c.id)?.state).toBe("submitting");
+  expect(ledger.transition(c.id, NON_TERMINAL_STATES, "running", { generation: g2, expectedAttemptId: a2.id })).toBe(true);
+  expect(ledger.getCommand(c.id)?.state).toBe("running");
+  expect(() => ledger.setCheckpoint("s1", "claude_transcript", "/t", 5, { generation: g1 })).toThrow(StaleGenerationError);
+  expect(ledger.getCheckpoint("s1", "claude_transcript")).toBeNull();
+  expect(ledger.setCheckpoint("s1", "claude_transcript", "/t", 5, { generation: g2 }).committed).toBe(true);
+  expect(() => accept("s1", "y", { generation: g1 })).toThrow(StaleGenerationError);
+  expect(ledger.listPending("s1").map((r) => r.text)).toEqual(["x"]);
+  expect(accept("s1", "y", { generation: g2 }).deduped).toBe("none");
+});
+
+test("a replacement reconciling its predecessor's attempt names its OWN generation and moves the command", () => {
+  const g1 = ledger.openGeneration("s1", "codex");
+  const c = accept("s1", "x");
+  const a1 = ledger.recordAttempt(c.id, g1, "x");
+  const g2 = ledger.openGeneration("s1", "codex");
+  expect(ledger.getCommand(c.id)?.state).toBe("unknown");
+  ledger.recordObservation({ sessionId: "s1", generation: g2, attemptId: a1.id, kind: "reconcile", ref: c.id }, {
+    command: { id: c.id, from: ["unknown"], to: "running" }, attempt: { id: a1.id, outcome: "accepted", runtimeTurnId: "t1" },
+  });
+  expect(ledger.getCommand(c.id)?.state).toBe("running");
+  expect(ledger.getAttempt(a1.id)).toMatchObject({ state: "accepted", runtimeTurnId: "t1" });
+  expect(ledger.listObservations("s1", STALE_SETTLEMENT_KIND)).toEqual([]);
 });

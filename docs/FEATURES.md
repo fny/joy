@@ -439,7 +439,22 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   consulted at every operation boundary and retried until confirmed or
   surfaced as unresolved (#35 #66 #77 #79), and the queue of a restarted
   session is the replacement's (#36 #49). Window records (identity/config only) and
-  user files still use atomic replacement (#567).
+  user files still use atomic replacement (#567). The one-time legacy import
+  (`domain/ledgerImport.ts`) commits a per-source marker (`import_sources`:
+  file + content hash) inside each file's transaction, so a repeat import is
+  a no-op even when the file could not be moved aside; synthetic rows carry
+  ids derived from the source, and an imported checkpoint never rewinds the
+  ledger's cursor. An unreadable or malformed source is a FAILED import:
+  left in place, retried next boot, and its session is quarantined
+  (`registry.quarantine`: not recovered, `create`/`restart({id})` refused)
+  until it imports. Settlements obey the current-owner rule:
+  `settleAttempt`/`confirmDelivery` change the command only when the claimed
+  generation is the session's current one AND the attempt is the command's
+  newest; anything else is recorded as a `stale_settlement` observation on
+  its own attempt (late-echo ownership kept) and never fails the command or
+  supersedes the newer attempt. `transition`/`setCheckpoint`/`acceptCommand`
+  take the owner's generation (+ expected attempt) and refuse when stale
+  (review 95c4781e).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.
