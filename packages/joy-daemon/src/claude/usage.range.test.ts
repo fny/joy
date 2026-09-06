@@ -126,6 +126,31 @@ test("a copied message is charged at its most complete observation, and its copi
   expect(byId["zz-fork"].calls).toBe(1);
 });
 
+test("a tool first observed in a copy's final snapshot is counted even though the copy owns no call (#491 residual)", async () => {
+  const r = root();
+  const proj = join(r, "-home-u-proj");
+  mkdirSync(proj, { recursive: true });
+  // The original holds message M's EARLY text-only observation (1 output
+  // token, no tool block yet); the later copy holds M's final observation:
+  // 100 output tokens and the Bash tool_use block. The copy owns no API call
+  // of its own, so collecting tools only from charged files lost the Bash call.
+  const original = join(proj, "aa-original.jsonl");
+  const copy = join(proj, "zz-final.jsonl");
+  writeFileSync(original, assistant({ ts: "2026-09-05T12:00:00Z", msgId: "partial", out: 1 }));
+  writeFileSync(copy, assistant({ ts: "2026-09-05T12:00:00Z", msgId: "partial", out: 100, tool: "Bash", toolId: "toolu_partial" }));
+  const t0 = new Date("2026-09-05T12:00:00Z"), t1 = new Date("2026-09-05T12:01:00Z");
+  utimesSync(original, t0, t0);
+  utimesSync(copy, t1, t1);
+
+  const rep = await computeUsage({ fromDay: "2026-09-05", toDay: "2026-09-05", root: r });
+  expect(rep.overview.calls).toBe(1);
+  expect(rep.overview.tokens.output).toBe(100);
+  expect(rep.tools).toEqual([{ name: "Bash", calls: 1 }]);
+  // Charge attribution is unchanged: the oldest file owns the call.
+  expect(rep.sessions.map((s) => s.id)).toEqual(["aa-original"]);
+  expect(rep.sessions[0].calls).toBe(1);
+});
+
 test("a genuine prompt that happens to be HTML/XML is a turn (#492 residual)", async () => {
   const r = root();
   const proj = join(r, "-home-u-proj");
