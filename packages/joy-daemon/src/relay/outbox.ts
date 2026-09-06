@@ -19,7 +19,18 @@ export type PostFate =
   | "transient"   // network, 5xx, lease fencing: retry with backoff
   | "permanent"   // the relay refused this row for good: drop it
   | "unbound";    // the session has no relay row yet: park the line until bind wakes it
-export type PostResult = { ok: true } | { ok: false; fate: PostFate; error: string; retryAfterMs?: number };
+export type PostResult =
+  | { ok: true }
+  | {
+      ok: false; fate: PostFate; error: string; retryAfterMs?: number;
+      /** Permanent only: evidence of the loss that must commit ATOMICALLY
+       *  with the row's settlement (#130 — the event-budget drop count).
+       *  Runs INSIDE the ledger transaction that drops the row: the row is
+       *  settled and the evidence recorded together, or neither is and the
+       *  row is retried. A crash between the two used to leave a settled
+       *  row, an advanced checkpoint, and no trace of what was lost. */
+      settle?: () => void;
+    };
 
 export interface OutboxSenderOpts {
   ledger: Ledger;
@@ -154,7 +165,12 @@ export class OutboxSender {
         continue;
       }
       if (r.fate === "permanent") {
-        ledger.dropOutbound(row.seq, r.error);
+        // One transaction: the drop (and the checkpoint it promotes) and the
+        // caller's evidence of it. `settle` joins the drop's transaction, so
+        // a throw there rolls the settlement back too and the row is retried.
+        const { settle } = r;
+        if (settle) ledger.tx(() => { ledger.dropOutbound(row.seq, r.error); settle(); }, "drop");
+        else ledger.dropOutbound(row.seq, r.error);
         this.#settled(row.seq);
         continue;
       }
