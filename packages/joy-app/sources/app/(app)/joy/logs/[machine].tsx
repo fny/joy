@@ -11,6 +11,8 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Modal } from '@/modal';
 import { machineListLogs, type JoyLogEntry } from '@/sync/ops';
+import { sync } from '@/sync/sync';
+import { storage, useMachine } from '@/sync/storage';
 import { useUnistyles } from 'react-native-unistyles';
 
 function formatBytes(bytes: number): string {
@@ -28,17 +30,34 @@ export default React.memo(function JoyLogsListScreen() {
     const { theme } = useUnistyles();
     const [logs, setLogs] = React.useState<JoyLogEntry[] | null>(null);
     const [error, setError] = React.useState<string | null>(null);
+    // Retry re-runs the load without leaving the route (#150).
+    const [attempt, setAttempt] = React.useState(0);
+    // Machine readiness is reactive: the data key is installed BEFORE the
+    // machine row reaches storage, so a present row means machineOnlyCtx
+    // resolves. Opened before machine sync finished, the request used to fail
+    // once ("no machine key") and never rerun (#150).
+    const hasMachineRow = !!useMachine(machine ?? '');
+    const machinesReady = storage((s) => s.isDataReady);
+    const machineCtxReady = hasMachineRow && !!machine && !!sync.machineOnlyCtx(machine);
 
     React.useEffect(() => {
         let cancelled = false;
         if (!machine || !dir) { setError('Missing machine or directory'); return; }
         setLogs(null);
         setError(null);
+        if (!machineCtxReady) {
+            // Still hydrating: keep the spinner; this effect reruns when the
+            // machine row lands. Hydrated but no context: the machine is
+            // unknown to this account (or its key failed to decrypt).
+            if (machinesReady && hasMachineRow) setError('Machine is not ready');
+            else if (machinesReady && !hasMachineRow) setError('Machine not found');
+            return;
+        }
         machineListLogs(machine, dir)
             .then((r) => { if (!cancelled) setLogs(r); })
             .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); });
         return () => { cancelled = true; };
-    }, [machine, dir]);
+    }, [machine, dir, machineCtxReady, machinesReady, hasMachineRow, attempt]);
 
     const copyId = React.useCallback(guarded(async (id: string) => {
         if (!(await copyToClipboard(id))) return;
@@ -58,6 +77,12 @@ export default React.memo(function JoyLogsListScreen() {
                         subtitle={error}
                         icon={<Ionicons name="alert-circle-outline" size={28} color={theme.colors.textDestructive} />}
                         showChevron={false}
+                    />
+                    <Item
+                        title={t('common.retry')}
+                        icon={<Ionicons name="refresh-outline" size={28} color={theme.colors.textLink} />}
+                        showChevron={false}
+                        onPress={() => setAttempt((a) => a + 1)}
                     />
                 </ItemGroup>
             </ItemList>

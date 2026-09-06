@@ -12,6 +12,8 @@ import { ToolStatusIndicator } from '@/components/tools/ToolStatusIndicator';
 import { Message } from '@/sync/typesMessage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
+import { deepLinkStep } from '@/utils/messageDeepLink';
+import { handle } from '@/utils/guardAsync';
 
 const stylesheet = StyleSheet.create((theme) => ({
     loadingContainer: {
@@ -38,7 +40,7 @@ export default React.memo(() => {
     // pages render even when opened directly.
     useDemoSession(isDemoSession(sessionId));
     const session = useSession(sessionId!);
-    const { isLoaded: messagesLoaded } = useSessionMessages(sessionId!);
+    const { isLoaded: messagesLoaded, hasMoreOlder, isLoadingOlder } = useSessionMessages(sessionId!);
     const message = useMessage(sessionId!, messageId!);
     const { theme } = useUnistyles();
     const styles = stylesheet;
@@ -50,12 +52,26 @@ export default React.memo(() => {
         }
     }, [sessionId]);
     
-    // Navigate back if message doesn't exist after messages are loaded
+    // The first loaded page is only the most recent window of history; a
+    // link to an older message is not "missing" until older pages are
+    // exhausted too. Page backward until it appears or nothing is left,
+    // then (and only then) leave (#165).
+    const pagesRequested = React.useRef(0);
     React.useEffect(() => {
-        if (messagesLoaded && !message) {
+        const step = deepLinkStep({
+            messagesLoaded,
+            found: !!message,
+            hasMoreOlder,
+            isLoadingOlder,
+            pagesRequested: pagesRequested.current,
+        });
+        if (step === 'loadOlder' && sessionId) {
+            pagesRequested.current += 1;
+            handle(sync.loadOlderMessages(sessionId));
+        } else if (step === 'back') {
             router.back();
         }
-    }, [messagesLoaded, message, router]);
+    }, [messagesLoaded, message, hasMoreOlder, isLoadingOlder, sessionId, router]);
     
     // Configure header for tool messages
     React.useLayoutEffect(() => {
@@ -73,8 +89,8 @@ export default React.memo(() => {
         );
     }
     
-    // If messages are loaded but specific message not found, show loader briefly
-    // The useEffect above will navigate back
+    // Loaded but not yet found: older pages are still being fetched (the
+    // effect above pages until it appears or navigates back).
     if (!message) {
         return (
             <View style={styles.loadingContainer}>
