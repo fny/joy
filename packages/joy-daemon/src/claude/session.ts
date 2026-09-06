@@ -258,6 +258,19 @@ export function flattenForMatch(text: string): string {
  *  <status> tag (completed/failed/killed). Payloads with no <status> at all
  *  are legacy shell-task notifications (always terminal) — except interim
  *  monitor events, recognizable by their "Monitor event:" summary. */
+/**
+ * A user-role entry Claude Code wrote ITSELF rather than the human — background
+ * task completions (`<task-notification>`, promptSource "system", origin.kind
+ * "task-notification") and kin. Never eligible as the 5xx auto-retry prompt
+ * (#110). Exported for tests.
+ */
+export function isSystemPromptEntry(entry: Record<string, unknown>, content: string): boolean {
+  if (entry.promptSource === "system") return true;
+  const origin = entry.origin as Record<string, unknown> | undefined;
+  if (origin && typeof origin.kind === "string" && /notification/i.test(origin.kind)) return true;
+  return /^\s*<task-notification\b/.test(content);
+}
+
 function completionFromNotification(payload: string): { kind: "complete"; id: string } | null {
   const m = /<task-id>([^<]+)<\/task-id>/.exec(payload);
   if (!m) return null;
@@ -523,6 +536,15 @@ export interface QueuedItem extends QueuedMessage {
   mirrorToRelay: boolean;
   seq?: number;
   visible: boolean;
+  /** In-memory only. Set once this dispatch's user bubble was mirrored to the
+   *  relay, so the hook-confirm and the delayed-Enter paths mirror it exactly
+   *  once between them (#483). */
+  mirrored?: boolean;
+  /** In-memory only. Set when a dispatch timed out and was put back at the
+   *  queue head with its pending/received receipt twins LEFT IN PLACE so a
+   *  late echo can still match them (#31); the re-dispatch (or a cancel/edit)
+   *  neutralizes those stale twins right before it records fresh ones. */
+  requeued?: boolean;
 }
 
 /** Delivery outcome of ONE queued item, by id. The v2 lane needs proof that
@@ -784,6 +806,20 @@ export class Session {
   // Pending delayed-Enter for a /steer send — separate from #submitTimer so steering
   // (which submits mid-turn) and the dispatch submit don't cancel each other.
   #steerSubmitTimer: (ReturnType<typeof setTimeout> & { onSuperseded?: () => void }) | null = null;
+  // A /steer owns the pane from its capture until its Enter lands (#34). The
+  // drain pump, the dirty-clear and the draft restore all stand down while this
+  // is set: they used to run concurrently with a steer, so a drain retry that
+  // captured the box mid-steer read the steered text as a stray human draft,
+  // C-u'd it away, and the steer's Enter then submitted an empty box while the
+  // receipt/mirror recorded it as sent.
+  #steering = false;
+  // The in-progress drain pass, awaited by #steer so its capture never
+  // interleaves with a pass that is between "captured empty" and "typed".
+  #drainDone: Promise<void> | null = null;
+  // Serializes #restoreDraftIfAny: a command echo used to start a restore and
+  // immediately kick the drain, which started a second one before the first
+  // capture resolved — the draft was typed twice (#476).
+  #restoringDraft = false;
 
   /** Clear a pending steer submit AND settle its awaiting promise — a
    *  superseded steer's caller must not hang (its text was deliberately
@@ -1047,7 +1083,12 @@ export class Session {
     // Push the existing conversation title on attach. On recovery the tailer
     // runs before the relay exists, so the ai-title entry it sees can't be
     // forwarded — read the latest one straight from the transcript here.
-    const title = this.summary ?? this.#readLatestAiTitle();
+    // NOT when the user locked the title and this instance has no summary of
+    // its own (a restart/recovery replacement): the transcript's ai-title is
+    // exactly the title the lock exists to suppress, and publishing it here
+    // stomped the user's `/title` while the lock stayed active — the relay
+    // card already holds the user's title, so leave it alone (#474).
+    const title = this.summary ?? (this.#titleLocked ? null : this.#readLatestAiTitle());
     if (title) { this.summary = title; void rs.updateSummary(title); }
     return true;
   }
@@ -1386,75 +1427,121 @@ export class Session {
       this.#dispatchInFlight = null;
       this.#broadcastQueue();
     }
-    // No dispatch gate here (steering types alongside an in-flight turn), so clear any
-    // leftover ourselves — guarded on the box actually holding text (never clear a box
-    // that reads empty). See docs/pane-input-clearing.md for why C-u, not C-c. Let it
-    // settle before the type so it can't be folded into a multi-line paste (the
-    // \x15-class bug). If the clear can't empty the box (a stalled/damaged pane —
-    // keys aren't being processed), do NOT type over the residue: the two would
-    // concatenate into one garbled submit. Fall back to the queue head + the
-    // input_dirty banner, the same recovery path the dispatch gate uses.
-    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
-    if (pane.ok && paneInputText(pane.out)) {
-      this.#preserveDraft(paneInputText(pane.out)!);
-      if (!(await this.#clearBoxWithCtrlU())) {
-        this.#queue.unshift({
-          id: crypto.randomUUID().slice(0, 8),
-          text,
-          createdAt: Date.now(),
-          source: opts.source,
-          mirrorToRelay: opts.mirrorToRelay ?? true,
-          seq: opts.seq,
-          visible: false,
-        });
-        this.#pauseDispatch("input_dirty");
+    // Own the pane for the whole steer (#34): stand the drain pump down and wait
+    // for any pass already past its capture to finish typing, so the two can
+    // never interleave (steered text C-u'd by the drain as a "draft", or two
+    // messages typed into one box).
+    this.#steering = true;
+    try {
+      while (this.#drainDone) await this.#drainDone;
+      if ((this.status as string) === "ended") return; // re-read after the await
+      // No dispatch gate here (steering types alongside an in-flight turn), so clear any
+      // leftover ourselves — guarded on the box actually holding text (never clear a box
+      // that reads empty). See docs/pane-input-clearing.md for why C-u, not C-c. Let it
+      // settle before the type so it can't be folded into a multi-line paste (the
+      // \x15-class bug). If the clear can't empty the box (a stalled/damaged pane —
+      // keys aren't being processed), do NOT type over the residue: the two would
+      // concatenate into one garbled submit. Fall back to the queue head + the
+      // input_dirty banner, the same recovery path the dispatch gate uses.
+      const pane = await this.#captureBox();
+      const parked = (): QueuedItem => ({
+        id: crypto.randomUUID().slice(0, 8),
+        text,
+        createdAt: Date.now(),
+        source: opts.source,
+        mirrorToRelay: opts.mirrorToRelay ?? true,
+        seq: opts.seq,
+        visible: false,
+      });
+      // A steer needs a LIVE input box to land in. With a dialog up (permission
+      // prompt, AskUserQuestion, "Switch model?", the trust dialog) there is no
+      // box: the digits of the steer text select options and its Enter
+      // confirms the highlighted default — approving a permission, or
+      // answering "No, exit" and killing the session — while the receipt
+      // records the steer as delivered (#33). Same for a capture that failed
+      // or shows no box at all: unknown is not "safe to type". Park it at the
+      // queue head instead; the drain gate dispatches it once the ready
+      // prompt is back (no pause — nothing is wrong with the pane).
+      const box = pane.ok ? paneInputText(pane.out) : null;
+      if (!pane.ok || box === null || dialogFromPane(stripAnsi(pane.out)) !== null) {
+        this.#dlog(`steer parked on the queue head — ${!pane.ok ? "pane capture failed" : "no live input box (dialog or not ready)"}`);
+        this.#queue.unshift(parked());
+        this.#broadcastQueue();
         return;
       }
-      await sleep(CLEAR_SETTLE_MS);
+      if (box) {
+        this.#preserveDraft(box);
+        if (!(await this.#clearBoxWithCtrlU())) {
+          this.#queue.unshift(parked());
+          this.#pauseDispatch("input_dirty");
+          return;
+        }
+        await sleep(CLEAR_SETTLE_MS);
+      }
+      if (!(await this.#typeLines(text))) {
+        // Typing failed → the caller (relay pull) must NOT confirm this seq.
+        throw new Error("steer: typing into the pane failed");
+      }
+      // Submit after the settle delay (paste-detection swallows an immediate Enter).
+      // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
+      // lands. The returned promise resolves when the Enter LANDS (or the steer is
+      // deliberately superseded by a newer one) and rejects when it fails — the
+      // relay pull awaits this, so the cursor covers the whole delivery, not just
+      // the typing (5.6-sol audit #5: a crash inside the submit delay lost the
+      // steer while the cursor had already moved on).
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(async () => {
+          this.#steerSubmitTimer = null;
+          try {
+            if (this.status === "ended") { resolve(); return; } // dead session — nothing to deliver to
+            const e = await this.#tmux.key(this.tmuxWindow, "Enter");
+            if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
+            const delivery = this.#ensureDelivery();
+            if (delivery && this.relaySessionId) {
+              delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
+              recordReceived(delivery, this.relaySessionId, typed, Date.now());
+            }
+            if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
+            resolve();
+          } catch (e) { reject(e as Error); }
+        }, ENTER_SUBMIT_DELAY_MS);
+        // A NEWER steer superseding this one clears the timer. For a RELAY
+        // steer that must not read as delivered — its text never got Enter —
+        // so REJECT and let the pull retry it (5.6-sol verify #5). Pull
+        // serialization makes this path rare (only an RPC steer can preempt a
+        // relay steer mid-delay). Non-relay callers get resolve (fire-and-
+        // forget semantics preserved).
+        const onSuperseded = opts.source === "relay"
+          ? () => reject(new Error("steer superseded before submit"))
+          : resolve;
+        this.#steerSubmitTimer = Object.assign(timer, { onSuperseded }) as typeof timer;
+      });
+    } finally {
+      // A superseding steer has already set the flag for itself; only the
+      // LAST steer standing releases the pane and wakes the drain.
+      if (!this.#steerSubmitTimer) {
+        this.#steering = false;
+        this.#maybeDrainQueue();
+      }
     }
-    if (!(await this.#typeLines(text))) {
-      // Typing failed → the caller (relay pull) must NOT confirm this seq.
-      throw new Error("steer: typing into the pane failed");
-    }
-    // Submit after the settle delay (paste-detection swallows an immediate Enter).
-    // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
-    // lands. The returned promise resolves when the Enter LANDS (or the steer is
-    // deliberately superseded by a newer one) and rejects when it fails — the
-    // relay pull awaits this, so the cursor covers the whole delivery, not just
-    // the typing (5.6-sol audit #5: a crash inside the submit delay lost the
-    // steer while the cursor had already moved on).
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(async () => {
-        this.#steerSubmitTimer = null;
-        try {
-          if (this.status === "ended") { resolve(); return; } // dead session — nothing to deliver to
-          const e = await this.#tmux.key(this.tmuxWindow, "Enter");
-          if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
-          const delivery = this.#ensureDelivery();
-          if (delivery && this.relaySessionId) {
-            delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
-            recordReceived(delivery, this.relaySessionId, typed, Date.now());
-          }
-          if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
-          resolve();
-        } catch (e) { reject(e as Error); }
-      }, ENTER_SUBMIT_DELAY_MS);
-      // A NEWER steer superseding this one clears the timer. For a RELAY
-      // steer that must not read as delivered — its text never got Enter —
-      // so REJECT and let the pull retry it (5.6-sol verify #5). Pull
-      // serialization makes this path rare (only an RPC steer can preempt a
-      // relay steer mid-delay). Non-relay callers get resolve (fire-and-
-      // forget semantics preserved).
-      const onSuperseded = opts.source === "relay"
-        ? () => reject(new Error("steer superseded before submit"))
-        : resolve;
-      this.#steerSubmitTimer = Object.assign(timer, { onSuperseded }) as typeof timer;
-    });
+  }
+
+  /**
+   * Fresh capture of the pane WITH terminal attributes (capture-pane -e) for
+   * every input-box read. The dim attribute is the only thing that tells
+   * Claude's ghost placeholder from a typed draft that starts with `Try "`
+   * (#478); the parsers strip the codes themselves for everything else.
+   */
+  #captureBox(): Promise<{ ok: boolean; out: string }> {
+    return this.#tmux.captureFresh(this.tmuxWindow, { color: true });
   }
 
   editQueued(id: string, text: string): boolean {
     const m = this.#queue.find(q => q.id === id);
     if (!m) return false; // already dispatched or unknown
+    // A timed-out item still has receipt twins recorded for its OLD text
+    // (#31); the new text will record its own on dispatch.
+    if (m.requeued) { this.#neutralizePending(m.text); m.requeued = false; }
     m.text = text;
     this.#broadcastQueue();
     return true;
@@ -1462,11 +1549,35 @@ export class Session {
 
   cancelQueued(id: string): boolean {
     const i = this.#queue.findIndex(q => q.id === id);
-    if (i < 0) return false;
-    this.#queue.splice(i, 1);
-    this.#recordOutcome(id, "cancelled");
-    this.#broadcastQueue();
-    return true;
+    if (i >= 0) {
+      const [item] = this.#queue.splice(i, 1);
+      if (item.requeued) this.#neutralizePending(item.text); // its stale twins will never match now (#31)
+      this.#recordOutcome(id, "cancelled");
+      this.#broadcastQueue();
+      return true;
+    }
+    // The item is IN FLIGHT but not yet submitted: typed (or still typing) with
+    // its Enter pending. A relay cancel landing in that window used to find
+    // nothing to cancel here, and abort() then mistook the just-armed submit
+    // for a NEW send — so the cancelled prompt was submitted and ran to
+    // completion (#35). Cancel it for real: drop the Enter, neutralize its
+    // receipt (it will never echo) and record the outcome. The typed text
+    // stays in the box until the next gate clears it (docs/pane-input-
+    // clearing.md — no control keys outside the pre-type gates); the
+    // drain's ownership check abandons a type still in progress.
+    const inflight = this.#dispatchInFlight;
+    if (inflight && inflight.id === id && this.#dispatchSubmittedAt === null) {
+      this.#clearSubmitTimer();
+      if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+      this.#neutralizePending(inflight.text);
+      this.#recordOutcome(id, "cancelled");
+      this.#dispatchInFlight = null;
+      this.#dispatchExtends = 0;
+      this.#dlog(`cancelled ${id} before its submit landed`);
+      this.#broadcastQueue();
+      return true;
+    }
+    return false;
   }
 
   /** Move a queued message to a new index (clamped). */
@@ -1559,7 +1670,7 @@ export class Session {
   async #recheckDirtyPause(): Promise<void> {
     if (!this.#dirtyRecheckWanted()) return;
     this.#dirtyRecheckAttempts += 1;
-    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#captureBox();
     // Re-check after the await: a resume, an end, or a different pause may have
     // landed while the capture was in flight.
     if (!this.#dirtyRecheckWanted()) return;
@@ -1618,11 +1729,13 @@ export class Session {
    */
   async #clearInputIfDirty(idleOnly: boolean): Promise<"cleared" | "dirty" | "skipped"> {
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
-    const pane = await this.#tmux.captureFresh(this.tmuxWindow); // FRESH — stale here = concatenation
+    if (this.#steering) return "skipped"; // the box text is a steer in progress, not leftover (#34)
+    const pane = await this.#captureBox(); // FRESH — stale here = concatenation
     // captureFresh can take a control-mode round-trip; re-check the idle guards after
     // it: a turn / dispatch may have begun while it was in flight, in which case the
     // text in the box is no longer stale leftover and must not be cleared.
     if (idleOnly && (this.#turn || this.#dispatchInFlight)) return "skipped";
+    if (this.#steering) return "skipped";
     if (!pane.ok) return "skipped";
     if (idleOnly && (paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out))) return "skipped";
     const box = paneInputText(pane.out);
@@ -1659,12 +1772,25 @@ export class Session {
   async #restoreDraftIfAny(): Promise<void> {
     const draft = this.#preservedDraft;
     if (!draft || this.status === "ended") return;
-    if (this.#queue.length > 0 || this.#dispatchInFlight) return; // box is needed again — keep holding
-    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
-    if (!pane.ok) return;
-    if (paneInputText(pane.out) !== "") return; // user typed anew / no box — never merge
+    if (this.#queue.length > 0 || this.#dispatchInFlight || this.#steering) return; // box is needed again — keep holding
+    // CLAIM the draft before the first await and run one restore at a time: a
+    // command echo started a restore and then kicked the drain, which started
+    // a second restore before the first capture resolved — both saw an empty
+    // box and the draft was typed twice (#476). The claim is handed back on
+    // every path that cannot proceed, so a later idle trigger retries.
+    if (this.#restoringDraft) return;
+    this.#restoringDraft = true;
     this.#preservedDraft = null;
-    if (!(await this.#typeLines(draft))) this.#preservedDraft = draft; // typing failed — keep for retry
+    try {
+      const pane = await this.#captureBox();
+      if (!pane.ok || paneInputText(pane.out) !== "") { // capture failed / user typed anew / no box — never merge
+        this.#preservedDraft = this.#preservedDraft ?? draft;
+        return;
+      }
+      if (!(await this.#typeLines(draft))) this.#preservedDraft = this.#preservedDraft ?? draft; // typing failed — keep for retry
+    } finally {
+      this.#restoringDraft = false;
+    }
   }
 
   /**
@@ -1686,7 +1812,7 @@ export class Session {
    * blind-blasting the budget.
    */
   async #clearBoxWithCtrlU(): Promise<boolean> {
-    const first = await this.#tmux.captureFresh(this.tmuxWindow);
+    const first = await this.#captureBox();
     if (!first.ok) return false;
     let prev = paneInputText(first.out);
     if (prev === "" || prev === null) return true; // already empty
@@ -1695,7 +1821,7 @@ export class Session {
     for (let i = 0; i < budget; i++) {
       const cu = await this.#tmux.key(this.tmuxWindow, "C-u");
       if (!cu.ok) return false;
-      const re = await this.#tmux.captureFresh(this.tmuxWindow);
+      const re = await this.#captureBox();
       if (!re.ok) return false; // can't verify → report dirty, never claim success
       const remaining = paneInputText(re.out);
       if (remaining === "" || remaining === null) return true;
@@ -1710,7 +1836,7 @@ export class Session {
    *  readiness is checked separately, after a fresh capture). */
   #canDrain(): boolean {
     return this.status !== "ended" && !this.#queuePaused && !this.#dispatchInFlight
-      && !this.#turn && this.#queue.length > 0;
+      && !this.#turn && !this.#steering && this.#queue.length > 0;
   }
 
   #armDrainRetry(ms: number): void {
@@ -1772,10 +1898,14 @@ export class Session {
 
   async #kickDrain(): Promise<void> {
     this.#draining = true;
+    let done!: () => void;
+    this.#drainDone = new Promise<void>((r) => { done = r; }); // awaited by #steer (#34)
     try {
       await this.#drainOnce();
     } finally {
       this.#draining = false;
+      this.#drainDone = null;
+      done();
       if (this.#drainRequested) { this.#drainRequested = false; this.#maybeDrainQueue(); }
     }
   }
@@ -1799,7 +1929,7 @@ export class Session {
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     if (!this.#canDrain()) { this.#noteHold(this.#holdReason()); return; }
 
-    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#captureBox();
     if (!this.#canDrain()) return; // re-check after the await
     if (!pane.ok || paneShowsGenerating(pane.out) || !paneShowsReadyPrompt(pane.out)) {
       this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
@@ -1836,6 +1966,11 @@ export class Session {
     if (!this.#canDrain()) return; // final re-check before committing the dispatch
 
     const next = this.#queue.shift()!;
+    // A timed-out item kept its receipt twins so a LATE echo could still match
+    // (#31). Now that it is really being re-typed, drop those stale twins first:
+    // #typeIntoTmux records fresh ones, and two pending entries for one text
+    // would leave a dangling `received` that swallows a later identical prompt.
+    if (next.requeued) { this.#neutralizePending(next.text); next.requeued = false; }
     this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
     this.#broadcastQueue();
     // OWNERSHIP CHECK for everything after the awaited write (#481). While the
@@ -1911,7 +2046,7 @@ export class Session {
   }
 
   /** Called from onTranscriptEntry when a new turn starts — confirms the dispatch landed. */
-  #confirmDispatchIfAwaiting(): void {
+  #confirmDispatchIfAwaiting(opts?: { byTurnStart?: boolean }): void {
     if (!this.#dispatchInFlight) return;
     // A dispatch whose submit Enter is still PENDING cannot be what started this
     // turn — the message hasn't been submitted yet. Confirming here is how a
@@ -1923,7 +2058,28 @@ export class Session {
     // the open turn and the transcript user-echo (text-matched) confirms it —
     // or the dispatch echo timeout requeues it. Never confirm on turn-start alone.
     if (this.#submitTimer) return;
-    this.#dlog(`confirmed ${this.#dispatchInFlight.id} by transcript echo`);
+    if (opts?.byTurnStart) {
+      // A SENT Enter is not a SUBMITTED message: paste-detection can absorb it
+      // as a newline, leaving the prompt in the box. If a foreign turn then
+      // starts (a <task-notification>, a Claude-side queued message, typing in
+      // the terminal), this used to credit it to our dispatch — "delivered" —
+      // while the prompt still sat unsent, later to be C-u'd away as a "human
+      // draft" (#32). The box is the evidence: when the pane positively shows
+      // our text still in it, this turn is not ours. An unknown box (no
+      // capture, no live box) keeps the legacy confirm — the echo, the hook
+      // and the timeout still cover a genuinely lost prompt.
+      const pane = this.#tmux.captureCached(this.tmuxWindow);
+      const box = pane.ok ? paneInputText(pane.out) : null;
+      if (box) {
+        const flatBox = flattenForMatch(box);
+        const flatSent = flattenForMatch(this.#dispatchInFlight.text);
+        if (flatBox === flatSent || flatBox.startsWith(flatSent) || flatSent.startsWith(flatBox)) {
+          this.#dlog(`turn started but ${this.#dispatchInFlight.id} is still in the input box — not confirming (#32)`);
+          return;
+        }
+      }
+    }
+    this.#dlog(`confirmed ${this.#dispatchInFlight.id} by ${opts?.byTurnStart ? "turn start" : "transcript echo"}`);
     this.#recordOutcome(this.#dispatchInFlight.id, "delivered");
     this.#dispatchInFlight = null;
     this.#dispatchExtends = 0;
@@ -1985,12 +2141,19 @@ export class Session {
     // No turn started in time and Claude isn't visibly working → the message
     // didn't land. Re-queue the WHOLE item at the head (so its seq/source/mirror/
     // visible survive) and pause so we don't pile more into a bad state; resume
-    // re-clears the box and re-types it. Drop the stale pending entry first so the
-    // re-type doesn't double it / suppress it as a self-echo.
+    // re-clears the box and re-types it. The pending/received receipt twins are
+    // deliberately LEFT IN PLACE (#31): the documented late-landing cases (tailer
+    // bound after the echo window, a 600k-context turn start slower than the
+    // extension budget, a narrow pane hiding "esc to interrupt") echo AFTER this
+    // point, and only a still-pending entry lets that echo match — which is what
+    // fires the late-echo self-heal (drop the requeued twin, resume) instead of
+    // mirroring the prompt as a duplicate bubble and re-running it on resume.
+    // The twins are neutralized when the item is really re-typed, edited or
+    // cancelled (item.requeued).
     this.#dispatchExtends = 0;
     this.#dispatchInFlight = null;
     this.#clearSubmitTimer();
-    this.#neutralizePending(inflight.text);
+    inflight.requeued = true;
     this.#queue.unshift(inflight);
     this.#pauseDispatch("dispatch_timeout");
     process.stderr.write(`[queue] dispatch for ${this.id} never echoed — paused\n`);
@@ -2043,6 +2206,20 @@ export class Session {
     // Snapshot the pending submit BEFORE the awaited capture: if a NEW dispatch
     // starts during that await, this (now possibly stale) abort must not cancel it.
     const submitBefore = this.#submitTimer;
+    // …and the dispatch it belongs to: a submit that appears during the await
+    // for the SAME in-flight item is that item finishing its typing, not a new
+    // send (#35) — see below.
+    const inflightBefore = this.#dispatchInFlight;
+    // Stop = "stop trying": a scheduled 5xx auto-retry is cancellable work even
+    // when the pane is idle (the failed prompt is not in flight, Claude sits at
+    // an empty ready box during the backoff). It used to be cleared only past
+    // the idle guard below, so a Stop during the backoff returned success and
+    // the still-armed timer typed the stopped prompt again (#475).
+    if (this.#retry) {
+      this.#emitAgentNote(`Auto-retry cancelled`, Date.now(), this.claudeSessionId);
+      this.#clearRetry();
+    }
+    this.#turn5xxStatus = null;
 
     // Block abort only when the session is unambiguously IDLE: an EMPTY ready box,
     // not generating, and no open turn / in-flight dispatch / pending submit. The
@@ -2053,14 +2230,20 @@ export class Session {
     // a stray Escape on idle is a no-op (Escape doesn't clear the box), whereas a
     // wrong block means "Stop did nothing". FRESH capture — a stale read here could
     // wrongly block a real abort.
-    const pane = await this.#tmux.captureFresh(this.tmuxWindow);
+    const pane = await this.#captureBox();
     // A genuinely NEW send appeared while we awaited the capture → this abort is
     // stale: the state it was issued against is gone and a fresh message is now in
     // flight. Return before touching anything (no Escape-interrupt, no clear). Note
     // a NULL #submitTimer here means the pre-abort submit simply FIRED (a turn is
     // starting) — that we still interrupt below; only a different, non-null timer is
-    // a new send.
-    if (this.#submitTimer !== null && this.#submitTimer !== submitBefore) return { ok: true };
+    // a new send. EXCEPT when that timer belongs to the dispatch that was already
+    // in flight when abort began: the drain types line by line over the FIFO and
+    // arms the Enter only afterwards, so a cancel landing in the typing window
+    // used to see "new timer ≠ snapshot" and walk away while the Enter fired and
+    // the cancelled prompt ran to completion (#35). Same item → cancellable.
+    const sameDispatchTyped = inflightBefore !== null && this.#dispatchInFlight === inflightBefore
+      && this.#dispatchSubmittedAt === null;
+    if (this.#submitTimer !== null && this.#submitTimer !== submitBefore && !sameDispatchTyped) return { ok: true };
     // Require !#thinking: during the PRE-OUTPUT phase of a turn (long
     // initial cogitation) the transcript has no entries yet (#turn null), the
     // dispatch is already echo-confirmed (#dispatchInFlight null), and the
@@ -2074,21 +2257,18 @@ export class Session {
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
       return { ok: true };
     }
-    // Abort also cancels an in-progress 500 auto-retry (pressing abort = "stop
-    // trying") and disarms a pending retry so the next turn-end won't start one.
-    if (this.#retry) {
-      this.#emitAgentNote(`Auto-retry cancelled`, Date.now(), this.claudeSessionId);
-      this.#clearRetry();
-    }
-    this.#turn5xxStatus = null;
     // Cancel the pending submit Enter — but ONLY the one that was pending when abort
     // BEGAN, and only if one existed at all: submitBefore === null means the Enter
     // already FIRED before abort was called (dispatch delivered, awaiting its echo /
     // turn-start) — with a bare === both sides are null and the old check wrongly
     // classified that as "typed but not submitted", discarding + neutralizing a
     // message Claude already received (its later echo then mirrored as a duplicate
-    // user bubble). A fired-or-never-armed submit has nothing to cancel.
-    const sameSubmit = submitBefore !== null && this.#submitTimer === submitBefore;
+    // user bubble). A fired-or-never-armed submit has nothing to cancel. The one
+    // addition: the in-flight item that finished typing DURING our capture and
+    // armed its Enter just now (#35) — its Enter has not landed, so it is
+    // cancellable exactly like a submit that was pending from the start.
+    const sameSubmit = (submitBefore !== null && this.#submitTimer === submitBefore)
+      || (sameDispatchTyped && this.#submitTimer !== null);
     if (sameSubmit) {
       // Aborting a message that was typed but NOT yet submitted (its Enter was still
       // pending): cancel that Enter AND discard the dispatch — Stop means the message is
@@ -2174,8 +2354,17 @@ export class Session {
     // "git commit<Enter>" lands as those exact characters instead of a
     // command + keypress. Used by the pane's plain-text input toggle.
     if (opts?.literal) {
-      const ok = (await this.#tmux.literal(this.tmuxWindow,script)).ok;
-      return ok ? { ok: true, segments: 1 } : { ok: false, segments: 1, error: "tmux send-keys failed" };
+      // One `literal` per line with a named Enter between them, like #typeLines:
+      // under control mode the command line is serialized by tmuxQuoteArg, which
+      // refuses a raw newline, so a multi-line literal failed outright with
+      // "tmux send-keys failed" and nothing was typed (#39). (The disconnected
+      // spawn path passed argv and happened to work — same text, two outcomes.)
+      const lines = script.split(/\r\n|\r|\n/);
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 && !(await this.#tmux.key(this.tmuxWindow, "Enter")).ok) return { ok: false, segments: lines.length, error: "tmux send-keys failed" };
+        if (lines[i] !== "" && !(await this.#tmux.literal(this.tmuxWindow, lines[i])).ok) return { ok: false, segments: lines.length, error: "tmux send-keys failed" };
+      }
+      return { ok: true, segments: lines.length };
     }
     // parse the token language → tmux key-name / literal segments (toTmux
     // already groups consecutive named keys and coalesces literal runs, so each
@@ -2276,18 +2465,29 @@ export class Session {
     if (uuid && this.#relay && this.relaySessionId) {
       const delivery = this.#ensureDelivery();
       if (delivery) {
-        if (delivery.forwardedUuids.has(uuid)) return false;
-        // In-memory dedupe NOW (this process won't re-emit); the PERSISTED
-        // receipt is stamped by #emitAgentNote and written on server ack —
-        // handoff-time persistence turned dropped notes into "forwarded"
-        // (codex review finding 1). Crash between emit and ack re-emits on
-        // replay: at-least-once, matching the assistant path.
-        delivery.forwardedUuids.add(uuid);
+        if (delivery.forwardedUuids.has(uuid) || this.#pendingNoteUuids.has(uuid)) return false;
+        // In-memory dedupe NOW (this process won't re-emit) in a set SEPARATE
+        // from the persisted forwardedUuids: recordOutboundReceipt is
+        // idempotent on that set, so pre-adding the uuid there made the
+        // server-ack receipt callback a no-op and the note's receipt was never
+        // saved — every restart before the next checkpoint replayed the same
+        // /model output or bash card with fresh event ids (#484). The
+        // PERSISTED receipt is stamped by #emitAgentNote and written on ack;
+        // a crash between emit and ack re-emits on replay: at-least-once,
+        // matching the assistant path.
+        this.#pendingNoteUuids.add(uuid);
+        if (this.#pendingNoteUuids.size > 500) {
+          for (const u of this.#pendingNoteUuids) { this.#pendingNoteUuids.delete(u); if (this.#pendingNoteUuids.size <= 400) break; }
+        }
         this.#nextNoteReceipt = uuid;
       }
     }
     return fresh;
   }
+
+  /** Note uuids emitted by THIS process whose outbound receipt has not been
+   *  acked yet — in-memory replay dedupe only, never persisted (#484). */
+  #pendingNoteUuids = new Set<string>();
 
   /** Entry types the daemon knows how to handle — the semantic-health
    *  baseline. Unknown types are fine in small numbers (forward compat);
@@ -2419,6 +2619,28 @@ export class Session {
     this.#maybeDrainQueue();
   }
 
+  /** A `!cmd` dispatch never produces a user-text echo, a turn start, or a
+   *  UserPromptSubmit hook (the CLI runs it locally) — so the only evidence it
+   *  landed is its `<bash-input>` echo. Without this, delivery rested on the
+   *  hook alone; on hook-less sessions the 30s timeout requeued an already-run
+   *  `!make deploy` and "resume" ran it a second time (#40). Confirm when the
+   *  echoed command equals the in-flight text minus its leading `!`. */
+  #confirmBashEcho(echoedCmd: string): void {
+    const inflight = this.#dispatchInFlight;
+    if (!inflight || !echoedCmd) return;
+    const m = /^\s*!\s*([\s\S]*)$/.exec(inflight.text);
+    if (!m || flattenForMatch(m[1]) !== flattenForMatch(echoedCmd)) return;
+    process.stderr.write(`[queue] ${this.id} bash echo confirmed dispatch (!${echoedCmd.slice(0, 40)})\n`);
+    this.#clearSubmitTimer();
+    this.#recordOutcome(inflight.id, "delivered");
+    this.#dispatchInFlight = null;
+    this.#dispatchExtends = 0;
+    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    this.#broadcastQueue();
+    void this.#restoreDraftIfAny();
+    this.#maybeDrainQueue();
+  }
+
   #neutralizePending(text: string): void {
     const delivery = this.#delivery;
     if (!delivery || !this.relaySessionId) return;
@@ -2529,6 +2751,15 @@ export class Session {
     this.#deps.broadcast("session_update", this.toJSON());
   }
 
+  /** Mirror a dispatch's user bubble to the relay EXACTLY ONCE per item (#483):
+   *  both the hook-confirm path and the delayed-Enter path may reach this for
+   *  the same dispatch, in either order. */
+  #mirrorDispatch(item: QueuedItem, text: string): void {
+    if (item.mirrored) return;
+    item.mirrored = true;
+    this.#relay?.send(encodeUserMessage(text));
+  }
+
   /** Cancel a pending delayed-Enter (abort/kill/confirm/timeout/mismatch). */
   #clearSubmitTimer(): void {
     if (this.#submitTimer) { clearTimeout(this.#submitTimer); this.#submitTimer = null; }
@@ -2568,12 +2799,18 @@ export class Session {
       // commands): a kill / dispatch-timeout / abort that flipped state mid-await must
       // not let us publish stale "sent/thinking". (#turn can't have flipped from our
       // own Enter yet — the turn isn't detected until claude writes turn-start — so
-      // this only catches an externally-changed state.)
+      // this only catches an externally-changed state.) A dispatch the
+      // UserPromptSubmit hook already confirmed DELIVERED during the await is not
+      // stale state: the Enter went out and Claude took it. Treating it as
+      // abandoned skipped the mirror, and the transcript echo was then eaten by
+      // the pending receipt — the prompt ran but appeared in no chat (#483).
       const st: string = this.status; // re-read: it may have flipped to "ended" during the await
-      if (st === "ended" || this.#turn || !target || this.#dispatchInFlight !== target) return;
-      this.#dispatchSubmittedAt = Date.now(); // Enter is out — dialogs after this are ours
+      const delivered = this.#itemOutcome.get(target.id) === "delivered";
+      if (st === "ended" || !target || (this.#dispatchInFlight !== target && !delivered)) return;
+      if (this.#dispatchInFlight === target && this.#turn) return;
+      if (this.#dispatchInFlight === target) this.#dispatchSubmittedAt = Date.now(); // Enter is out — dialogs after this are ours
       this.#dlog(`submitted ${target.id}`);
-      if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(opts.text));
+      if (opts.mirrorToRelay) this.#mirrorDispatch(target, opts.text);
       this.#setThinking(true);
       // Trusted edge — the pane can't clear it — EXCEPT for a slash command,
       // which never generates (see takesThinkingLease). This is the dispatch
@@ -2643,6 +2880,9 @@ export class Session {
       if (!force) return;
       this.#tailer.close();
       this.#tailer = null;
+      // A checkpoint armed for the OLD file must not fire against the new
+      // binding (#37) — the new tailer's first entry re-arms it.
+      if (this.#checkpointTimer) { clearTimeout(this.#checkpointTimer); this.#checkpointTimer = null; }
     }
     this.transcriptPath = transcriptPath;
     // --continue backfill cap: --continue replays a full-history transcript from
@@ -2690,10 +2930,18 @@ export class Session {
    *  are already in the persisted relay queue by then, so a restart resuming
    *  AT the checkpoint re-mirrors nothing and misses nothing. */
   #checkpointTimer: ReturnType<typeof setTimeout> | null = null;
-  #scheduleCheckpoint(transcriptPath: string): void {
+  #scheduleCheckpoint(_transcriptPath: string): void {
     if (this.#checkpointTimer) return;
     this.#checkpointTimer = setTimeout(() => {
       this.#checkpointTimer = null;
+      // The ACTIVE binding at fire time, never the path captured when the
+      // timer was armed: a /clear rebinds the tailer inside the 5s window, and
+      // the stale closure then persisted {path: OLD file, offset: NEW tailer's
+      // offset} — recover() prefers a checkpoint whose file exists, so a
+      // restart re-bound the dead pre-/clear conversation at a bogus offset
+      // (nothing mirrored, every dispatch timing out) (#37).
+      const transcriptPath = this.transcriptPath;
+      if (!transcriptPath || !this.#tailer) return;
       // HOLD the checkpoint while the outbound spool can't persist (5.6-sol
       // audit #2): advancing past entries whose mirror rows exist only in
       // memory makes a crash lose the rows AND the replay window that would
@@ -2719,6 +2967,34 @@ export class Session {
   /** PID-death detection: poll every 5s; on exit, run the full teardown. */
   #pollEnd(): void {
     if (this.status === "ended") return;
+    // A pid that is the pane's LOGIN SHELL is not Claude's pid (#30): create()
+    // resolves the pid ~800ms after typing the launch command and falls back to
+    // the shell when a slow profile (nvm/pyenv/conda) has not forked claude
+    // yet. The shell is immortal, so "pid alive" never became false and a
+    // later Claude exit was never detected — the card stayed "running" and the
+    // lane kept offering prompts into a dead pane. Treat it as unresolved: try
+    // to re-resolve from the shell's child each tick, and once the session is
+    // active, a shell with NO child is a Claude that exited (the startup
+    // watchdog owns the not-yet-forked case while status is "starting").
+    if (this.pid !== undefined && this.status !== "starting" && this.pid === this.#paneShellPid()) {
+      const fresh = this.#resolvePidFromPane();
+      if (fresh !== undefined) {
+        process.stderr.write(`[end] ${this.id}: pid ${this.pid} was the pane shell — re-resolved claude as ${fresh} (#30)\n`);
+        this.pid = fresh;
+        this.#noProcessPasses = 0;
+      } else {
+        const pane = this.#tmux.captureCached(this.tmuxWindow);
+        const textAlive = pane.ok && (dialogFromPane(pane.out) != null || paneShowsClaudeRunning(pane.out));
+        this.#noProcessPasses += 1;
+        if (!textAlive || this.#noProcessPasses > 12) {
+          process.stderr.write(`[end] ${this.id}: pid ${this.pid} is the pane shell and it has no child → claude exited → detached (#30)\n`);
+          this.end("process_exited");
+          return;
+        }
+      }
+      setTimeout(() => this.#pollEnd(), 5000);
+      return;
+    }
     if (this.pid !== undefined && !Session.#pidAlive(this.pid)) {
       // The cached pid can be stale or plain wrong: launch grabs the shell's
       // first child 800ms in (which may not be claude), and claude can re-exec
@@ -2764,12 +3040,23 @@ export class Session {
     setTimeout(() => this.#pollEnd(), 5000);
   }
 
+  /** The pane's login-shell pid (#{pane_pid}), memoized — it never changes for
+   *  the life of the window, and #pollEnd asks every 5s (#30). */
+  #shellPid: number | undefined;
+  #paneShellPid(): number | undefined {
+    if (this.#shellPid !== undefined) return this.#shellPid;
+    const shell = this.#tmux.runSync("display-message", "-t", this.tmuxWindow, "-p", "#{pane_pid}");
+    if (!shell.ok) return undefined;
+    const pid = parseInt(shell.out.trim());
+    if (isNaN(pid)) return undefined;
+    this.#shellPid = pid;
+    return pid;
+  }
+
   /** Re-derive Claude's pid from the pane's shell: its live first child. */
   #resolvePidFromPane(): number | undefined {
-    const shell = this.#tmux.runSync("display-message", "-t", this.tmuxWindow, "-p", "#{pane_pid}");
-    if (!shell.ok) return undefined; // window gone → let the caller end the session
-    const shellPid = parseInt(shell.out.trim());
-    if (isNaN(shellPid)) return undefined;
+    const shellPid = this.#paneShellPid();
+    if (shellPid === undefined) return undefined; // window gone → let the caller end the session
     const child = parseInt(run("pgrep", "-P", String(shellPid)).out.split("\n")[0]);
     if (!isNaN(child) && child !== this.pid && Session.#pidAlive(child)) return child;
     return undefined;
@@ -3018,7 +3305,12 @@ export class Session {
         if (prompt && this.#dispatchInFlight
           && flattenForMatch(prompt) === flattenForMatch(this.#dispatchInFlight.text)) {
           process.stderr.write(`[hook] ${this.id} UserPromptSubmit confirmed dispatch\n`);
-          this.#recordOutcome(this.#dispatchInFlight.id, "delivered");
+          const item = this.#dispatchInFlight;
+          this.#recordOutcome(item.id, "delivered");
+          // The hook proves the submit landed: mirror the bubble here if the
+          // Enter callback has not yet (it may still be awaiting its write) —
+          // exactly once between the two paths (#483).
+          if (item.mirrorToRelay) this.#mirrorDispatch(item, item.text);
           this.#clearSubmitTimer(); // our delayed Enter would fire into an empty box — harmless, but don't
           this.#dispatchInFlight = null;
           this.#dispatchExtends = 0;
@@ -3281,9 +3573,15 @@ export class Session {
     // awaits this, and a swallowed failure confirmed the cursor for a code
     // that never landed (5.6-sol verify #5).
     if (!pane.ok) throw new Error("login-code: pane capture failed");
-    if (!authUrlFromPane(pane.out)) return; // box gone — deliberate drop
+    if (!paneShowsLoginForm(pane.out)) return; // form gone — deliberate drop
     if (!(await this.#typeLines(c))) throw new Error("login-code: typing failed");
+    // Re-validate right before the submit (#482): the form can close during the
+    // typing round-trips, and an Enter into the ordinary conversation input
+    // would hand the auth code to the agent as a prompt.
     await sleep(ENTER_SUBMIT_DELAY_MS); // paste-detection swallows an immediate Enter
+    const again = await this.#tmux.captureFresh(this.tmuxWindow);
+    if (!again.ok) throw new Error("login-code: pane capture failed before submit");
+    if (!paneShowsLoginForm(again.out)) throw new Error("login-code: login form closed before submit — code not submitted");
     const e = await this.#tmux.key(this.tmuxWindow, "Enter");
     if (!e.ok) throw new Error("login-code: submit Enter failed");
   }
@@ -3490,7 +3788,7 @@ export class Session {
     if (!msg) return;
 
     const role = String(msg.role || "");
-    const content = msg.content;
+    const rawContent = msg.content;
 
     if (role === "user") {
       if (entry.isMeta) return;
@@ -3502,9 +3800,9 @@ export class Session {
       // forever — #canDrain needs !#turn, so the dispatch queue wedges and every later
       // message hangs. Treat the marker as the terminator: close any open turn, stop
       // thinking, kick the drain, and don't mirror the marker as a user bubble.
-      const interruptText = typeof content === "string" ? content
-        : Array.isArray(content)
-          ? (content as Array<Record<string, unknown>>).map((b) => (b && typeof b.text === "string" ? b.text : "")).join("")
+      const interruptText = typeof rawContent === "string" ? rawContent
+        : Array.isArray(rawContent)
+          ? (rawContent as Array<Record<string, unknown>>).map((b) => (b && typeof b.text === "string" ? b.text : "")).join("")
           : "";
       if (/^\s*\[Request interrupted by user/.test(interruptText)) {
         if (this.#turn) {
@@ -3522,15 +3820,16 @@ export class Session {
       // It is machine text, never a prompt — so it must not become the 5xx
       // retry text either (re-sending the whole summary as a prompt).
       const isCompactSummary = entry.isCompactSummary === true;
-      if (typeof content !== "string") {
+      let content: string;
+      if (typeof rawContent !== "string") {
         // (Background-task launches are handled by the coalesced re-derive
         // scheduled at the top of onTranscriptEntry.)
         // Emit tool-call-end for tool results. NOT gated on this.#turn: the turn
         // may have been nulled (turn_duration/error) before the result lands, and
         // gating used to drop the end → a tool card stuck "running". Use the turn
         // id remembered when the start was forwarded (fall back to the live turn).
-        if (this.#relay && Array.isArray(content)) {
-          for (const item of content as Array<Record<string, unknown>>) {
+        if (this.#relay && Array.isArray(rawContent)) {
+          for (const item of rawContent as Array<Record<string, unknown>>) {
             if (item.type === "tool_result" && typeof item.tool_use_id === "string") {
               const id = item.tool_use_id;
               // No known turn? Emit anyway (turn is optional app-side). A result
@@ -3550,7 +3849,20 @@ export class Session {
             }
           }
         }
-        return;
+        // A prompt typed in the terminal WITH an image (or any content-block
+        // prompt) arrives as [{type:"text"…},{type:"image"…}] — its text is a
+        // real user message and must take the same path as the string form:
+        // mirrored, receipt-matched, remembered as retry text. It used to
+        // return here and vanish from both chat sinks (#477). Tool-result-only
+        // entries carry no text blocks and stop here as before.
+        const textBlocks = Array.isArray(rawContent)
+          ? (rawContent as Array<Record<string, unknown>>).filter((b) => b && b.type === "text" && typeof b.text === "string").map((b) => String(b.text))
+          : [];
+        const joined = textBlocks.join("\n").trim();
+        if (!joined) return;
+        content = joined;
+      } else {
+        content = rawContent;
       }
       // (Background-task completions — the <task-notification> — are handled by
       // the coalesced re-derive scheduled at the top of onTranscriptEntry.)
@@ -3573,6 +3885,7 @@ export class Session {
       if (content.startsWith("<bash-input>")) {
         const m = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(content);
         this.#pendingBashCmd = m ? stripAnsi(m[1]).trim() : "";
+        this.#confirmBashEcho(this.#pendingBashCmd);
         return;
       }
       // Bash output (`!cmd`) → a structured card the app renders as a tool call:
@@ -3628,7 +3941,7 @@ export class Session {
           // codex-4: record the prompt for 5xx auto-retry BEFORE returning —
           // app/queue/RPC sends match here and used to skip the #lastUserText
           // assignment below, so #fireRetry had nothing to re-send.
-          this.#lastUserText = content;
+          if (!isSystemPromptEntry(entry, content)) this.#lastUserText = content;
           // codex-3: the echo proves the dispatched prompt landed. Confirm it now
           // instead of waiting for assistant output — a turn that errors before any
           // output (api_error → turn_duration with no assistant blocks) would
@@ -3675,7 +3988,13 @@ export class Session {
           }
         }
       }
-      if (!isCompactSummary) this.#lastUserText = content; // the prompt to re-send if this turn 5xx-fails
+      // The prompt to re-send if this turn 5xx-fails — but never machine text
+      // (#110): background-task completions are plain user-role string entries
+      // (`<task-notification>…`, promptSource "system"), and a turn Claude
+      // started off one that then 5xx'd out re-sent the XML notification as
+      // the user's prompt: a forged "task completed" for a task already
+      // handled, plus a duplicate task card in the app.
+      if (!isCompactSummary && !isSystemPromptEntry(entry, content)) this.#lastUserText = content;
       this.#deps.addChatMessage({ role: "user", content, source: "cli", session_id: sid });
 
     } else if (role === "assistant") {
@@ -3691,7 +4010,7 @@ export class Session {
       // gated). 401/login ones are excluded: the pane login flow already
       // surfaces those with the auth URL.
       if (msg.model === "<synthetic>") {
-        const parts = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
+        const parts = Array.isArray(rawContent) ? rawContent as Array<Record<string, unknown>> : [];
         const text = parts.map((b) => typeof b?.text === "string" ? b.text : "").join(" ").trim();
         if (/API Error/i.test(text) && !/401|\/login/i.test(text) && this.#shouldEmitNote(entry, entryTimeMs)) {
           this.#emitAgentNote(text.slice(0, 300), entryTimeMs, sid);
@@ -3706,7 +4025,7 @@ export class Session {
           }
         }
       }
-      const blocks = Array.isArray(content) ? content as Array<Record<string, unknown>> : [];
+      const blocks = Array.isArray(rawContent) ? rawContent as Array<Record<string, unknown>> : [];
       // Claude produced output → it recovered from any mid-turn 5xx, so this turn
       // won't trigger an auto-retry.
       if (blocks.length > 0) this.#turn5xxStatus = null;
@@ -3734,8 +4053,9 @@ export class Session {
           this.#turnUsage = null; // fresh turn → reset usage accumulator
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
           // A fresh turn starting is the proof a dispatched queue message
-          // landed — Claude is now responding to it.
-          this.#confirmDispatchIfAwaiting();
+          // landed — Claude is now responding to it (unless the pane shows the
+          // message still sitting unsent in the box, #32).
+          this.#confirmDispatchIfAwaiting({ byTurnStart: true });
         }
         // Capture token usage (cumulative per message) to report at turn-end —
         // AFTER the turn-start reset above so the first entry's usage isn't wiped.
@@ -3946,6 +4266,23 @@ export function authUrlFromPane(text: string): string | null {
 }
 
 /**
+ * True only when the pane shows the ACTIVE /login form — the place a pasted
+ * auth code may be typed. The URL alone is not it (#482): agents quote
+ * claude.ai/oauth links in replies, and a normal ready chat pane with such a
+ * link matched `authUrlFromPane`, so /login-code typed the secret into the
+ * conversation input and submitted it to the agent. Requires the form's own
+ * code-input marker ("Paste code here if prompted >", live shape) AND no live
+ * ready input box — the form REPLACES the box. Exported for tests.
+ */
+export function paneShowsLoginForm(text: string): boolean {
+  const plain = stripAnsi(text);
+  if (!authUrlFromPane(plain)) return false;
+  if (!/paste code here/i.test(plain)) return false;
+  if (paneShowsReadyPrompt(plain)) return false;
+  return true;
+}
+
+/**
  * Detect an interactive CLI dialog (model picker, "Switch model?" confirm,
  * /effort slider, and future kin) occupying the pane. These dialogs REPLACE
  * the input box, write NO transcript entry until resolved, and show neither
@@ -4065,16 +4402,113 @@ function isBoxRule(s: string | undefined): boolean {
   return /^[─━]{3,}(?:[^─━]{1,80}[─━]+)?$/.test((s ?? "").trim());
 }
 
-export function paneShowsReadyPrompt(text: string): boolean {
-  const lines = text.split("\n");
-  const isRule = isBoxRule;
+/**
+ * Footer-SHAPED line: the status bar Claude paints under the input box. Live
+ * shapes (captured 2026-09-06, claude 2.1.2xx):
+ *   `  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents`
+ *   `  ⏸ plan mode on (shift+tab to cycle)`
+ *   `  ? for shortcuts · ← for agents`            (default mode: no glyph)
+ * Keyed on the glyph / the shortcut hints — NOT on bare mode words. The old
+ * `bypass permissions|accept edits|plan mode` alternatives matched ordinary
+ * prose inside a multi-line draft ("Explain plan mode on this project") and
+ * truncated the box read to "" — the gate then typed a second prompt on top of
+ * the draft (#486).
+ */
+const FOOTER_LINE_RE = /^\s*(?:⏵⏵|⏸)\s|shift\+tab|\?\s*for shortcuts|←\s*for agents|↓\s*to manage/i;
+
+/** The live input box's geometry in a captured pane (line indexes). */
+interface LiveBox {
+  /** The `❯` prompt line. */
+  prompt: number;
+  /** First line AFTER the box content (the bottom rule, a footer line, or EOF). */
+  end: number;
+  /** Index of the bottom rule, or -1 when the capture is missing it. */
+  bottomRule: number;
+}
+
+/**
+ * Locate Claude's LIVE input box: the `❯` line with a box rule directly above
+ * it (scrollback echoes of past prompts have no rule) and its content region
+ * down to the bottom rule. The ONE geometry every box parser below shares, so
+ * ready / text / span / footer all agree on what the box is.
+ *
+ *  - Content is delimited by the ACTUAL bottom rule when the capture has one;
+ *    footer signatures only bound a capture that is missing its rule (#486).
+ *  - A numbered `❯ 1. …` row is a selector option (trust dialog, pickers), NOT
+ *    the box, only when the dialog layout says so: no bottom rule under it, or
+ *    the next row continues the count (`2.`). A lone `❯ 1. Review the build`
+ *    inside a bordered box is a human draft — rejecting every numbered row made
+ *    the live box vanish from dispatch, so an app prompt sat queued forever with
+ *    no banner while Claude was idle (#485). A multi-line numbered draft
+ *    ("1. a" / "2. b") stays ambiguous and reads as a selector → null (unknown,
+ *    never "empty").
+ */
+function locateLiveBox(lines: string[]): LiveBox | null {
   for (let i = 1; i < lines.length; i++) {
     const t = lines[i].trim();
     if (!t.startsWith("❯")) continue;
-    if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
-    if (isRule(lines[i - 1])) return true;  // the live box's top border
+    if (!isBoxRule(lines[i - 1])) continue;
+    let end = i + 1;
+    while (end < lines.length && !isBoxRule(lines[end])) end++;
+    let bottomRule = -1;
+    if (end < lines.length) {
+      bottomRule = end;
+    } else {
+      // No bottom rule in the capture (truncated) — bound by the footer instead.
+      end = i + 1;
+      while (end < lines.length && !FOOTER_LINE_RE.test(lines[end])) end++;
+    }
+    const numbered = /^❯\s*(\d+)\.\s/.exec(t);
+    if (numbered) {
+      if (bottomRule < 0) continue; // selector rows are never boxed
+      const n = parseInt(numbered[1], 10);
+      let k = i + 1;
+      while (k < end && !lines[k].trim()) k++;
+      if (k < end && new RegExp(`^\\s*(?:❯\\s*)?${n + 1}\\.\\s+\\S`).test(lines[k])) continue; // option run
+    }
+    return { prompt: i, end, bottomRule };
   }
-  return false;
+  return null;
+}
+
+export function paneShowsReadyPrompt(text: string): boolean {
+  return locateLiveBox(stripAnsi(text).split("\n")) !== null;
+}
+
+/**
+ * Is the `Try "…"` text in the live box Claude's dimmed GHOST placeholder or a
+ * human draft that happens to start with Try and a quote (#478)? In plain text
+ * the two are identical, so the answer comes from terminal ATTRIBUTES when the
+ * capture carries them (capture-pane -e): the placeholder is painted dim /
+ * grey, typed text in the default colour (live capture 2026-09-06: a typed
+ * `Try "npm test"` renders `\x1b[39m❯ Try "npm test"`). `rawLine` is the
+ * un-stripped `❯` line; with no SGR on it at all (a plain capture) the legacy
+ * text heuristic decides — kept because a real ghost box misread as a draft
+ * would be C-u'd (a no-op on an empty box) until the gate paused input_dirty,
+ * wedging the first message of every fresh session.
+ */
+const GHOST_TEXT_RE = /^Try\s+["“'][^"”']*["”']$/;
+function isGhostPlaceholder(rawLine: string, joined: string): boolean {
+  if (!GHOST_TEXT_RE.test(joined)) return false;
+  const tryAt = rawLine.search(/Try\s+["“']/);
+  const glyphAt = rawLine.indexOf("❯");
+  if (tryAt < 0 || !/\x1b\[/.test(rawLine)) return true; // plain capture → legacy heuristic
+  const between = rawLine.slice(glyphAt >= 0 ? glyphAt : 0, tryAt);
+  const sgrs = [...between.matchAll(/\x1b\[([\d;]*)m/g)].map((m) => m[1]);
+  const dimOrGrey = sgrs.some((s) => {
+    const parts = s.split(";");
+    if (parts.includes("2") || parts.includes("90")) return true;   // dim / bright-black
+    const i = parts.indexOf("5");
+    if (i > 0 && parts[i - 1] === "38" && parts[i + 1] !== undefined) {
+      const n = parseInt(parts[i + 1], 10);
+      return n === 8 || (n >= 240 && n <= 255);                   // 256-colour greys
+    }
+    return false;
+  });
+  // SGR present on the line: dim/grey text is the placeholder; default-colour
+  // text is a draft. (The `❯` line always starts with a reset after the grey
+  // rule above it, so a coloured capture reliably carries at least one SGR.)
+  return dimOrGrey;
 }
 
 /**
@@ -4086,39 +4520,32 @@ export function paneShowsReadyPrompt(text: string): boolean {
  *     stripped) when something is in it,
  *   - null when no live input box is on screen.
  * Ghost-text placeholders (e.g. `Try "refactor <filepath>"`, shown dimmed when
- * the box is empty) count as empty — they are not user content. This is the
+ * the box is empty) count as empty — they are not user content. Pass a
+ * capture-pane -e (coloured) capture when you can: the dim attribute is what
+ * tells a placeholder from a draft that starts with `Try "` (#478). This is the
  * primitive the dispatch gate uses to refuse typing into a non-empty box (which
  * is how two messages used to concatenate into one garbled turn).
  */
 export function paneInputText(text: string): string | null {
-  const lines = text.split("\n");
-  const isRule = isBoxRule;
-  for (let i = 1; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (!t.startsWith("❯")) continue;
-    if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
-    if (!isRule(lines[i - 1])) continue;    // not the live box (scrollback echo)
-    // Read the WHOLE box: the ❯ line PLUS any continuation lines down to the bottom
-    // rule. A wrapped / multi-line (C-j) input box spans several lines between the
-    // rules; reading only the ❯ line would miss text on a blank-first-line box and
-    // wrongly report "empty", letting a dispatch concatenate on top of it.
-    const parts: string[] = [];
-    const first = stripAnsi(t.replace(/^❯/, "")).replace(/\s+/g, " ").trim();
-    if (first) parts.push(first);
-    for (let j = i + 1; j < lines.length && !isRule(lines[j]); j++) {
-      // Defensive bound: the footer (permission hint / shortcut row) lives below the
-      // bottom rule, but if a capture is missing that rule, don't run past it into footer
-      // text. Covers the known footer forms across permission modes.
-      if (/⏵|⏸|shift\+tab|bypass permissions|accept edits|plan mode|for shortcuts|for agents|to manage/i.test(lines[j])) break;
-      const cont = stripAnsi(lines[j]).replace(/\s+/g, " ").trim();
-      if (cont) parts.push(cont);
-    }
-    const joined = parts.join(" ");
-    if (!joined) return "";
-    if (/^Try\s+["“']/.test(joined)) return ""; // ghost-text placeholder, not input
-    return joined;
+  const rawLines = text.split("\n");
+  const lines = rawLines.map(stripAnsi);
+  const box = locateLiveBox(lines);
+  if (!box) return null;
+  // Read the WHOLE box: the ❯ line PLUS any continuation lines down to the bottom
+  // rule. A wrapped / multi-line (C-j) input box spans several lines between the
+  // rules; reading only the ❯ line would miss text on a blank-first-line box and
+  // wrongly report "empty", letting a dispatch concatenate on top of it.
+  const parts: string[] = [];
+  const first = lines[box.prompt].trim().replace(/^❯/, "").replace(/\s+/g, " ").trim();
+  if (first) parts.push(first);
+  for (let j = box.prompt + 1; j < box.end; j++) {
+    const cont = lines[j].replace(/\s+/g, " ").trim();
+    if (cont) parts.push(cont);
   }
-  return null;
+  const joined = parts.join(" ");
+  if (!joined) return "";
+  if (parts.length === 1 && isGhostPlaceholder(rawLines[box.prompt], joined)) return "";
+  return joined;
 }
 
 /**
@@ -4130,21 +4557,8 @@ export function paneInputText(text: string): string | null {
  * budget — the loop exits early once the box reads empty.
  */
 export function paneInputLineSpan(text: string): number {
-  const lines = text.split("\n");
-  const isRule = isBoxRule;
-  for (let i = 1; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (!t.startsWith("❯")) continue;
-    if (/^❯\s*\d+\./.test(t)) continue;     // selector option row, not the input
-    if (!isRule(lines[i - 1])) continue;    // not the live box (scrollback echo)
-    let span = 1;
-    for (let j = i + 1; j < lines.length && !isRule(lines[j]); j++) {
-      if (/⏵|⏸|shift\+tab|bypass permissions|accept edits|plan mode|for shortcuts|for agents|to manage/i.test(lines[j])) break;
-      span++;
-    }
-    return span;
-  }
-  return 0;
+  const box = locateLiveBox(stripAnsi(text).split("\n"));
+  return box ? box.end - box.prompt : 0;
 }
 
 /** True when the live input box is present AND empty — safe to type into. */
@@ -4162,6 +4576,17 @@ export function paneShowsEmptyReadyPrompt(text: string): boolean {
 export function paneShowsClaudeRunning(text: string): boolean {
   if (paneShowsReadyPrompt(text)) return true;
   return /Yes, I trust this folder|Is this a project you (created|trust)|esc to interrupt|\? for shortcuts|shift\+tab to cycle|⏵⏵|⏸/i.test(text);
+}
+
+/**
+ * The LIVE status region of a pane: the lines below the live input box (where
+ * Claude paints its footer), or the last few lines when no box is on screen
+ * (a dialog). Everything above the box is conversation output / scrollback and
+ * must never be read as live status (#479, #480).
+ */
+function liveStatusLines(lines: string[], fallbackTail = 4): string[] {
+  const box = locateLiveBox(lines);
+  return box ? lines.slice(box.bottomRule >= 0 ? box.bottomRule + 1 : box.end) : lines.slice(-fallbackTail);
 }
 
 /**
@@ -4191,14 +4616,7 @@ export function paneShowsWorking(text: string): boolean {
   // subagent/background run). The live footer sits BELOW the live input box, so
   // scope the scan to the lines after it (fall back to the last few lines if no
   // box is on screen, e.g. a dialog).
-  const lines = text.split("\n");
-  const isRule = isBoxRule;
-  let boxLine = -1;
-  for (let i = 1; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (t.startsWith("❯") && !/^❯\s*\d+\./.test(t) && isRule(lines[i - 1])) boxLine = i;
-  }
-  const region = (boxLine >= 0 ? lines.slice(boxLine + 1) : lines.slice(-4))
+  const region = liveStatusLines(stripAnsi(text).split("\n"))
     .filter((l) => /⏵⏵|⏸|↓\s*to manage|for agents/i.test(l))
     .join("\n");
   return /·\s*\d+\s+shells?\b/i.test(region) || /↓\s*to manage/i.test(region);
@@ -4211,9 +4629,23 @@ export function paneShowsWorking(text: string): boolean {
  * "a turn is in flight" signal, used to avoid typing a queued message into a live
  * turn before the transcript's #turn flag catches up. A lingering background shell
  * must NOT count here — Claude is idle at the prompt and can take the next message.
+ *
+ * The hint is read ONLY where Claude paints it live (#479): the status footer
+ * under the box (`… · esc to interrupt · …`, live capture 2026-09-06) and the
+ * spinner line above it (`✻ Ruminating… (esc to interrupt)`, older builds).
+ * Conversation text quoting the phrase ("You can press Esc to interrupt a
+ * running command") used to classify an idle pane as generating for as long as
+ * the reply stayed on screen, holding every queued prompt.
  */
 export function paneShowsGenerating(text: string): boolean {
-  if (/esc to interrupt/i.test(text)) return true;
+  const lines = stripAnsi(text).split("\n");
+  // Live footer: below the box (or the tail when no box), footer-shaped, with
+  // the hint as a `·`-separated segment.
+  if (liveStatusLines(lines, 6).some((l) => FOOTER_LINE_RE.test(l) && /(?:·|^)\s*esc to interrupt/i.test(l))) return true;
+  // Spinner line: glyph-led, in the live bottom region (scrollback can echo old
+  // spinner text far above). The hint is parenthesised there.
+  const tail = lines.slice(-12);
+  if (tail.some((l) => /^\s*[✽✻✶✳✢·∗⠂⠐⠈]\s.*\(\s*esc to interrupt\b/i.test(l))) return true;
   // Narrow-pane fallback: on a small attached client (e.g. 58 cols) claude
   // truncates the status line before "esc to interrupt" ("… · esc to…"), which
   // made the daemon read a generating pane as idle (and, with the box parser
@@ -4221,7 +4653,6 @@ export function paneShowsGenerating(text: string): boolean {
   // itself survives truncation: `✽ Zesting… (4m 17s · ↓ 13.9k tokens …`. Match
   // its shape — spinner glyph, word, ellipsis, then an elapsed-time paren —
   // only in the live bottom region (scrollback can echo old spinner text).
-  const tail = text.split("\n").slice(-12);
   return tail.some(l => /^\s*[✽✻✶✳✢·∗]\s+\w[\w '’-]*…\s*\(\d+[ms]?\s?\d*s?\b/u.test(l));
 }
 
@@ -4230,12 +4661,22 @@ export function formatRetryDelay(sec: number): string {
   return sec < 60 ? `${sec}s` : `${Math.round(sec / 60)}m`;
 }
 
-/** Footer → permission mode. Exported for tests. */
+/**
+ * Footer → permission mode. Read from the LIVE footer only — the glyph-led
+ * status line under the input box (or the pane tail when no box is up) — never
+ * from conversation text: a reply quoting "bypass permissions on" while the
+ * footer said "plan mode on" made setPermissionMode believe it was already in
+ * bypass, send no Shift+Tab, report success and persist the wrong mode (#480).
+ * Exported for tests.
+ */
 export function parsePermissionModeFromPane(text: string): string {
-  if (/bypass permissions on/i.test(text)) return "bypassPermissions";
-  if (/auto mode on/i.test(text)) return "auto";
-  if (/accept edits on/i.test(text)) return "acceptEdits";
-  if (/plan mode on/i.test(text)) return "plan";
+  const region = liveStatusLines(stripAnsi(text).split("\n"), 6)
+    .filter((l) => /^\s*(?:⏵⏵|⏸)\s/.test(l))
+    .join("\n");
+  if (/bypass permissions on/i.test(region)) return "bypassPermissions";
+  if (/auto mode on/i.test(region)) return "auto";
+  if (/accept edits on/i.test(region)) return "acceptEdits";
+  if (/plan mode on/i.test(region)) return "plan";
   return "default"; // no marker line in default mode
 }
 
