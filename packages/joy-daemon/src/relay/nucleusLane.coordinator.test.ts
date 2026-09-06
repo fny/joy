@@ -185,4 +185,49 @@ describe("nucleusLane on the coordinator", () => {
     await until(() => !!relay.terminal("t4"), 10_000);
     expect(relay.terminal("t4")).toMatchObject({ terminalState: "completed" });
   }, 25_000);
+
+  // #584: the relay lane once chose `completed` for a turn purely because no
+  // cancellation had been requested and the session had gone idle — a
+  // provider failure the adapter had already reported was relayed as a
+  // success. On the coordinator the terminal fact IS the command's state, so
+  // idle establishes only that execution STOPPED. Pinned here for the whole
+  // outcome vocabulary, and against a session that reports itself idle
+  // BEFORE the runtime's verdict arrives (the shape that used to lie).
+  it("the terminal fact is the command's state, never an idle guess (#584)", async () => {
+    for (const [n, status, terminalState, reason] of [
+      [0, "failed", "failed", "agent_reported_failed"],
+      [1, "cancelled", "cancelled", "agent_reported_cancelled"],
+      [2, "completed", "completed", undefined],
+    ] as Array<[number, "failed" | "cancelled" | "completed", string, string | undefined]>) {
+      const relay = makeFakeRelay();
+      const url = await relay.listen();
+      const id = `cs58400${n}`;
+      const { s, driver, ledger } = coordinatedSession(id);
+      const registry: any = { get: (i: string) => (i === id ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
+      const lane = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: `m58${n}`, log: () => {} });
+      try {
+        const turn = `t58${n}`;
+        relay.pushWork({ deliveryId: `ds${n}`, commandId: `sp${n}`, sessionId: `v2s58${n}`, kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
+        await until(() => relay.count("/bind") === 1);
+        relay.pushWork({ deliveryId: `d${n}`, commandId: `c${n}`, sessionId: `v2s58${n}`, kind: "prompt", turnId: turn, ciphertext: enc("go") });
+        await until(() => driver.submits.length === 1);
+        const row = ledger.commandForRelayTurn(turn)!;
+        driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: `T${n}` });
+        await settle();
+        driver.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: `T${n}` });
+        await until(() => relay.count(`/turns/${turn}/start`) === 1);
+        // Idle first, verdict second: nothing may terminalize on the gap.
+        await sleep(600);
+        expect(relay.terminal(turn)).toBeUndefined();
+        driver.emit({ kind: "turn_ended", runtimeTurnId: `T${n}`, status });
+        await until(() => !!relay.terminal(turn), 10_000);
+        expect(relay.terminal(turn)!.terminalState, status).toBe(terminalState);
+        expect(relay.terminal(turn)!.terminalState).toBe(ledger.getCommand(row.id)!.state);
+        expect(relay.terminal(turn)!.meta?.reason).toBe(reason);
+      } finally {
+        await lane.stop();
+        relay.server.close();
+      }
+    }
+  }, 40_000);
 });
