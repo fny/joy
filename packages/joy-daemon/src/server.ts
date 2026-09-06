@@ -26,7 +26,7 @@ import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 import { ledgerFor } from "./domain/ledger";
 import { mkdirSecure, writeSecretFileAtomic } from "./domain/secretFile";
-import { launcherFromEnv } from "./daemonLauncher";
+import { launcherFromEnv, processStartId } from "./daemonLauncher";
 import { importLegacyState } from "./domain/ledgerImport";
 
 // Provider keys for spawned agents live in the sealed store (~/.joy/env.sealed,
@@ -98,12 +98,14 @@ function writeDaemonState(port: number): void {
       token: SERVER_TOKEN, pid: process.pid, port,
       relay: joyRelayUrl(), relayKey: joyRelayKey(),
       startedAt: Date.now(), version: "joy-daemon/0.1.0",
-      // Process identity for `joy stop` (#495 residual): the entry script this
-      // daemon runs (process.argv[1] — absolute, the way the command line shows
-      // it) and the node binary. verifyDaemonPid requires a pid's command line
-      // to name exactly this entry before it signals anything; "contains
-      // server.ts and tsx" also matched an unrelated `tsx ~/x/server.ts`.
-      entry: process.argv[1], exec: process.execPath,
+      // Process identity for `joy stop` (#495): the kernel's start identity
+      // for THIS pid (the one thing a reused pid cannot reproduce), the entry
+      // script this daemon runs (process.argv[1] — absolute, the way the
+      // command line shows it) and the node binary. verifyDaemonPid requires
+      // the live pid to match all three before it signals anything; a
+      // daemon.json that outlived its writer used to get whatever now held
+      // the pid killed.
+      startId: processStartId(process.pid), entry: process.argv[1], exec: process.execPath,
       // How this daemon was launched (#502 residual): `joy stop` consults it
       // when the supervisor itself cannot be asked whether it owns the pid.
       launcher: launcherFromEnv(process.env),
