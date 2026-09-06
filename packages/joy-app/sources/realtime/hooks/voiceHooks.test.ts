@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // vi.mock factories are hoisted above every other statement, so the fixtures
 // they close over must be hoisted too.
-const { state, voice, sent, realtime } = vi.hoisted(() => {
+const { state, voice, sent, realtime, ledger } = vi.hoisted(() => {
     const sent: string[] = [];
+    // The module's ledger instance, captured so its retention can be measured.
+    const ledger = { current: null as null | { size: number; isShown(id: string): boolean; staleSessions(): string[] } };
     const voice = {
         startSession: vi.fn(async () => null),
         endSession: vi.fn(async () => {}),
@@ -23,7 +25,14 @@ const { state, voice, sent, realtime } = vi.hoisted(() => {
         currentSessionId: null as string | null,
         wakeForEvent: vi.fn(),
     };
-    return { state, voice, sent, realtime };
+    return { state, voice, sent, realtime, ledger };
+});
+vi.mock('./contextLedger', async (importOriginal) => {
+    const mod = await importOriginal<typeof import('./contextLedger')>();
+    class Captured<M extends { id: string }> extends mod.SessionContextLedger<M> {
+        constructor(maxDeferred?: number) { super(maxDeferred); ledger.current = this; }
+    }
+    return { ...mod, SessionContextLedger: Captured };
 });
 vi.mock('@/sync/storage', () => ({
     storage: { getState: () => state, subscribe: () => () => {} },
@@ -47,7 +56,8 @@ vi.mock('./contextFormatters', () => ({
     cleanAgentText: (text: string) => text,
 }));
 
-import { flushPendingPrompts, voiceHooks } from './voiceHooks';
+import { flushPendingPrompts, hasPendingPrompts, voiceHooks } from './voiceHooks';
+import { MAX_DEFERRED_UPDATES } from './contextLedger';
 
 function addMessage(sessionId: string, id: string) {
     const m = { id, kind: 'agent-text' as const, localId: null, text: id, isThinking: false, createdAt: 0 };
@@ -141,6 +151,62 @@ describe('voiceHooks keep the briefed session current across a connect (#340)', 
         state.realtimeStatus = 'connected';
         voiceHooks.onVoiceConnected();
         expect(sent).toEqual([]);
+    });
+
+    it('an idle hang-up retires the ledger: an armed phone with event wake off retains nothing (#340)', () => {
+        state.realtimeStatus = 'connecting';
+        voiceHooks.onVoiceStarted('A');
+        state.realtimeStatus = 'connected';
+        voiceHooks.onVoiceConnected();
+        expect(ledger.current!.isShown('A')).toBe(true);
+
+        // Idle timeout: hung up, still armed, nothing would wake it.
+        state.realtimeStatus = 'disconnected';
+        state.settings.voiceWakeOnEvents = false;
+        voiceHooks.onVoiceDisconnected();
+        expect(ledger.current!.isShown('A')).toBe(false);
+        for (let i = 0; i < 10_000; i++) voiceHooks.onMessages('A', [addMessage('A', `idle-${i}`)]);
+        expect(hasPendingPrompts()).toBe(false);
+        expect(ledger.current!.size).toBe(0);
+        expect(ledger.current!.staleSessions()).toEqual([]);
+        expect(sent).toEqual([]);
+        state.settings.voiceWakeOnEvents = true;
+    });
+
+    it('deferral is scoped to a connect in flight, not to every state the line is down in (#340)', () => {
+        state.realtimeStatus = 'connecting';
+        voiceHooks.onVoiceStarted('A');
+        state.realtimeStatus = 'connected';
+        voiceHooks.onVoiceConnected();
+        // A drop the orchestrator has not reported yet: still nothing kept.
+        state.realtimeStatus = 'disconnected';
+        voiceHooks.onMessages('A', [addMessage('A', 'a2')]);
+        state.realtimeStatus = 'error';
+        voiceHooks.onMessages('A', [addMessage('A', 'a3')]);
+        expect(ledger.current!.size).toBe(0);
+        // In flight again: deferred, and replayed on connect.
+        state.realtimeStatus = 'connecting';
+        voiceHooks.onMessages('A', [addMessage('A', 'a4')]);
+        expect(ledger.current!.size).toBe(1);
+        state.realtimeStatus = 'connected';
+        voiceHooks.onVoiceConnected();
+        expect(sent).toEqual(['context:new(A):a4']);
+    });
+
+    it('a session that changes more than the ledger keeps during the connect is briefed in full again, not replayed', () => {
+        state.realtimeStatus = 'connecting';
+        voiceHooks.onVoiceStarted('A');
+        const ids: string[] = [];
+        for (let i = 0; i < MAX_DEFERRED_UPDATES + 1; i++) {
+            const m = addMessage('A', `a${i + 2}`);
+            ids.push(m.id);
+            voiceHooks.onMessages('A', [m]);
+        }
+        expect(ledger.current!.size).toBe(0);
+        state.realtimeStatus = 'connected';
+        voiceHooks.onVoiceConnected();
+        voiceHooks.onReady('A');
+        expect(sent).toEqual([`context:full(A):a1,${ids.join(',')}`, 'prompt:ready(A)']);
     });
 
     it('updates while hung up are not replayed on a connection that re-briefs the session', () => {

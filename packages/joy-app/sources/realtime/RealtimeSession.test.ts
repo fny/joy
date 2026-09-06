@@ -21,6 +21,7 @@ const { state, permission, agent, token, hooks } = vi.hoisted(() => {
             onVoiceStarted: vi.fn((sessionId: string) => `ctx:${sessionId}`),
             onFocusChangedWhileConnecting: vi.fn(),
             onVoiceConnected: vi.fn(),
+            onVoiceDisconnected: vi.fn(),
             onVoiceStopped: vi.fn(),
         },
     };
@@ -63,6 +64,8 @@ import {
     registerVoiceSession,
     setCurrentRealtimeSessionId,
     notifyVoiceConnected,
+    notifyVoiceAgentEnded,
+    notifyVoiceUnexpectedDisconnect,
 } from './RealtimeSession';
 import type { VoiceSession, VoiceSessionConfig } from './types';
 
@@ -172,5 +175,56 @@ describe('startVoice re-reads the focused session at every async boundary (#338)
         expect(await startVoice('A')).toBe(true);
         expect(started[0].sessionId).toBe('A');
         expect(hooks.onFocusChangedWhileConnecting).not.toHaveBeenCalled();
+    });
+});
+
+describe('the context ledger lives only as long as the connection (#340)', () => {
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        vi.useRealTimers();
+        await hangUp();
+        vi.clearAllMocks();
+        state.realtimeStatus = 'disconnected';
+        state.voiceArmedSessionId = null;
+        agent.current = { agentId: 'agent-1', apiKey: undefined };
+        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
+    });
+
+    it('a hang-up (the idle timeout, a tap) retires it while voice stays armed', async () => {
+        fakeSdk();
+        expect(await startVoice('A')).toBe(true);
+        expect(hooks.onVoiceDisconnected).not.toHaveBeenCalled();
+        await hangUp();
+        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(1);
+        expect(hooks.onVoiceStopped).not.toHaveBeenCalled();
+        expect(state.voiceArmedSessionId).toBe('A');
+    });
+
+    it('the agent ending the call, and a drop, retire it', async () => {
+        fakeSdk();
+        expect(await startVoice('A')).toBe(true);
+        state.realtimeStatus = 'disconnected';
+        notifyVoiceAgentEnded();
+        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(1);
+        // A drop while armed schedules a reconnect, which briefs afresh.
+        state.voiceArmedSessionId = null;
+        notifyVoiceUnexpectedDisconnect();
+        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failed connect retires it, before the attempt is parked in error', async () => {
+        const { session } = fakeSdk(false);
+        (session.startSession as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('no network'));
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        expect(await startVoice('A', { silentWake: true })).toBe(false);
+        expect(hooks.onVoiceStarted).toHaveBeenCalledTimes(1);
+        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(1);
+        expect(state.realtimeStatus).toBe('error');
+    });
+
+    it('a connect that succeeds does not', async () => {
+        fakeSdk();
+        expect(await startVoice('A')).toBe(true);
+        expect(hooks.onVoiceDisconnected).not.toHaveBeenCalled();
     });
 });

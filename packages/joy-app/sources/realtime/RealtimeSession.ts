@@ -201,6 +201,8 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
         // run inside the catch with this guard still up, so a failed
         // sound-wake connect left voice armed with no listener (#337).
         connecting = false;
+        // No line came of this attempt: what it briefed is forgotten (#340).
+        if (outcome !== 'connected') voiceHooks.onVoiceDisconnected();
         if (outcome === 'failed') {
             // Parked and visible in the strip. canListenWhileIdle does not
             // listen in 'error', so the detector cannot retry-and-fail on
@@ -276,6 +278,7 @@ export async function hangUp(): Promise<void> {
         try { await voiceSession.endSession(); } catch (e) { console.error('[voice] hang up failed:', e); }
     }
     connectedAt = null;
+    voiceHooks.onVoiceDisconnected();
     maybeListenWhileIdle();
 }
 
@@ -319,6 +322,7 @@ export function notifyVoiceAgentEnded(): void {
     reconnectAttempts = 0;
     connectedAt = null;
     intentionalStop = false;
+    voiceHooks.onVoiceDisconnected();
     maybeListenWhileIdle();
 }
 
@@ -327,6 +331,8 @@ export function notifyVoiceAgentEnded(): void {
 export function notifyVoiceUnexpectedDisconnect(): void {
     clearIdleTimer();
     connectedAt = null;
+    // A reconnect briefs the agent afresh; until then nothing is deferred.
+    voiceHooks.onVoiceDisconnected();
     if (intentionalStop) { intentionalStop = false; return; }
     if (!isVoiceArmed()) return;
     const sessionId = currentSessionId;
