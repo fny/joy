@@ -53,6 +53,38 @@ describe("treeCpuTicks — departed subtree accounting (#554 residual)", () => {
     expect(treeCpuTicks(a, b)).toBe(30);
   });
 
+  it("a grandchild orphaned outside the tree is live, not reaped: its history does not erase real work (#554 regression)", () => {
+    // At `a`, child 2 has 100 historical reaped ticks and a still-running
+    // grandchild 3 with 100 own ticks. Child 2 exits and root reaps its
+    // 100; grandchild 3 outlives it and is reparented outside the tree,
+    // alive; another short-lived child burns and is reaped for 30. Root's
+    // childTicks rises by 130 — the in-window work is 30, not 0.
+    const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1, 0)], [2, proc(1, 0, 1, 100)], [3, proc(2, 100, 1)]]) };
+    const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1, 130)]]) };
+    expect(treeCpuTicks(a, b)).toBe(30); // no host-wide table: the orphan cannot have been reaped by a survivor
+    const alive: TreeSnapshot = { ...b, all: new Map([[1, proc(0, 0, 1, 130)], [3, proc(0, 120, 1)]]) };
+    expect(treeCpuTicks(a, alive)).toBe(30); // host-wide table: pid 3 is still alive elsewhere
+  });
+
+  it("a grandchild that its departing parent reaped first flows through to the surviving ancestor", () => {
+    // Same start, but grandchild 3 finished and was reaped by child 2
+    // before 2 exited: root absorbs 2's own + 2's reaped (100 + 3's 100)
+    // + the fresh 30. Both pre-window baselines come out: 30.
+    const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1, 0)], [2, proc(1, 0, 1, 100)], [3, proc(2, 100, 1)]]) };
+    const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1, 230)]]), all: new Map([[1, proc(0, 0, 1, 230)]]) };
+    expect(treeCpuTicks(a, b)).toBe(30);
+  });
+
+  it("a departed child's baseline is charged to its own reaper, not to a sibling's fresh reaped work", () => {
+    // Two surviving children: X reaps a departed grandchild whose history
+    // (100) it never fully absorbs in the window (its delta is 60); Y reaps
+    // a grandchild born and finished inside the window (30). One global
+    // subtraction read 60 + 30 - 100 = 0; per ancestor it is 0 + 30.
+    const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1)], [10, proc(1, 0, 1, 0)], [11, proc(10, 100, 1)], [20, proc(1, 0, 1, 0)]]) };
+    const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1)], [10, proc(1, 0, 1, 60)], [20, proc(1, 0, 1, 30)]]) };
+    expect(treeCpuTicks(a, b)).toBe(30);
+  });
+
   it("a reused pid is a new process plus an exited one, matched on start time", () => {
     // pid 2 at `a` (started at tick 50, 200 own ticks) exits and is reaped;
     // a NEW pid 2 (started at 120) has burned 7 ticks. In-window: 7 + the

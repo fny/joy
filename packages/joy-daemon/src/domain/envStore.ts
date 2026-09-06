@@ -13,11 +13,11 @@
 // pairing's) and re-sealed under the local key on first read.
 //
 // Several relay daemons share the file, so every read/modify/write runs as
-// ONE transaction under ~/.joy/env.lock, the key is published exclusively
-// (the first mint wins; a concurrent minter adopts it), and temporary files
-// are owned by the attempt (pid + nonce). Two daemons' first writes used to
-// race: the second minted its own key over the first's and sealed a store
-// holding only its own variable (#533 residual).
+// ONE transaction under the OS-backed lock at ~/.joy/env.lock.db, the key is
+// published exclusively (the first mint wins; a concurrent minter adopts it),
+// and temporary files are owned by the attempt (pid + nonce). Two daemons'
+// first writes used to race: the second minted its own key over the first's
+// and sealed a store holding only its own variable (#533 residual).
 //
 // What sealing buys: protection against file-level exposure (backups, a
 // stray `cat`, permissive modes). What it does not: the daemon holds the key
@@ -30,14 +30,20 @@
 // environment already carries (service env / shell wins), matching the old
 // ~/.joy/env contract.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync, linkSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync, linkSync } from "node:fs";
 import { join } from "node:path";
 import { joyHomeDir } from "../paths";
 import { loadCredentials } from "../relay/relay";
 
+type SqliteDb = { exec(sql: string): void; close(): void };
+// Resolved through process.getBuiltinModule (Node ≥ 22.3) rather than a
+// static import so loaders that compile this file to CommonJS (test
+// harnesses) work the same as the daemon's ESM runtime.
+const { DatabaseSync } = process.getBuiltinModule("node:sqlite") as unknown as { DatabaseSync: new (p: string) => SqliteDb };
+
 const FILE = "env.sealed";
 const KEY_FILE = "env.key";
-const LOCK_FILE = "env.lock";
+const LOCK_FILE = "env.lock.db";
 let warnedUnreadable = false;
 let warnedDropped = "";
 const LEGACY_FILE = "env";
@@ -53,37 +59,45 @@ function legacyPath(): string { return join(joyHomeDir(), LEGACY_FILE); }
 function tmpPath(target: string): string { return `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`; }
 
 // ── the store lock ───────────────────────────────────────────────────────────
-// One writer at a time across every daemon on the machine. The lock is an
-// exclusively-created file (O_EXCL); the transactions it guards last
-// milliseconds, so a lock older than LOCK_STALE_MS belongs to a process that
-// died holding it and is broken. Waiting is a synchronous sleep — the callers
-// (setEnvVar, unsetEnvVar, migration) are synchronous by contract.
-const timing = { waitMs: 5000, staleMs: 10_000 };
+// One writer at a time across every daemon on the machine, for the COMPLETE
+// read-modify-publish transaction. The lock is an SQLite connection holding
+// `BEGIN IMMEDIATE` on env.lock.db — the pattern singleton.ts uses for the
+// daemon lock: the OS (fcntl) lock is atomic, blocks a second taker for up
+// to `waitMs` (SQLite's busy handler sleeps inside the synchronous call, so
+// the callers — setEnvVar, unsetEnvVar, migration — stay synchronous by
+// contract), and dies with the process, so there is nothing to reclaim. The
+// O_EXCL env.lock file it replaces was "broken" on mtime age alone: a writer
+// paused between its temp write and its rename for ten seconds had its lock
+// stolen by a second daemon, then renamed its stale snapshot over the second
+// daemon's accepted write (#533 residual). No age heuristic can tell a slow
+// holder from a dead one; an OS lock does not need to.
+const timing = { waitMs: 5000 };
 /** Test hook: shorten the wait so a held-lock case runs in milliseconds. */
 export function __setEnvLockTimingForTests(t: Partial<typeof timing>): void { Object.assign(timing, t); }
 
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
+/** Test hook: runs inside the lock, after the sealed store is written to its
+ *  temporary file and before it is renamed into place — the point at which a
+ *  paused writer used to be robbed of its lock. */
+const hooks: { beforePublish?: () => void } = {};
+export function __setEnvStoreHooksForTests(h: typeof hooks): void { Object.assign(hooks, h); }
 
 function withStoreLock<T>(fn: () => T): T | { ok: false; error: string } {
   mkdirSync(joyHomeDir(), { recursive: true });
-  const lock = lockPath();
-  const deadline = Date.now() + timing.waitMs;
-  for (;;) {
-    try {
-      writeFileSync(lock, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > timing.staleMs) { unlinkSync(lock); continue; }
-      } catch { continue; } // vanished between the failed create and the stat — try again
-      if (Date.now() >= deadline) return { ok: false, error: "store_busy" };
-      sleepSync(10);
-    }
+  const db = new DatabaseSync(lockPath());
+  try {
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(timing.waitMs))}`);
+    db.exec("BEGIN IMMEDIATE");
+  } catch (e) {
+    try { db.close(); } catch { /* best effort */ }
+    if (/locked|busy/i.test(String((e as Error).message ?? e))) return { ok: false, error: "store_busy" };
+    throw e;
   }
-  try { return fn(); } finally { try { unlinkSync(lock); } catch { /* broken as stale by someone else */ } }
+  try {
+    return fn();
+  } finally {
+    try { db.exec("ROLLBACK"); } catch { /* connection may already be closed */ }
+    try { db.close(); } catch { /* best effort */ }
+  }
 }
 
 /** A dictionary with NO prototype: `__proto__` is a legal variable name, and
@@ -297,6 +311,7 @@ function writeEnvStore(env: Record<string, string>): { ok: true } | { ok: false;
   const tmp = tmpPath(storePath());
   try {
     writeFileSync(tmp, seal(env, key) + "\n", { mode: 0o600 });
+    hooks.beforePublish?.();
     renameSync(tmp, storePath());
   } catch (e) {
     try { unlinkSync(tmp); } catch { /* never written */ }

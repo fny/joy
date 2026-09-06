@@ -78,6 +78,8 @@ every relay; machines register per account.
 - **Machine environment**: the machine page lists the sealed provider keys
   (`~/.joy/env.sealed`) and can add/remove them over the tunnel; every new
   session on that machine inherits them. `joy env ls|set|unset` from a shell.
+  Writes from several daemons serialize on an OS-backed lock (`env.lock.db`)
+  that dies with its holder, so a slow writer is never robbed mid-write.
 - **Sends never vanish**: v2 has no optimistic row and no outbox — the user
   bubble is the relay's `turn.queued` event. A send the relay did not accept
   (offline, unbound session, refused upload) puts the text and pictures back
