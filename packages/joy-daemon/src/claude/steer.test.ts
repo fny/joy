@@ -23,6 +23,7 @@ vi.mock("../tmux/driver", () => ({
 }));
 
 import { Session } from "./session";
+import { queueFor } from "../domain/queueFacade";
 
 const READY_PANE = "──────\n❯\n──────\n";                    // empty input box
 const DIRTY_PANE = "──────\n❯ stray residue text\n──────\n"; // box with text
@@ -42,11 +43,11 @@ const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 test("steer: bypasses the queue — never a queue chip, submits after the delay", async () => {
   state.pane = READY_PANE; state.keys = []; state.typed = [];
   const s = steerSession();
-  s.enqueue("/steer focus on the tests first");
+  queueFor(s).accept("/steer focus on the tests first", { visible: true });
   await settle(600); // > ENTER_SUBMIT_DELAY_MS (350)
-  expect(s.queueState().queue).toEqual([]);        // no visible chip
-  expect(s.queueState().pendingCount).toBe(0);      // not queued at all
-  expect(s.queueState().paused).toBe(false);        // no warning banner
+  expect(queueFor(s).state().queue).toEqual([]);        // no visible chip
+  expect(queueFor(s).state().commands.filter((c) => c.state === "queued")).toEqual([]); // not queued: typed + submitted (its hook/echo settles it)
+  expect(queueFor(s).state().paused).toBe(false);        // no warning banner
   expect(state.typed.join("")).toContain("focus on the tests first"); // typed to pane
   expect(state.keys).toContain("Enter");            // and submitted
 });
@@ -54,11 +55,11 @@ test("steer: bypasses the queue — never a queue chip, submits after the delay"
 test("steer: unclearable dirty box degrades to queue + input_dirty warning (the reported symptom)", async () => {
   state.pane = DIRTY_PANE; state.keys = []; state.typed = [];
   const s = steerSession();
-  s.enqueue("/steer do the thing");
+  queueFor(s).accept("/steer do the thing", { visible: true });
   // C-u clear attempts re-capture and keep seeing the dirty pane → gives up.
-  await vi.waitFor(() => { expect(s.queueState().paused).toBe(true); }, { timeout: 20000, interval: 200 });
-  expect(s.queueState().pauseReason).toBe("input_dirty");
-  expect(s.queueState().pendingCount).toBe(1);      // steer parked on the queue head
+  await vi.waitFor(() => { expect(queueFor(s).state().paused).toBe(true); }, { timeout: 20000, interval: 200 });
+  expect(queueFor(s).state().pauseReason).toBe("input_dirty");
+  expect(queueFor(s).state().pendingCount).toBe(1);      // steer parked on the queue head
   expect(state.typed.join("")).not.toContain("do the thing"); // never typed over residue
 }, 25000);
 
@@ -70,15 +71,15 @@ test("steer: unclearable dirty box degrades to queue + input_dirty warning (the 
 test("input_dirty self-heals once the box goes clean, and the parked message delivers", async () => {
   state.pane = DIRTY_PANE; state.keys = []; state.typed = [];
   const s = steerSession();
-  s.enqueue("/steer do the thing");
-  await vi.waitFor(() => { expect(s.queueState().paused).toBe(true); }, { timeout: 20000, interval: 200 });
-  expect(s.queueState().pauseReason).toBe("input_dirty");
+  queueFor(s).accept("/steer do the thing", { visible: true });
+  await vi.waitFor(() => { expect(queueFor(s).state().paused).toBe(true); }, { timeout: 20000, interval: 200 });
+  expect(queueFor(s).state().pauseReason).toBe("input_dirty");
 
   // The clear we gave up on lands late and empties the box.
   state.pane = READY_PANE;
 
-  await vi.waitFor(() => { expect(s.queueState().paused).toBe(false); }, { timeout: 20000, interval: 250 });
-  expect(s.queueState().pauseReason).toBeUndefined();
+  await vi.waitFor(() => { expect(queueFor(s).state().paused).toBe(false); }, { timeout: 20000, interval: 250 });
+  expect(queueFor(s).state().pauseReason).toBeUndefined();
   // Self-healing is only worth anything if the parked message then goes out.
   await vi.waitFor(() => {
     expect(state.typed.join("")).toContain("do the thing");
@@ -94,14 +95,14 @@ test("a dispatch_failed pause does NOT self-heal, clean box or not", async () =>
   const { tmux } = await import("../tmux/driver");
   const literal = vi.mocked(tmux.literal);
   literal.mockImplementationOnce(async () => ({ ok: false, out: "" }) as any); // typing fails → dispatch_failed
-  s.enqueue("this send will fail to type");
+  queueFor(s).accept("this send will fail to type", { visible: true });
   await vi.waitFor(() => {
-    expect(s.queueState().pauseReason).toBe("dispatch_failed");
+    expect(queueFor(s).state().pauseReason).toBe("dispatch_failed");
   }, { timeout: 20000, interval: 200 });
 
   await settle(8000); // well past the dense self-heal cadence
-  expect(s.queueState().paused).toBe(true);
-  expect(s.queueState().pauseReason).toBe("dispatch_failed");
+  expect(queueFor(s).state().paused).toBe(true);
+  expect(queueFor(s).state().pauseReason).toBe("dispatch_failed");
 }, 40000);
 
 test("steer: dirty box that C-u CAN clear steers normally (no warning)", async () => {
@@ -110,9 +111,9 @@ test("steer: dirty box that C-u CAN clear steers normally (no warning)", async (
   // First C-u observation clears the box: flip the pane when C-u arrives.
   const origPush = state.keys.push.bind(state.keys);
   state.keys.push = (k: string) => { if (k === "C-u") state.pane = READY_PANE; return origPush(k); };
-  s.enqueue("/steer refactor carefully");
+  queueFor(s).accept("/steer refactor carefully", { visible: true });
   await vi.waitFor(() => { expect(state.keys).toContain("Enter"); }, { timeout: 10000, interval: 100 });
-  expect(s.queueState().paused).toBe(false);
-  expect(s.queueState().pendingCount).toBe(0);
+  expect(queueFor(s).state().paused).toBe(false);
+  expect(queueFor(s).state().commands.filter((c) => c.state === "queued")).toEqual([]); // typed + submitted, nothing parked
   expect(state.typed.join("")).toContain("refactor carefully");
 }, 15000);

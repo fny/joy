@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Session, HOOK_SESSION_END_GRACE_MS, HOOK_NEEDS_INPUT_STALE_MS } from "./session";
+import { queueFor } from "../domain/queueFacade";
 import { loadWindowRecord, saveWindowRecord } from "../domain/windowRecord";
 import * as windowRecords from "../domain/windowRecord";
 import { ensureHookSettings } from "./hooks";
@@ -93,17 +94,17 @@ test("hooks live: a fake hook feed drives submit → generating → stop → exi
   s.beginWatching(); // pane polls run (3s thinking reconcile, 5s pid probe)
   expect(s.hookState().live).toBe(false);
 
-  const item = s.enqueue("P the prompt", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("P the prompt", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
-  expect(s.queueState().inFlight).toBe("P the prompt");
+  expect(queueFor(s).state().inFlight).toBe("P the prompt");
 
   // 1. UserPromptSubmit with the exact text confirms delivery — the pane still
   //    shows an idle READY frame (stale), which no longer matters.
   s.onHookEvent({ event: "UserPromptSubmit", prompt: "P the prompt", prompt_id: "p1", permission_mode: "plan" });
   expect(s.hookState().live).toBe(true);
-  expect(s.queueState().inFlight).toBeNull();
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).state().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   expect(s.busy()).toBe(true);
   // permission_mode rode on the hook: persisted, and used where the footer is not on screen.
   expect(loadWindowRecord(s.id)?.claudePermissionMode).toBe("plan");
@@ -172,18 +173,18 @@ test("#32 hooks live: a foreign turn start does NOT confirm the in-flight prompt
   const { st, driver } = fakeTmux({ pane: READY });
   const s = mkSession(uid("foreign"), driver, { claudeSessionId: "sid" });
   s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" }); // latch on
-  const item = s.enqueue("P the prompt", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("P the prompt", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   // The pane's box reads EMPTY (a misread, or the prompt scrolled) — the
   // hook-less rule would have confirmed on this turn start.
   s.onTranscriptEntry({ type: "assistant", uuid: "u-foreign", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "handling a task notification" }] } } as any);
-  expect(s.queueState().inFlight).toBe("P the prompt");
-  expect(s.queueItemState(item.id)).toBe("pending");
+  expect(queueFor(s).state().inFlight).toBe("P the prompt");
+  expect(queueFor(s).itemState(item.id)).toBe("pending");
   // The real confirmation: the hook with the exact text.
   s.onHookEvent({ event: "UserPromptSubmit", prompt: "P the prompt" });
-  expect(s.queueState().inFlight).toBeNull();
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).state().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.end("killed");
 });
 
@@ -194,13 +195,13 @@ test("#32 hooks live: a slash command keeps the turn-start confirm (UserPromptSu
   const { rs } = relayStub("rs-slash");
   s.attachRelay(rs, true); // turn-start is only observed with a relay attached
   s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
-  const item = s.enqueue("/compact focus on the tests", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("/compact focus on the tests", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   s.onTranscriptEntry({ type: "assistant", uuid: "u-cmd", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "compacting" }] } } as any);
   await vi.advanceTimersByTimeAsync(10); // the confirm awaits a FRESH box read (empty here)
-  expect(s.queueState().inFlight).toBeNull();
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).state().inFlight).toBeNull();
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.end("killed");
 });
 
@@ -216,12 +217,12 @@ test("no hook seen: the pane rules stay in force — turn start confirms on an e
   expect(s.hookState().live).toBe(false);
 
   // Turn-start confirm with an empty box (today's rule).
-  const item = s.enqueue("P the prompt", { mirrorToRelay: false, source: "rpc" });
+  const item = queueFor(s).accept("P the prompt", { mirrorToRelay: false, source: "rpc" });
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   s.onTranscriptEntry({ type: "assistant", uuid: "u-1", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "on it" }] } } as any);
   await vi.advanceTimersByTimeAsync(10); // the confirm awaits a FRESH box read (empty here)
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 10 } as any);
   expect(s.busy()).toBe(false);
 
@@ -269,7 +270,7 @@ test("#482 hooks live: /login-code types only inside an auth episode (StopFailur
 
   // No episode, no login bar → refused outright (even before the form check).
   st.pane = LOGIN_FORM;
-  s.enqueue("/login-code secret-1");
+  queueFor(s).accept("/login-code secret-1", { visible: true });
   await new Promise((r) => setTimeout(r, 300));
   expect(st.typed.join("")).not.toContain("secret-1");
 
@@ -277,13 +278,13 @@ test("#482 hooks live: /login-code types only inside an auth episode (StopFailur
   s.onHookEvent({ event: "StopFailure", error_type: "authentication_failed" });
   expect(s.hookState().authFailure?.errorType).toBe("authentication_failed");
   expect(s.busy()).toBe(false);
-  s.enqueue("/login-code secret-2");
+  queueFor(s).accept("/login-code secret-2", { visible: true });
   await vi.waitFor(() => expect(st.typed.join("")).toContain("secret-2"), { timeout: 3000 });
   await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 3000 });
 
   // Inside the episode a chat pane that merely quotes the URL still gets nothing (the form is pane-only).
   st.pane = CHAT_WITH_LINK;
-  s.enqueue("/login-code secret-3");
+  queueFor(s).accept("/login-code secret-3", { visible: true });
   await new Promise((r) => setTimeout(r, 300));
   expect(st.typed.join("")).not.toContain("secret-3");
 
@@ -291,7 +292,7 @@ test("#482 hooks live: /login-code types only inside an auth episode (StopFailur
   s.onHookEvent({ event: "Notification", notification_type: "auth_success", message: "Logged in" });
   expect(s.hookState().authFailure).toBeNull();
   st.pane = LOGIN_FORM;
-  s.enqueue("/login-code secret-4");
+  queueFor(s).accept("/login-code secret-4", { visible: true });
   await new Promise((r) => setTimeout(r, 300));
   expect(st.typed.join("")).not.toContain("secret-4");
   s.end("killed");
@@ -300,7 +301,7 @@ test("#482 hooks live: /login-code types only inside an auth episode (StopFailur
 test("#482 no hook seen: /login-code keeps today's pane-only gate (form on screen → typed)", async () => {
   const { st, driver } = fakeTmux({ pane: LOGIN_FORM });
   const s = mkSession(uid("login-legacy"), driver, { claudeSessionId: "sid" });
-  s.enqueue("/login-code secret-legacy");
+  queueFor(s).accept("/login-code secret-legacy", { visible: true });
   await vi.waitFor(() => expect(st.typed.join("")).toContain("secret-legacy"), { timeout: 3000 });
   s.end("killed");
 });
@@ -379,12 +380,12 @@ test("ingress fence: a stale process's hooks (another conversation id) flip no l
   s.onHookEvent({ event: "Stop", session_id: "new" });
   expect(s.busy()).toBe(false);
   // Nor can its text-matching UserPromptSubmit confirm the replacement's dispatch.
-  const item = s.enqueue("same prompt", { mirrorToRelay: false });
+  const item = queueFor(s).accept("same prompt", { mirrorToRelay: false });
   await vi.advanceTimersByTimeAsync(400);
   s.onHookEvent({ event: "UserPromptSubmit", session_id: "old", prompt: "same prompt" });
-  expect(s.queueItemState(item.id)).toBe("pending");      // old code: delivered
+  expect(queueFor(s).itemState(item.id)).toBe("pending");      // old code: delivered
   s.onHookEvent({ event: "UserPromptSubmit", session_id: "new", prompt: "same prompt" });
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   s.end("killed");
 });
 
@@ -546,16 +547,16 @@ test("hook authority owns readiness: after Stop a queued prompt dispatches again
   s.onHookEvent({ event: "PostToolUse", session_id: "sid", agent_id: "background-agent", tool_name: "Read" });
   expect(thinking.slice(before)).toEqual([]);                            // old code: thinking re-asserted
   expect(s.busy()).toBe(false);
-  const item = s.enqueue("next prompt", { mirrorToRelay: false });
+  const item = queueFor(s).accept("next prompt", { mirrorToRelay: false });
   await vi.advanceTimersByTimeAsync(1_000);
   expect(st.typed).toContain("next prompt");                             // old code: vetoed by the stale footer for the whole retry loop
   expect(st.keys).toContain("Enter");
   // The transcript's late turn_duration for the OLD turn changes nothing…
   s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 5 } as any);
-  expect(s.queueItemState(item.id)).toBe("pending");
+  expect(queueFor(s).itemState(item.id)).toBe("pending");
   // …and the main agent's UserPromptSubmit is the real next-turn edge.
   s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "next prompt" });
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   expect(s.busy()).toBe(true);
   s.end("killed");
 });
@@ -592,15 +593,15 @@ test("launch fence: a hook that does not echo THIS launch's id — the retired p
   s.onHookEvent({ event: "PostToolUse", tool_name: "Read", session_id: "sid", launch_id: "L2" });
   expect(s.hookState().sessionEnd).toBeNull();
   // Nor can the predecessor's text-matching UserPromptSubmit confirm our dispatch.
-  const item = s.enqueue("same prompt", { mirrorToRelay: false });
+  const item = queueFor(s).accept("same prompt", { mirrorToRelay: false });
   await vi.advanceTimersByTimeAsync(400);
   s.onHookEvent({ event: "UserPromptSubmit", prompt: "same prompt", ...stale });
-  expect(s.queueItemState(item.id)).toBe("pending");
+  expect(queueFor(s).itemState(item.id)).toBe("pending");
   // An event with NO launch id is not ours either (a claude launched by hand, or before the env existed).
   s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "same prompt" });
-  expect(s.queueItemState(item.id)).toBe("pending");
+  expect(queueFor(s).itemState(item.id)).toBe("pending");
   s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", launch_id: "L2", prompt: "same prompt" });
-  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(queueFor(s).itemState(item.id)).toBe("delivered");
   // A session recorded WITHOUT a launch id (launched before the field, or adopted) has nothing to fence on.
   const legacy = mkSession(uid("launch-legacy"), driver, { claudeSessionId: "sid" });
   expect(legacy.hookState().launchId).toBeNull();
@@ -617,7 +618,7 @@ test("#32 residual: a turn start confirms the hook-less plain prompt and the com
     const { rs } = relayStub("rs-fresh");
     s.attachRelay(rs, true); // the turn-start path is the relay's
     if (live) s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
-    const item = s.enqueue(prompt, { mirrorToRelay: false });
+    const item = queueFor(s).accept(prompt, { mirrorToRelay: false });
     await vi.advanceTimersByTimeAsync(400);
     expect(st.keys).toContain("Enter");
     // Paste-detection absorbed the Enter: the LIVE box still holds the text while the
@@ -627,8 +628,8 @@ test("#32 residual: a turn start confirms the hook-less plain prompt and the com
     s.onTranscriptEntry({ type: "assistant", uuid: "foreign", message: { role: "assistant", content: [{ type: "text", text: "a foreign task's response" }] } } as any);
     await vi.advanceTimersByTimeAsync(10);
     expect(freshReads).toBe(1);
-    expect(s.queueItemState(item.id)).toBe("pending");      // old code: delivered off the stale cached frame
-    expect(s.queueState().inFlight).toBe(prompt);
+    expect(queueFor(s).itemState(item.id)).toBe("pending");      // old code: delivered off the stale cached frame
+    expect(queueFor(s).state().inFlight).toBe(prompt);
     s.end("killed");
   }
   // The positive case: the fresh read shows the box EMPTY → the turn is ours (hook-less plain prompt).
@@ -638,12 +639,12 @@ test("#32 residual: a turn start confirms the hook-less plain prompt and the com
     const s = mkSession(uid("fresh-empty"), driver, { claudeSessionId: "sid" });
     const { rs } = relayStub("rs-fresh-empty");
     s.attachRelay(rs, true);
-    const item = s.enqueue("plain Q", { mirrorToRelay: false });
+    const item = queueFor(s).accept("plain Q", { mirrorToRelay: false });
     await vi.advanceTimersByTimeAsync(400);
     expect(st.keys).toContain("Enter");
     s.onTranscriptEntry({ type: "assistant", uuid: "ours", message: { role: "assistant", content: [{ type: "text", text: "on it" }] } } as any);
     await vi.advanceTimersByTimeAsync(10);
-    expect(s.queueItemState(item.id)).toBe("delivered");
+    expect(queueFor(s).itemState(item.id)).toBe("delivered");
     s.end("killed");
   }
 });
