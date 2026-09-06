@@ -111,6 +111,28 @@ function decryptBox(bundle: Uint8Array, recipientSecret: Uint8Array): Uint8Array
   return tweetnacl.box.open(bundle.slice(56), bundle.slice(32, 56), bundle.slice(0, 32), recipientSecret);
 }
 
+/** Domain separator of the pairing proof — a WIRE CONSTANT shared with the
+ *  relay (packages/joy-relay/src/accounts.mjs, PAIRING_PROOF_LABEL). */
+const PAIRING_PROOF_LABEL = "joy-pairing-proof-v1";
+
+/** Proof that we hold the private half of the ephemeral pairing key (#127).
+ *  The relay hands every request a `challenge` and its own X25519
+ *  `relayPublicKey`; the proof is HMAC-SHA256 keyed by the X25519 agreement
+ *  over label || challenge || ourPub || relayPub, which only the private key
+ *  can produce — without it, anyone who saw the QR could collect the bearer.
+ *  Returns undefined when the relay issued no handshake (a relay from before
+ *  the proof existed), in which case pickup runs the legacy way. */
+export function pairingProof(kp: tweetnacl.BoxKeyPair, handshake: Record<string, unknown>): string | undefined {
+  const { challenge, relayPublicKey } = handshake;
+  if (typeof challenge !== "string" || typeof relayPublicKey !== "string") return undefined;
+  const relayPub = unb64(relayPublicKey);
+  const nonce = unb64(challenge);
+  if (relayPub.length !== 32 || nonce.length === 0) return undefined;
+  const shared = tweetnacl.scalarMult(kp.secretKey, relayPub);
+  const msg = Buffer.concat([Buffer.from(PAIRING_PROOF_LABEL), Buffer.from(nonce), Buffer.from(kp.publicKey), Buffer.from(relayPub)]);
+  return createHmac("sha256", Buffer.from(shared)).update(msg).digest("base64");
+}
+
 async function post(relayUrl: string, path: string, body: unknown, relayKey: string, token?: string): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "X-Joy-Client": "cli/joy-auth" };
   if (relayKey) headers["X-Joy-Relay-Key"] = relayKey;
@@ -143,16 +165,24 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
   const accountToken = String(auth.token ?? "");
   if (!accountToken) throw new Error("relay returned no account token");
 
-  // 2. terminal request + self-approval
+  // 2. terminal request + self-approval. The creation reply carries the
+  // handshake (challenge + relay key) the pickup proof is computed over.
   const termKp = tweetnacl.box.keyPair();
-  await send("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  const created = await send("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
   const contentPub = boxSeedKeypair(deriveContentSeed(accountSecret)).publicKey;
   const bundle = new Uint8Array([0x00, ...contentPub]);
   await send("/joy/v2/auth/response",
     { publicKey: b64(termKp.publicKey), response: b64(encryptBox(bundle, termKp.publicKey)) }, accountToken);
 
-  // 3. pick up the approval
-  const resp = await send("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  // 3. pick up the approval, proving we hold the private key (#127). With
+  // the proof the pickup is retryable: a reply lost in transit is polled
+  // again, not re-paired.
+  const proof = pairingProof(termKp, created);
+  const resp = await send("/joy/v2/auth/request",
+    { publicKey: b64(termKp.publicKey), supportsV2: true, ...(proof ? { proof } : {}) });
+  if (resp.state === "proof_required") {
+    throw new Error(`relay requires a pairing proof this daemon could not build (state=proof_required): ${String(resp.message ?? "")}`);
+  }
   if (resp.state === "consumed") {
     // One-shot by design (#607/#70): the answer was already handed out — to an
     // earlier poll of ours whose reply was lost, or to someone who saw the

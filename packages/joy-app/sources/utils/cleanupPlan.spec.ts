@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planFolderDeletion, recheckDetached, describeFolderDeletion } from './cleanupPlan';
+import { planFolderDeletion, recheckDetached, describeFolderDeletion, tallyDeletions, FOLDER_DELETE_IF_STATUS } from './cleanupPlan';
 
 describe('cleanupPlan — folder deletion (#173)', () => {
     it('separates records whose agent is gone from sessions that must be stopped first', () => {
@@ -38,5 +38,25 @@ describe('cleanupPlan — detached re-check (#174)', () => {
         const r = recheckDetached(['s1', 's2'], (id) => fresh[id]);
         expect(r.kill).toEqual([]);
         expect(r.skip).toEqual(['s1', 's2']);
+    });
+});
+
+describe('cleanupPlan — conditional record deletion (#173)', () => {
+    it('names only the states with no live agent behind them', () => {
+        const states = FOLDER_DELETE_IF_STATUS.split(',');
+        expect(states).toEqual(['detached', 'archived', 'failed']);
+        for (const live of ['provisioning', 'starting', 'active']) expect(states).not.toContain(live);
+    });
+
+    it('tells a relay refusal (the session was live at the delete) apart from a plain failure', () => {
+        const t = tallyDeletions([
+            { id: 'gone', success: true },
+            { id: 'live', success: false, code: 'status_mismatch' },
+            { id: 'net', success: false },
+            { id: 'gone2', success: true },
+        ]);
+        expect(t.deleted).toEqual(['gone', 'gone2']);
+        expect(t.live).toEqual(['live']);
+        expect(t.failed).toEqual(['net']);
     });
 });

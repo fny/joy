@@ -52,6 +52,7 @@ export function createTunnel({
   globalMaxBytes = GLOBAL_INBOX_MAX_BYTES,
   responseMaxBuffered = RESPONSE_MAX_BUFFERED_BYTES,
   responseDrainWaitMs = RESPONSE_DRAIN_WAIT_MS,
+  responseIdleMs = RESPONSE_IDLE_MS,
 } = {}) {
   const lastPoll = new Map();   // daemonId -> ms epoch of last claim poll (pruned by age)
   const inboxes = new Map();    // daemonId -> [{ requestId, payload: Buffer }]
@@ -126,7 +127,7 @@ export function createTunnel({
 
   function armIdle(p) {
     clearTimeout(p.idleTimer);
-    p.idleTimer = setTimeout(() => fail(p.requestId, 504, 'daemon_response_timeout'), RESPONSE_IDLE_MS);
+    p.idleTimer = setTimeout(() => fail(p.requestId, 504, 'daemon_response_timeout'), responseIdleMs);
   }
 
   /** Resolve true once the client's socket has drained (or is already empty),

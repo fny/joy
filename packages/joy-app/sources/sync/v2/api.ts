@@ -183,7 +183,12 @@ export const v2 = {
             ...(opts?.spawnSpecWire !== undefined ? { spawnSpec: opts.spawnSpecWire }
                 : spec ? { spawnSpec: encodeSpawnSpec(spec, opts?.sealKey ?? null) } : {}),
         }),
-    deleteSession: (id: string) => v2fetch('DELETE', `/sessions/${id}`),
+    /** `ifStatus` (comma-separated relay states) makes the delete conditional:
+     *  the relay answers 409 status_mismatch when the record is in any other
+     *  state at the delete — the folder cleanup's guard against deleting the
+     *  record of a session whose agent is still working (#173). */
+    deleteSession: (id: string, opts?: { ifStatus?: string }) =>
+        v2fetch('DELETE', `/sessions/${id}${opts?.ifStatus ? `?ifStatus=${encodeURIComponent(opts.ifStatus)}` : ''}`),
     // Retry a spawn that FAILED (e.g. directory missing), opting into
     // directory creation — the client half of the v1-parity approval flow.
     retrySpawn: (id: string, createDir: boolean) =>

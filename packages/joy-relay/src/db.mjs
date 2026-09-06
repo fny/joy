@@ -229,6 +229,16 @@ const MIGRATIONS = [
   ALTER TABLE attachments ADD COLUMN uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now();
   UPDATE attachments SET uploaded_at = created_at;
   `,
+  // 008 — pairing proves possession of the ephemeral private key (#127).
+  // Each request gets a relay-side X25519 keypair and a nonce; the requester
+  // presents an HMAC keyed by the X25519 agreement before a bearer is minted.
+  // `proven_at` records the first proven pickup. Rows created before this
+  // migration have no challenge and receive one lazily on their next poll.
+  `
+  ALTER TABLE auth_requests ADD COLUMN challenge TEXT;
+  ALTER TABLE auth_requests ADD COLUMN relay_secret TEXT;
+  ALTER TABLE auth_requests ADD COLUMN proven_at TIMESTAMPTZ;
+  `,
 ];
 
 /** Exclusive ownership of a data directory. Two relay processes opening the
