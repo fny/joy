@@ -31,6 +31,11 @@ export type OpencodeEffect =
   | { kind: "wire"; record: WireRecord; localId: string }
   | { kind: "thinking"; value: boolean }
   | { kind: "confirmPrompt"; messageID: string; seq?: number }
+  // The user message behind an admission, as the server reported it (text +
+  // its own timestamp). The session decides whether the card needs a row:
+  // a prompt this daemon submitted already has one; a prompt typed in the
+  // opencode TUI has none until this (#629).
+  | { kind: "user"; messageID: string; text: string; at?: number }
   | { kind: "model"; code: string }
   | { kind: "receipt"; uuid: string; turn: string }
   // Terminal step (finish !== 'tool-calls') / turn failure. /wait is 503
@@ -57,6 +62,15 @@ export function extractJoyTitle(text: string): { title: string | null; text: str
 }
 
 function str(v: unknown): string { return typeof v === "string" ? v : ""; }
+/** `prompt.text` of a prompted/admitted event (both carry the prompt body). */
+function promptText(d: Record<string, unknown>): string {
+  return str((d.prompt as Record<string, unknown> | undefined)?.text).trim();
+}
+/** The server's `timestamp` (ms) on a session.next.* event, if it carries one. */
+function eventTime(d: Record<string, unknown>): number | undefined {
+  const t = Number(d.timestamp);
+  return Number.isFinite(t) && t > 0 ? t : undefined;
+}
 
 export class OpencodeNormalizer {
   #sessionID: string;
@@ -70,6 +84,11 @@ export class OpencodeNormalizer {
   // Last user/assistant message id seen on the live stream — the session's
   // reconcile checkpoint advances to this when a turn completes.
   #lastMessageId: string | null = null;
+  // Prompts received but not yet admitted (`session.next.prompted` precedes
+  // `prompt.admitted`; a queued prompt waits for idle in between). Both
+  // events carry the prompt body on 1.18.10 — this is the fallback for an
+  // admission that arrives without it. An entry leaves on its admission.
+  #prompted = new Map<string, { text: string; at?: number }>();
 
   constructor(sessionID: string) { this.#sessionID = sessionID; }
 
@@ -112,6 +131,12 @@ export class OpencodeNormalizer {
         const messageID = str(d.messageID);
         if (!messageID) return [];
         this.#lastMessageId = messageID;
+        // The user's side comes FIRST, before the turn bracket it opens — the
+        // order a reader expects and the order the history replay projects
+        // (#629).
+        const out: OpencodeEffect[] = [];
+        const user = this.#userMessage(messageID, d);
+        if (user) out.push(user);
         // Steer-into-open-turn: an admission while a turn is running is the
         // steered message joining THAT turn (verified live 2026-08-03: the
         // assistant flow continues, no new turn) — confirm delivery but do
@@ -119,13 +144,22 @@ export class OpencodeNormalizer {
         // The server's own ordering (durable.seq) rides along so the session
         // can rank admissions by SERVER order, not arrival order (#77).
         const seq = typeof e.durable?.seq === "number" ? e.durable.seq : undefined;
-        if (this.#turn) return [{ kind: "confirmPrompt", messageID, seq }];
+        if (this.#turn) { out.push({ kind: "confirmPrompt", messageID, seq }); return out; }
         this.#turn = messageID;
-        return [
+        out.push(
           { kind: "confirmPrompt", messageID, seq },
           { kind: "thinking", value: true },
           this.#wire(encodeTurnStart({ turn: messageID }), `${messageID}:turn-start`),
-        ];
+        );
+        return out;
+      }
+      case "session.next.prompted": {
+        // The prompt as received (the TUI builds its user message from this
+        // very event): remembered until its admission reports the message.
+        const messageID = str(d.messageID);
+        const text = promptText(d);
+        if (messageID && text) this.#prompted.set(messageID, { text, at: eventTime(d) });
+        return [];
       }
       case "session.next.step.started": {
         // A step is one LLM call, not a joy turn — but it carries the
@@ -201,11 +235,22 @@ export class OpencodeNormalizer {
       case "session.next.tool.input.started":
       case "session.next.tool.input.delta":
       case "session.next.tool.input.ended":
-      case "session.next.prompted":
         return [];
       default:
         return [];
     }
+  }
+
+  /** The user message an admission reports: the event's own prompt body,
+   *  else the body its `session.next.prompted` carried. Its time is the
+   *  prompt's arrival (what history stores as `time.created`), else the
+   *  admission's. Null for a prompt with no text at all. */
+  #userMessage(messageID: string, d: Record<string, unknown>): OpencodeEffect | null {
+    const received = this.#prompted.get(messageID);
+    this.#prompted.delete(messageID);
+    const text = promptText(d) || received?.text || "";
+    if (!text) return null;
+    return { kind: "user", messageID, text, at: received?.at ?? eventTime(d) };
   }
 
   /** Text arriving with no open turn (e.g. a TUI-driven or queued turn we
