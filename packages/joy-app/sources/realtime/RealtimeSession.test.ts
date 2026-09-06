@@ -20,6 +20,7 @@ const { state, permission, agent, token, hooks } = vi.hoisted(() => {
         hooks: {
             onVoiceStarted: vi.fn((sessionId: string) => `ctx:${sessionId}`),
             onFocusChangedWhileConnecting: vi.fn(),
+            onVoiceConnected: vi.fn(),
             onVoiceStopped: vi.fn(),
         },
     };
