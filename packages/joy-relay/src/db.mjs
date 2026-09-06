@@ -4,6 +4,7 @@
 // than something we can get wrong. The SQL is plain, so moving to a real
 // postgres server later is a driver swap, not a rewrite.
 import { PGlite } from '@electric-sql/pglite';
+import { closeSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 
 /** Ordered, append-only migrations. Tracked in _migrations by index. */
 const MIGRATIONS = [
@@ -208,8 +209,51 @@ const MIGRATIONS = [
   `ALTER TABLE auth_requests ADD COLUMN consumed_at TIMESTAMPTZ;`,
 ];
 
+/** Exclusive ownership of a data directory. Two relay processes opening the
+ *  same directory (overlapping restart, duplicate launch) each got their own
+ *  PGlite cache and the later close silently discarded the other's committed
+ *  rows (#615). The lock is an O_EXCL file holding the owner's pid; a stale
+ *  lock (owner pid gone) is reclaimed by RENAMING it away first — rename is
+ *  atomic, so of two concurrent reclaimers only one proceeds to create. */
+function acquireDataDirLock(dataDir) {
+  // Beside the directory, not inside it: PGlite refuses a non-empty data dir
+  // that is not yet a database.
+  const path = `${dataDir.replace(/\/+$/, '')}.lock`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(path, 'wx');
+      writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+      closeSync(fd);
+      return () => { try { unlinkSync(path); } catch { /* already gone */ } };
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      let holder = null;
+      try { holder = JSON.parse(readFileSync(path, 'utf8')); } catch { /* partial write: treat as in-progress */ }
+      const pid = Number(holder?.pid);
+      if (!holder) {
+        // No pid yet: the other opener is mid-write, not stale (a half-written
+        // lock is an owner, not a leftover — Astra, singleton #589).
+        throw new Error(`relay data directory ${dataDir} is being opened by another process`);
+      }
+      if (pidAlive(pid)) throw new Error(`relay data directory ${dataDir} is owned by pid ${pid}`);
+      try { renameSync(path, `${path}.stale-${process.pid}-${Date.now()}`); }
+      catch (re) { if (re?.code === 'ENOENT') continue; throw re; } // someone else reclaimed it — retry the create
+      try { unlinkSync(`${path}.stale-${process.pid}-${Date.now()}`); } catch { /* best effort */ }
+    }
+  }
+  throw new Error(`relay data directory ${dataDir} is locked`);
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
+}
+
 export async function openDb(dataDir) {
-  const pg = dataDir === ':memory:' ? new PGlite() : new PGlite(dataDir);
+  const release = dataDir === ':memory:' ? () => {} : acquireDataDirLock(dataDir);
+  let pg;
+  try { pg = dataDir === ':memory:' ? new PGlite() : new PGlite(dataDir); }
+  catch (e) { release(); throw e; }
   await pg.query(`CREATE TABLE IF NOT EXISTS _migrations (idx INT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   const { rows } = await pg.query(`SELECT max(idx) AS n FROM _migrations`);
   const applied = Number(rows[0].n ?? -1);
@@ -224,6 +268,6 @@ export async function openDb(dataDir) {
     /** Serialized read-modify-write. PGlite runs one tx at a time; the
      *  callback gets a tx handle with query/exec. Throw to roll back. */
     tx: (fn) => pg.transaction(fn),
-    close: () => pg.close(),
+    close: async () => { try { await pg.close(); } finally { release(); } },
   };
 }
