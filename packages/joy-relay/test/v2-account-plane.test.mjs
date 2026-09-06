@@ -185,7 +185,8 @@ describe('pairing', () => {
     // The answer is collected ONCE (#70): a second poll — anyone who saw the
     // public key in the QR — gets neither the token nor the sealed blob.
     const again = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
-    expect(again.json).toEqual({ state: 'consumed' });
+    expect(again.json).toMatchObject({ state: 'consumed', error: 'pairing_answer_already_collected' }); // legible, #607
+    expect(again.json.token).toBeUndefined();
   });
 
   it('account flavour is independent of terminal flavour; unknown keys 404 on response', async () => {
