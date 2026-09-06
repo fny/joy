@@ -248,6 +248,38 @@ describe('machines', () => {
     expect((await call('PATCH', '/joy/v2/machines/mach-cas', { body: {} })).status).toBe(400);
   });
 
+  it('upsert with expectedMetadataVersion is conditional: a rename that landed in between is refused with 409, never replaced (#61)', async () => {
+    // The daemon's key repair: CAS PATCH of the blob, then the full POST of
+    // that SAME blob carrying the key, conditioned on the version the PATCH
+    // produced. The app renames between the two.
+    const c = await call('POST', '/joy/v2/machines', { body: { id: 'mach-cond', metadata: 'blob-v1' } });
+    expect(c.json.machine).toMatchObject({ metadataVersion: 1, dataEncryptionKey: null });
+    const cas = await call('PATCH', '/joy/v2/machines/mach-cond', { body: { metadata: 'blob-daemon', expectedMetadataVersion: 1 } });
+    expect(cas.json).toMatchObject({ result: 'success', metadataVersion: 2 });
+    // The app's rename lands first.
+    const rename = await call('PATCH', '/joy/v2/machines/mach-cond', { body: { metadata: 'blob-renamed', expectedMetadataVersion: 2 } });
+    expect(rename.json).toMatchObject({ result: 'success', metadataVersion: 3 });
+    const stale = await call('POST', '/joy/v2/machines', { body: { id: 'mach-cond', metadata: 'blob-daemon', dataEncryptionKey: 'dek-repair', expectedMetadataVersion: 2 } });
+    expect(stale.status).toBe(409);
+    expect(stale.json).toEqual({ error: 'metadata_version_mismatch' });
+    const after = await call('GET', '/joy/v2/machines/mach-cond');
+    expect(after.json.machine).toMatchObject({ metadata: 'blob-renamed', metadataVersion: 3, dataEncryptionKey: null }); // nothing replaced, no key landed
+    // The daemon re-reads (version 3), CAS-writes the rename forward, then repairs at the version that write produced.
+    const again = await call('PATCH', '/joy/v2/machines/mach-cond', { body: { metadata: 'blob-daemon-2', expectedMetadataVersion: 3 } });
+    expect(again.json).toMatchObject({ result: 'success', metadataVersion: 4 });
+    const ok = await call('POST', '/joy/v2/machines', { body: { id: 'mach-cond', metadata: 'blob-daemon-2', dataEncryptionKey: 'dek-repair', expectedMetadataVersion: 4 } });
+    expect(ok.status).toBe(200);
+    expect(ok.json.machine).toMatchObject({ metadata: 'blob-daemon-2', metadataVersion: 4, dataEncryptionKey: 'dek-repair' }); // unchanged blob keeps the version
+    // A missing row is a mismatch too (a repair must not resurrect a deleted machine)…
+    const missing = await call('POST', '/joy/v2/machines', { body: { id: 'mach-cond-none', metadata: 'x', expectedMetadataVersion: 1 } });
+    expect(missing.status).toBe(409);
+    expect((await call('GET', '/joy/v2/machines/mach-cond-none')).status).toBe(404);
+    // …a malformed precondition is a 400, and an old daemon omitting the field keeps the unconditional replace.
+    expect((await call('POST', '/joy/v2/machines', { body: { id: 'mach-cond', metadata: 'x', expectedMetadataVersion: 'soon' } })).status).toBe(400);
+    const blind = await call('POST', '/joy/v2/machines', { body: { id: 'mach-cond', metadata: 'blob-old-daemon' } });
+    expect(blind.json.machine).toMatchObject({ metadata: 'blob-old-daemon', metadataVersion: 5 });
+  });
+
   it('is scoped to the owning account', async () => {
     await call('POST', '/joy/v2/machines', { body: { id: 'mach-mine', metadata: 'm' } });
     expect((await call('GET', '/joy/v2/machines/mach-mine', { token: OTHER.token })).status).toBe(404);
