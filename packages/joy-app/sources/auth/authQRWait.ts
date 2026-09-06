@@ -135,14 +135,24 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
             }
             // Transient: network blip, 5xx, timeout. The QR stays valid on
             // the relay, so keep polling instead of failing the flow (#89).
-            // A 401 invalid_proof lands here as well — a proof over a
-            // challenge the relay has since spent. Its reply carries no
-            // handshake, so drop ours: the next poll goes proof-less, is
-            // handed the current handshake, and the one after proves over it
-            // instead of repeating the stale proof until the deadline.
+            // The handshake survives such a failure: a delivering poll whose
+            // reply was lost is re-collected with the SAME proof (the relay
+            // keeps a proven pickup retryable), so the retry must prove
+            // again rather than go proof-less and be told `consumed`.
+            // A 401 invalid_proof is different — a proof over a challenge
+            // the relay has since spent. Its reply carries no handshake, so
+            // drop ours: the next poll goes proof-less, is handed the current
+            // handshake, and the one after proves over it instead of
+            // repeating the stale proof until the deadline.
             failed = true;
-            handshake = null;
-            console.log('Failed to check authentication status; retrying.', error);
+            const failure = pollFailureOf(error);
+            if (failure.status === 401) {
+                handshake = null;
+            }
+            // Never the error object itself: an AxiosError carries the
+            // request body in `config.data`, and that body is a valid proof
+            // that would land in the copyable in-app log (dev/logs.tsx).
+            console.log('Failed to check authentication status; retrying.', failure);
         }
 
         // Call progress callback if provided
@@ -166,6 +176,26 @@ interface PollResponse {
      *  error bodies and from a relay that predates the proof. */
     challenge?: string;
     relayPublicKey?: string;
+}
+
+/** What a failed poll is allowed to log: the transport code, the HTTP status,
+ *  the relay's `error` word and the message — never the request or the
+ *  response body. Duck-typed rather than `axios.isAxiosError` so a plain
+ *  Error (or a test double) summarises the same way. */
+function pollFailureOf(error: unknown): { code?: string; status?: number; error?: string; message: string } {
+    const e = (error && typeof error === 'object' ? error : {}) as {
+        code?: unknown;
+        message?: unknown;
+        response?: { status?: unknown; data?: { error?: unknown } | null } | null;
+    };
+    const status = e.response?.status;
+    const relayError = e.response?.data?.error;
+    return {
+        ...(typeof e.code === 'string' ? { code: e.code } : {}),
+        ...(typeof status === 'number' ? { status } : {}),
+        ...(typeof relayError === 'string' ? { error: relayError } : {}),
+        message: typeof e.message === 'string' ? e.message : String(error),
+    };
 }
 
 /** One status request, aborted the moment `cancelled()` turns true.
