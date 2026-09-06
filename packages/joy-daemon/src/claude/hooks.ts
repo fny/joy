@@ -23,7 +23,9 @@
 //   SubagentStop      → a subagent finished (permission_mode refresh only)
 //   PreCompact        → compaction started (the original hook)
 //
-// `permission_mode` rides on most of these and is forwarded from every one.
+// `permission_mode` rides on most of these and is forwarded from every one;
+// so do the subagent identity (agent_id / agent_type) and the daemon's own
+// per-launch identity (JOY_LAUNCH_ID → launch_id, the ingress fence).
 //
 // Everything is BEST-EFFORT by design: the script bounds its network call,
 // swallows every failure (daemon down → ECONNREFUSED, unknown session → 404,
@@ -83,6 +85,11 @@ try {
       // must not read a background agent's PostToolUse as the main agent's.
       agent_id: input.agent_id,
       agent_type: input.agent_type,
+      // Launch identity: the daemon exports a fresh JOY_LAUNCH_ID into every
+      // claude it starts. The joy session id is a ROUTE that a restart's
+      // replacement inherits and the conversation id survives a --resume, so
+      // this is the only field that tells the daemon WHICH process fired.
+      launch_id: process.env.JOY_LAUNCH_ID,
     };
     // Drop the keys the event didn't carry so the daemon sees an absent field,
     // not a JSON null it has to special-case.
@@ -120,7 +127,13 @@ process.exit(0);
 // "5": SessionEnd forwards the real wire field (`reason` → end_reason — the
 // "4" script read a field that never existed, so every exit was "other") and
 // the subagent identity (agent_id / agent_type) rides along.
-const HOOK_VERSION = "5";
+// "6": the per-launch identity (JOY_LAUNCH_ID → launch_id) rides along, so a
+// session fences hook ingress to ITS process — not just its conversation id,
+// which a same-conversation --resume replacement shares with its predecessor.
+// The script is read at fire time, so every running claude forwards it from
+// the moment the file is rewritten; one launched without the env var simply
+// sends no launch_id (its session was recorded without one, and accepts that).
+const HOOK_VERSION = "6";
 
 // The stamp covers the script version AND the embedded node path: the hook
 // command pins the daemon's absolute execPath, so a node upgrade that removes

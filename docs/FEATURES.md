@@ -355,25 +355,53 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   (#551, #542); queue and window-record writes are atomic (#555, #567).
 - Claude session state: hooks and the transcript are the authority, the pane
   parser is a tie-breaker. The daemon launches `claude --settings` with a
-  managed hook set (`claude/hooks.ts`, HOOK_VERSION 4: SessionStart/End,
+  managed hook set (`claude/hooks.ts`, HOOK_VERSION 6: SessionStart/End,
   UserPromptSubmit, Stop, StopFailure, PostToolUse, PermissionRequest,
   SubagentStop, Notification, PreCompact, each forwarding `permission_mode`,
-  `notification_type`, `end_reason`, `error_type`, `tool_name`, `prompt_id`).
-  Hooks are best-effort, so each session carries a `hooksLive` latch that flips
-  on the first hook event from its own claude process and gates every
-  authority swap; until it flips (adopted sessions, old settings snapshots,
-  daemon downtime) the pane rules apply unchanged. Once live: a plain prompt
-  is "delivered" only when `UserPromptSubmit` (or the transcript's user echo)
-  text-matches it — a foreign turn start never confirms it (#32); the pane's
+  `notification_type`, `end_reason` (Claude's `reason`), `error_type`,
+  `tool_name`, `prompt_id`, the subagent identity `agent_id`/`agent_type`,
+  and `launch_id` — the `JOY_LAUNCH_ID` the daemon exports per launch and
+  persists as the window record's `hookLaunchId`). Ingress is FENCED before
+  anything changes: an event that does not echo the session's launch id, or
+  names another conversation id, is a retired predecessor's (a restart
+  replacement inherits the route id, a `--resume` replacement even the
+  conversation id) and flips no latch, persists no mode, arms or withdraws no
+  end, closes no turn and confirms no dispatch; a session recorded without a
+  launch id accepts any. A subagent's events (`agent_id`) never touch the
+  main agent's turn, wait or mode — its `PermissionRequest` opens a wait
+  tagged with its actor that only its own `PostToolUse` answers, and
+  `SubagentStop` persists no mode. Hooks are best-effort, so each session
+  carries a `hooksLive` latch that flips on the first hook event from its
+  own claude process and gates every authority swap; until it flips (adopted
+  sessions, old settings snapshots, daemon downtime) the pane rules apply
+  unchanged. Once live: a plain prompt is "delivered" only when
+  `UserPromptSubmit` (or the transcript's user echo) text-matches it — a
+  foreign turn start never confirms it (#32); without hooks (and for a
+  slash/`!` command, which fires no `UserPromptSubmit`) a turn start confirms
+  only against a FRESH box read that positively shows the text gone, never
+  the cached sweep frame; `Stop`/`StopFailure`/idle close the RUNTIME turn
+  (`Session.promptReadiness()`, the one decision every dispatch/clear gate
+  and `busy()` consume) even while the transcript's tail is still open and
+  the pane still paints "esc to interrupt" — the box/dialog checks on a
+  fresh capture remain; the pane's
   "esc to interrupt" read never sets thinking and clears it only after six
   idle polls past the lease (#479) — `UserPromptSubmit`/`PostToolUse` mark
   generating, `Stop`/`StopFailure`/`Notification` mark idle; `permission_mode`
-  from any hook is persisted and verifies `setPermissionMode` (the live
-  footer under a located box is still read, since Shift+Tab fires no hook;
-  the hook value fills in when no box is on screen) (#480); `SessionEnd`
-  (exit-class reasons; `clear`/`resume` rotate the conversation) ends the
-  session as `process_exited` once the pid is not alive after a 1.5s grace —
-  the pid probe and the pane's frozen frame no longer decide alone (#30);
+  from a main-agent hook is persisted (the cache advances only on a
+  successful record write, so a lost write is retried by the next hook) and
+  verifies `setPermissionMode`, which reads FRESH footers on both sides of
+  the Shift+Tab cycle and fails on a failed key (the live footer under a
+  located box is still read, since Shift+Tab fires no hook; the hook value
+  fills in when no box is on screen, and outranks a cached frame captured
+  before the hook) (#480); a hook-reported permission wait is cleared by the
+  pane only once the dialog has been continuously ABSENT for 10s, never by
+  one contradictory capture; `SessionEnd` (exit-class reasons;
+  `clear`/`resume` rotate the conversation) ends the session as
+  `process_exited` once, after a 1.5s grace, no live claude is found — an
+  unresolved/shell/dead pid is re-resolved from the pane shell's live child
+  first, so a replacement under the shell is never torn down by its
+  predecessor's late hook — the pid probe and the pane's frozen frame no
+  longer decide alone (#30);
   `StopFailure(authentication_failed)` opens an auth episode and
   `/login-code` types only inside one (or under a surfaced login bar) AND
   into the real form (#482); `PermissionRequest`/`Notification` set the
