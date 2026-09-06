@@ -136,3 +136,107 @@ describe('splitSessionFileText — bounded candidate scanning (#446)', () => {
         expect(segments.map(s => s.text).join('')).toBe(text);
     });
 });
+
+describe('splitSessionFileText — separate references stay separate (#445)', () => {
+    it('two absolute paths joined by prose become two links', () => {
+        const text = 'See /repo/a.ts and /repo/b.ts';
+        const segments = splitSessionFileText(text, '/repo');
+        expect(segments.filter(s => s.link).map(s => s.text)).toEqual(['/repo/a.ts', '/repo/b.ts']);
+        expect(segments.map(s => s.text).join('')).toBe(text);
+        expect(segments.find(s => s.text === '/repo/a.ts')?.link?.absolutePath).toBe('/repo/a.ts');
+    });
+
+    it('relative paths separated by a comma become two links', () => {
+        const segments = splitSessionFileText('Open src/a.ts, src/b.ts', '/repo');
+        expect(segments.filter(s => s.link).map(s => s.text)).toEqual(['src/a.ts', 'src/b.ts']);
+    });
+
+    it('a path never grows past a following bare filename once it already names a file', () => {
+        const text = 'Compare /repo/a.ts with notes.md please';
+        const segments = splitSessionFileText(text, '/repo');
+        expect(segments.filter(s => s.link).map(s => s.text)).toEqual(['/repo/a.ts']);
+        expect(segments.map(s => s.text).join('')).toBe(text);
+    });
+});
+
+describe('parseSessionFileLink — line suffix vs URL scheme (#447)', () => {
+    it('a bare filename with a line number is a file, not a scheme', () => {
+        expect(parseSessionFileLink('index.ts:12', { sessionRoot: '/repo' })).toEqual({
+            path: 'index.ts',
+            absolutePath: '/repo/index.ts',
+            relativePath: 'index.ts',
+            withinSessionRoot: true,
+            line: 12,
+            column: null,
+        });
+        // A relative path with a line suffix links in free text as well.
+        expect(splitSessionFileText('fix src/index.ts:12 now', '/repo').filter(s => s.link).map(s => s.text)).toEqual(['src/index.ts:12']);
+    });
+
+    it('real schemes are still rejected, with or without a port', () => {
+        expect(parseSessionFileLink('https://x.io:8080/a', { sessionRoot: '/repo' })).toBeNull();
+        expect(parseSessionFileLink('mailto:a@b.c', { sessionRoot: '/repo' })).toBeNull();
+    });
+});
+
+describe('resolveSessionFilePath — filesystem roots (#448)', () => {
+    it('a child of "/" is inside a session rooted at "/"', () => {
+        expect(resolveSessionFilePath('/readme.txt', '/')).toMatchObject({ withinSessionRoot: true, relativePath: 'readme.txt' });
+    });
+
+    it('a child of "C:\\" is inside a session rooted at "C:\\"', () => {
+        expect(resolveSessionFilePath('C:\\readme.txt', 'C:\\')).toMatchObject({
+            absolutePath: 'C:/readme.txt', withinSessionRoot: true, relativePath: 'readme.txt',
+        });
+    });
+});
+
+describe('resolveSessionFilePath — file: URLs (#449)', () => {
+    it('decodes drive, localhost and percent-encoded forms', () => {
+        expect(resolveSessionFilePath('file:///C:/Users/me/file.ts', 'C:/repo')?.absolutePath).toBe('C:/Users/me/file.ts');
+        expect(resolveSessionFilePath('file://localhost/home/me/file.ts', '/repo')?.absolutePath).toBe('/home/me/file.ts');
+        expect(resolveSessionFilePath('file:///home/me/my%20file.ts', '/repo')).toMatchObject({
+            path: '/home/me/my file.ts', absolutePath: '/home/me/my file.ts',
+        });
+    });
+
+    it('a file: URL on another host is not a local file', () => {
+        expect(resolveSessionFilePath('file://nas/share/x.ts', '/repo')).toBeNull();
+    });
+});
+
+describe('resolveSessionFilePath — home paths (#450)', () => {
+    it('expands ~ when the home can be inferred from the session root', () => {
+        expect(resolveSessionFilePath('~/file.ts', '/home/me/repo')).toMatchObject({
+            absolutePath: '/home/me/file.ts', withinSessionRoot: false, relativePath: null,
+        });
+    });
+
+    it('leaves ~ unresolved instead of inventing a "~" directory in the project', () => {
+        expect(resolveSessionFilePath('~/file.ts', '/srv/repo')).toBeNull();
+        expect(splitSessionFileText('see ~/file.ts', '/srv/repo')).toEqual([{ text: 'see ~/file.ts', link: null }]);
+    });
+});
+
+describe('splitSessionFileText — quoted references (#451)', () => {
+    it('a single-quoted path links like a double-quoted one', () => {
+        expect(splitSessionFileText("See '/repo/a.ts'", '/repo')).toEqual([
+            { text: "See '", link: null },
+            { text: '/repo/a.ts', link: expect.objectContaining({ absolutePath: '/repo/a.ts' }) },
+            { text: "'", link: null },
+        ]);
+    });
+
+    it('an apostrophe that belongs to an unquoted name stays in it', () => {
+        const segments = splitSessionFileText("open /repo/it's.ts", '/repo');
+        expect(segments.filter(s => s.link).map(s => s.text)).toEqual(["/repo/it's.ts"]);
+    });
+});
+
+describe('resolveSessionFilePath — UNC paths (#452)', () => {
+    it('a \\\\server\\share path is absolute and outside the project', () => {
+        expect(resolveSessionFilePath('\\\\server\\share\\a.ts', 'C:/repo')).toMatchObject({
+            absolutePath: '//server/share/a.ts', withinSessionRoot: false, relativePath: null,
+        });
+    });
+});

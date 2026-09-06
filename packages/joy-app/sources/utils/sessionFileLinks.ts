@@ -15,6 +15,10 @@ export type SessionFileTextSegment = {
 };
 
 const WINDOWS_ABSOLUTE_PATH = /^[A-Za-z]:[\\/]/;
+// \\server\share\… — absolute too, or it was joined under the project root
+// and reported as an in-project file (#452). Only the backslash form: a
+// forward-slash "//x/y" is an ordinary (collapsible) POSIX path.
+const UNC_PATH = /^\\\\[^\\/]+[\\/][^\\/]+/;
 const POSIX_ABSOLUTE_PATH = /^\//;
 const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const FILE_URL_PREFIX = /^file:\/\//i;
@@ -80,22 +84,49 @@ function pushTextSegment(segments: SessionFileTextSegment[], text: string) {
 function stripToken(value: string): { leading: string; core: string; trailing: string } {
     const leading = value.match(LEADING_WRAP)?.[0] ?? '';
     const withoutLeading = leading ? value.slice(leading.length) : value;
-    const trailing = withoutLeading.match(TRAILING_WRAP)?.[0] ?? '';
-    const core = trailing ? withoutLeading.slice(0, withoutLeading.length - trailing.length) : withoutLeading;
+    let trailing = withoutLeading.match(TRAILING_WRAP)?.[0] ?? '';
+    let core = trailing ? withoutLeading.slice(0, withoutLeading.length - trailing.length) : withoutLeading;
+    // A closing apostrophe is stripped only when an opening one was: '/repo/a.ts'
+    // is a quoted path (#451), while an apostrophe that ends an unquoted name
+    // belongs to it. Double quotes and backticks are in TRAILING_WRAP already.
+    if (leading.includes("'") && core.endsWith("'")) {
+        core = core.slice(0, -1);
+        trailing = `'${trailing}`;
+    }
     return { leading, core, trailing };
 }
 
-function decodeFileUrl(value: string): string {
+/**
+ * file: URL → local path, or null when the URL names another host. The old
+ * "strip the scheme, ensure a leading slash" produced /C:/Users/… for a
+ * Windows drive and /localhost/home/… for the localhost authority (#449).
+ */
+function decodeFileUrl(value: string): string | null {
     if (!FILE_URL_PREFIX.test(value)) {
         return value;
     }
-    const stripped = value.replace(FILE_URL_PREFIX, '');
-    const normalized = stripped.startsWith('/') ? stripped : `/${stripped}`;
-    try {
-        return decodeURIComponent(normalized);
-    } catch {
-        return normalized;
+    const rest = value.replace(FILE_URL_PREFIX, '');
+    let path: string;
+    if (rest.startsWith('/')) {
+        path = rest; // file:///… — empty authority
+    } else {
+        const slash = rest.indexOf('/');
+        const authority = slash === -1 ? rest : rest.slice(0, slash);
+        if (authority.toLowerCase() !== 'localhost') {
+            return null; // a remote host is not a file this machine can open
+        }
+        path = slash === -1 ? '/' : rest.slice(slash);
     }
+    try {
+        path = decodeURIComponent(path);
+    } catch {
+        // keep the raw path
+    }
+    // /C:/Users/… → C:/Users/…
+    if (/^\/[A-Za-z]:[\\/]/.test(path)) {
+        path = path.slice(1);
+    }
+    return path;
 }
 
 function inferHomeDirectory(sessionRoot: string | null | undefined): string | null {
@@ -107,19 +138,33 @@ function inferHomeDirectory(sessionRoot: string | null | undefined): string | nu
     return match?.[1] ?? null;
 }
 
-function expandHomePath(value: string, sessionRoot: string | null | undefined): string {
-    if (!value.startsWith('~/')) {
+/**
+ * ~/x → <home>/x when the home directory can be inferred from the session
+ * root; null when it cannot. Leaving the tilde in place made resolvePath join
+ * it to the project ("/srv/repo/~/file.ts", reported as inside the project,
+ * #450) — an unresolvable reference is better left unlinked.
+ */
+function expandHomePath(value: string, sessionRoot: string | null | undefined): string | null {
+    if (!/^~[\\/]/.test(value)) {
         return value;
     }
     const home = inferHomeDirectory(sessionRoot);
     if (!home) {
-        return value;
+        return null;
     }
     return `${home}/${value.slice(2)}`;
 }
 
 function normalizePath(value: string): string {
+    // UNC: keep the //server/share prefix intact (#452).
+    const uncMatch = value.match(UNC_PATH);
     const withForwardSlashes = value.replace(/\\/g, '/');
+    if (uncMatch) {
+        const prefixLength = uncMatch[0].length;
+        const uncPrefix = withForwardSlashes.slice(0, prefixLength);
+        const tail = normalizePath(withForwardSlashes.slice(prefixLength).replace(/^\/+/, ''));
+        return tail ? `${uncPrefix}/${tail}` : uncPrefix;
+    }
     const isWindowsAbsolute = /^[A-Za-z]:\//.test(withForwardSlashes);
     const isPosixAbsolute = withForwardSlashes.startsWith('/');
     const prefix = isWindowsAbsolute ? `${withForwardSlashes.slice(0, 2)}/` : isPosixAbsolute ? '/' : '';
@@ -152,12 +197,20 @@ function normalizePath(value: string): string {
     return `${prefix}${normalizedParts.join('/')}`;
 }
 
+function isAbsolutePath(path: string): boolean {
+    return WINDOWS_ABSOLUTE_PATH.test(path) || UNC_PATH.test(path) || POSIX_ABSOLUTE_PATH.test(path);
+}
+
 function resolvePath(path: string, sessionRoot: string | null | undefined): string | null {
-    const expandedPath = expandHomePath(decodeFileUrl(path), sessionRoot);
+    const decoded = decodeFileUrl(path);
+    if (decoded === null) {
+        return null;
+    }
+    const expandedPath = expandHomePath(decoded, sessionRoot);
     if (!expandedPath) {
         return null;
     }
-    if (WINDOWS_ABSOLUTE_PATH.test(expandedPath) || POSIX_ABSOLUTE_PATH.test(expandedPath)) {
+    if (isAbsolutePath(expandedPath)) {
         return normalizePath(expandedPath);
     }
     if (!sessionRoot) {
@@ -166,13 +219,20 @@ function resolvePath(path: string, sessionRoot: string | null | undefined): stri
     return normalizePath(`${normalizePath(sessionRoot)}/${expandedPath}`);
 }
 
+// "/" for a root of "/" (or "C:/"), "<root>/" otherwise — appending another
+// separator to an already-terminated root made every child of a filesystem
+// root register as outside the session (#448).
+function rootPrefix(normalizedRoot: string): string {
+    return normalizedRoot.endsWith('/') ? normalizedRoot : `${normalizedRoot}/`;
+}
+
 function isWithinRoot(path: string, root: string | null | undefined): boolean {
     if (!root) {
         return false;
     }
     const normalizedPath = normalizePath(path);
     const normalizedRoot = normalizePath(root);
-    return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+    return normalizedPath === normalizedRoot || normalizedPath.startsWith(rootPrefix(normalizedRoot));
 }
 
 function getRelativePath(path: string, root: string | null | undefined): string | null {
@@ -184,7 +244,7 @@ function getRelativePath(path: string, root: string | null | undefined): string 
     if (normalizedPath === normalizedRoot) {
         return '.';
     }
-    return normalizedPath.slice(normalizedRoot.length + 1);
+    return normalizedPath.slice(rootPrefix(normalizedRoot).length);
 }
 
 function looksLikeBareFileName(value: string): boolean {
@@ -227,7 +287,7 @@ function looksLikePath(value: string): boolean {
     if (!trimmed) {
         return false;
     }
-    if (WINDOWS_ABSOLUTE_PATH.test(trimmed)) {
+    if (WINDOWS_ABSOLUTE_PATH.test(trimmed) || UNC_PATH.test(trimmed)) {
         return true;
     }
     if (POSIX_ABSOLUTE_PATH.test(trimmed)) {
@@ -242,13 +302,20 @@ function looksLikePath(value: string): boolean {
     return looksLikeBareFileName(trimmed);
 }
 
+// A token that unmistakably BEGINS a path reference of its own.
+function hasPathPrefix(text: string): boolean {
+    return WINDOWS_ABSOLUTE_PATH.test(text) || UNC_PATH.test(text)
+        || text.startsWith('/') || text.startsWith('~/') || text.startsWith('./') || text.startsWith('../');
+}
+
 function buildLink(path: string, line: number | null, column: number | null, sessionRoot: string | null | undefined): SessionFileLink | null {
     const absolutePath = resolvePath(path, sessionRoot);
     if (!absolutePath) {
         return null;
     }
     return {
-        path: normalizePath(path),
+        // The reference as written, minus any file: URL wrapping (#449).
+        path: normalizePath(decodeFileUrl(path) ?? path),
         absolutePath,
         relativePath: getRelativePath(absolutePath, sessionRoot),
         withinSessionRoot: isWithinRoot(absolutePath, sessionRoot),
@@ -271,12 +338,20 @@ export function parseSessionFileLink(
         return null;
     }
 
-    if (!WINDOWS_ABSOLUTE_PATH.test(trimmedUrl) && URL_SCHEME.test(trimmedUrl)) {
-        return null;
-    }
-
     const parsedUrl = parseLineAndColumn(trimmedUrl);
     const parsedLabel = options?.label ? parseLineAndColumn(options.label) : null;
+
+    // Scheme check AFTER the line suffix is split off: "index.ts:12" is a
+    // file with a line number, not an "index.ts:" scheme (#447). A real URL
+    // ("https://…", "mailto:…") still has its colon in the path part. A
+    // file: URL is a path, handled by decodeFileUrl.
+    if (
+        !WINDOWS_ABSOLUTE_PATH.test(parsedUrl.path)
+        && !FILE_URL_PREFIX.test(parsedUrl.path)
+        && URL_SCHEME.test(parsedUrl.path)
+    ) {
+        return null;
+    }
 
     if (!looksLikePath(parsedUrl.path) && !looksLikePath(parsedLabel?.path ?? '')) {
         return null;
@@ -303,16 +378,15 @@ export function parseSessionFileLink(
 type TokenMatch = {
     start: number;
     end: number;
+    /** The token with its wrapping punctuation removed (computed once). */
+    core: string;
 };
 
 function looksLikePathStart(text: string): boolean {
     if (!text) {
         return false;
     }
-    if (WINDOWS_ABSOLUTE_PATH.test(text)) {
-        return true;
-    }
-    if (text.startsWith('/') || text.startsWith('~/') || text.startsWith('./') || text.startsWith('../')) {
+    if (hasPathPrefix(text)) {
         return true;
     }
     return HAS_PATH_SEPARATOR.test(text);
@@ -339,7 +413,7 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
     let match: RegExpExecArray | null;
 
     while ((match = tokenPattern.exec(text)) !== null) {
-        tokens.push({ start: match.index, end: match.index + match[0].length });
+        tokens.push({ start: match.index, end: match.index + match[0].length, core: stripToken(match[0]).core });
     }
 
     let cursor = 0;
@@ -347,10 +421,8 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
 
     while (tokenIndex < tokens.length && !budget.exhausted) {
         const token = tokens[tokenIndex];
-        const tokenText = text.slice(token.start, token.end);
-        const strippedStart = stripToken(tokenText).core;
 
-        if (!looksLikePathStart(strippedStart)) {
+        if (!looksLikePathStart(token.core)) {
             tokenIndex += 1;
             continue;
         }
@@ -366,6 +438,19 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
             if (candidateIndex > tokenIndex
                 && text.slice(tokens[candidateIndex - 1].end, tokens[candidateIndex].start).includes('\n')) {
                 break; // a path never continues on the next line
+            }
+            if (candidateIndex > tokenIndex) {
+                // A span stops where a SEPARATE reference begins: "/repo/a.ts and
+                // /repo/b.ts" used to link as one path "/repo/a.ts and /repo/b.ts"
+                // because the longest file-like span won (#445). A token with an
+                // absolute/relative prefix always starts a new reference; once
+                // this span already names a file, any path-like token does
+                // (a bare "notes.md", a "src/x.ts") — before that point such
+                // tokens are the middle of a path with spaces
+                // ("…/Application Support/CleanShot/…").
+                const nextCore = tokens[candidateIndex].core;
+                if (hasPathPrefix(nextCore)) break;
+                if (bestLink && (HAS_PATH_SEPARATOR.test(nextCore) || looksLikeBareFileName(nextCore))) break;
             }
             if (!budget.spend()) break;
             const candidate = text.slice(token.start, tokens[candidateIndex].end);
