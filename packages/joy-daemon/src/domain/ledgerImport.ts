@@ -2,22 +2,42 @@
 // (design §1.4). Runs at daemon boot, before any session is recovered, and
 // only until every legacy file is gone (`schema_meta.import_v1 = done`).
 //
-// Idempotent under a crash at any point: each source file is imported in ONE
-// transaction with insert-or-ignore semantics on the natural keys (command
-// id, receipt primary key, runtime_event_id, spawn intent id), and only after
-// COMMIT is the file moved to `<stateDir>/imported-v1/`. A crash between the
-// commit and the move re-imports a file whose rows already exist — zero
-// effect. The originals are preserved for inspection, never deleted.
+// Contract (review 95c4781e, wave C1):
+//   - Each source file is imported in ONE transaction that also commits a
+//     per-source marker (`import_sources`: state-dir-relative name + content
+//     hash). "This file is done" is that ledger fact, never an inference
+//     from the file having moved: a repeat import of a file the marker
+//     already covers is a no-op even when the file could not be moved
+//     aside. Synthetic rows (the received-text echo backstop) take ids
+//     derived from the source hash and the record's index, so they cannot
+//     multiply either. The natural keys (command id, receipt primary key,
+//     runtime_event_id, spawn intent id) stay insert-or-ignore on top.
+//   - An unreadable or malformed source is a FAILED import: nothing is
+//     written, the file stays where it is, the failure is reported with the
+//     session it belongs to (server.ts quarantines that session) and the
+//     import is NOT marked done — it is retried next boot.
+//   - A legacy checkpoint never moves the ledger's cursor backwards: it is
+//     installed only while the ledger has none of that kind.
+//   - Window records keep their identity fields; the execution fields are
+//     stripped through the atomic-write primitive, so a rewrite that fails
+//     leaves the record complete (a truncating write left `{"launch`).
+// Only after COMMIT is a file moved to `<stateDir>/imported-v1/`; the
+// originals are preserved for inspection, never deleted.
 //
 // The legacy parsers live here now (they used to be the stores' loaders);
 // nothing else in the daemon reads these files any more.
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { Ledger, LedgerWriteError, type CommandState, type NewOutbound } from "./ledger";
+import { writeFileAtomic } from "./atomicWrite";
 
+export interface ImportFailure { file: string; error: string; sessionId?: string }
 export interface ImportReport {
   skipped: boolean;
   files: string[];
+  /** Files whose marker already covered their contents: nothing re-applied. */
+  repeated: string[];
   commands: number;
   attempts: number;
   receipts: number;
@@ -25,10 +45,13 @@ export interface ImportReport {
   checkpoints: number;
   spawnIntents: number;
   jobs: number;
-  /** Files that could not be moved after their import committed (retried next boot). */
+  /** Files that could not be moved after their import committed (retried next boot — a no-op). */
   unmoved: string[];
-  /** Files whose import failed (left in place, retried next boot). */
-  failed: Array<{ file: string; error: string }>;
+  /** Files whose import failed (left in place, nothing written, retried next boot). */
+  failed: ImportFailure[];
+  /** Sessions a failed per-session source belongs to: they must not accept
+   *  or recover work until their import completes. */
+  quarantine: string[];
 }
 
 export interface ImportOptions {
@@ -43,9 +66,27 @@ export interface ImportOptions {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 /** The old `received[]` echo backstop only ever mattered inside this window. */
 const RECEIVED_WINDOW_MS = 15 * 60 * 1000;
 
+/** The source parsed, but is not the shape its file class promises. */
+class MalformedSource extends Error {
+  constructor(what: string) { super(`malformed: ${what}`); this.name = "MalformedSource"; }
+}
+
+/** Read + parse a source, hashing the bytes actually read. Throws: an
+ *  unreadable file (EIO, EACCES, a vanished file) or one that is not JSON. */
+function readSource(path: string): { doc: unknown; hash: string } {
+  const raw = fs.readFileSync(path);
+  let doc: unknown;
+  try { doc = JSON.parse(raw.toString("utf8")); }
+  catch (e) { throw new MalformedSource(`not JSON (${errMsg(e)})`); }
+  return { doc, hash: createHash("sha256").update(raw).digest("hex") };
+}
+
+/** Best-effort read for the window records (a record that does not parse is
+ *  not this module's to repair — windowRecord.ts owns it). */
 function readJson(path: string): unknown {
   try { return JSON.parse(fs.readFileSync(path, "utf8")); } catch { return null; }
 }
@@ -61,6 +102,15 @@ const LEGACY = {
 } as const;
 const EXEC_FIELDS = ["transcriptCheckpoint", "opencodeDeliveredThrough", "handoffJob"] as const;
 
+/** The session a per-session legacy file belongs to (none for the global ones). */
+function sessionOf(name: string): string | undefined {
+  for (const re of [LEGACY.queue, LEGACY.receipts, LEGACY.codexInbound, LEGACY.codexCheckpoint]) {
+    const m = re.exec(name);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
 /** Every legacy store file present in the state dir (window records are
  *  handled separately: they stay, only their execution fields move). */
 export function listLegacyFiles(stateDir: string): string[] {
@@ -72,7 +122,7 @@ export function listLegacyFiles(stateDir: string): string[] {
 export function importLegacyState(ledger: Ledger, stateDir: string, opts: ImportOptions): ImportReport {
   const log = opts.log ?? (() => {});
   const now = opts.now ?? Date.now;
-  const report: ImportReport = { skipped: false, files: [], commands: 0, attempts: 0, receipts: 0, outbox: 0, checkpoints: 0, spawnIntents: 0, jobs: 0, unmoved: [], failed: [] };
+  const report: ImportReport = { skipped: false, files: [], repeated: [], commands: 0, attempts: 0, receipts: 0, outbox: 0, checkpoints: 0, spawnIntents: 0, jobs: 0, unmoved: [], failed: [], quarantine: [] };
   if (ledger.getMeta("import_v1") === "done") { report.skipped = true; return report; }
   const files = listLegacyFiles(stateDir);
   const records = listRecordFiles(stateDir);
@@ -88,50 +138,73 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
       fs.renameSync(join(stateDir, name), join(movedDir, name));
     } catch (e) {
       report.unmoved.push(name);
-      log(`[ledger-import] ${name}: imported but could not be moved aside (${e instanceof Error ? e.message : e}) — re-imported (no-op) next boot`);
+      log(`[ledger-import] ${name}: imported but could not be moved aside (${errMsg(e)}) — re-imported (no-op) next boot`);
     }
+  };
+  const fail = (file: string, sessionId: string | undefined, what: string, error: string): void => {
+    report.failed.push({ file, error, ...(sessionId ? { sessionId } : {}) });
+    if (sessionId && !report.quarantine.includes(sessionId)) report.quarantine.push(sessionId);
+    log(`[ledger-import] ${file}: ${what} (${error}) — left in place, nothing imported, retried next boot${sessionId ? `; session ${sessionId} accepts no work until then` : ""}`);
   };
 
   for (const name of files) {
     const path = join(stateDir, name);
+    const sessionId = sessionOf(name);
+    let src: { doc: unknown; hash: string };
+    try { src = readSource(path); }
+    catch (e) { fail(name, sessionId, e instanceof MalformedSource ? "malformed" : "unreadable", errMsg(e)); continue; }
+    const marker = ledger.getImportSource(name);
+    if (marker && marker.contentHash === src.hash) {
+      // Already committed (the move failed, or the daemon died between the
+      // commit and the move): nothing to apply, only the move to retry.
+      report.repeated.push(name);
+      move(name);
+      continue;
+    }
     try {
       ledger.tx(() => {
         let m: RegExpExecArray | null;
-        if ((m = LEGACY.queue.exec(name))) importQueue(ledger, m[1], readJson(path), report);
-        else if ((m = LEGACY.receipts.exec(name))) importReceipts(ledger, m[1], readJson(path), report, now());
-        else if (LEGACY.outbound.test(name)) importOutbound(ledger, readJson(path), report, opts.sealsContent, localByV2, log);
-        else if ((m = LEGACY.codexInbound.exec(name))) importCodexInbound(ledger, m[1], readJson(path), report);
-        else if ((m = LEGACY.codexCheckpoint.exec(name))) importCodexCheckpoint(ledger, m[1], readJson(path), report);
-        else if (LEGACY.spawns.test(name)) importSpawns(ledger, readJson(path), report);
+        if ((m = LEGACY.queue.exec(name))) importQueue(ledger, m[1], src.doc, report);
+        else if ((m = LEGACY.receipts.exec(name))) importReceipts(ledger, m[1], src.doc, src.hash, report, now());
+        else if (LEGACY.outbound.test(name)) importOutbound(ledger, src.doc, report, opts.sealsContent, localByV2, log);
+        else if ((m = LEGACY.codexInbound.exec(name))) importCodexInbound(ledger, m[1], src.doc, report);
+        else if ((m = LEGACY.codexCheckpoint.exec(name))) importCodexCheckpoint(ledger, m[1], src.doc, report);
+        else if (LEGACY.spawns.test(name)) importSpawns(ledger, src.doc, report);
+        ledger.recordImportSource(name, src.hash);
       }, `import ${name}`);
       report.files.push(name);
       move(name);
     } catch (e) {
-      report.failed.push({ file: name, error: e instanceof Error ? e.message : String(e) });
-      log(`[ledger-import] ${name}: import failed (${e instanceof Error ? e.message : e}) — left in place, retried next boot`);
+      // A wrong-shape source throws MalformedSource inside the transaction;
+      // tx() wraps it — report the shape complaint, not the wrapper.
+      const cause = e instanceof LedgerWriteError ? e.cause : e;
+      if (cause instanceof MalformedSource) fail(name, sessionId, "malformed", cause.message);
+      else fail(name, sessionId, "import failed", errMsg(e));
     }
   }
 
   // Window records: the three execution fields move; the record stays.
   for (const rec of records) {
     if (!EXEC_FIELDS.some((f) => rec.raw[f] !== undefined)) continue;
-    try {
-      ledger.tx(() => importRecordFields(ledger, rec.id, rec.raw, report), `import window-${rec.id}`);
-      const stripped: Record<string, unknown> = { ...rec.raw };
-      for (const f of EXEC_FIELDS) delete stripped[f];
-      try { fs.writeFileSync(rec.path, JSON.stringify(stripped)); }
-      catch (e) { report.unmoved.push(`window-${rec.id}.json`); log(`[ledger-import] window-${rec.id}.json: fields imported but the record could not be rewritten (${e instanceof Error ? e.message : e})`); }
-      report.files.push(`window-${rec.id}.json`);
-    } catch (e) {
-      report.failed.push({ file: `window-${rec.id}.json`, error: e instanceof Error ? e.message : String(e) });
-    }
+    const file = `window-${rec.id}.json`;
+    try { ledger.tx(() => importRecordFields(ledger, rec.id, rec.raw, report), `import ${file}`); }
+    catch (e) { fail(file, rec.id, "import failed", errMsg(e)); continue; }
+    const stripped: Record<string, unknown> = { ...rec.raw };
+    for (const f of EXEC_FIELDS) delete stripped[f];
+    // The record is the session's identity (launch cwd, conversation id): it
+    // is replaced atomically or not at all. A failed rewrite leaves the old
+    // fields in place; importRecordFields ignores them once the ledger has
+    // its checkpoint, and the strip is retried next boot.
+    try { writeFileAtomic(rec.path, JSON.stringify(stripped)); }
+    catch (e) { report.unmoved.push(file); log(`[ledger-import] ${file}: fields imported but the record could not be rewritten (${errMsg(e)}) — record left complete, stripped next boot`); }
+    report.files.push(file);
   }
 
   if (report.failed.length === 0 && report.unmoved.length === 0 && listLegacyFiles(stateDir).length === 0) {
-    try { ledger.setMeta("import_v1", "done"); } catch (e) { log(`[ledger-import] could not mark the import done: ${e instanceof Error ? e.message : e}`); }
+    try { ledger.setMeta("import_v1", "done"); } catch (e) { log(`[ledger-import] could not mark the import done: ${errMsg(e)}`); }
   }
   if (report.files.length) {
-    log(`[ledger-import] imported ${report.files.length} legacy file(s): ${report.commands} commands, ${report.attempts} attempts, ${report.receipts} receipts, ${report.outbox} outbox rows, ${report.checkpoints} checkpoints, ${report.spawnIntents} spawn intents, ${report.jobs} jobs`);
+    log(`[ledger-import] imported ${report.files.length} legacy file(s): ${report.commands} commands, ${report.attempts} attempts, ${report.receipts} receipts, ${report.outbox} outbox rows, ${report.checkpoints} checkpoints, ${report.spawnIntents} spawn intents, ${report.jobs} jobs${report.repeated.length ? ` (${report.repeated.length} already imported, skipped)` : ""}`);
   }
   return report;
 }
@@ -152,7 +225,7 @@ function listRecordFiles(stateDir: string): RecordFile[] {
 }
 
 function importQueue(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
-  if (!Array.isArray(doc)) return;
+  if (!Array.isArray(doc)) throw new MalformedSource("a queue file is an array of items");
   for (const it of doc) {
     if (!isRecord(it) || typeof it.id !== "string" || typeof it.text !== "string" || !it.text) continue;
     const seq = num(it.seq);
@@ -165,8 +238,8 @@ function importQueue(ledger: Ledger, sessionId: string, doc: unknown, report: Im
   }
 }
 
-function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport, now: number): void {
-  if (!isRecord(doc)) return;
+function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, sourceHash: string, report: ImportReport, now: number): void {
+  if (!isRecord(doc)) throw new MalformedSource("a receipts file is an object");
   const inbound = Array.isArray(doc.inbound) ? doc.inbound : [];
   const outbound = Array.isArray(doc.outbound) ? doc.outbound : [];
   const received = Array.isArray(doc.received) ? doc.received : [];
@@ -184,19 +257,22 @@ function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, report:
   // transcript echo has not been matched yet. It becomes a synthetic
   // delivered command with an attempt awaiting that echo (runtime_ref = the
   // flattened text), exactly what the live path now records — so the echo
-  // pairs with it and is not mirrored back as a duplicate bubble.
-  for (const r of received) {
-    if (!isRecord(r) || typeof r.text !== "string" || !r.text) continue;
+  // pairs with it and is not mirrored back as a duplicate bubble. Its id is
+  // a function of the source (hash) and the entry's index: a re-import of
+  // the same file finds the same row and adds nothing.
+  received.forEach((r, i) => {
+    if (!isRecord(r) || typeof r.text !== "string" || !r.text) return;
     const at = num(r.at) ?? 0;
-    if (at < now - RECEIVED_WINDOW_MS) continue;
-    const c = ledger.acceptCommand({ sessionId, text: r.text, origin: "import", source: "relay", visible: false, mirrorToRelay: false, createdAt: at, state: "completed" });
-    if (c.deduped !== "none") continue;
+    if (at < now - RECEIVED_WINDOW_MS) return;
+    const id = `import:${sessionId}:received:${sourceHash.slice(0, 12)}:${i}`;
+    const c = ledger.acceptCommand({ sessionId, id, text: r.text, origin: "import", source: "relay", visible: false, mirrorToRelay: false, createdAt: at, state: "completed" });
+    if (c.deduped !== "none") return;
     ledger.importAttempt(c.id, r.text, "unknown", at); report.commands++; report.attempts++;
-  }
+  });
 }
 
 function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, sealsContent: boolean, localByV2: Map<string, string>, log: (l: string) => void): void {
-  if (!Array.isArray(doc)) return;
+  if (!Array.isArray(doc)) throw new MalformedSource("v2-outbound.json is an array of entries");
   const rows: NewOutbound[] = [];
   for (const e of doc) {
     if (!isRecord(e) || typeof e.id !== "string") continue;
@@ -217,14 +293,12 @@ function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, seal
       rows.push({ sessionId: localId, kind: "output", runtimeEventId, relayTurnId: str(e.turnId) ?? null, v2SessionId: v2, sealed, keyB64: str(e.key) ?? null, body: e.wire, createdAt: num(e.at) });
     }
   }
-  const before = ledger.sessionsWithOutbound().length;
   const seqs = ledger.enqueueOutbound(rows);
-  void before;
   report.outbox += seqs.length;
 }
 
 function importCodexInbound(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
-  if (!Array.isArray(doc)) return;
+  if (!Array.isArray(doc)) throw new MalformedSource("a codex inbound file is an array of items");
   for (const it of doc) {
     if (!isRecord(it) || typeof it.clientId !== "string" || !it.clientId) continue;
     const seq = num(it.seq);
@@ -248,9 +322,11 @@ function importCodexInbound(ledger: Ledger, sessionId: string, doc: unknown, rep
 }
 
 function importCodexCheckpoint(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
-  if (!isRecord(doc)) return;
+  if (!isRecord(doc)) throw new MalformedSource("a codex checkpoint file is an object");
   const high = str(doc.deliveredThroughTurnId);
-  if (high) { ledger.setCheckpoint(sessionId, "codex_turn", high, 0); report.checkpoints++; }
+  // Never backwards: a cursor the ledger already holds is by construction
+  // newer than anything the legacy file remembers.
+  if (high && !ledger.getCheckpoint(sessionId, "codex_turn")) { ledger.setCheckpoint(sessionId, "codex_turn", high, 0); report.checkpoints++; }
   for (const id of Array.isArray(doc.knownClientIds) ? doc.knownClientIds : []) {
     if (typeof id !== "string" || !id) continue;
     ledger.addReceipt(sessionId, { kind: "codex_client", ref: id, commandId: id }); report.receipts++;
@@ -263,7 +339,7 @@ function importCodexCheckpoint(ledger: Ledger, sessionId: string, doc: unknown, 
 }
 
 function importSpawns(ledger: Ledger, doc: unknown, report: ImportReport): void {
-  if (!isRecord(doc)) return;
+  if (!isRecord(doc)) throw new MalformedSource("v2-spawns.json is an object");
   for (const [commandId, localId] of Object.entries(doc)) {
     if (typeof localId !== "string" || !localId) continue;
     if (ledger.lookupSpawnIntent(commandId)) continue;

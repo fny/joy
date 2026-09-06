@@ -260,7 +260,7 @@ export class PiSession implements AgentSession {
             break;
           }
           // pi took it: the command is delivered (#456 — the response carries the request id).
-          try { this.#ledger.confirmDelivery(pending.commandId, [], { attemptId: pending.attemptId }); }
+          try { this.#ledger.confirmDelivery(pending.commandId, [], { attemptId: pending.attemptId, generation: this.#generation }); }
           catch (err) { process.stderr.write(`[pi ${this.id}] ledger confirm for ${pending.commandId} failed: ${err instanceof Error ? err.message : err}\n`); }
         }
         if (e.command === "get_state" && e.success) {
@@ -388,7 +388,7 @@ export class PiSession implements AgentSession {
   }
 
   #settleRejected(commandId: string, attemptId: string, error: string): void {
-    try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: error.slice(0, 200) }); }
+    try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: error.slice(0, 200), generation: this.#generation }); }
     catch (e) { process.stderr.write(`[pi ${this.id}] ledger settle for ${commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
   }
 

@@ -178,7 +178,7 @@ export class CodexSession implements AgentSession {
     } else {
       // A fresh thread under this id: nothing queued for an earlier thread can
       // run here, and its delivered-turn mark is meaningless.
-      for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session" });
+      for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session", generation: this.#generation });
       this.#ledger.clearCheckpoint(init.id, "codex_turn");
       this.#pendingEffort = init.effort ?? null; // fresh session: apply on turn 1
     }
@@ -479,7 +479,7 @@ export class CodexSession implements AgentSession {
     if (next === this.#deliveredThrough || next === null) return;
     if (this.#relay?.outboundPersistDegraded) return;
     try {
-      this.#ledger.setCheckpoint(this.id, "codex_turn", next, 0, { throughSeq: "latest" });
+      this.#ledger.setCheckpoint(this.id, "codex_turn", next, 0, { throughSeq: "latest", generation: this.#generation });
       this.#deliveredThrough = next;
     } catch (e) {
       process.stderr.write(`[codex ${this.id}] checkpoint ${next} failed: ${e instanceof Error ? e.message : e}\n`);

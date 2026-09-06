@@ -1388,7 +1388,7 @@ export class Session {
         // command (`!bash`, `/slash`) never echoes as user text — settle now.
         const text = this.#ledger.getCommand(id)?.text ?? "";
         const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
-        this.#ledger.confirmDelivery(id, [], { settleAttempts: isCommand });
+        this.#ledger.confirmDelivery(id, [], { settleAttempts: isCommand, generation: this.#generation });
       } else this.#ledger.transition(id, NON_TERMINAL_STATES, "cancelled", { terminalReason: "cancelled" });
     } catch (e) {
       process.stderr.write(`[${this.id}] ledger outcome ${outcome} for ${id} failed: ${e instanceof Error ? e.message : e}\n`);
@@ -1441,7 +1441,7 @@ export class Session {
    *  `superseded` retires it) and the ledger row returns to queued. */
   #unstage(item: QueuedItem, attemptOutcome: "unknown" | "superseded"): void {
     try {
-      if (item.attemptId) { this.#ledger.settleAttempt(item.attemptId, attemptOutcome, { command: null }); if (attemptOutcome === "superseded") item.attemptId = undefined; }
+      if (item.attemptId) { this.#ledger.settleAttempt(item.attemptId, attemptOutcome, { command: null, generation: this.#generation }); if (attemptOutcome === "superseded") item.attemptId = undefined; }
       this.#ledger.transition(item.id, ["submitting", "accepted", "unknown"], "queued");
     } catch (e) {
       process.stderr.write(`[${this.id}] ledger unstage ${item.id} failed: ${e instanceof Error ? e.message : e}\n`);
@@ -4606,7 +4606,7 @@ export class Session {
           // the command's terminal outcome (delivered) — one transaction.
           const cmd = this.#ledger.getCommand(attempt.commandId);
           const receipts = [{ kind: "transcript_uuid", ref: uuid }, ...(cmd?.seq != null ? [{ kind: "seq", ref: String(cmd.seq) }] : [])];
-          try { this.#ledger.confirmDelivery(attempt.commandId, receipts, { attemptId: attempt.id }); }
+          try { this.#ledger.confirmDelivery(attempt.commandId, receipts, { attemptId: attempt.id, generation: this.#generation }); }
           catch (e) { process.stderr.write(`[${this.id}] echo confirm for ${attempt.commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
           this.#uuidSeen.add(uuid);
           this.#itemOutcome.set(attempt.commandId, "delivered");

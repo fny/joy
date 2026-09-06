@@ -206,6 +206,28 @@ export class SessionRegistry {
     });
   }
 
+  // ── boot quarantine (review 95c4781e) ──────────────────────────────────────
+  // A session whose legacy state failed to import (ledgerImport.ts) has a
+  // queue / receipts the ledger does not hold yet: recovering it would run
+  // without its history and could redeliver or lose prompts. Until the import
+  // completes (next boot) such an id is neither recovered nor created.
+  #quarantined = new Map<string, string>();
+  #quarantineLogged = new Set<string>();
+  quarantine(ids: Iterable<string>, reason: string): void {
+    for (const id of ids) this.#quarantined.set(id, reason);
+  }
+  isQuarantined(id: string): boolean { return this.#quarantined.has(id); }
+  /** True (and logged once per id) when recovery must leave this id alone. */
+  #skipQuarantined(id: string): boolean {
+    const reason = this.#quarantined.get(id);
+    if (reason === undefined) return false;
+    if (!this.#quarantineLogged.has(id)) {
+      this.#quarantineLogged.add(id);
+      process.stderr.write(`[recover] ${id}: quarantined (${reason}) — not recovered, accepts no work until the import completes on a later boot\n`);
+    }
+    return true;
+  }
+
   /**
    * Is the claude CLI on this machine, and which version? Spawning
    * `claude --version` costs ~100ms, so we cache it — but ONLY a successful
@@ -303,6 +325,8 @@ export class SessionRegistry {
 
   async create(opts: CreateSessionOpts): Promise<AgentSession> {
     const id = opts.id ?? crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    const quarantined = this.#quarantined.get(id);
+    if (quarantined !== undefined) throw new Error(`session ${id} is quarantined (${quarantined}) — accepts no work until the legacy import completes (quarantined)`);
     const cwd = expandHome(opts.cwd);
     // Reserved while this create runs: a second create({id}) during the tmux
     // setup used to kill the first one's server and return a second object
@@ -922,6 +946,8 @@ export class SessionRegistry {
    *  kill it and archive the card (#45). It now joins the first. */
   #restarting = new Map<string, Promise<AgentSession>>();
   async restart(opts: { id: string; cwd?: string }): Promise<AgentSession> {
+    const quarantined = this.#quarantined.get(opts.id);
+    if (quarantined !== undefined) throw new Error(`session ${opts.id} is quarantined (${quarantined}) — accepts no work until the legacy import completes (quarantined)`);
     const pending = this.#restarting.get(opts.id);
     if (pending) return pending;
     const run = this.#restartInner(opts).finally(() => { this.#restarting.delete(opts.id); });
@@ -1101,6 +1127,7 @@ export class SessionRegistry {
     for (const { winName, target, drv, socket } of candidates) {
       const id = winName.slice(2);
       if (this.#sessions.has(id)) continue;
+      if (this.#skipQuarantined(id)) continue;
 
       const tmuxWindow = target;
       // Prefer the persisted launch cwd over the pane's CURRENT dir: the user may
@@ -1292,6 +1319,7 @@ export class SessionRegistry {
     // session id (reaping any recorded live server pid on takeover).
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "opencode" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (this.#skipQuarantined(rec.id)) continue;
       if (!existsSync(rec.launchCwd)) continue;
       const session = new OpencodeSession({
         id: rec.id, cwd: rec.launchCwd,
@@ -1313,6 +1341,7 @@ export class SessionRegistry {
     // its card read "running" while every send answered session_not_found (#47).
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "pi" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (this.#skipQuarantined(rec.id)) continue;
       if (!existsSync(rec.launchCwd)) continue;
       const session = new PiSession({
         id: rec.id, cwd: rec.launchCwd,
@@ -1326,6 +1355,7 @@ export class SessionRegistry {
     }
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "agy" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (this.#skipQuarantined(rec.id)) continue;
       if (!existsSync(rec.launchCwd)) continue;
       const session = new AgySession({
         id: rec.id, cwd: rec.launchCwd,
@@ -1339,6 +1369,7 @@ export class SessionRegistry {
     }
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "codex" || !rec.id || this.#sessions.has(rec.id)) continue;
+      if (this.#skipQuarantined(rec.id)) continue;
       const sock = rec.codexSocketPath;
       const pid = rec.codexServerPid;
       if (!sock || !pid || !existsSync(sock) || !existsSync(rec.launchCwd)) continue;
