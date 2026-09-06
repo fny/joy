@@ -270,6 +270,16 @@ app.
   authority inside the TUI (SessionEnd, PermissionRequest, StopFailure,
   permission_mode…), pane demoted to a tie-breaker.
 
+- 2026-09-07 (later) — Wave E8a (sync core, spawn, encryption, session
+  screens; 0361f2ea) and E8b (composer, autocomplete, file viewer, diff, QR,
+  utils; 457bf717) landed with What's New entries; #134's accepted-turn
+  cancel followed (82a36e61). Daemon free-files round (81386fd0): lane
+  outcomes, spawn-failure acks, deleted relay rows, paced event history,
+  pairing key, content-free push, CAS metadata, receipts, config paths,
+  tunnel path validation and relay key. Wave D residual rounds through
+  f9027d50. Astra reviews queued for Wave E and the daemon round; a Fable
+  reviewer on the tunnel executor. Four merges still await approval.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
