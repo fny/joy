@@ -12,6 +12,13 @@
 // under a relay key is still opened (this relay's key, then every sibling
 // pairing's) and re-sealed under the local key on first read.
 //
+// Several relay daemons share the file, so every read/modify/write runs as
+// ONE transaction under ~/.joy/env.lock, the key is published exclusively
+// (the first mint wins; a concurrent minter adopts it), and temporary files
+// are owned by the attempt (pid + nonce). Two daemons' first writes used to
+// race: the second minted its own key over the first's and sealed a store
+// holding only its own variable (#533 residual).
+//
 // What sealing buys: protection against file-level exposure (backups, a
 // stray `cat`, permissive modes). What it does not: the daemon holds the key
 // on the same disk, and spawned agents receive plaintext env (that is how
@@ -23,19 +30,61 @@
 // environment already carries (service env / shell wins), matching the old
 // ~/.joy/env contract.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, readdirSync, linkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { joyHomeDir } from "../paths";
 import { loadCredentials } from "../relay/relay";
 
 const FILE = "env.sealed";
 const KEY_FILE = "env.key";
+const LOCK_FILE = "env.lock";
 let warnedUnreadable = false;
+let warnedDropped = "";
 const LEGACY_FILE = "env";
 
 function storePath(): string { return join(joyHomeDir(), FILE); }
 function keyPath(): string { return join(joyHomeDir(), KEY_FILE); }
+function lockPath(): string { return join(joyHomeDir(), LOCK_FILE); }
 function legacyPath(): string { return join(joyHomeDir(), LEGACY_FILE); }
+
+/** A temporary path no other attempt (this process or another daemon) can
+ *  share: a fixed `<file>.tmp` let two writers truncate each other's
+ *  half-written file and rename the wrong bytes into place. */
+function tmpPath(target: string): string { return `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`; }
+
+// ── the store lock ───────────────────────────────────────────────────────────
+// One writer at a time across every daemon on the machine. The lock is an
+// exclusively-created file (O_EXCL); the transactions it guards last
+// milliseconds, so a lock older than LOCK_STALE_MS belongs to a process that
+// died holding it and is broken. Waiting is a synchronous sleep — the callers
+// (setEnvVar, unsetEnvVar, migration) are synchronous by contract.
+const timing = { waitMs: 5000, staleMs: 10_000 };
+/** Test hook: shorten the wait so a held-lock case runs in milliseconds. */
+export function __setEnvLockTimingForTests(t: Partial<typeof timing>): void { Object.assign(timing, t); }
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withStoreLock<T>(fn: () => T): T | { ok: false; error: string } {
+  mkdirSync(joyHomeDir(), { recursive: true });
+  const lock = lockPath();
+  const deadline = Date.now() + timing.waitMs;
+  for (;;) {
+    try {
+      writeFileSync(lock, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > timing.staleMs) { unlinkSync(lock); continue; }
+      } catch { continue; } // vanished between the failed create and the stat — try again
+      if (Date.now() >= deadline) return { ok: false, error: "store_busy" };
+      sleepSync(10);
+    }
+  }
+  try { return fn(); } finally { try { unlinkSync(lock); } catch { /* broken as stale by someone else */ } }
+}
 
 /** A dictionary with NO prototype: `__proto__` is a legal variable name, and
  *  on a plain object `out["__proto__"] = v` hits the prototype setter and the
@@ -52,15 +101,39 @@ function readLocalKey(): Uint8Array | null {
   } catch { return null; }
 }
 
-/** The machine-local store key, minted on first use (#533). */
+/** The machine-local store key, minted on first use (#533). Publication is
+ *  EXCLUSIVE: the fully written candidate is hard-linked into place, which
+ *  fails when a key already exists — then that key is adopted. A rename
+ *  would silently replace a sibling daemon's key and orphan its store. */
 function ensureLocalKey(): Uint8Array {
   const cur = readLocalKey();
   if (cur) return cur;
   mkdirSync(joyHomeDir(), { recursive: true });
   const k = randomBytes(32);
-  const tmp = `${keyPath()}.tmp`;
+  const tmp = tmpPath(keyPath());
   writeFileSync(tmp, k.toString("base64") + "\n", { mode: 0o600 });
-  renameSync(tmp, keyPath());
+  try {
+    try {
+      linkSync(tmp, keyPath());
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") {
+        const existing = readLocalKey();
+        if (existing) return existing;
+        throw new Error("env.key exists but is not a 32-byte key");
+      }
+      // A filesystem without hard links: exclusive create is the fallback.
+      writeFileSync(keyPath(), k.toString("base64") + "\n", { flag: "wx", mode: 0o600 });
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      const existing = readLocalKey();
+      if (existing) return existing;
+    }
+    throw e;
+  } finally {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+  }
   return new Uint8Array(k);
 }
 
@@ -137,8 +210,24 @@ export function isValidEnvName(name: string): boolean { return NAME_RE.test(name
 
 /** A C string cannot carry NUL: Node truncates `process.env[k]` at the first
  *  one, so a value accepted here with a NUL reached agents as a DIFFERENT
- *  value than the one the store confirmed (#535). Rejected at the door. */
+ *  value than the one the store confirmed (#535). Rejected at the door — and
+ *  on the way out (`validated`), since a store sealed by the version that
+ *  accepted such a value is still on disk. */
 export function isValidEnvValue(value: unknown): value is string { return typeof value === "string" && !value.includes("\0"); }
+
+/** Split a decoded store into the values the environment can carry and the
+ *  names of those it cannot. A dropped value is never applied (it would be
+ *  silently truncated) and never resealed: the next write drops it from the
+ *  file, and applyEnvStore says so once. */
+function validated(raw: Record<string, string>): { env: Record<string, string>; dropped: string[] } {
+  const env = envDict();
+  const dropped: string[] = [];
+  for (const [k, v] of Object.entries(raw)) {
+    if (isValidEnvValue(v)) env[k] = v;
+    else dropped.push(k);
+  }
+  return { env, dropped };
+}
 
 /** Does this machineKey (base64) open the current store? True when there is
  *  no store yet, and true once the store is sealed under its own local key
@@ -156,59 +245,90 @@ export function machineKeyOpensStore(keyB64: string): boolean {
   } catch { return false; }
 }
 
-/** The store's contents, or an error string when it cannot be read (a
- *  tampered file fails authentication; a store sealed under a key that is
- *  gone cannot be opened). */
-export function readEnvStore(): { ok: true; env: Record<string, string> } | { ok: false; error: string } {
+export type EnvStoreRead =
+  | { ok: true; env: Record<string, string>; /** Names whose sealed value the environment cannot carry (#535). */ dropped?: string[] }
+  | { ok: false; error: string };
+
+/** Decode the store as it is on disk: under the local key, else under a relay
+ *  pairing's machineKey (`legacy: true`). No writes. */
+function decodeStore(): (EnvStoreRead & { legacy?: boolean }) {
   if (!existsSync(storePath())) return { ok: true, env: envDict() };
   let b64: string;
   try { b64 = readFileSync(storePath(), "utf8").trim(); } catch { return { ok: false, error: "store_unreadable" }; }
+  const done = (raw: Record<string, string>, legacy: boolean): EnvStoreRead & { legacy?: boolean } => {
+    const { env, dropped } = validated(raw);
+    return dropped.length ? { ok: true, env, dropped, legacy } : { ok: true, env, legacy };
+  };
   const local = readLocalKey();
   if (local) {
-    const env = open(b64, local);
-    if (env) return { ok: true, env };
+    const raw = open(b64, local);
+    if (raw) return done(raw, false);
   }
-  // Legacy: sealed under a relay pairing's machineKey (#533). Re-seal under
-  // the local key so every relay's daemon reads it from here on.
   for (const k of relayMachineKeys()) {
-    const env = open(b64, k);
-    if (env) {
-      try { writeEnvStore(env); } catch { /* still readable through this relay */ }
-      return { ok: true, env };
-    }
+    const raw = open(b64, k);
+    if (raw) return done(raw, true);
   }
   return { ok: false, error: "store_unreadable" };
+}
+
+/** The store's contents, or an error string when it cannot be read (a
+ *  tampered file fails authentication; a store sealed under a key that is
+ *  gone cannot be opened). A store still sealed under a relay pairing's
+ *  machineKey (#533) is re-sealed under the local key so every relay's
+ *  daemon reads it from here on — inside the lock, and only if it is still
+ *  legacy once the lock is held. */
+export function readEnvStore(): EnvStoreRead {
+  const cur = decodeStore();
+  if (!cur.ok) return cur;
+  const { legacy, ...read } = cur;
+  if (!legacy) return read;
+  try {
+    withStoreLock(() => {
+      const again = decodeStore();
+      if (again.ok && again.legacy) writeEnvStore(again.env);
+    });
+  } catch { /* still readable through this relay */ }
+  return read;
 }
 
 function writeEnvStore(env: Record<string, string>): { ok: true } | { ok: false; error: string } {
   const key = ensureLocalKey();
   mkdirSync(joyHomeDir(), { recursive: true });
-  const tmp = `${storePath()}.tmp`;
-  writeFileSync(tmp, seal(env, key) + "\n", { mode: 0o600 });
-  renameSync(tmp, storePath());
+  const tmp = tmpPath(storePath());
+  try {
+    writeFileSync(tmp, seal(env, key) + "\n", { mode: 0o600 });
+    renameSync(tmp, storePath());
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* never written */ }
+    throw e;
+  }
   return { ok: true };
 }
 
 export function setEnvVar(name: string, value: string): { ok: true } | { ok: false; error: string } {
   if (!isValidEnvName(name)) return { ok: false, error: "bad_name" };
   if (!isValidEnvValue(value)) return { ok: false, error: "bad_value" };
-  const cur = readEnvStore();
-  if (!cur.ok) return cur;
-  const next = envDict();
-  Object.assign(next, cur.env);
-  next[name] = value;
-  return writeEnvStore(next);
+  return withStoreLock(() => {
+    const cur = decodeStore();
+    if (!cur.ok) return cur;
+    const next = envDict();
+    Object.assign(next, cur.env);
+    next[name] = value;
+    return writeEnvStore(next);
+  });
 }
 
 export function unsetEnvVar(name: string): { ok: true; existed: boolean } | { ok: false; error: string } {
-  const cur = readEnvStore();
-  if (!cur.ok) return cur;
-  const existed = Object.hasOwn(cur.env, name);
-  const next = envDict();
-  Object.assign(next, cur.env);
-  delete next[name];
-  const w = writeEnvStore(next);
-  return w.ok ? { ok: true, existed } : w;
+  return withStoreLock(() => {
+    const cur = decodeStore();
+    if (!cur.ok) return cur;
+    const existed = Object.hasOwn(cur.env, name);
+    const next = envDict();
+    Object.assign(next, cur.env);
+    delete next[name];
+    const w = writeEnvStore(next);
+    return w.ok ? { ok: true, existed } : w;
+  });
 }
 
 /** Names only, for the app/CLI listing — values never leave the daemon in
@@ -232,6 +352,13 @@ export function applyEnvStore(): void {
   { const probe = readEnvStore(); if (!probe.ok && existsSync(storePath()) && !warnedUnreadable) { warnedUnreadable = true; process.stderr.write(`[env] ${storePath()} is ${probe.error} — provider keys are NOT being applied; run \`joy env ls\` to inspect, or delete the file and set the keys again\n`); } }
   const cur = readEnvStore();
   if (!cur.ok) return;
+  // A value the environment cannot carry is not applied at all — installing
+  // it would hand agents a silently truncated value (#535). Said once per
+  // distinct set of names.
+  if (cur.dropped?.length) {
+    const key = cur.dropped.join(",");
+    if (warnedDropped !== key) { warnedDropped = key; process.stderr.write(`[env] ${storePath()}: the value(s) of ${cur.dropped.join(", ")} contain a NUL byte and cannot be environment values — not applied; set them again to replace them\n`); }
+  }
   for (const k of appliedFromStore) {
     if (!Object.hasOwn(cur.env, k)) { delete process.env[k]; appliedFromStore.delete(k); }
   }
@@ -252,16 +379,19 @@ export function migrateLegacyEnvFile(log: (line: string) => void = () => {}): vo
     if (isValidEnvValue(v)) parsed[k] = v;
     else log(`[env] ~/.joy/env: ${k} contains a NUL byte and cannot be an environment value — skipped`);
   }
-  const cur = readEnvStore();
-  if (!cur.ok) {
-    log(`[env] ~/.joy/env is plaintext and cannot be sealed yet (${cur.error}); loading it as-is`);
+  const w = withStoreLock((): { ok: true } | { ok: false; error: string } => {
+    const cur = decodeStore();
+    if (!cur.ok) return cur;
+    const merged = envDict();
+    Object.assign(merged, parsed, cur.env); // an existing sealed value wins
+    return writeEnvStore(merged);
+  });
+  if (!w.ok) {
+    if (w.error === "store_busy") { log(`[env] could not seal ~/.joy/env: ${w.error}`); return; }
+    log(`[env] ~/.joy/env is plaintext and cannot be sealed yet (${w.error}); loading it as-is`);
     for (const [k, v] of Object.entries(parsed)) if (!Object.hasOwn(process.env, k)) process.env[k] = v;
     return;
   }
-  const merged = envDict();
-  Object.assign(merged, parsed, cur.env); // an existing sealed value wins
-  const w = writeEnvStore(merged);
-  if (!w.ok) { log(`[env] could not seal ~/.joy/env: ${w.error}`); return; }
   try { unlinkSync(legacyPath()); } catch { /* leave it */ }
   log(`[env] sealed ${Object.keys(parsed).length} variable(s) from ~/.joy/env into env.sealed and removed the plaintext file`);
 }

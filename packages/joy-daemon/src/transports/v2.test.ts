@@ -482,6 +482,34 @@ describe("wave C transport fixes", () => {
     }
   });
 
+  test("#600 residual: a reset outside Date's range is null, the quota rows survive", async () => {
+    const home = mkdtempSync(join(tmpdir(), "joy-codex-home-"));
+    const day = join(home, "sessions", "2026", "09", "05");
+    mkdirSync(day, { recursive: true });
+    writeFileSync(join(day, "rollout-2026-09-05T10-00-00-aaaa.jsonl"), JSON.stringify({
+      timestamp: "2026-09-05T10:00:00.000Z", type: "event_msg",
+      payload: { type: "token_count", rate_limits: {
+        primary: { used_percent: 25, window_minutes: 300, resets_at: 1e100 },
+        secondary: { used_percent: 10, window_minutes: 10080, resets_in_seconds: 1e300 },
+      } },
+    }) + "\n");
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    try {
+      const r = await call("GET", "/v2/harnesses/codex/limits");
+      expect(r.status).toBe(200);
+      expect(r.json.status).toEqual({ state: "ok" });
+      const byId = Object.fromEntries(r.json.limits.map((l: any) => [l.id, l]));
+      expect(byId.primary.usedPercent).toBe(25);
+      expect(byId.primary.resetsAt).toBeNull();
+      expect(byId.secondary.usedPercent).toBe(10);
+      expect(byId.secondary.resetsAt).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("#604 a model filter the aggregated report cannot honour is refused, not half-applied", async () => {
     const r = await call("GET", "/v2/usage?model=Sonnet&period=today");
     expect(r.status).toBe(422);

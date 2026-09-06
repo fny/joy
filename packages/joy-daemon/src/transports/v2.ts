@@ -283,10 +283,15 @@ route("GET", "/v2/harnesses/:harness/limits", async (_ctx, p) => {
     // The normalized contract is an ISO string or null. Codex writes resets_at
     // as Unix SECONDS; passing the number through made `new Date(resetsAt)`
     // read it as milliseconds — a reset in January 1970 instead of 2033 (#600).
+    // Every computed instant is bounded to what Date can represent: a finite
+    // but absurd value (1e100 seconds) made toISOString throw "Invalid time
+    // value" and the whole quota route 500 — the reset is unusable evidence,
+    // the percentages beside it are not, so it becomes null instead.
+    const isoAt = (ms: number): string | null => (Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : null);
     const resetIso = (w: CodexWindow): string | null => {
-      if (typeof w.resets_at === "string") return w.resets_at;
-      if (typeof w.resets_at === "number" && Number.isFinite(w.resets_at)) return new Date(w.resets_at * 1000).toISOString();
-      if (typeof w.resets_in_seconds === "number" && Number.isFinite(w.resets_in_seconds)) return new Date(observedAt + w.resets_in_seconds * 1000).toISOString();
+      if (typeof w.resets_at === "string") return isoAt(Date.parse(w.resets_at)) === null ? null : w.resets_at;
+      if (typeof w.resets_at === "number") return isoAt(w.resets_at * 1000);
+      if (typeof w.resets_in_seconds === "number") return isoAt(observedAt + w.resets_in_seconds * 1000);
       return null;
     };
     const limits = Object.entries(r.limits as Record<string, CodexWindow | undefined>)

@@ -90,6 +90,29 @@ describe("readCodexLimits", () => {
     expect(r.ok && r.limits.primary?.used_percent).toBe(95);
   });
 
+  it("an actively updated rollout is found past seven populated days of newer sessions (#543 residual)", async () => {
+    const { readCodexLimits } = await import("./limits");
+    const { utimesSync } = await import("node:fs");
+    // 63 newer-created rollouts over seven busy days, all last observed at
+    // 08:00; the live session was created on the 1st and observed 95% at
+    // noon. Its mtime is the newest in the store; nothing else may hide it.
+    for (let d = 2; d <= 8; d++) {
+      for (let n = 0; n < 9; n++) {
+        const rel = `2026/09/0${d}/rollout-2026-09-0${d}T0${n}-00-00-n${n}.jsonl`;
+        rollout(rel, [{ ts: "2026-09-08T08:00:00Z", pct: 5 }]);
+        const t = new Date("2026-09-08T08:00:00Z");
+        utimesSync(join(home, "sessions", rel), t, t);
+      }
+    }
+    const live = "2026/09/01/rollout-2026-09-01T09-00-00-live.jsonl";
+    rollout(live, [{ ts: "2026-09-08T12:00:00Z", pct: 95 }]);
+    const t = new Date("2026-09-08T12:00:00Z");
+    utimesSync(join(home, "sessions", live), t, t);
+    const r = readCodexLimits(join(home, "sessions"));
+    expect(r.ok && r.limits.primary?.used_percent).toBe(95);
+    expect(r.ok && r.limits.observedAt).toBe("2026-09-08T12:00:00Z");
+  });
+
   it("the default root honours CODEX_HOME (#546)", async () => {
     const { readCodexLimits } = await import("./limits");
     process.env.CODEX_HOME = home;

@@ -120,11 +120,17 @@ interface FileAgg {
   msgs: Msg[];
   /** YYYY-MM-DD → user prompt count */
   perDayTurns: Map<string, number>;
-  /** `${YYYY-MM-DD} ${tool}` → calls — per day so a date-ranged query can
-   *  drop the out-of-range ones (#490). */
-  perDayTools: Map<string, number>;
-  /** `${YYYY-MM-DD} ${mcp server}` → calls (#490). */
-  perDayMcp: Map<string, number>;
+  /** Every tool_use block, with its day so a date-ranged query can drop the
+   *  out-of-range ones (#490) and its block id so a call copied into another
+   *  transcript along with its message is counted once (#491). */
+  tools: ToolCall[];
+}
+
+interface ToolCall {
+  /** The tool_use block id (null when the transcript carries none). */
+  id: string | null;
+  day: string;
+  name: string;
 }
 
 function localDay(ts: string): string {
@@ -133,15 +139,27 @@ function localDay(ts: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** Claude Code's own envelopes around user-role entries: slash-command
+ *  machinery, `!cmd` capture, hook/system injections, background-task
+ *  completions. Matched by NAME — a bare "starts with <" test also rejected a
+ *  person pasting HTML/XML (`<div>Explain this HTML</div>` counted zero turns). */
+const SYNTHETIC_WRAPPERS = [
+  "command-name", "command-message", "command-args",
+  "local-command-stdout", "local-command-stderr", "local-command-caveat",
+  "bash-input", "bash-stdout", "bash-stderr",
+  "system-reminder", "task-notification", "user-prompt-submit-hook",
+];
+const SYNTHETIC_RE = new RegExp(`^\\s*<(?:${SYNTHETIC_WRAPPERS.join("|")})(?=[\\s>/])`, "i");
+
 /** Is this user entry a prompt the person typed (or pasted), as opposed to a
- *  tool_result, an isMeta wrapper, or a CLI/system envelope whose text starts
- *  with a tag (`<command-name>`, `<local-command-stdout>`, …)? Those were
- *  counted as turns and inflated the prompt totals (#492). Mirrors
- *  isUserPromptLine in transcript.ts, plus image prompts. */
+ *  tool_result, an entry flagged synthetic by its metadata (isMeta, the
+ *  compaction summary), or a CLI/system envelope whose text opens with one of
+ *  the KNOWN wrapper tags above? Those were counted as turns and inflated the
+ *  prompt totals (#492); ordinary HTML/XML a person typed is a prompt. */
 function isRealPrompt(e: Record<string, any>): boolean {
-  if (e.isMeta) return false;
+  if (e.isMeta || e.isCompactSummary) return false;
   const c = e.message?.content;
-  const realText = (s: unknown) => typeof s === "string" && s.trim().length > 0 && !s.trim().startsWith("<");
+  const realText = (s: unknown) => typeof s === "string" && s.trim().length > 0 && !SYNTHETIC_RE.test(s);
   if (typeof c === "string") return realText(c);
   if (!Array.isArray(c)) return false;
   return c.some((b: any) => b?.type === "image" || (b?.type === "text" && realText(b.text)));
@@ -161,8 +179,7 @@ async function parseFile(path: string, sessionId: string, subagent: boolean): Pr
     lastTs: 0,
     msgs: [],
     perDayTurns: new Map(),
-    perDayTools: new Map(),
-    perDayMcp: new Map(),
+    tools: [],
   };
 
   // message.id → final usage (entries for the same message repeat usage;
@@ -191,16 +208,14 @@ async function parseFile(path: string, sessionId: string, subagent: boolean): Pr
         if (t > agg.lastTs) agg.lastTs = t;
       }
       if (!agg.project && typeof e.cwd === "string" && e.cwd) agg.project = e.cwd;
-      // Tool calls are counted across ALL entries — each entry carries the
-      // message's new content block, so blocks never repeat. Keyed by the
-      // entry's day so a ranged query can filter them (#490).
+      // Tool calls are collected across ALL entries — each entry carries the
+      // message's new content block, so blocks never repeat within a file.
+      // Kept with their day (#490) and block id (#491) for computeUsage.
       if (Array.isArray(msg.content)) {
         const day = localDay(ts);
         for (const block of msg.content) {
           if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
-          const mcpMatch = /^mcp__([^_]+(?:_[^_]+)*?)__/.exec(block.name);
-          if (mcpMatch) agg.perDayMcp.set(`${day} ${mcpMatch[1]}`, (agg.perDayMcp.get(`${day} ${mcpMatch[1]}`) ?? 0) + 1);
-          else agg.perDayTools.set(`${day} ${block.name}`, (agg.perDayTools.get(`${day} ${block.name}`) ?? 0) + 1);
+          agg.tools.push({ id: typeof block.id === "string" && block.id ? block.id : null, day, name: block.name });
         }
       }
       if (msg.usage && typeof msg.id === "string" && typeof msg.model === "string" && msg.model !== "<synthetic>") {
@@ -236,13 +251,12 @@ const fileCache = new Map<string, FileAgg>();
 // files. A background refresh (see server.ts) recomputes every 2h so the cache
 // is warm before anyone asks.
 // 2: per-message identities + per-day tools/mcp + subagent/birthtime fields
-//    (#490 #491 #493) — a format-1 cache is simply discarded and re-parsed.
-const CACHE_FORMAT = 2;
+//    (#490 #491 #493) — an older cache is simply discarded and re-parsed.
+// 3: tool calls keep their block ids so copied history dedupes (#491).
+const CACHE_FORMAT = 3;
 
-type FileAggJson = Omit<FileAgg, "perDayTurns" | "perDayTools" | "perDayMcp"> & {
+type FileAggJson = Omit<FileAgg, "perDayTurns"> & {
   perDayTurns: Array<[string, number]>;
-  perDayTools: Array<[string, number]>;
-  perDayMcp: Array<[string, number]>;
 };
 
 function usageCachePath(): string {
@@ -261,8 +275,6 @@ function loadDiskCacheOnce(): void {
         ...j,
         path,
         perDayTurns: new Map(j.perDayTurns),
-        perDayTools: new Map(j.perDayTools),
-        perDayMcp: new Map(j.perDayMcp),
       });
     }
   } catch { /* no cache yet, or unreadable — cold parse repopulates it */ }
@@ -275,8 +287,6 @@ function saveDiskCache(): void {
       files[path] = {
         ...agg,
         perDayTurns: [...agg.perDayTurns],
-        perDayTools: [...agg.perDayTools],
-        perDayMcp: [...agg.perDayMcp],
       };
     }
     mkdirSync(joyStateDir(), { recursive: true });
@@ -402,6 +412,25 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   const created = (a: FileAgg) => (a.birthtimeMs > 0 ? a.birthtimeMs : a.mtimeMs);
   aggs.sort((a, b) => created(a) - created(b) || a.mtimeMs - b.mtimeMs || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const owned = new Set<string>();
+  // WHICH observation of a shared message is charged is a separate question
+  // from who owns it: the owning (oldest) file may hold an early streaming
+  // snapshot of the call (1 output token) while the copy carries the final
+  // count (100). The most complete observation across every file wins — the
+  // one with the most output tokens, then the most tokens overall.
+  const completeness = (t: Tok) => [t.output, t.input + t.cacheRead + t.cacheWrite] as const;
+  const finalMsg = new Map<string, Msg>();
+  for (const agg of aggs) {
+    for (const m of agg.msgs) {
+      const cur = finalMsg.get(m.id);
+      if (!cur) { finalMsg.set(m.id, m); continue; }
+      const [o1, t1] = completeness(cur.tok);
+      const [o2, t2] = completeness(m.tok);
+      if (o2 > o1 || (o2 === o1 && t2 > t1)) finalMsg.set(m.id, m);
+    }
+  }
+  // Tool calls copied along with their message carry the same block id;
+  // the same ownership rule counts each once.
+  const ownedTools = new Set<string>();
 
   const total = zeroTok();
   const daily = new Map<string, { cost: number; calls: number }>();
@@ -411,8 +440,6 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   const tools = new Map<string, number>();
   const mcp = new Map<string, number>();
   const inRange = (day: string) => day >= q.fromDay && day <= q.toDay;
-  /** Split a `${day} ${name}` key. */
-  const splitKey = (key: string): [string, string] => [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
 
   for (const agg of aggs) {
     const project = sessionProject.get(agg.sessionId) ?? "";
@@ -420,9 +447,10 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
     let inRangeCalls = 0;
     const sessionModels = new Map<string, number>();
 
-    for (const { id, day, model, tok } of agg.msgs) {
-      if (owned.has(id)) continue; // already charged to an older file (#491)
-      owned.add(id);
+    for (const own of agg.msgs) {
+      if (owned.has(own.id)) continue; // already charged to an older file (#491)
+      owned.add(own.id);
+      const { id, day, model, tok } = finalMsg.get(own.id) ?? own;
       if (!day || !inRange(day)) continue;
 
       addTok(total, tok);
@@ -480,13 +508,17 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
 
     // Tools/MCP obey the same day range as the tokens (#490): they used to be
     // lifetime-per-file, so "today" reported every tool the session ever ran.
-    for (const [key, n] of agg.perDayTools) {
-      const [day, name] = splitKey(key);
-      if (inRange(day)) tools.set(name, (tools.get(name) ?? 0) + n);
-    }
-    for (const [key, n] of agg.perDayMcp) {
-      const [day, name] = splitKey(key);
-      if (inRange(day)) mcp.set(name, (mcp.get(name) ?? 0) + n);
+    // A block id seen in an older file is that file's call (#491); a block
+    // without an id has no identity to share and counts where it is.
+    for (const { id, day, name } of agg.tools) {
+      if (id) {
+        if (ownedTools.has(id)) continue;
+        ownedTools.add(id);
+      }
+      if (!inRange(day)) continue;
+      const mcpMatch = /^mcp__([^_]+(?:_[^_]+)*?)__/.exec(name);
+      if (mcpMatch) mcp.set(mcpMatch[1], (mcp.get(mcpMatch[1]) ?? 0) + 1);
+      else tools.set(name, (tools.get(name) ?? 0) + 1);
     }
   }
 
