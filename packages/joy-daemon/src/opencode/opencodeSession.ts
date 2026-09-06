@@ -331,6 +331,7 @@ export class OpencodeSession implements AgentSession {
         // (admittedSeq is the server's own ordering receipt).
         if (this.#isEnded()) return; // retired mid-request: do not touch the (cleared) spool (#43)
         // A cancel that raced the reply wins: never overwrite its outcome.
+        if (r.messageID) this.#lastAdmitted = item.clientId;
         if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
         // The HTTP ack is admission evidence too: a prompt cancelled while
         // this request was in flight (tombstoned by cancelQueued) is now
@@ -430,6 +431,7 @@ export class OpencodeSession implements AgentSession {
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
         case "confirmPrompt":
           if (eff.messageID) {
+            this.#lastAdmitted = eff.messageID;
             this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
             if (this.#cancelledIds.has(eff.messageID) && this.#client && this.#ocSessionId) {
               // Admitted after the user cancelled it: interrupt now (#77).
@@ -641,7 +643,11 @@ export class OpencodeSession implements AgentSession {
         // retry: the tombstone alone is the evidence (Astra on 5b06ba5c, #77).
         const n = (this.#interruptAttempts.get(id) ?? 0) + 1;
         this.#interruptAttempts.set(id, n);
-        if (n < INTERRUPT_RETRY_MAX) setTimeout(() => { if (this.#cancelledIds.has(id) && !this.#isEnded()) this.#interruptCancelled(id, client, ocSessionId); }, INTERRUPT_RETRY_MS).unref?.();
+        // Fenced to the cancelled work: the endpoint interrupts the SESSION,
+        // so once a newer prompt was admitted the retry would stop that one
+        // instead (Astra on af76c787). The tombstone then stays for the next
+        // admission evidence of THIS prompt, if any.
+        if (n < INTERRUPT_RETRY_MAX) setTimeout(() => { if (this.#cancelledIds.has(id) && !this.#isEnded() && this.#lastAdmitted === id) this.#interruptCancelled(id, client, ocSessionId); }, INTERRUPT_RETRY_MS).unref?.();
         else process.stderr.write(`[opencode ${this.id}] giving up interrupting cancelled ${id} after ${n} attempts\n`);
       })
       .finally(() => {
@@ -655,6 +661,8 @@ export class OpencodeSession implements AgentSession {
   #interrupting = new Set<string>();
   #interruptAgain = new Set<string>();
   #interruptAttempts = new Map<string, number>();
+  /** clientId of the most recently admitted prompt (HTTP ack or SSE confirm). */
+  #lastAdmitted: string | null = null;
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
     // Terminal outcomes are monotonic: a late admission or reply for an item

@@ -144,7 +144,15 @@ export default React.memo(function CleanupScreen() {
             const deletable: string[] = [];
             const changed: string[] = [];
             for (const id of fresh.deleteNow) {
-                if (joyStateOf(id) === 'archived' || await daemonSaysDetached(id)) deletable.push(id); else changed.push(id);
+                if (joyStateOf(id) === 'archived') { deletable.push(id); continue; }
+                // A detached card is deleted only after the daemon itself commits
+                // to "ended" at the decision instant: the conditional kill
+                // (ifStatus=ended) archives a truly ended session and answers
+                // 409 for one that restarted meanwhile — the GET alone left a
+                // window between observation and delete (Astra on ffdfc7e3, #173).
+                if (!(await daemonSaysDetached(id))) { changed.push(id); continue; }
+                const r = await sessionKill(id, { ifStatus: 'ended' });
+                if (r.success || /already|not found|404|ended/i.test(r.message)) deletable.push(id); else changed.push(id);
             }
             const kept: string[] = [];
             for (const id of fresh.stopFirst) {

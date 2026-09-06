@@ -930,11 +930,26 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       } else {
         registry.saveRecord(session.id, { v2SessionId: offer.sessionId });
       }
-      await api("POST", `/daemon/sessions/${offer.sessionId}/bind`, {
-        spawnCommandId: offer.commandId,
-        localSessionId: session.id,
-        sessionKeyEnvelope: envelope,
-      }, leaseRef);
+      try {
+        await api("POST", `/daemon/sessions/${offer.sessionId}/bind`, {
+          spawnCommandId: offer.commandId,
+          localSessionId: session.id,
+          sessionKeyEnvelope: envelope,
+        }, leaseRef);
+      } catch (e) {
+        const st = (e as { status?: number }).status;
+        if (st === 404 || st === 410) {
+          // The relay row is gone — the app timed out and cancelled the spawn
+          // after we had already created the agent. Nothing will ever bind or
+          // drive it: kill it instead of leaving an orphan running (Astra on
+          // 28208445, #151).
+          abandonedSpawns.add(offer.commandId);
+          log(`spawn ${offer.sessionId.slice(0, 8)}: relay session gone at bind (${st}) — killing local ${session.id}`);
+          try { await session.forceKill(); } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: kill of orphaned ${session.id} failed: ${String(e2)}`); }
+          return;
+        }
+        throw e;
+      }
       bound.set(offer.sessionId, session.id); boundByLocal.set(session.id, offer.sessionId);
       // Stamp the session card with its v2 link so the app can address this
       // session — envelope included so the app needs no extra fetch to obtain
