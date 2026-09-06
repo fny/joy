@@ -1313,7 +1313,7 @@ class Sync {
         if (!v2ctx) throw new Error(`Failed to forward-sync ${sessionId}: no v2 link`);
         // A gap left by an earlier read is re-tried first whenever the key
         // has changed since it failed (#128).
-        await this.replayUnopenableGap(sessionId, encryption, v2ctx, gen);
+        await this.replayUnopenableGap(sessionId, encryption, v2ctx, fromSeq, gen);
         while (true) {
             // Read from the relay's event log (seq-ordered, forward-paged).
             const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
@@ -1719,11 +1719,20 @@ class Sync {
      * reach keeps its old stamp and is where the next sync continues — the
      * old code deleted the whole range once five pages had opened, and the
      * rows past page five were lost for good.
+     *
+     * A page is an unbounded forward read, so it can carry rows PAST the
+     * range being replayed. Only failures inside the range settle it — a
+     * failure beyond it used to re-stamp a range whose own rows had all
+     * opened, and the current key then never revisited them. Rows beyond
+     * the range that the head (`headSeq`) has already passed are recorded
+     * as their own range under this key; rows past the head are the
+     * forward read's to retry.
      */
     private replayUnopenableGap = async (
         sessionId: string,
         encryption: ReturnType<Encryption['getSessionEncryption']> & {},
         v2ctx: { base: string; v2SessionId: string; key: Uint8Array | null; token: string },
+        headSeq: number,
         gen: number,
     ) => {
         const ranges = this.unopenableGaps.get(sessionId);
@@ -1738,6 +1747,7 @@ class Sync {
             let opened = 0;
             let stalled = false;
             const sealed: UnopenableRange[] = [];
+            const beyond: number[] = [];
             while (afterSeq < range.toSeq && pages < Sync.MAX_FORWARD_CATCHUP_PAGES) {
                 const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
                 this.assertFresh(sessionId, gen);
@@ -1751,17 +1761,28 @@ class Sync {
                 // Nothing beyond this page: the rest of the range holds no rows.
                 if (!data.hasMore) pageEnd = range.toSeq;
                 if (pageEnd <= afterSeq) { stalled = true; break; }
-                const unopenable = data.unopenable ?? 0;
+                const failed = data.unopenableSeqs;
+                const inRange = failed ? failed.filter((seq) => seq > afterSeq && seq <= range.toSeq) : [];
+                const unopenable = failed ? inRange.length : (data.unopenable ?? 0);
                 if (unopenable > 0) {
                     stillSealed += unopenable;
-                    sealed.push({ fromSeq: afterSeq, toSeq: pageEnd, keyId, count: unopenable });
-                } else {
-                    opened += messages.length;
+                    sealed.push({ ...Sync.sealedSpan({ unopenable, unopenableSeqs: inRange }, afterSeq, pageEnd), keyId });
                 }
+                opened += messages.length;
+                if (failed) for (const seq of failed) if (seq > range.toSeq && seq <= headSeq) beyond.push(seq);
                 afterSeq = pageEnd;
             }
             let next = Sync.cutRange(this.unopenableGaps.get(sessionId) ?? [], range.fromSeq, range.toSeq);
             for (const s of sealed) next = Sync.settleRange(next, s);
+            // Failures past this range that the head already stepped over:
+            // nobody else will read them again, so they are a gap of their
+            // own — unless a recorded range already holds them (it replays
+            // under its own stamp).
+            const orphaned = beyond.filter((seq) => !next.some((r) => seq > r.fromSeq && seq <= r.toSeq));
+            if (orphaned.length > 0) {
+                next = Sync.settleRange(next, { ...Sync.sealedSpan({ unopenableSeqs: orphaned }, 0, 0), keyId });
+                log.log(`💬 replayUnopenableGap: ${orphaned.length} row(s) in ${sessionId} past ${range.fromSeq + 1}..${range.toSeq} unopenable with the current key — ${orphaned[0]}..${orphaned[orphaned.length - 1]} kept as a recoverable gap of its own (#128)`);
+            }
             if (afterSeq < range.toSeq) {
                 // Unvisited remainder: the continuation cursor. A relay that
                 // made no progress is stamped with this key instead, so it is
