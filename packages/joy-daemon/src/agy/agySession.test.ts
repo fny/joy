@@ -41,6 +41,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 import { AgySession, type AgyInit } from "./agySession";
 import { loadWindowRecord } from "../domain/windowRecord";
+import { queueFor } from "../domain/queueFacade";
 
 let home: string;
 beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-agy-")); process.env.JOY_HOME_DIR = home; });
@@ -77,8 +78,8 @@ function harness(id: string, init: Partial<AgyInit> = {}) {
 test("#466: exit before stdout drains does not advance the queue; late lines stay on their own turn", async () => {
   H.procs.length = 0;
   const { s, sent } = harness("agy-466");
-  s.enqueue("first", { mirrorToRelay: false });
-  s.enqueue("second", { mirrorToRelay: false });
+  queueFor(s).accept("first", { mirrorToRelay: false });
+  queueFor(s).accept("second", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   const p1 = H.procs[0];
   const t1 = sent.find((e) => e.t === "turn-start")!.turn;
@@ -88,7 +89,7 @@ test("#466: exit before stdout drains does not advance the queue; late lines sta
   await settle(30);
   expect(H.procs).toHaveLength(1);                       // turn two NOT started yet
   expect(sent.filter((e) => e.t === "turn-end")).toEqual([]); // turn one still open
-  expect(s.queueState().inFlight).toBe("first");
+  expect(queueFor(s).state().running?.text).toBe("first");
 
   // The pipe drains: these belong to turn ONE.
   p1.stdout.write(answer(1, "answer one"));
@@ -115,7 +116,7 @@ test("#466: exit before stdout drains does not advance the queue; late lines sta
   expect(sent.filter((e) => e.t === "text").map((e) => [e.turn, e.text])).toEqual([[t1, "answer one"], [t2, "answer two"]]);
   expect(sent.filter((e) => e.t === "turn-end").map((e) => [e.turn, e.status])).toEqual([[t1, "completed"], [t2, "completed"]]);
   // The queue settles only once child two's stdout has closed too.
-  await vi.waitFor(() => expect(s.queueState().inFlight).toBeNull());
+  await vi.waitFor(() => expect(queueFor(s).state().running).toBeNull());
   expect(s.busy()).toBe(false);
 
   // Finalization is idempotent: a duplicate exit or a late error changes nothing.
@@ -131,26 +132,26 @@ test("#466: exit before stdout drains does not advance the queue; late lines sta
 test("#466: stdout closing BEFORE exit still waits for the exit status", async () => {
   H.procs.length = 0;
   const { s, sent } = harness("agy-466-order");
-  s.enqueue("only", { mirrorToRelay: false });
+  queueFor(s).accept("only", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   const p = H.procs[0];
   p.stdout.write(answer(0, "done"));
   p.stdout.end(); // EOF first — no result line: the exit code decides the status
   await settle(20);
   expect(sent.filter((e) => e.t === "turn-end")).toEqual([]);
-  expect(s.queueState().inFlight).toBe("only");
+  expect(queueFor(s).state().running?.text).toBe("only");
   p.exitCode = 1; p.emit("exit", 1);
   await vi.waitFor(() => expect(sent.filter((e) => e.t === "turn-end")).toHaveLength(1));
   expect(sent.find((e) => e.t === "turn-end")).toMatchObject({ status: "failed" });
   expect(sent.find((e) => e.t === "text")).toMatchObject({ text: "done" }); // the drained answer was kept
-  await vi.waitFor(() => expect(s.queueState().inFlight).toBeNull());
+  await vi.waitFor(() => expect(queueFor(s).state().running).toBeNull());
   s.end("killed");
 });
 
 test("#467: text buffered when the child dies without `result` reaches relay AND chat, once, before the turn end", async () => {
   H.procs.length = 0;
   const { s, sent, chat } = harness("agy-467");
-  s.enqueue("crash", { mirrorToRelay: false });
+  queueFor(s).accept("crash", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   const p = H.procs[0];
   p.stdout.write(delta(1, "partial "));
@@ -174,7 +175,7 @@ test("#467: text buffered when the child dies without `result` reaches relay AND
 test("#467: a cancelled turn flushes its buffered text too", async () => {
   H.procs.length = 0;
   const { s, sent, chat } = harness("agy-467-cancel");
-  s.enqueue("stop me", { mirrorToRelay: false });
+  queueFor(s).accept("stop me", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   H.procs[0].stdout.write(delta(2, "half an answer"));
   await settle(20);
@@ -194,7 +195,7 @@ test("#468: a pending --continue survives a restart until the conversation id is
   const gen1 = harness(id, { conversationId: undefined, continueLast: true });
   gen1.s.end("restart");
   const gen2 = harness(id, { conversationId: undefined });
-  gen2.s.enqueue("hello", { mirrorToRelay: false });
+  queueFor(gen2.s).accept("hello", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   expect(lastSpawnArgs()).toContain("--continue");
   expect(lastSpawnArgs()).not.toContain("--conversation");
@@ -207,7 +208,7 @@ test("#468: a pending --continue survives a restart until the conversation id is
   expect((rec.agySettings as { continueLast?: boolean }).continueLast).toBeUndefined();
   gen2.s.end("restart");
   const gen3 = harness(id, { conversationId: rec.agySettings?.conversationId });
-  gen3.s.enqueue("again", { mirrorToRelay: false });
+  queueFor(gen3.s).accept("again", { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(2));
   expect(lastSpawnArgs()).not.toContain("--continue");
   expect(lastSpawnArgs().slice(lastSpawnArgs().indexOf("--conversation"))).toEqual(expect.arrayContaining(["--conversation", "conv-learned"]));
@@ -218,7 +219,7 @@ test("#469: a /title survives a restart along with its lock", async () => {
   H.procs.length = 0;
   const id = "agy-469";
   const gen1 = harness(id);
-  gen1.s.enqueue("/title Release review", { mirrorToRelay: false });
+  queueFor(gen1.s).accept("/title Release review", { mirrorToRelay: false });
   expect(gen1.s.summary).toBe("Release review");
   expect(gen1.summaries).toEqual(["Release review"]);
   gen1.s.end("restart");
@@ -226,7 +227,7 @@ test("#469: a /title survives a restart along with its lock", async () => {
   const gen2 = harness(id);
   expect(gen2.s.summary).toBe("Release review");            // restored from the record
   expect(gen2.summaries).toEqual(["Release review"]);       // pushed onto the rebuilt card
-  gen2.s.enqueue("please look at the flaky test", { mirrorToRelay: false }); // the lock still holds
+  queueFor(gen2.s).accept("please look at the flaky test", { mirrorToRelay: false }); // the lock still holds
   expect(gen2.s.summary).toBe("Release review");
   expect(gen2.summaries).toEqual(["Release review"]);
   gen2.s.end("killed");
@@ -236,7 +237,7 @@ test("#56: the prompt travels over stdin as a stream-json user message, never in
   H.procs.length = 0;
   const { s } = harness("agy-56");
   const big = "x".repeat(200_000); // > MAX_ARG_STRLEN (128 KiB): E2BIG as an argument
-  s.enqueue(big, { mirrorToRelay: false });
+  queueFor(s).accept(big, { mirrorToRelay: false });
   await vi.waitFor(() => expect(H.procs).toHaveLength(1));
   const args = lastSpawnArgs();
   expect(args.some((a) => a.includes("xxxx"))).toBe(false);
