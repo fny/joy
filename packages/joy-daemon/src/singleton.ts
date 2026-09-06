@@ -3,28 +3,31 @@
 // Only one daemon may run per machine: two would both recover() the same tmux
 // windows and attach duplicate relay sessions, producing duplicate messages.
 // The fixed HTTP port is only an implicit guard (bypassable via a different
-// PORT, and EADDRINUSE crashes uncaught), so we take an explicit pidfile lock
-// that is independent of the port.
+// PORT, and EADDRINUSE crashes uncaught), so we take an explicit lock that is
+// independent of the port.
 //
-// The lock is published ATOMICALLY WITH ITS FULL RECORD: the record is written
-// to a private temp file first and link(2)ed into place — link fails EEXIST
-// when anything is there, and no reader can ever observe an empty or partial
-// lock. The old O_EXCL-create-then-write left a window in which a second
-// starter read the not-yet-written file as "holder pid 0", judged it stale,
-// unlinked it and took its own; the first then finished writing into an
-// unlinked descriptor and ALSO reported success — two daemons, same sessions
-// (#589). A lock left by a crashed daemon (dead pid) is stale and reclaimed,
-// but reclamation renames the exact file it judged stale aside and verifies
-// it got THAT file — a newer owner's lock that landed in between is restored,
-// never unlinked.
+// The mutual exclusion is an OS-BACKED lock: an SQLite connection holding
+// `BEGIN IMMEDIATE` on `<lockPath>.db` (node:sqlite, already a dependency via
+// forkHarness). SQLite's fcntl/flock locking is atomic and dies with the
+// process, so there is nothing to reclaim and no reclaim protocol to race.
+// Every pure-file protocol tried before (#589: O_EXCL create-then-write, link
+// of a full record, rename-aside reclaim, a mutex-serialized reclaim, a
+// pid-owned mutex) left some window in which a paused or racing starter could
+// remove a live owner's lock — Astra reproduced each one. A file lock cannot
+// do compare-and-delete; the OS lock can.
 //
-// Record format (three lines): holder pid, a per-acquisition nonce, the
-// acquisition time in ms. Line 1 alone is what the legacy format held, so a
-// legacy reader (parseInt of the file) still sees the pid.
+// `<lockPath>` itself stays as an INFORMATIONAL pidfile (line 1 = pid, then a
+// nonce and time) for `joy stop`/status readers and legacy daemons. A live
+// legacy daemon (pre-SQLite-lock) is detected from that file and honoured;
+// a dead one's file is simply overwritten.
 
-import { openSync, writeSync, closeSync, unlinkSync, readFileSync, mkdirSync, linkSync, statSync } from "fs";
+import { openSync, writeSync, closeSync, unlinkSync, readFileSync, mkdirSync, renameSync, statSync } from "fs";
 import { dirname } from "path";
 import { randomBytes } from "crypto";
+import { createRequire } from "module";
+
+type SqliteDb = { exec(sql: string): void; close(): void };
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as { DatabaseSync: new (p: string) => SqliteDb };
 
 export class SingletonError extends Error {
   constructor(public readonly holderPid: number, detail?: string) {
@@ -76,103 +79,48 @@ export function acquireSingleton(
   const now = opts?.now ?? Date.now;
   mkdirSync(dirname(lockPath), { recursive: true });
 
+  // Legacy holders first: a daemon from before the SQLite lock only has the
+  // pidfile. Live pid → occupied. Empty/unparseable and young → a legacy
+  // creation in progress → occupied. Dead or old → ignorable.
+  const existing = readLock(lockPath);
+  if (existing) {
+    if (existing.pid && existing.pid !== process.pid && isAlive(existing.pid)) throw new SingletonError(existing.pid);
+    if (!existing.pid) {
+      let ageMs = Infinity;
+      try { ageMs = now() - statSync(lockPath).mtimeMs; } catch { /* gone */ }
+      if (ageMs < CREATION_GRACE_MS) throw new SingletonError(0, `another joy-daemon daemon is taking the lock at ${lockPath} right now`);
+    }
+  }
+
+  // The real lock. BEGIN IMMEDIATE takes SQLite's RESERVED lock; a second
+  // connection (any process, or this one) gets SQLITE_BUSY at once.
+  const db = new DatabaseSync(`${lockPath}.db`);
+  try {
+    db.exec("PRAGMA busy_timeout = 0");
+    db.exec("BEGIN IMMEDIATE");
+  } catch (e) {
+    try { db.close(); } catch { /* best effort */ }
+    const holder = readLock(lockPath);
+    const msg = String((e as Error).message ?? e);
+    if (/locked|busy/i.test(msg)) throw new SingletonError(holder?.pid ?? 0, holder?.pid ? undefined : `another joy-daemon daemon holds the lock at ${lockPath}`);
+    throw e;
+  }
+
+  // Informational pidfile, written whole then renamed in (readers never see
+  // a partial record). We hold the OS lock, so no one else writes it now.
   const nonce = randomBytes(8).toString("hex");
   const record = `${process.pid}\n${nonce}\n${now()}\n`;
   const tmp = `${lockPath}.${process.pid}.${nonce}.tmp`;
+  const fd = openSync(tmp, "w");
+  try { writeSync(fd, record); } finally { closeSync(fd); }
+  renameSync(tmp, lockPath);
 
-  /** Publish the full record under lockPath atomically. False = occupied. */
-  const publish = (): boolean => {
-    const fd = openSync(tmp, "w");
-    try { writeSync(fd, record); } finally { closeSync(fd); }
-    try {
-      linkSync(tmp, lockPath);
-      return true;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      return false;
-    } finally {
-      try { unlinkSync(tmp); } catch { /* best effort */ }
-    }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    try { if (readLock(lockPath)?.raw === record) unlinkSync(lockPath); } catch { /* already gone */ }
+    try { db.exec("ROLLBACK"); } catch { /* connection may already be closed */ }
+    try { db.close(); } catch { /* best effort */ }
   };
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    if (publish()) {
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        // Only remove the lock if it's still ours (a restart may have handed it on).
-        try {
-          if (readLock(lockPath)?.raw === record) unlinkSync(lockPath);
-        } catch { /* already gone */ }
-      };
-    }
-    const holder = readLock(lockPath);
-    if (!holder) continue; // vanished between our link and our read — retry the create
-    if (holder.pid && holder.pid !== process.pid && isAlive(holder.pid)) {
-      throw new SingletonError(holder.pid);
-    }
-    if (!holder.pid) {
-      let ageMs = Infinity;
-      try { ageMs = now() - statSync(lockPath).mtimeMs; } catch { /* gone: treat as stale, the rename below fails harmlessly */ }
-      if (ageMs < CREATION_GRACE_MS) {
-        throw new SingletonError(0, `another joy-daemon daemon is taking the lock at ${lockPath} right now`);
-      }
-    }
-    // Stale lock (dead holder, or junk older than the creation grace) — remove
-    // exactly that file under the reclaim mutex and retry the atomic create.
-    if (!reclaim(lockPath, holder, now, isAlive)) continue;
-  }
-  throw new Error(`could not acquire daemon lock at ${lockPath} after retries`);
-}
-
-/** A reclaimer that crashed holding the mutex must not block every later
- *  starter: a mutex older than this is junk. */
-const RECLAIM_MUTEX_STALE_MS = 30_000;
-
-/** Remove a lock judged stale WITHOUT ever removing a live owner's, even
- *  briefly. Reclaimers serialize on an O_EXCL mutex file; under it the lock
- *  is re-read and unlinked only if it is byte-identical to the record that
- *  was judged stale. A live owner can only appear by link(2), which fails
- *  while that stale file exists, and can only replace it by reclaiming —
- *  which needs this mutex. The earlier rename-aside/restore protocol left a
- *  window where a third starter took the pathname while a fresh owner's lock
- *  was aside, and both reported ownership (Astra on 53d22103, #589).
- *  Returns false when the reclaim did not happen (the caller re-evaluates). */
-function reclaim(lockPath: string, stale: LockRecord, now: () => number, isAlive: (pid: number) => boolean = defaultIsAlive): boolean {
-  const mutex = `${lockPath}.reclaiming`;
-  let fd: number;
-  try {
-    fd = openSync(mutex, "wx");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    // The mutex names its holder. It is stolen only from a DEAD holder —
-    // never by age alone: a live reclaimer paused between its re-read and
-    // its unlink would otherwise resume and remove the thief's fresh lock
-    // (Astra on af76c787). A paused-but-alive holder blocks us; we report
-    // occupied and the caller can retry later.
-    let holderPid = NaN;
-    try { holderPid = Number(readFileSync(mutex, "utf8").trim()); } catch { return false; }
-    if (Number.isInteger(holderPid) && holderPid > 0 && isAlive(holderPid)) {
-      throw new SingletonError(holderPid, `another joy-daemon daemon (pid ${holderPid}) is reclaiming the lock at ${lockPath} right now`);
-    }
-    let age = 0;
-    try { age = now() - statSync(mutex).mtimeMs; } catch { return false; }
-    // An unreadable/pidless mutex is a creation in progress unless it is old.
-    if (!(Number.isInteger(holderPid) && holderPid > 0) && age < RECLAIM_MUTEX_STALE_MS) {
-      throw new SingletonError(0, `another joy-daemon daemon is reclaiming the lock at ${lockPath} right now`);
-    }
-    try { unlinkSync(mutex); } catch { /* a racer removed it */ }
-    return false; // retry the whole evaluation
-  }
-  try {
-    writeSync(fd, `${process.pid}\n`);
-    closeSync(fd);
-    const current = readLock(lockPath);
-    if (!current || current.raw !== stale.raw) return false; // replaced or gone while we decided
-    try { unlinkSync(lockPath); } catch { return false; }
-    return true;
-  } finally {
-    try { unlinkSync(mutex); } catch { /* best effort */ }
-  }
 }
