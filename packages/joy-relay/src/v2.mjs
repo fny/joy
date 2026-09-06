@@ -39,6 +39,16 @@ function readJson(req, limit = 512 * 1024) {
     try { return JSON.parse(b.toString('utf8')); } catch { throw new ApiError(400, 'bad_json'); }
   });
 }
+/** The body size a client DECLARED (0 when absent/chunked) — lets admission
+ *  and the size cap speak before a single body byte is buffered. */
+function declaredLength(req) {
+  const n = Number(req.headers['content-length']);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+/** A client that left mid-body: Node surfaces it as an ECONNRESET 'aborted'
+ *  error from the request stream. Not a relay fault — no 500, no stack trace
+ *  (one was logged per abort, a free log-spam vector). */
+const isClientAbort = (e, req) => !(e instanceof ApiError) && (e?.code === 'ECONNRESET' || e?.message === 'aborted' || req.destroyed === true);
 const intent = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 // One mapping, shared with the core so the DELETE precondition it checks
@@ -388,10 +398,21 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
 
   // ── client: E2E tunnel to a machine (endpoint-agnostic, relay-blind) ──────
   route('POST', '/machines/([\\w.-]+)/http', { raw: true }, async (ctx, m, body, url, req, res) => {
-    // Ownership FIRST, before reading the body.
+    // Ownership, liveness and capacity FIRST, before a single body byte is
+    // buffered: an offline daemon or a full inbox used to cost the relay the
+    // whole 32 MiB upload before it said no. The admission reserves the
+    // declared size against the inbox budgets while the body is in flight,
+    // so K unfinished uploads cannot pin K × 32 MiB either.
     await core.assertDaemonOwned(m[1], ctx.accountId);
-    const payload = await readRaw(req, TUNNEL_REQUEST_MAX);
-    tunnel.clientRequest(m[1], payload, res);
+    const reservation = tunnel.admit(m[1], declaredLength(req));
+    let payload;
+    try {
+      payload = await readRaw(req, TUNNEL_REQUEST_MAX);
+    } catch (e) {
+      reservation.release();
+      throw e;
+    }
+    tunnel.clientRequest(m[1], payload, res, reservation);
     return null; // tunnel owns res for the life of the exchange
   });
 
@@ -515,6 +536,11 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     const leaseId = String(req.headers['x-joy-lease-id'] ?? '');
     if (!leaseId) throw new ApiError(401, 'missing_lease_id');
     const lease = await leaseCtx(leaseId, req);
+    // Existence, ownership and the client's presence are settled BEFORE the
+    // frame body is read: a post for a gone request used to cost a full
+    // (up to 32 MiB) body read before the 404.
+    tunnel.assertAnswerable(m[1], lease.daemon_id);
+    if (declaredLength(req) > TUNNEL_REQUEST_MAX) throw new ApiError(413, 'body_too_large');
     const chunk = await readRaw(req, TUNNEL_REQUEST_MAX);
     return tunnel.daemonFrames(m[1], lease.daemon_id, chunk, url.searchParams.get('done') === '1');
   });
@@ -556,11 +582,15 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       res.writeHead(isEnvelope ? out.status : 200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(isEnvelope ? out.body : out));
     } catch (e) {
+      if (isClientAbort(e, req)) { // the client left mid-body: nobody to answer, nothing to log
+        try { res.destroy(); } catch { /* already gone */ }
+        return true;
+      }
       const status = e instanceof ApiError ? e.status : 500;
       const code = e instanceof ApiError ? e.code : 'internal_error';
       if (status === 500) console.error('[joy-relay v2] internal error:', e);
       if (!res.headersSent) {
-        res.writeHead(status, { 'content-type': 'application/json' });
+        res.writeHead(status, { 'content-type': 'application/json', ...(e instanceof ApiError && e.headers ? e.headers : {}) });
         res.end(JSON.stringify(typeof code === 'object' ? code : { error: code }));
       } else {
         res.end();

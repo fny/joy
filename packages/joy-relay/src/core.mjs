@@ -22,10 +22,12 @@ export const MAX_EVENTS_PER_SESSION = 50_000;
 export const EVENT_BUDGET_LIFECYCLE_RESERVE = 3;
 
 export class ApiError extends Error {
-  constructor(status, code, message) {
+  /** `headers` ride along to the response (e.g. `retry-after` on a 503). */
+  constructor(status, code, message, headers) {
     super(message ?? code);
     this.status = status;
     this.code = code;
+    if (headers) this.headers = headers;
   }
 }
 
