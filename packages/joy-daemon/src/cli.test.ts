@@ -1,7 +1,7 @@
 // CLI helpers that decide WHAT to launch and WHAT to signal. Pure functions
 // exported from cli.ts; the module's main() is gated off under vitest.
 import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "node:url";
@@ -925,14 +925,21 @@ describe("verifyDaemonPid (#495)", () => {
   });
 
   test.runIf(linux)("processIdentity + processStartId read the kernel: a live process's argv (boundaries intact), exe and start identity", async () => {
-    // not this process: vitest rewrites its own title, and on Linux that overwrites /proc/self/cmdline
-    const child = spawn("sleep", ["300", "two words"], { stdio: "ignore" });
-    await once(child, "spawn");
+    // Not this process: vitest rewrites its own title, and on Linux that
+    // overwrites /proc/self/cmdline. A child node instead of `sleep`: the
+    // spaced operand that proves argv boundaries survive is an invalid
+    // interval to sleep, which exits 1 at once — the pid was then a zombie
+    // (empty cmdline, no exe link) whenever the read lost the race. Node
+    // parks the extra operand in process.argv and stays up.
+    const argv = [process.execPath, "-e", "setTimeout(() => {}, 300_000)", "two words"];
+    const child = spawn(argv[0], argv.slice(1), { stdio: "ignore" });
+    await once(child, "spawn"); // exec has happened: /proc/<pid>/{cmdline,exe} are the child's
     try {
       const it = processIdentity(child.pid!)!;
       expect(it).not.toBeNull();
-      expect(it.argv).toEqual(["sleep", "300", "two words"]);
-      expect(it.exe && realpathSync(it.exe)).toMatch(/\/sleep$/);
+      expect(readFileSync(`/proc/${child.pid}/stat`, "utf8")).not.toMatch(/\) Z /); // the fixture is alive, not a zombie
+      expect(it.argv).toEqual(argv);
+      expect(it.exe && realpathSync(it.exe)).toBe(realpathSync(process.execPath));
       expect(it.startId).toMatch(/^linux:[0-9a-f-]+:\d+$/);
       expect(it.startId).toBe(processStartId(child.pid!));
       expect(it.startedAt).toBeGreaterThan(Date.now() - 60_000);
