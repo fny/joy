@@ -12,6 +12,7 @@ import { t } from '@/text';
 import { sync } from '@/sync/sync';
 import { storage } from '@/sync/storage';
 import { v2, V2ApiError } from '@/sync/v2/api';
+import { deriveSpawnSpecKey, encodeSpawnSpec } from '@/sync/v2/spawnSpec';
 
 export type V2SpawnSpec = Parameters<typeof v2.createSession>[1];
 
@@ -58,6 +59,9 @@ export interface SpawnDeps {
     confirm: (title: string, message: string, options: { cancelText: string; confirmText: string }) => Promise<boolean>;
     now: () => number;
     sleep: (ms: number) => Promise<void>;
+    /** The key the spawn spec is sealed under for this machine, or null for
+     *  the plain-JSON form (#107) — spawnSealKeyFor in production. */
+    sealKeyFor: (machineId: string) => Promise<Uint8Array | null>;
     /** Pins the creation intent (see #417). A caller re-driving ONE user
      *  action — the "Retry" of a SpawnCreationUncertainError it just showed —
      *  passes that error's `creationIntentId` here so the relay replays
@@ -72,7 +76,37 @@ const defaultDeps = (): SpawnDeps => ({
     confirm: (title, message, options) => Modal.confirm(title, message, options),
     now: () => Date.now(),
     sleep: (ms) => new Promise<void>(r => setTimeout(r, ms)),
+    sealKeyFor: (machineId) => spawnSealKeyFor(machineId),
 });
+
+/** What spawnSealKeyFor reads; overridable for tests. */
+export interface SpawnSealKeyLookup {
+    /** The machine's synced record (its sealed metadata, opened). */
+    machine: (machineId: string) => { metadata?: { capabilities?: { spawnSpecSealed?: boolean } } | null } | undefined;
+    /** The per-machine key the app unwrapped from `dataEncryptionKey`, or null. */
+    machineKey: (machineId: string) => Uint8Array | null;
+}
+
+const defaultSealKeyLookup: SpawnSealKeyLookup = {
+    machine: (machineId) => storage.getState().machines[machineId],
+    machineKey: (machineId) => sync.machineOnlyCtx(machineId)?.machineKey ?? null,
+};
+
+/**
+ * The seal key for a spawn to `machineId`, or null for the plain form (#107).
+ * Sealed ONLY when the daemon advertises `capabilities.spawnSpecSealed` in
+ * its machine metadata AND the app holds that machine's key. Every daemon
+ * parses the plain form, so the gate can only ever cost confidentiality,
+ * never a spawn: a sealed spec to a daemon that predates the capability is
+ * "no usable spawnSpec — skipped" there and the create hangs to its
+ * deadline; one it cannot open is reported `bad_spawn_spec` (never launched).
+ */
+export async function spawnSealKeyFor(machineId: string, lookup: SpawnSealKeyLookup = defaultSealKeyLookup): Promise<Uint8Array | null> {
+    if (lookup.machine(machineId)?.metadata?.capabilities?.spawnSpecSealed !== true) return null;
+    const machineKey = lookup.machineKey(machineId);
+    if (!machineKey) return null;
+    return deriveSpawnSpecKey(machineKey, machineId);
+}
 
 type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown } | null;
 
@@ -149,6 +183,10 @@ export interface UncertainCreation {
     machineId: string;
     /** When the create budget ran out (deps.now()). */
     since: number;
+    /** The spec exactly as it went on the wire. A replay of this intent must
+     *  re-send these bytes: the relay's idempotency hash covers them, and a
+     *  sealed spec carries a random nonce (#107, #417). */
+    spawnSpecWire?: string;
 }
 
 // Keyed by the action's fingerprint (machine + spec): the relay's own
@@ -234,14 +272,24 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
     // after the retry budget the id used to live only in the abandoned
     // invocation, so the user's own retry accepted a second intent.
     const fingerprint = creationFingerprint(machineId, spec);
-    const creationIntentId = deps.creationIntentId
-        ?? uncertainCreationFor(machineId, spec, deps.now())?.creationIntentId
-        ?? randomUUID();
+    const uncertain = uncertainCreationFor(machineId, spec, deps.now());
+    const creationIntentId = deps.creationIntentId ?? uncertain?.creationIntentId ?? randomUUID();
+    // The spec goes on the wire ONCE per creation intent (#107): sealed under
+    // the machine's spawn-spec key when the daemon opens sealed specs (a
+    // fresh random nonce each time it is sealed), else plain JSON. The relay
+    // hashes the spawnSpec bytes into the intent's idempotency check, so
+    // every retry of this intent — in this call, or a later replay of the
+    // same unresolved creation — re-sends the identical envelope; re-sealing
+    // would be answered 409 idempotency_mismatch instead of a replay.
+    const spawnSpecWire = spec
+        ? (uncertain?.creationIntentId === creationIntentId ? uncertain.spawnSpecWire : undefined)
+            ?? encodeSpawnSpec(spec, await deps.sealKeyFor(machineId))
+        : undefined;
     const createStarted = deps.now();
     let v2id: string;
     for (let attempt = 0; ; attempt++) {
         const remaining = CREATE_RETRY_BUDGET_MS - (deps.now() - createStarted);
-        const r = await settleWithin(deps, deps.api.createSession(machineId, spec, { creationIntentId }), Math.min(STEP_CAP_MS, remaining));
+        const r = await settleWithin(deps, deps.api.createSession(machineId, spec, { creationIntentId, spawnSpecWire }), Math.min(STEP_CAP_MS, remaining));
         if (r?.ok) {
             v2id = r.value.sessionId;
             uncertainCreations.delete(fingerprint); // acceptance resolved
@@ -254,7 +302,7 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
         }
         const elapsed = deps.now() - createStarted;
         if (elapsed >= CREATE_RETRY_BUDGET_MS) {
-            uncertainCreations.set(fingerprint, { creationIntentId, machineId, since: deps.now() });
+            uncertainCreations.set(fingerprint, { creationIntentId, machineId, since: deps.now(), spawnSpecWire });
             throw new SpawnCreationUncertainError(creationIntentId, machineId, error);
         }
         await deps.sleep(Math.min(CREATE_RETRY_BASE_MS * 2 ** attempt, CREATE_RETRY_BUDGET_MS - elapsed));

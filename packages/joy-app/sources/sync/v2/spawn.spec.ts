@@ -8,8 +8,17 @@
  *        accepted retry gets a fresh startup budget.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import _sodium from 'libsodium-wrappers';
+import { createHmac } from 'node:crypto';
 
 vi.mock('expo-crypto', () => ({ randomUUID: () => 'uuid-' + Math.random().toString(36).slice(2) }));
+// spawn.ts seals the spec (#107): the native libsodium module and the
+// hmac primitive get their node stand-ins, as in spawnSpec.spec.ts.
+vi.mock('@/encryption/libsodium.lib', async () => { await _sodium.ready; return { default: _sodium }; });
+vi.mock('@/encryption/hmac_sha512', () => ({
+    hmac_sha512: async (key: Uint8Array, data: Uint8Array) =>
+        new Uint8Array(createHmac('sha512', Buffer.from(key)).update(Buffer.from(data)).digest()),
+}));
 vi.mock('@/modal', () => ({ Modal: { confirm: vi.fn(async () => true) } }));
 vi.mock('@/text', () => ({ t: (k: string, a?: Record<string, string>) => a ? `${k}:${JSON.stringify(a)}` : k }));
 vi.mock('@/sync/sync', () => ({ sync: { refreshSessions: vi.fn(async () => { }) } }));
@@ -24,18 +33,19 @@ vi.mock('@/sync/v2/api', () => {
 import { V2ApiError } from '@/sync/v2/api';
 import {
     SpawnAbandonedError, SpawnCreationUncertainError, discardUncertainCreation, isRetryableCreateError,
-    resetUncertainCreationsForTests, uncertainCreationFor, v2SpawnAndWait, waitForLocalSession, type SpawnDeps,
+    resetUncertainCreationsForTests, spawnSealKeyFor, uncertainCreationFor, v2SpawnAndWait, waitForLocalSession, type SpawnDeps,
 } from './spawn';
+import { deriveSpawnSpecKey, openSpawnSpec } from './spawnSpec';
 
 type Sessions = Record<string, { metadata?: { joy__sessionId?: string; v2?: { sessionId?: string; localSessionId?: string; keyEnvelope?: string } } }>;
 
 /** A virtual clock: sleeps advance time instantly, nothing real waits. */
 function harness(over: Partial<SpawnDeps> & { sessions?: () => Sessions } = {}) {
     let now = 1_000_000;
-    const calls = { create: [] as Array<{ intent: string | undefined }>, retry: 0, refresh: 0, deleted: 0, state: 0 };
+    const calls = { create: [] as Array<{ intent: string | undefined; wire?: string }>, retry: 0, refresh: 0, deleted: 0, state: 0 };
     const api: SpawnDeps['api'] = {
-        createSession: vi.fn(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
-            calls.create.push({ intent: opts?.creationIntentId });
+        createSession: vi.fn(async (_m: string, _s: unknown, opts?: { creationIntentId?: string; spawnSpecWire?: string }) => {
+            calls.create.push({ intent: opts?.creationIntentId, wire: opts?.spawnSpecWire });
             return { sessionId: 'v2-1' };
         }) as unknown as SpawnDeps['api']['createSession'],
         sessionState: vi.fn(async () => { calls.state++; return null as never; }),
@@ -49,6 +59,7 @@ function harness(over: Partial<SpawnDeps> & { sessions?: () => Sessions } = {}) 
         confirm: async () => true,
         now: () => now,
         sleep: async (ms) => { now += ms; },
+        sealKeyFor: async () => null,
         ...over,
     };
     return { deps, calls, api, clock: { get: () => now, add: (ms: number) => { now += ms; } } };
@@ -89,7 +100,7 @@ describe('v2SpawnAndWait', () => {
     it('#417: a caller-pinned intent is what reaches the relay', async () => {
         const h = harness({ sessions: () => bound('v2-1'), creationIntentId: 'intent-abc' });
         await v2SpawnAndWait('m', { cwd: '/x' }, h.deps);
-        expect(h.calls.create).toEqual([{ intent: 'intent-abc' }]);
+        expect(h.calls.create).toMatchObject([{ intent: 'intent-abc' }]);
     });
 
     it('#417: a definitive relay refusal is not retried', async () => {
@@ -327,5 +338,73 @@ describe('isRetryableCreateError', () => {
         expect(isRetryableCreateError(new V2ApiError(409, 'idempotency_mismatch', null))).toBe(false);
         expect(isRetryableCreateError(new V2ApiError(401, 'not_logged_in', null))).toBe(false);
         expect(isRetryableCreateError(new V2ApiError(500, 'internal', null))).toBe(false);
+    });
+});
+
+describe('#107 spawn-spec sealing', () => {
+    beforeEach(() => resetUncertainCreationsForTests());
+    const machineKey = new Uint8Array(32).fill(7);
+
+    it('spawnSealKeyFor: the spawn-spec key only when the daemon advertises spawnSpecSealed AND the machine key is known', async () => {
+        const advertising = { metadata: { capabilities: { spawnSpecSealed: true } } };
+        const key = await spawnSealKeyFor('m1', { machine: () => advertising, machineKey: () => machineKey });
+        expect(key).toEqual(await deriveSpawnSpecKey(machineKey, 'm1'));
+        // an older daemon (no capabilities block), one that says false, or no synced record → plain
+        expect(await spawnSealKeyFor('m1', { machine: () => ({ metadata: { homeDir: '/h' } as never }), machineKey: () => machineKey })).toBeNull();
+        expect(await spawnSealKeyFor('m1', { machine: () => ({ metadata: { capabilities: { spawnSpecSealed: false } } }), machineKey: () => machineKey })).toBeNull();
+        expect(await spawnSealKeyFor('m1', { machine: () => undefined, machineKey: () => machineKey })).toBeNull();
+        // capability advertised but the app holds no key for the machine → plain (the daemon accepts it)
+        expect(await spawnSealKeyFor('m1', { machine: () => advertising, machineKey: () => null })).toBeNull();
+    });
+
+    it('sends the plain JSON form when there is no seal key', async () => {
+        const h = harness({ sessions: () => bound('v2-1') });
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
+        expect(h.calls.create[0].wire).toBe(JSON.stringify({ v: 1, t: 'spawn', cwd: '/x' }));
+    });
+
+    it('seals under the machine key and re-sends the IDENTICAL envelope on a lost-response retry (the relay hashes the spec into the intent)', async () => {
+        const key = await deriveSpawnSpecKey(machineKey, 'm');
+        const h = harness({ sessions: () => bound('v2-1'), sealKeyFor: async () => key });
+        let first = true;
+        h.api.createSession = vi.fn(async (_m: string, _s: unknown, opts?: { creationIntentId?: string; spawnSpecWire?: string }) => {
+            h.calls.create.push({ intent: opts?.creationIntentId, wire: opts?.spawnSpecWire });
+            if (first) { first = false; throw new V2ApiError(503, 'relay_restarting', null); }
+            return { sessionId: 'v2-1' };
+        }) as never;
+        await expect(v2SpawnAndWait('m', { cwd: '/x', extraArgs: '--flag' }, h.deps)).resolves.toBe('app1');
+        expect(h.calls.create).toHaveLength(2);
+        const wire = h.calls.create[0].wire!;
+        expect(wire.startsWith('v2e1:')).toBe(true);
+        expect(wire).not.toContain('/x');
+        expect(wire).not.toContain('--flag');
+        expect(h.calls.create[1].wire).toBe(wire);
+        expect(h.calls.create[1].intent).toBe(h.calls.create[0].intent);
+        expect(openSpawnSpec(wire, key)).toEqual({ v: 1, t: 'spawn', cwd: '/x', extraArgs: '--flag' });
+    });
+
+    it('a replay of an UNCERTAIN creation re-sends the envelope that intent was created with, not a re-sealed one', async () => {
+        const key = await deriveSpawnSpecKey(machineKey, 'm');
+        const h = harness({ sessions: () => bound('v2-1'), sealKeyFor: async () => key });
+        h.api.createSession = vi.fn(async () => { throw new V2ApiError(503, 'down', null); }) as never;
+        const failure = await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e);
+        expect(failure).toBeInstanceOf(SpawnCreationUncertainError);
+        const retained = uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())!;
+        expect(retained.spawnSpecWire?.startsWith('v2e1:')).toBe(true);
+        // the user retries the same action: same intent, same bytes
+        h.api.createSession = vi.fn(async (_m: string, _s: unknown, opts?: { creationIntentId?: string; spawnSpecWire?: string }) => {
+            h.calls.create.push({ intent: opts?.creationIntentId, wire: opts?.spawnSpecWire });
+            return { sessionId: 'v2-1' };
+        }) as never;
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, { ...h.deps, creationIntentId: failure.creationIntentId })).resolves.toBe('app1');
+        const last = h.calls.create[h.calls.create.length - 1];
+        expect(last.intent).toBe(retained.creationIntentId);
+        expect(last.wire).toBe(retained.spawnSpecWire);
+        // a DIFFERENT action seals afresh under a new intent
+        await v2SpawnAndWait('m', { cwd: '/y' }, h.deps);
+        const other = h.calls.create[h.calls.create.length - 1];
+        expect(other.intent).not.toBe(retained.creationIntentId);
+        expect(other.wire).not.toBe(retained.spawnSpecWire);
+        expect(openSpawnSpec(other.wire, key)).toEqual({ v: 1, t: 'spawn', cwd: '/y' });
     });
 });

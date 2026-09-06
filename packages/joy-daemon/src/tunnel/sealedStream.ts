@@ -55,8 +55,25 @@ function hmac512(key: Uint8Array, data: Uint8Array): Buffer {
  *  the blast radius: one machine's key cannot decrypt another machine's
  *  tunnel traffic. */
 export function deriveTunnelKey(machineKey: Uint8Array, machineId: string): Uint8Array {
-  const master = machineKey;
-  const I = hmac512(new TextEncoder().encode("Joy Tunnel Master Seed"), master);
+  return deriveMachineLeaf(machineKey, "Joy Tunnel", machineId);
+}
+
+/** Spawn-spec key for one machine (#107): the leaf the app seals
+ *  `POST /joy/v2/sessions` spawnSpec under (app: sync/v2/spawnSpec.ts,
+ *  deriveKey(machineKey, 'Joy Spawn Spec', [machineId])). Same tree as the
+ *  tunnel key, its own usage label: spawn specs are random-nonce secretbox
+ *  envelopes, and the tunnel key's per-stream subkeys use counter nonces —
+ *  the two must never share a key. */
+export function deriveSpawnSpecKey(machineKey: Uint8Array, machineId: string): Uint8Array {
+  return deriveMachineLeaf(machineKey, "Joy Spawn Spec", machineId);
+}
+
+/** One leaf of the per-machine key tree — byte for byte the app's
+ *  deriveKey(machineKey, usage, [machineId]) (encryption/deriveKey.ts):
+ *  root = hmac512(utf8(usage + " Master Seed"), machineKey), chain = root[32..],
+ *  leaf = hmac512(chain, 0x00 ‖ utf8(machineId))[0..32]. */
+function deriveMachineLeaf(machineKey: Uint8Array, usage: string, machineId: string): Uint8Array {
+  const I = hmac512(new TextEncoder().encode(`${usage} Master Seed`), machineKey);
   const chain = I.subarray(32);
   const I2 = hmac512(chain, Buffer.concat([Buffer.from([0x00]), Buffer.from(machineId, "utf8")]));
   return new Uint8Array(I2.subarray(0, 32));

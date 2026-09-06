@@ -33,6 +33,7 @@ import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, type NewOutbound, type OutboxRow } from "../domain/ledger";
 import { writeAttachmentToCwd } from "../domain/attachments";
 import { cloneForSpawn } from "../domain/operations";
+import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
@@ -52,6 +53,12 @@ export interface NucleusLaneOpts {
    *  this key (ephemeral NaCl box) in the bind, and every prompt/output
    *  ciphertext is secretbox'd under it. Absent → plaintext test envelopes. */
   accountContentPublicKey?: Uint8Array | null;
+  /** The per-machine key (access.key `machineKey`, the tunnel's root). Set →
+   *  the lane derives the spawn-spec key (deriveSpawnSpecKey) and opens
+   *  sealed `v2e1:` spawn specs; the machine metadata advertises
+   *  `capabilities.spawnSpecSealed` so the app seals (#107). Absent → only
+   *  plain-JSON specs are usable; a sealed one fails the spawn. */
+  machineKey?: Uint8Array | null;
   log?: (line: string) => void;
 }
 
@@ -80,16 +87,21 @@ interface ControlOffer { deliveryId: string; commandId: string; sessionId: strin
 function openEnvelope(ciphertext: string, key?: Uint8Array | null): any | null {
   if (ciphertext.startsWith("v2e1:")) {
     if (!key) return null; // sealed content without the session key — refuse
-    try {
-      const raw = Buffer.from(ciphertext.slice(5), "base64");
-      const n = tweetnacl.secretbox.nonceLength;
-      const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
-      if (!pt) return null;
-      return JSON.parse(Buffer.from(pt).toString("utf8"));
-    } catch { return null; }
+    return openSealedJson(ciphertext, key);
   }
   if (key) return null; // plaintext offered to a SEALED session: unauthenticated — refuse (#579)
   try { return JSON.parse(ciphertext); } catch { return null; }
+}
+/** The `v2e1:` envelope alone: b64(nonce24 ‖ secretbox(utf8(json))) under
+ *  `key` → the JSON payload; null on a wrong key, tampering, or bad bytes. */
+function openSealedJson(ciphertext: string, key: Uint8Array): any | null {
+  try {
+    const raw = Buffer.from(ciphertext.slice(5), "base64");
+    const n = tweetnacl.secretbox.nonceLength;
+    const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
+    if (!pt) return null;
+    return JSON.parse(Buffer.from(pt).toString("utf8"));
+  } catch { return null; }
 }
 /** Why a prompt was refused, for the turn's terminal fact: the app shows it. */
 export type PromptRejectReason = "undecodable_prompt" | "plaintext_on_sealed_session";
@@ -155,13 +167,27 @@ export interface SpawnSpec {
   gitUrl?: string;
 }
 
-export function decodeSpawnSpec(ciphertext: string | null | undefined): SpawnSpec | null {
+/** The spawn spec on the wire is either the sealed `v2e1:` envelope under the
+ *  machine's spawn-spec key (app sync/v2/spawnSpec.ts, #107) or — from an app
+ *  that predates the seal, or one that holds no key for this machine — the
+ *  plain JSON `{v:1,t:'spawn',cwd,…}`. Both are accepted: unlike prompts
+ *  (#579) plain is NOT refused when a key exists, because the spec was
+ *  never authenticated before and old apps must keep spawning. A sealed
+ *  spec is accepted ONLY when it opens under `key` — it is the app's proof
+ *  that it holds this machine's key. */
+export function isSealedSpawnSpec(ciphertext: string | null | undefined): boolean {
+  return !!ciphertext && ciphertext.startsWith("v2e1:");
+}
+export function decodeSpawnSpec(ciphertext: string | null | undefined, key?: Uint8Array | null): SpawnSpec | null {
   if (!ciphertext) return null;
-  try {
-    const p = JSON.parse(ciphertext);
-    if (p && p.t === "spawn") return p;
-    return null;
-  } catch { return null; }
+  let p: any;
+  if (isSealedSpawnSpec(ciphertext)) {
+    if (!key) return null;
+    p = openSealedJson(ciphertext, key);
+  } else {
+    try { p = JSON.parse(ciphertext); } catch { return null; }
+  }
+  return p && p.t === "spawn" ? p : null;
 }
 /** Seal a session CARD (the metadata object the app renders in its list)
  *  with the session content key. Plaintext JSON when the session has no key
@@ -213,6 +239,9 @@ export function sealSessionKey(sessionKey: Uint8Array, accountPub: Uint8Array): 
 export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const { registry, relayUrl, token, machineId } = opts;
   const log = (line: string) => opts.log?.(`[v2-lane] ${line}`);
+  // Derived once: the leaf the app seals spawn specs under (#107). Never
+  // sent anywhere — both ends compute it from the machine key they share.
+  const spawnSpecKey = opts.machineKey ? deriveSpawnSpecKey(opts.machineKey, machineId) : null;
   let stopped = false;
   let lease: Lease | null = null;
   // Chat-log ids are an in-memory counter reset on every boot — a bare
@@ -873,7 +902,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // abandoned (avoids re-spinning a still-missing directory).
     if (offer.createDir) abandonedSpawns.delete(offer.commandId);
     if (abandonedSpawns.has(offer.commandId)) return;
-    const spec = decodeSpawnSpec(offer.ciphertext);
+    const spec = decodeSpawnSpec(offer.ciphertext, spawnSpecKey);
+    if (!spec && isSealedSpawnSpec(offer.ciphertext)) {
+      // A sealed spec that did not open (#107): the app sealed under a key
+      // this daemon does not derive — a stale machine key after a re-pair,
+      // or a daemon with no machine key at all. Waiting would only hang the
+      // app's create until its deadline; report it, launch nothing.
+      const detail = spawnSpecKey
+        ? "sealed spawn spec did not open under this machine's key"
+        : "sealed spawn spec, but this daemon holds no machine key";
+      if (await reportSpawnFailed(offer, `bad_spawn_spec:${detail}`, leaseRef)) abandonedSpawns.add(offer.commandId);
+      log(`spawn ${offer.sessionId.slice(0, 8)}: ${detail} — reported bad_spawn_spec, nothing launched`);
+      return;
+    }
     if (!spec?.cwd) {
       // Undecodable/incomplete spec: leave the command for a human — binding
       // a session we cannot actually run would strand prompts harder.

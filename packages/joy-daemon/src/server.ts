@@ -177,6 +177,9 @@ if (process.env.JOY_V2_LANE !== "0") {
       // The pairing carries the account's content PUBLIC key — the lane
       // seals v2 content under per-session keys enveloped to it.
       accountContentPublicKey: creds.encryption.publicKey,
+      // The per-machine key: the lane opens spawn specs the app sealed under
+      // its "Joy Spawn Spec" leaf (#107) — the same root the tunnel uses.
+      machineKey: creds.encryption.machineKey.length === 32 ? creds.encryption.machineKey : null,
       log: (line) => process.stderr.write(line + "\n"),
     });
   } else {
