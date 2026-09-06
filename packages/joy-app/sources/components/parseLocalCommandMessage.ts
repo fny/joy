@@ -56,8 +56,18 @@ export function parseLocalCommandMessage(text: string): LocalCommandMessage {
                 args: args && args.length > 0 ? args : undefined,
             };
         }
-        // Mixed content: keep the surrounding text, drop the tags.
-        return { kind: 'text', text: stripped };
+        // Mixed content: the wrappers are replaced by what they wrap — the
+        // command as "/name" and its arguments as text — so the user's actual
+        // instruction survives in place. Deleting the bodies hid the args of
+        // a "/review <instruction>\nBase commit: …" message and left only the
+        // trailing line (#271). The human-readable <command-message> is dropped.
+        const readable = text
+            .replace(COMMAND_MESSAGE_RE, '')
+            .replace(COMMAND_NAME_TAG_RE, `/${nameMatch[1]}`)
+            .replace(COMMAND_ARGS_TAG_RE, args && args.length > 0 ? ` ${args}` : '')
+            .replace(/[ \t]+\n/g, '\n')
+            .trim();
+        return { kind: 'text', text: readable };
     }
 
     return { kind: 'text', text };

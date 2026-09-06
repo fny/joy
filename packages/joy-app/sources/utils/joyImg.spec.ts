@@ -92,3 +92,46 @@ describe('splitJoySegments — bounded tag scanning', () => {
         expect(segs.some(s => s.kind === 'img' && s.src === '/b.png')).toBe(true);
     });
 });
+
+describe('splitJoySegments — ">" inside quoted attributes (#435)', () => {
+    it('a > inside a quoted path does not end the tag', () => {
+        expect(splitJoySegments('<joy-file path="/tmp/a>b.txt" name="file" />')).toEqual([
+            { kind: 'file', path: '/tmp/a>b.txt', line: null, name: 'file' },
+        ]);
+    });
+
+    it('alt="1 > 0" keeps the rest of the tag out of the message', () => {
+        expect(splitJoySegments('x <joy-img src="/a.png" alt="1 > 0" /> y')).toEqual([
+            { kind: 'md', text: 'x ' },
+            { kind: 'img', src: '/a.png', width: null, height: null, alt: '1 > 0' },
+            { kind: 'md', text: ' y' },
+        ]);
+    });
+
+    it('a tag whose quote never closes is not a tag; a later well-formed one still is', () => {
+        expect(splitJoySegments('<joy-img src="/a.png alt="x"> oops <joy-img src="/b.png" />')).toEqual([
+            { kind: 'md', text: '<joy-img src="/a.png alt="x"> oops ' },
+            { kind: 'img', src: '/b.png', width: null, height: null, alt: null },
+        ]);
+    });
+});
+
+describe('splitJoySegments — tags inside code are documentation (#436)', () => {
+    it('a fenced example keeps its tag and its fence intact', () => {
+        const text = 'Use it like this:\n```html\n<joy-img src="/tmp/example.png" />\n```\nDone.';
+        expect(splitJoySegments(text)).toEqual([{ kind: 'md', text }]);
+    });
+
+    it('an inline-code example is not a tag; a real tag after it still is', () => {
+        const text = 'The `<joy-file path="x" />` tag. <joy-file path="/repo/a.ts" />';
+        expect(splitJoySegments(text)).toEqual([
+            { kind: 'md', text: 'The `<joy-file path="x" />` tag. ' },
+            { kind: 'file', path: '/repo/a.ts', line: null, name: null },
+        ]);
+    });
+
+    it('an unclosed fence (streaming) protects everything after it', () => {
+        const text = 'Example:\n```\n<joy-img src="/a.png" />';
+        expect(splitJoySegments(text)).toEqual([{ kind: 'md', text }]);
+    });
+});
