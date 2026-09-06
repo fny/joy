@@ -130,3 +130,27 @@ test("#564 a non-canonical cwd (`/.`, `..`, a symlink) is canonicalised before t
   await expect(reg.create({ cwd: `${link}/sub/..` })).rejects.toThrow(/launch-claude/);
   expect((seen.recordsAtLaunch[0] as { launchCwd: string }).launchCwd).toBe(real);
 }, 20_000);
+
+test("#564 residual: a record-only recovery (agy/pi/opencode) canonicalises the record's symlink spelling before the existence check, the session and the record", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { saveWindowRecord, loadWindowRecord } = await import("./windowRecord");
+  const { AgySession } = await import("../agy/agySession");
+  const { PiSession } = await import("../pi/piSession");
+  vi.spyOn(AgySession.prototype, "beginWatching").mockImplementation(() => {});
+  vi.spyOn(PiSession.prototype, "beginWatching").mockImplementation(() => {});
+  const physical = realpathSync.native(cwd);
+  const nested = join(cwd, "nested"); fs.mkdirSync(nested);
+  const link = join(home, "project-link"); fs.symlinkSync(nested, link);
+  // agy: a symlink spelling; pi: a symlink followed by `..` (its target's parent, NOT the link's)
+  saveWindowRecord("af005641", { launchCwd: link, agent: "agy", agySettings: { conversationId: "recovery-link" } });
+  saveWindowRecord("af005642", { launchCwd: `${link}/..`, agent: "pi", piSettings: { sessionId: "pi-1" } });
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: { creds: { machineId: "m" } } as never });
+  await reg.recover();
+  const agy = reg.get("af005641")!; const pi = reg.get("af005642")!;
+  expect(agy.cwd).toBe(join(physical, "nested"));                     // old code: the link spelling
+  expect(pi.cwd).toBe(physical);                                       // old code: the link spelling + `/..`
+  expect(loadWindowRecord("af005641")?.launchCwd).toBe(join(physical, "nested"));
+  expect(loadWindowRecord("af005642")?.launchCwd).toBe(physical);
+  expect(relayCards.find((c) => c.id === "af005641")?.cwd ?? agy.toJSON().cwd).toBe(join(physical, "nested"));
+  agy.end("killed"); pi.end("killed");
+});

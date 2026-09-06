@@ -100,4 +100,29 @@ describe("canonicalCwd (#549 #564)", () => {
         expect(p.canonicalCwd("~/nope-never-there")).toBe(join(realpathSync.native(homedir()), "nope-never-there"));
         expect(p.canonicalCwd("  /tmp/x/  ")).toBe(join(realpathSync.native("/tmp"), "x"));
     });
+
+    it("#564 residual: `..` after a symlink steps up from the link TARGET, the way the kernel enters it — never folded lexically first", async () => {
+        const { symlinkSync, realpathSync } = await import("fs");
+        const p = await freshPaths();
+        const root = mkdtempSync(join(tmpdir(), "joy-canon-dotdot-"));
+        const physical = join(root, "physical"); const nested = join(physical, "nested"); mkdirSync(nested, { recursive: true });
+        const other = join(root, "other"); mkdirSync(other);
+        const link = join(root, "shortcut"); symlinkSync(nested, link);
+        const realPhysical = realpathSync.native(physical);
+        // shortcut -> physical/nested, so shortcut/.. IS physical (old code: the test root)
+        expect(realpathSync.native(`${link}/..`)).toBe(realPhysical);
+        expect(p.canonicalCwd(`${link}/..`)).toBe(realPhysical);
+        expect(p.canonicalCwd(`${link}/../..`)).toBe(realpathSync.native(root));
+        // an absent tail below the traversal still hangs off the real directory
+        expect(p.canonicalCwd(`${link}/../new-dir/deeper`)).toBe(join(realPhysical, "new-dir", "deeper"));
+        // `..` inside the absent tail folds lexically (nothing exists to follow); past it, physically again
+        expect(p.canonicalCwd(`${link}/nope/../..`)).toBe(realPhysical);
+        expect(p.canonicalCwd(`${link}/nope/deeper/..`)).toBe(join(realpathSync.native(nested), "nope"));
+        // a second symlink met AFTER a `..` is followed too
+        symlinkSync(other, join(physical, "to-other"));
+        expect(p.canonicalCwd(`${link}/../to-other`)).toBe(realpathSync.native(other));
+        // relative spellings resolve against the (physical) process cwd
+        expect(p.canonicalCwd("./")).toBe(process.cwd());
+        expect(p.canonicalCwd("sub/../")).toBe(process.cwd());
+    });
 });

@@ -1294,6 +1294,19 @@ export class SessionRegistry {
     } catch { /* sweep is best-effort */ }
   }
 
+  /** The cwd a record-only recovery launches in (#564 residual): the record's
+   *  spelling canonicalised (a legacy record may hold `~`, `/.`, `..` or a
+   *  symlink) BEFORE the existence check, the session object, and the card —
+   *  and written back so the record and every later restart agree with the
+   *  physical directory the agent actually runs in. Null when the directory
+   *  is gone. */
+  #recoveredCwd(rec: { id: string; launchCwd: string }): string | null {
+    const cwd = canonicalCwd(rec.launchCwd);
+    if (!existsSync(cwd)) return null;
+    if (cwd !== rec.launchCwd) saveWindowRecord(rec.id, { launchCwd: cwd });
+    return cwd;
+  }
+
   /** RECORD-based codex recovery (2026-07-31): a codex session whose tmux
    *  window vanished (window churn, tmux death) but whose app-server is STILL
    *  RUNNING was previously forgotten forever — the window scan above never
@@ -1313,9 +1326,10 @@ export class SessionRegistry {
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "opencode" || !rec.id || this.#sessions.has(rec.id)) continue;
       if (this.#skipQuarantined(rec.id)) continue;
-      if (!existsSync(rec.launchCwd)) continue;
+      const cwd = this.#recoveredCwd(rec);
+      if (!cwd) continue;
       const session = new OpencodeSession({
-        id: rec.id, cwd: rec.launchCwd,
+        id: rec.id, cwd,
         model: rec.opencodeSettings?.model,
         providerID: rec.opencodeSettings?.providerID,
         status: "active", startedAt: Date.now(),
@@ -1335,9 +1349,10 @@ export class SessionRegistry {
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "pi" || !rec.id || this.#sessions.has(rec.id)) continue;
       if (this.#skipQuarantined(rec.id)) continue;
-      if (!existsSync(rec.launchCwd)) continue;
+      const cwd = this.#recoveredCwd(rec);
+      if (!cwd) continue;
       const session = new PiSession({
-        id: rec.id, cwd: rec.launchCwd,
+        id: rec.id, cwd,
         model: rec.piSettings?.model,
         piSessionId: rec.piSettings?.sessionId,
         status: "starting", startedAt: Date.now(),
@@ -1349,9 +1364,10 @@ export class SessionRegistry {
     for (const rec of listWindowRecords()) {
       if (rec.agent !== "agy" || !rec.id || this.#sessions.has(rec.id)) continue;
       if (this.#skipQuarantined(rec.id)) continue;
-      if (!existsSync(rec.launchCwd)) continue;
+      const cwd = this.#recoveredCwd(rec);
+      if (!cwd) continue;
       const session = new AgySession({
-        id: rec.id, cwd: rec.launchCwd,
+        id: rec.id, cwd,
         model: rec.agySettings?.model,
         conversationId: rec.agySettings?.conversationId,
         status: "active", startedAt: Date.now(),
@@ -1365,7 +1381,9 @@ export class SessionRegistry {
       if (this.#skipQuarantined(rec.id)) continue;
       const sock = rec.codexSocketPath;
       const pid = rec.codexServerPid;
-      if (!sock || !pid || !existsSync(sock) || !existsSync(rec.launchCwd)) continue;
+      if (!sock || !pid || !existsSync(sock)) continue;
+      const cwd = this.#recoveredCwd(rec);
+      if (!cwd) continue;
       let cmdline = "";
       try { cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8"); } catch { continue; }
       if (!cmdline.includes("app-server") || !cmdline.includes(sock)) continue;
@@ -1383,7 +1401,7 @@ export class SessionRegistry {
       try {
         run("tmux", "-L", sockLabel, "kill-server"); // a half-dead one from before, if any
         disposeTmuxHandle(sockLabel);
-        server = await this.#newAgentServer(tmuxHandleFor(sockLabel, names.session), names.session, rec.launchCwd);
+        server = await this.#newAgentServer(tmuxHandleFor(sockLabel, names.session), names.session, cwd);
       } finally { this.#creating.delete(rec.id); }
       if (this.#sessions.has(rec.id) || this.#restarting.has(rec.id)) continue; // taken over meanwhile: leave its handle alone
       if (!server) { disposeTmuxHandle(sockLabel); continue; }
@@ -1392,11 +1410,11 @@ export class SessionRegistry {
       const shell = process.env.SHELL || "/bin/bash";
       drv.runSync("send-keys", "-t", tmuxWindow, "-l", `exec ${shell} -l`);
       drv.runSync("send-keys", "-t", tmuxWindow, "Enter");
-      saveWindowRecord(rec.id, { launchCwd: rec.launchCwd, socket: sockLabel });
+      saveWindowRecord(rec.id, { launchCwd: cwd, socket: sockLabel });
 
       const s = rec.codexSettings ?? {};
       const session = new CodexSession({
-        id: rec.id, tmuxWindow, cwd: rec.launchCwd,
+        id: rec.id, tmuxWindow, cwd,
         tmux: drv, tmuxSocket: sockLabel,
         model: s.model, effort: s.effort,
         permissionMode: s.permissionMode ?? "default",
