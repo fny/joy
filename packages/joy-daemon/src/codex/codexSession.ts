@@ -33,13 +33,9 @@ import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsP
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
 import { CodexNormalizer, type CodexNotification } from "./normalize";
 import { buildCodexAttachCommand } from "./attach";
-import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "./codexInboundStore";
+import { ledgerFor, type Ledger, type CommandRow, LedgerWriteError, StaleCommandError, StaleGenerationError } from "../domain/ledger";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
-import {
-  loadCheckpoint, saveCheckpoint, clearCheckpoint, isTurnDelivered, markTurnDelivered,
-  recordSeqReceipt, seqReceiptFor,
-  type CodexCheckpoint,
-} from "./codexCheckpointStore";
+import { isTurnDelivered, advanceTurnHighWater } from "./codexTurnCheckpoint";
 
 export interface CodexInit {
   id: string;
@@ -128,11 +124,15 @@ export class CodexSession implements AgentSession {
   // <joy-title> emissions. Loaded from the window record.
   #titleLocked = false;
   #freshCard = false;
-  // Durable inbound spool (finding #3): app messages persisted before delivery.
-  // Loaded in the constructor BEFORE the relay starts pulling (finding #3 race).
-  #inbound: CodexInboundItem[] = [];
-  // Delivered-turn checkpoint — advanced only on terminal-row ACK (finding #2).
-  #checkpoint: CodexCheckpoint;
+  // Durable inbound queue (finding #3): app messages are ledger commands,
+  // committed before delivery; the dispatch attempt (turn/start) is a ledger
+  // attempt committed BEFORE the socket write, so a crash between the send
+  // and the echo is an explicit unknown outcome, never a blind resend.
+  #ledger: Ledger;
+  #generation: number;
+  // Delivered-turn high-water — `checkpoints(kind='codex_turn')`, committed
+  // only once the turn's outbox rows are acked (finding #2, #67).
+  #deliveredThrough: string | null = null;
   // Notifications are BUFFERED from connect until reconcile finishes (finding
   // #10): the thread filter is inactive until #threadId is known, and live
   // traffic must not interleave with synthetic history replay.
@@ -163,23 +163,26 @@ export class CodexSession implements AgentSession {
     this.#config = init.config;
     this.#socketPath = join(joyStateDir(), `codex-${init.id}.sock`);
     this.#norm = new CodexNormalizer();
-    // Load durable state SYNCHRONOUSLY here, before attachRelay starts the relay
-    // pull, so an inbound message can't race the load (finding #3 startup race).
+    // The ledger is opened SYNCHRONOUSLY here, before attachRelay starts the
+    // relay pull, so an inbound message can't race the load (finding #3
+    // startup race). A new generation closes the previous one: attempts it
+    // left mid-flight become `unknown` and are reconciled from thread/read.
+    this.#ledger = deps.ledger ?? ledgerFor();
+    this.#generation = this.#ledger.openGeneration(init.id, "codex");
     if (init.codexThreadId) {
-      this.#inbound = loadCodexInbound(init.id);
-      this.#checkpoint = loadCheckpoint(init.id);
-      for (const it of this.#inbound) this.#dispatched.add(it.clientId); // recovered spool entries are ours (#78)
-      for (const id of this.#checkpoint.knownClientIds ?? []) this.#dispatched.add(id); // …and the ones already echoed before the crash
-      for (const r of this.#checkpoint.seqReceipts ?? []) this.#dispatched.add(r.clientId); // seq receipts are ours too (#516)
+      this.#deliveredThrough = this.#ledger.getCheckpoint(init.id, "codex_turn")?.ref ?? null;
       // Do NOT seed pendingEffort on resume/recover (finding #8).
     } else {
-      clearCodexInbound(init.id);
-      clearCheckpoint(init.id);
-      this.#inbound = [];
-      this.#checkpoint = { threadId: null, deliveredThroughTurnId: null };
+      // A fresh thread under this id: nothing queued for an earlier thread can
+      // run here, and its delivered-turn mark is meaningless.
+      for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session" });
+      this.#ledger.clearCheckpoint(init.id, "codex_turn");
       this.#pendingEffort = init.effort ?? null; // fresh session: apply on turn 1
     }
   }
+
+  /** Test/diagnostic access to the session's ledger generation. */
+  get ledgerGeneration(): number { return this.#generation; }
 
   get relayAttached(): boolean { return this.#relay !== null; }
   /** The codex thread id, once known — used by registry.restart to resume the
@@ -228,12 +231,12 @@ export class CodexSession implements AgentSession {
       }
       this.#client = client;
 
-      // Deliver anything spooled once reconcile has settled the confirmed set.
+      // Deliver anything queued once reconcile has settled the confirmed set.
       // Fresh spawn: the old server + its in-flight turn are gone, so requeue
-      // unconfirmed 'sentUnknown' items (at-least-once). Rejoin: hold them.
+      // unconfirmed (unknown) items (at-least-once — each resend is a NEW
+      // attempt with its own client id). Rejoin: hold them (at-most-once).
       if (!this.#rejoined) {
-        for (const it of this.#inbound) if (it.state === "sentUnknown") it.state = "queued";
-        saveCodexInbound(this.id, this.#inbound);
+        for (const r of this.#ledger.listPending(this.id, ["unknown"])) this.#ledger.requeueCommand(r.id);
       }
 
       // Reconcile done → resume live notification flow (flush buffered).
@@ -339,7 +342,6 @@ export class CodexSession implements AgentSession {
       this.#threadId = r.threadId;
       this.#norm.setThreadId(r.threadId);
       this.transcriptPath = r.rolloutPath ?? undefined;
-      this.#checkpoint = { ...this.#checkpoint, threadId: r.threadId };
       this.#persistWindowRecord();
       if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
     }
@@ -360,7 +362,6 @@ export class CodexSession implements AgentSession {
   #applyResumeSettings(r: { model: string | null; reasoningEffort: string | null }): void {
     if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
     if (r.reasoningEffort) this.currentEffort = r.reasoningEffort;
-    this.#checkpoint = { ...this.#checkpoint, threadId: this.#threadId };
   }
 
   /** Is `pid` actually one of OUR codex app-servers (not a recycled pid)? Guards
@@ -423,34 +424,49 @@ export class CodexSession implements AgentSession {
     if (this.status === "ended") return;
     if (this.#dispatching || this.#activeTurnId) return;
     if (!this.#client || !this.#threadId) return; // not ready — drained after start
-    const item = this.#inbound.find((i) => i.state === "queued");
+    const item = this.#ledger.listPending(this.id, ["queued"])[0];
     if (!item) return;
     this.#dispatching = true;
     void this.#dispatch(item).finally(() => { this.#dispatching = false; });
   }
 
-  async #dispatch(item: CodexInboundItem): Promise<void> {
+  /** The clientUserMessageId a dispatch attempt sends. The first attempt uses
+   *  the command id itself (the deterministic `codex-in:<id>:<seq>` scheme
+   *  keeps recovery ownership checks simple); a RESEND after an unknown
+   *  outcome gets a fresh id per attempt, so the two submissions — and their
+   *  echoes — stay distinguishable (campaign decision, 2026-09-06). */
+  #attemptRef(commandId: string, attemptNo: number): string {
+    return attemptNo <= 1 ? commandId : `${commandId}#a${attemptNo}`;
+  }
+
+  async #dispatch(item: CommandRow): Promise<void> {
     const client = this.#client;
     if (!client || !this.#threadId) return;
-    // Persist 'sentUnknown' BEFORE the socket write (finding #3d): a crash after
-    // codex accepts but before the response is processed must NOT leave it
-    // 'queued' (which would blindly resend). Ambiguous outcomes stay sentUnknown.
-    item.state = "sentUnknown";
-    if (!saveCodexInbound(this.id, this.#inbound)) {
-      // The durable spool still says 'queued' — sending now would let a crash
-      // before the echo make recovery resend a prompt codex already accepted
-      // (clientUserMessageId is not idempotent). Restore the in-memory state,
-      // never send, and retry the persistence (not the send) shortly (#514).
-      item.state = "queued";
-      process.stderr.write(`[codex ${this.id}] could not persist sentUnknown for ${item.clientId} — holding the send, retrying persistence\n`);
+    // The attempt is COMMITTED before the socket write (finding #3d): a crash
+    // after codex accepts but before the response is processed leaves an
+    // explicit `unknown`, never a `queued` row that recovery would blindly
+    // resend (clientUserMessageId is correlation, not idempotency).
+    let attemptId: string;
+    let clientId: string;
+    try {
+      const attemptNo = this.#ledger.attemptsForCommand(item.id).length + 1;
+      clientId = this.#attemptRef(item.id, attemptNo);
+      attemptId = this.#ledger.recordAttempt(item.id, this.#generation, clientId, "turn/start").id;
+    } catch (e) {
+      if (e instanceof StaleGenerationError) return; // retired: the replacement owns the queue
+      if (e instanceof StaleCommandError) { this.#recordOutcome(item.id, this.#ledger.getCommand(item.id)?.state === "cancelled" ? "cancelled" : "delivered"); queueMicrotask(() => this.#pumpDispatch()); return; }
+      // The ledger refused the commit — sending now would let a crash before
+      // the echo make recovery resend a prompt codex already accepted. Never
+      // send; retry the commit (not the send) shortly (#514).
+      process.stderr.write(`[codex ${this.id}] could not commit the dispatch attempt for ${item.id} (${e instanceof Error ? e.message : e}) — holding the send, retrying\n`);
       setTimeout(() => this.#pumpDispatch(), PERSIST_RETRY_MS).unref();
       return;
     }
-    this.#dispatched.add(item.clientId);
+    this.#dispatched.add(clientId);
     this.#inflightItem = item;
     try {
       const { turnId } = await client.turnStart(this.#threadId, item.text, {
-        clientUserMessageId: item.clientId,
+        clientUserMessageId: clientId,
         permissionMode: this.#permissionMode,
         effort: this.#pendingEffort ?? undefined,
       });
@@ -458,17 +474,18 @@ export class CodexSession implements AgentSession {
         try { await client.turnInterrupt(this.#threadId, turnId); } catch { /* best effort */ }
         return;
       }
+      this.#settle(attemptId, "accepted", { runtimeTurnId: turnId });
       this.#pendingEffort = null; // applied (codex persists it thread-side)
       this.#activeTurnId = turnId; // serialize: no further dispatch until this completes
-      if (this.#cancelledIds.has(item.clientId)) {
+      if (this.#cancelledIds.has(item.id)) {
         // Cancelled while turn/start was in flight: the turn is accepted and
         // running — interrupt it the moment its id is known (Astra, #66).
-        this.#cancelledIds.delete(item.clientId);
-        process.stderr.write(`[codex ${this.id}] ${item.clientId} was cancelled mid-start — interrupting turn ${turnId}\n`);
+        this.#cancelledIds.delete(item.id);
+        process.stderr.write(`[codex ${this.id}] ${item.id} was cancelled mid-start — interrupting turn ${turnId}\n`);
         try { await client.turnInterrupt(this.#threadId, turnId); } catch { /* best effort */ }
       }
     } catch (e) {
-      if (this.status === "ended") return; // a killed generation must not save its old queue (#43)
+      if (this.status === "ended") return; // a killed generation must not touch its old queue (#43)
       if (e instanceof JsonRpcResponseError) {
         // EXPLICIT server rejection. A busy/already-active refusal is
         // retryable (turn/completed re-pumps); anything else, three times in
@@ -477,24 +494,25 @@ export class CodexSession implements AgentSession {
         // the item, and a non-busy refusal schedules its own bounded retry so
         // the counter is driven without waiting for unrelated intake.
         const busy = /busy|already|in progress|active/i.test(String(e.message ?? ""));
-        const n = busy ? (this.#rejections.get(item.clientId) ?? 0) : (this.#rejections.get(item.clientId) ?? 0) + 1;
-        this.#rejections.set(item.clientId, n);
+        const n = busy ? (this.#rejections.get(item.id) ?? 0) : (this.#rejections.get(item.id) ?? 0) + 1;
+        this.#rejections.set(item.id, n);
         if (!busy && n < 3) setTimeout(() => this.#pumpDispatch(), 2_000 * n).unref();
         if (!busy && n >= 3) {
-          this.#inbound = this.#inbound.filter((i) => i.clientId !== item.clientId);
-          saveCodexInbound(this.id, this.#inbound);
-          this.#recordOutcome(item.clientId, "failed");
-          this.#rejections.delete(item.clientId);
+          this.#settle(attemptId, "rejected", { detail: `${e.code}: ${String(e.message ?? "").slice(0, 120)}` });
+          this.#recordOutcome(item.id, "failed");
+          this.#rejections.delete(item.id);
           process.stderr.write(`[codex ${this.id}] turn/start rejected ${n}× (${e.code}: ${String(e.message ?? "").slice(0, 120)}) — prompt failed\n`);
         } else {
-          item.state = "queued";
-          saveCodexInbound(this.id, this.#inbound);
+          // A transient refusal: the attempt is settled rejected and the row
+          // goes back to queued for the next pump (a new attempt, new id).
+          this.#settle(attemptId, "rejected", { detail: String(e.code), command: { to: "queued" } });
           process.stderr.write(`[codex ${this.id}] turn/start rejected (${e.code}) — requeued\n`);
         }
       } else {
-        // AMBIGUOUS (timeout / socket loss): it MIGHT have landed — hold as
-        // sentUnknown (at-most-once) rather than risk a duplicate turn. The
-        // tombstone (if any) stays: a late turn/started or echo settles it.
+        // AMBIGUOUS (timeout / socket loss): it MIGHT have landed — an explicit
+        // unknown (at-most-once) rather than a duplicate turn. The tombstone
+        // (if any) stays: a late turn/started or echo settles it.
+        this.#settle(attemptId, "unknown", { detail: String(e).slice(0, 200) });
         process.stderr.write(`[codex ${this.id}] turn/start ambiguous failure: ${e}\n`);
       }
     } finally {
@@ -502,9 +520,16 @@ export class CodexSession implements AgentSession {
     }
   }
 
+  /** settleAttempt with the ledger failure logged, never thrown: the
+   *  callers are the tails of a dispatch that already happened. */
+  #settle(attemptId: string, outcome: "accepted" | "unknown" | "rejected", patch: { runtimeTurnId?: string; detail?: string; command?: { to: "queued" } } = {}): void {
+    try { this.#ledger.settleAttempt(attemptId, outcome, patch); }
+    catch (e) { process.stderr.write(`[codex ${this.id}] ledger settle ${outcome} failed: ${e instanceof Error ? e.message : e}\n`); }
+  }
+
   /** The item whose turn/start is in flight; a late turn/started or echo for
    *  a tombstoned one is interrupted here (Astra, #66). */
-  #inflightItem: CodexInboundItem | null = null;
+  #inflightItem: CommandRow | null = null;
   #interruptIfCancelled(clientId: string | null): void {
     if (!clientId || !this.#cancelledIds.has(clientId)) return;
     if (!this.#client || !this.#threadId || !this.#activeTurnId) return; // no turn identity yet — keep the tombstone
@@ -513,48 +538,59 @@ export class CodexSession implements AgentSession {
     void this.#client.turnInterrupt(this.#threadId, this.#activeTurnId).catch(() => { /* best effort */ });
   }
 
-  /** A userMessage echo (live or from history replay) confirms delivery —
-   *  remove the spooled entry. */
+  /** A userMessage echo (live or from history replay) confirms delivery.
+   *  The echo observation, the codex_client + seq receipts (what stops a
+   *  redelivery of that seq from starting the prompt a second time, #516),
+   *  the attempt's `done` and the command's terminal `delivered` commit
+   *  TOGETHER — there is no longer an "ownership first, then the spool"
+   *  window, nor an ownership record to keep when a second write fails
+   *  (Astra on bdee9ac8 / cde740c1). */
   #onDispatchEchoed(clientId: string): void {
-    const before = this.#inbound.length;
-    const was = this.#inbound.find((i) => i.clientId === clientId);
-    this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
-    if (this.#inbound.length !== before) {
-      // Ownership FIRST, then the spool: a crash between the two must leave a
-      // durable copy of "this prompt was ours" somewhere (Astra on bdee9ac8).
-      // If the checkpoint cannot be written, the spool entry STAYS (state
-      // 'delivered' — never dispatched, never requeued) as that copy.
-      const known = [...(this.#checkpoint.knownClientIds ?? []), clientId].slice(-200);
-      this.#checkpoint = { ...this.#checkpoint, knownClientIds: known };
-      // The seq receipt rides in the SAME write: from here on the spool no
-      // longer holds this seq, so the receipt is what stops a redelivery of it
-      // from starting the prompt a second time (#516).
-      if (was?.seq != null) this.#checkpoint = recordSeqReceipt(this.#checkpoint, was.seq, clientId);
-      const saved = saveCheckpoint(this.id, this.#checkpoint);
-      if (!saved) {
-        const kept = this.#inbound.length; // restore the entry as an ownership record
-        const orig = this.#inbound; void kept;
-        // Keep the relay seq: a recovered adapter dedupes a redelivered
-        // prompt by seq, and without it the ownership record was invisible
-        // to that check — a second entry, a second turn (Astra on cde740c1).
-        this.#inbound = [...orig, { clientId, text: "", state: "delivered", at: Date.now(), ...(was?.seq != null ? { seq: was.seq } : {}) }];
-        process.stderr.write(`[codex ${this.id}] checkpoint save failed — keeping ${clientId} in the spool as the ownership record\n`);
+    const attempt = this.#ledger.matchAttemptByRef(this.id, clientId);
+    const commandId = attempt?.commandId ?? this.#commandIdForRef(clientId);
+    if (commandId) {
+      const cmd = this.#ledger.getCommand(commandId);
+      try {
+        this.#ledger.recordObservation({ sessionId: this.id, generation: this.#generation, attemptId: attempt?.id ?? null, kind: "echo", ref: clientId }, {
+          receipts: [{ kind: "codex_client", ref: clientId, commandId, attemptId: attempt?.id ?? null },
+            ...(cmd?.seq != null ? [{ kind: "seq", ref: String(cmd.seq), commandId, attemptId: attempt?.id ?? null }] : [])],
+          ...(attempt ? { attempt: { id: attempt.id, outcome: "done" as const } } : {}),
+          ...(cmd && !["completed", "failed", "cancelled", "interrupted"].includes(cmd.state) ? { command: { id: commandId, to: "completed" as const, terminalReason: "delivered" } } : {}),
+        });
+      } catch (e) {
+        process.stderr.write(`[codex ${this.id}] echo commit for ${clientId} failed: ${e instanceof Error ? e.message : e}\n`);
       }
-      saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId);
+      this.#recordOutcome(commandId, "delivered");
+      this.#dispatched.add(clientId);
     }
-    this.#interruptIfCancelled(clientId); // the echo proves it landed; a tombstoned one is interrupted now
+    this.#interruptIfCancelled(commandId ?? clientId); // the echo proves it landed; a tombstoned one is interrupted now
   }
 
+  /** The command a runtime ref (clientUserMessageId) belongs to, whether or
+   *  not an attempt is still awaiting it: a settled attempt, a retained
+   *  receipt, or the deterministic first-attempt id. */
+  #commandIdForRef(ref: string): string | null {
+    const rc = this.#ledger.getReceipt(this.id, "codex_client", ref);
+    if (rc?.commandId) return rc.commandId;
+    const base = ref.replace(/#a\d+$/, "");
+    return this.#ledger.getCommand(base)?.sessionId === this.id ? base : null;
+  }
+
+  /** The relay acked a turn's terminal row: advance the delivered-turn
+   *  high-water. Committed pending until every outbox row of this session
+   *  up to that point is acked (finding #2, #67); a restart before that
+   *  replays from the previous mark, receipt-deduped. Held outright while
+   *  the outbox cannot persist (rows exist only in RAM). */
   #markTurnDelivered(turnId: string): void {
     if (!turnId) return;
-    const next = markTurnDelivered(this.#checkpoint, turnId);
-    if (next !== this.#checkpoint) {
-      this.#checkpoint = next;
-      if (saveCheckpoint(this.id, this.#checkpoint) && this.#inbound.some((i) => i.state === "delivered")) {
-        // Ownership is durable in the checkpoint again: the spool copies can go.
-        for (const i of this.#inbound) if (i.state === "delivered") this.#checkpoint.knownClientIds = [...(this.#checkpoint.knownClientIds ?? []), i.clientId].slice(-200);
-        if (saveCheckpoint(this.id, this.#checkpoint)) { this.#inbound = this.#inbound.filter((i) => i.state !== "delivered"); saveCodexInbound(this.id, this.#inbound); }
-      }
+    const next = advanceTurnHighWater(this.#deliveredThrough, turnId);
+    if (next === this.#deliveredThrough || next === null) return;
+    if (this.#relay?.outboundPersistDegraded) return;
+    try {
+      this.#ledger.setCheckpoint(this.id, "codex_turn", next, 0, { throughSeq: "latest" });
+      this.#deliveredThrough = next;
+    } catch (e) {
+      process.stderr.write(`[codex ${this.id}] checkpoint ${next} failed: ${e instanceof Error ? e.message : e}\n`);
     }
   }
 
@@ -724,7 +760,7 @@ export class CodexSession implements AgentSession {
           // id scheme); anything else was typed in the attached TUI and has no
           // relay row — mirror it once. Not during history replay: a fresh
           // card already emitted user rows BEFORE the turn bracket (#78).
-          const ours = !!eff.clientId && (this.#dispatched.has(eff.clientId) || this.#inbound.some((i) => i.clientId === eff.clientId) || eff.clientId.startsWith(`codex-in:${this.id}:`));
+          const ours = !!eff.clientId && (this.#dispatched.has(eff.clientId) || eff.clientId.startsWith(`codex-in:${this.id}:`) || this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client"));
           if (ours) { this.#onDispatchEchoed(eff.clientId); break; }
           if (this.#replayingHistory && this.#freshCard) break; // already emitted before the turn bracket
           this.#relay?.send(encodeUserMessage(eff.text, Date.now()), eff.localId);
@@ -750,17 +786,18 @@ export class CodexSession implements AgentSession {
     // Rewind detection (finding #5): if our delivered high-water turn is no
     // longer in history, the TUI rolled back the tail. Surface it rather than
     // silently skipping turns the app still shows.
-    const high = this.#checkpoint.deliveredThroughTurnId;
+    const high = this.#deliveredThrough;
     if (high && !turns.some((t) => String(t.id ?? "") === high)) {
       process.stderr.write(`[codex ${this.id}] history rewound past ${high} — resetting checkpoint\n`);
-      this.#checkpoint = { threadId: this.#threadId, deliveredThroughTurnId: null };
+      this.#deliveredThrough = null;
+      try { this.#ledger.clearCheckpoint(this.id, "codex_turn"); } catch { /* the next mark rewrites it */ }
     }
 
     for (const turn of turns) {
       const tid = String(turn.id ?? "");
       if (!tid) continue;
       // Already delivered before the restart — skip wholesale.
-      if (isTurnDelivered(this.#checkpoint, tid)) continue;
+      if (isTurnDelivered(this.#deliveredThrough, tid)) continue;
       const status = String(turn.status ?? "completed");
       const view = String(turn.itemsView ?? "full");
       // A turn whose items history did NOT fully return can't be faithfully
@@ -811,12 +848,7 @@ export class CodexSession implements AgentSession {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
       }
     }
-    // The high-water advances via terminal-row ACKs (setReceiptSink); just make
-    // sure the thread binding is persisted.
-    if (this.#checkpoint.threadId !== this.#threadId) {
-      this.#checkpoint = { ...this.#checkpoint, threadId: this.#threadId };
-    }
-    saveCheckpoint(this.id, this.#checkpoint);
+    // The high-water advances via terminal-row ACKs (setReceiptSink).
   }
 
   // ── app-facing intake / queue (daemon-owned FIFO) ────────────────────────────
@@ -845,50 +877,32 @@ export class CodexSession implements AgentSession {
     if (rein) {
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command", reinjectionId: rein };
     }
-    if (seq != null) {
-      const dup = this.#inbound.find((i) => i.seq === seq);
-      if (dup) { this.#pumpDispatch(); return { id: dup.clientId, text, createdAt: dup.at }; }
-      // Already ACCEPTED and confirmed (or settled) earlier: the echo removed
-      // it from the spool, so only the receipts remember it. Redelivered seqs
-      // are the same logical message — never a second turn/start (#516).
-      const settled = this.#settledClientIdForSeq(seq);
-      if (settled) {
-        process.stderr.write(`[codex ${this.id}] dedupe redelivered seq=${seq} (already confirmed as ${settled})\n`);
-        this.#pumpDispatch();
-        return { id: settled, text, createdAt: Date.now() };
-      }
-    }
-    const item: CodexInboundItem = { clientId: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text, state: "queued", at: Date.now(), seq };
-    this.#inbound.push(item);
-    if (!saveCodexInbound(this.id, this.#inbound)) {
-      this.#inbound.pop();
-      throw new Error("codex inbound persist failed");
+    // Acceptance = the ledger commit (throws when it cannot commit, or when
+    // the session has ended — #553). Dedupe lives there: a redelivered seq
+    // (crash-before-cursor-persist) hits the pending row, or — after its echo
+    // settled the row — the retained seq receipt. Redelivered seqs are the
+    // same logical message: never a second turn/start (#516).
+    const at = Date.now();
+    const accepted = this.#ledger.acceptCommand({
+      sessionId: this.id, id: seq != null ? `codex-in:${this.id}:${seq}` : randomUUID(), text,
+      origin: seq != null ? "relay" : "local", source: opts?.source ?? "rpc", seq,
+      visible: opts?.visible ?? false, mirrorToRelay: opts?.mirrorToRelay ?? true, createdAt: at,
+    });
+    if (accepted.deduped !== "none") {
+      process.stderr.write(`[codex ${this.id}] dedupe ${accepted.deduped === "receipt" ? "redelivered" : "re-pulled"} ${seq != null ? `seq=${seq}` : `id=${accepted.id}`} (already ${accepted.deduped === "receipt" ? "confirmed" : "queued"} as ${accepted.id})\n`);
+      this.#pumpDispatch();
+      return { id: accepted.id, text, createdAt: accepted.row?.createdAt ?? at };
     }
     // The mirror row's localId must be unique per MESSAGE: two non-relay sends
     // in the same millisecond shared `codex:in:<id>:<ms>` and the relay deduped
     // the second user row away as a replay (Astra medium, codexSession.ts:731).
     // Relay sends keep the seq (stable across a redelivery — that dedupe is wanted).
-    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `codex:in:${this.id}:${seq ?? item.clientId}`);
+    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `codex:in:${this.id}:${seq ?? accepted.id}`);
     this.#pumpDispatch();
-    // The durable clientId IS the queue item id: cancelQueued/queueItemState
-    // address the spool by it, and the lane tracks THIS prompt's delivery by
+    // The durable command id IS the queue item id: cancelQueued/queueItemState
+    // address the ledger by it, and the lane tracks THIS prompt's delivery by
     // the userMessage echo instead of another turn's busy flag (#66).
-    return { id: item.clientId, text, createdAt: item.at };
-  }
-
-  /** The clientId a relay seq was already accepted under, when the spool no
-   *  longer holds it: the persisted seq receipt, the legacy knownClientIds
-   *  entry (checkpoints written before receipts existed — the clientId for a
-   *  seq is deterministic), or a per-item outcome this process recorded
-   *  (delivered / cancelled / failed — a redelivery must not resurrect any of
-   *  them). Null = genuinely new (#516). */
-  #settledClientIdForSeq(seq: number): string | null {
-    const fromReceipt = seqReceiptFor(this.#checkpoint, seq);
-    if (fromReceipt) return fromReceipt;
-    const deterministic = `codex-in:${this.id}:${seq}`;
-    if ((this.#checkpoint.knownClientIds ?? []).includes(deterministic)) return deterministic;
-    if (this.#itemOutcome.has(deterministic)) return deterministic;
-    return null;
+    return { id: accepted.id, text, createdAt: at };
   }
 
   /** Per-item outcomes for the lane (see Session.queueItemState). */
@@ -900,24 +914,27 @@ export class CodexSession implements AgentSession {
     if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
   }
   queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
-    // A 'delivered' spool entry is an OWNERSHIP record (checkpoint write
-    // failed after the echo) — codex already has the prompt; reporting it
-    // pending held the lane until its dispatch cap (Astra on 170ec279, #78).
-    const it = this.#inbound.find((i) => i.clientId === id);
-    if (it) return it.state === "delivered" ? "delivered" : "pending";
     const local = this.#itemOutcome.get(id);
     if (local) return local;
-    // A recovered adapter suppresses a redelivered seq from its persisted
+    const row = this.#ledger.getCommand(id);
+    if (row && row.sessionId === this.id) {
+      switch (row.state) {
+        case "completed": return "delivered";
+        case "failed": return "failed";
+        case "cancelled": case "interrupted": return "cancelled";
+        default: return "pending";
+      }
+    }
+    // A recovered adapter suppresses a redelivered seq from its retained
     // receipts but had no in-process outcome for it, so the lane saw
     // 'unknown', took the untracked path and waited 180 s before failing
     // no_agent_activity (Astra on ddc89de1, #516). The receipt IS the outcome.
-    const cp = this.#checkpoint;
-    if ((cp.seqReceipts ?? []).some((r) => r.clientId === id) || (cp.knownClientIds ?? []).includes(id)) return "delivered";
+    if (this.#ledger.hasReceipt(this.id, "codex_client", id)) return "delivered";
     return "unknown";
   }
 
   queueState(): QueueState {
-    const pending = this.#inbound.filter((i) => i.state === "queued").length;
+    const pending = this.#ledger.listPending(this.id, ["queued"]).length;
     return { queue: [], pendingCount: pending, hidden: [], inFlight: this.#activeTurnId, paused: false };
   }
 
@@ -928,18 +945,16 @@ export class CodexSession implements AgentSession {
    *  handed to codex (sentUnknown) is removed too — the abort that follows a
    *  cancel interrupts it if it did land. */
   cancelQueued(id: string): boolean {
-    const before = this.#inbound.length;
-    const item = this.#inbound.find((i) => i.clientId === id);
-    // An ownership record is not unsent work: codex already ran it, and this
-    // entry is the only durable copy of "that user row was ours" (#78).
-    if (item?.state === "delivered") return false;
-    this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
-    if (this.#inbound.length === before) return false;
-    saveCodexInbound(this.id, this.#inbound);
+    const row = this.#ledger.getCommand(id);
+    if (!row || row.sessionId !== this.id || ["completed", "failed", "cancelled", "interrupted"].includes(row.state)) return false;
+    // Durable cancel: a queued row is cancelled outright; one already handed
+    // to codex (submitting/accepted/unknown) is cancelled AND tombstoned so
+    // the accepted turn is interrupted as soon as its id arrives (#66).
+    const inFlight = row.state !== "queued";
+    try { this.#ledger.requestCancel(id); if (inFlight) this.#ledger.transition(id, ["submitting", "accepted", "unknown", "running", "cancelling"], "cancelled", { terminalReason: "cancelled" }); }
+    catch (e) { process.stderr.write(`[codex ${this.id}] ledger cancel ${id} failed: ${e instanceof Error ? e.message : e}\n`); }
     this.#recordOutcome(id, "cancelled");
-    // Already handed to codex (turn/start in flight): tombstone it so the
-    // accepted turn is interrupted as soon as its id arrives (#66).
-    if (item?.state === "sentUnknown") this.#cancelledIds.add(id);
+    if (inFlight) this.#cancelledIds.add(id);
     return true;
   }
   /** clientIds this session handed to codex (ownership for userMessage echoes). */
@@ -1064,12 +1079,18 @@ export class CodexSession implements AgentSession {
           : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));
       } catch { /* ignore */ }
       this.#relay?.stop();
-      clearCodexInbound(this.id); this.#inbound = []; // a killed session will never deliver — drop the spool
-      clearCheckpoint(this.id);
       // Intentional kill → drop the record so record-based codex recovery
       // can't resurrect this session on the next daemon boot.
       if (reason !== "restart") this.#recordTerminated = deleteWindowRecord(this.id);
     }
+    // A killed session will never deliver: its queued rows are interrupted
+    // and its delivered-turn mark dropped. A restart's replacement takes the
+    // queued rows; a process exit keeps them for the restart that follows
+    // (the record — and the thread — are still there).
+    try {
+      this.#ledger.closeGeneration(this.id, this.#generation, reason, { keepQueued: reason === "restart" || reason === "process_exited" });
+      if (reason === "killed") this.#ledger.clearCheckpoint(this.id, "codex_turn");
+    } catch (e) { process.stderr.write(`[codex ${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
   }
@@ -1090,7 +1111,9 @@ export class CodexSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       this.#recordTerminated = deleteWindowRecord(this.id);
-      clearCodexInbound(this.id); clearCheckpoint(this.id); this.#inbound = []; // nothing left to deliver or resume (#43)
+      // Nothing left to deliver or resume (#43).
+      try { this.#ledger.closeGeneration(this.id, this.#generation, "killed"); this.#ledger.clearCheckpoint(this.id, "codex_turn"); }
+      catch (e) { process.stderr.write(`[codex ${this.id}] ledger close on kill failed: ${e instanceof Error ? e.message : e}\n`); }
       void (this.#tmuxSocket
         ? (this.#tmux.runSync("kill-server"), disposeTmuxHandle(this.#tmuxSocket), Promise.resolve())
         : this.#tmux.command(["kill-window", "-t", this.tmuxWindow]));

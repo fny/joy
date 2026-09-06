@@ -31,7 +31,7 @@ import type { AgentSession } from "../domain/agentSession";
 import { spawnOpencodeServer, OpencodeClient, isOpencodeServerPid, killOpencodeServerPid } from "./opencodeClient";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
 import { opencodeJoyPreamble, joyPromptReinjection } from "../domain/agentTagsPrompt";
-import { loadCodexInbound, saveCodexInbound, clearCodexInbound, type CodexInboundItem } from "../codex/codexInboundStore";
+import { ledgerFor, type Ledger, type CommandRow, StaleCommandError, StaleGenerationError } from "../domain/ledger";
 
 export interface OpencodeInit {
   id: string;
@@ -140,7 +140,10 @@ export class OpencodeSession implements AgentSession {
   #started = false;
   #activeTurn: string | null = null;
   #archivePromise: Promise<boolean> | null = null;
-  #inbound: CodexInboundItem[] = [];
+  // Durable inbound queue: ledger commands, committed before delivery; each
+  // prompt POST is a ledger attempt committed before the request goes out.
+  #ledger: Ledger;
+  #generation: number;
   // Reconcile checkpoint (persisted): last message id fully delivered to the
   // relay. Advanced on live turn completion and after reconcile replay.
   #deliveredThrough?: string;
@@ -171,10 +174,19 @@ export class OpencodeSession implements AgentSession {
     this.#continueLast = init.continueLast === true;
     this.#titled = init.opencodeSessionId != null;
     this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
-    // Load the durable spool before the relay starts pulling.
-    this.#inbound = init.opencodeSessionId ? loadCodexInbound(this.id) : [];
-    if (!init.opencodeSessionId) clearCodexInbound(this.id);
+    // The ledger is opened before the relay starts pulling; a new generation
+    // closes the previous one (its in-flight prompts become `unknown`).
+    this.#ledger = deps.ledger ?? ledgerFor();
+    this.#generation = this.#ledger.openGeneration(init.id, "opencode");
+    if (!init.opencodeSessionId) {
+      // A fresh opencode session under this id: nothing queued for an earlier
+      // one can run here.
+      for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session" });
+    }
   }
+
+  /** Test/diagnostic access to the session's ledger generation. */
+  get ledgerGeneration(): number { return this.#generation; }
 
   get relayAttached(): boolean { return this.#relay !== null; }
   get opencodeSessionId(): string | undefined { return this.#ocSessionId ?? this.#resumeOcSessionId; }
@@ -310,60 +322,74 @@ export class OpencodeSession implements AgentSession {
   /** Read through a call so TS does not narrow `status` across an await. */
   #isEnded(): boolean { return this.status === "ended"; }
   async #drainInboundInner(client: OpencodeClient, ocSessionId: string): Promise<void> {
-    for (const item of [...this.#inbound]) {
+    // queued rows, plus unknown ones (a transport failure mid-request): the
+    // deterministic message id makes the retry idempotent server-side.
+    for (const item of this.#ledger.listPending(this.id, ["queued", "unknown"])) {
       if (this.status === "ended") return; // a killed generation sends nothing more (#43)
-      if (item.state !== "queued" && item.state !== "sentUnknown") continue;
-      // Re-check membership right before the send: a cancel that landed
-      // during the previous await removed it from #inbound.
-      if (!this.#inbound.includes(item)) continue;
+      // The attempt is COMMITTED before the request goes out. The ledger
+      // refuses a row whose cancel landed during the previous await (#77),
+      // a stale generation (#481), and — should the commit itself fail —
+      // the prompt is simply not sent this pass.
+      let attemptId: string;
       try {
-        item.state = "sentUnknown";
-        saveCodexInbound(this.id, this.#inbound);
+        if (item.state === "unknown" && !this.#ledger.requeueCommand(item.id)) continue;
+        attemptId = this.#ledger.recordAttempt(item.id, this.#generation, item.id, "prompt").id;
+      } catch (e) {
+        if (e instanceof StaleGenerationError) return;
+        if (e instanceof StaleCommandError) { this.#recordOutcome(item.id, this.#ledger.getCommand(item.id)?.state === "cancelled" ? "cancelled" : "delivered"); continue; }
+        process.stderr.write(`[opencode ${this.id}] could not commit the prompt attempt for ${item.id}: ${e instanceof Error ? e.message : e} — holding the send\n`);
+        this.#drainAgain = true;
+        return;
+      }
+      try {
         // delivery:'steer' (the server default, claude-parity UX): idle →
         // starts a turn; busy → injected into the RUNNING turn between tool
         // calls (verified live 2026-08-03 — in-flight work continues and the
         // model incorporates the addition).
         const outText = this.#needsPreamble ? opencodeJoyPreamble() + item.text : item.text;
-        const r = await client.prompt(ocSessionId, outText, { id: item.clientId, delivery: "steer" });
+        const r = await client.prompt(ocSessionId, outText, { id: item.id, delivery: "steer" });
         this.#needsPreamble = false;
         // Admission ack = durable server-side; prompt.admitted event confirms
-        // via the normalizer too, but the ack alone is safe to remove on
+        // via the normalizer too, but the ack alone is safe to settle on
         // (admittedSeq is the server's own ordering receipt).
-        if (this.#isEnded()) return; // retired mid-request: do not touch the (cleared) spool (#43)
-        // A cancel that raced the reply wins: never overwrite its outcome.
-        if (r.messageID) this.#noteAdmitted(item.clientId, r.admittedSeq >= 0 ? r.admittedSeq : undefined);
-        if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
+        if (this.#isEnded()) return; // retired mid-request: this generation owns nothing now (#43)
+        if (r.messageID) {
+          this.#noteAdmitted(item.id, r.admittedSeq >= 0 ? r.admittedSeq : undefined);
+          // A cancel that raced the reply wins: confirmDelivery on a cancelled
+          // row only adds the receipt (the terminal state stands).
+          try { this.#ledger.confirmDelivery(item.id, [{ kind: "opencode_msg", ref: r.messageID }, ...(item.seq != null ? [{ kind: "seq", ref: String(item.seq) }] : [])], { attemptId }); }
+          catch (e) { process.stderr.write(`[opencode ${this.id}] admission commit for ${item.id} failed: ${e instanceof Error ? e.message : e}\n`); }
+          this.#recordOutcome(item.id, "delivered");
+        } else {
+          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: "no messageID in the prompt reply" }); } catch { /* logged below on the next pass */ }
+        }
         // The HTTP ack is admission evidence too: a prompt cancelled while
         // this request was in flight (tombstoned by cancelQueued) is now
         // running — interrupt it here, not only on the SSE confirm, which a
         // dropped stream never delivers (Astra on 170ec279, #77).
-        if (r.messageID && this.#cancelledIds.has(item.clientId)) {
-          process.stderr.write(`[opencode ${this.id}] ${item.clientId} was cancelled — interrupting the admitted prompt\n`);
-          this.#interruptCancelled(item.clientId, client, ocSessionId);
+        if (r.messageID && this.#cancelledIds.has(item.id)) {
+          process.stderr.write(`[opencode ${this.id}] ${item.id} was cancelled — interrupting the admitted prompt\n`);
+          this.#interruptCancelled(item.id, client, ocSessionId);
         }
       } catch (e) {
         if (this.#isEnded()) return;
         const msg = e instanceof Error ? e.message : String(e);
         if (/→ \d{3}:/.test(msg)) {
           // The server ANSWERED and refused: this prompt is terminal. Leaving
-          // it sentUnknown re-ran it on the next unrelated intake, after the
-          // app had already shown it failed (#79).
+          // it unknown re-ran it on the next unrelated intake, after the app
+          // had already shown it failed (#79). A cancel that raced the reply
+          // keeps its outcome (the row is already terminal).
           process.stderr.write(`[opencode ${this.id}] prompt rejected: ${msg} — dropped\n`);
-          const stillOurs = this.#inbound.includes(item); // a cancel that raced the reply keeps its outcome
-          this.#removeInbound(item.clientId);
-          if (stillOurs) this.#recordOutcome(item.clientId, "failed");
+          const wasOurs = !this.#cancelledIds.has(item.id) && this.#ledger.getCommand(item.id)?.state === "submitting";
+          try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: msg.slice(0, 200) }); } catch { /* best effort */ }
+          if (wasOurs) this.#recordOutcome(item.id, "failed");
         } else {
           process.stderr.write(`[opencode ${this.id}] prompt failed: ${msg}\n`);
-          // transport failure: leave sentUnknown — the deterministic id makes a retry idempotent.
+          // transport failure: an explicit unknown — the deterministic id makes the retry idempotent.
+          try { this.#ledger.settleAttempt(attemptId, "unknown", { detail: msg.slice(0, 200) }); } catch { /* best effort */ }
         }
       }
     }
-  }
-
-  #removeInbound(clientId: string): void {
-    const before = this.#inbound.length;
-    this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
-    if (this.#inbound.length !== before) saveCodexInbound(this.id, this.#inbound);
   }
 
   /** Silent-drop guard: /wait is unusable (permanent 503 on 1.18.10), so turn
@@ -432,7 +458,14 @@ export class OpencodeSession implements AgentSession {
         case "confirmPrompt":
           if (eff.messageID) {
             this.#noteAdmitted(eff.messageID, eff.seq);
-            this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
+            // Admission proven by SSE: settle the attempt + row (idempotent
+            // after the HTTP ack's confirm; a cancelled row keeps its state).
+            const att = this.#ledger.matchAttemptByRef(this.id, eff.messageID);
+            if (att || this.#ledger.getCommand(eff.messageID)?.sessionId === this.id) {
+              try { this.#ledger.confirmDelivery(att?.commandId ?? eff.messageID, [{ kind: "opencode_msg", ref: eff.messageID }], { attemptId: att?.id }); }
+              catch (e) { process.stderr.write(`[opencode ${this.id}] admission commit for ${eff.messageID} failed: ${e instanceof Error ? e.message : e}\n`); }
+            }
+            this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
             if (this.#cancelledIds.has(eff.messageID) && this.#client && this.#ocSessionId) {
               // Admitted after the user cancelled it: interrupt now (#77).
               this.#interruptCancelled(eff.messageID, this.#client, this.#ocSessionId);
@@ -578,39 +611,38 @@ export class OpencodeSession implements AgentSession {
     if (rein) {
       return { id: String(seq ?? Date.now()), text, createdAt: Date.now(), handled: "command", reinjectionId: rein };
     }
-    if (seq != null) {
-      const dup = this.#inbound.find((i) => i.seq === seq);
-      if (dup) { void this.#drainInbound(); return { id: dup.clientId, text, createdAt: dup.at }; }
-    }
-    const item: CodexInboundItem = {
-      clientId: seq != null ? `msg_joy${this.id}s${seq}` : `msg_joy${this.id}r${randomUUID().replace(/-/g, "").slice(0, 12)}`,
-      text, state: "queued", at: Date.now(), seq,
-    };
-    this.#inbound.push(item);
-    if (!saveCodexInbound(this.id, this.#inbound)) {
-      this.#inbound.pop();
-      throw new Error("opencode inbound persist failed");
-    }
-    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, item.at), `oc:in:${this.id}:${seq ?? item.at}`);
+    // Acceptance = the ledger commit (throws when it cannot commit, or when
+    // the session has ended — #553). A redelivered seq dedupes against the
+    // pending row or the retained receipt: the same logical message, never a
+    // second prompt.
+    const at = Date.now();
+    const accepted = this.#ledger.acceptCommand({
+      sessionId: this.id, id: seq != null ? `msg_joy${this.id}s${seq}` : `msg_joy${this.id}r${randomUUID().replace(/-/g, "").slice(0, 12)}`, text,
+      origin: seq != null ? "relay" : "local", source: opts?.source ?? "rpc", seq,
+      visible: opts?.visible ?? false, mirrorToRelay: opts?.mirrorToRelay ?? true, createdAt: at,
+    });
+    if (accepted.deduped !== "none") { void this.#drainInbound(); return { id: accepted.id, text, createdAt: accepted.row?.createdAt ?? at }; }
+    if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `oc:in:${this.id}:${seq ?? at}`);
     this.#maybeTitle(text);
     void this.#drainInbound();
-    return { id: item.clientId, text, createdAt: item.at }; // the durable clientId is the queue item id (#79)
+    return { id: accepted.id, text, createdAt: at }; // the durable command id is the queue item id (#79)
   }
 
   queueState(): QueueState {
-    const pending = this.#inbound.filter((i) => i.state === "queued").length;
+    const pending = this.#ledger.listPending(this.id, ["queued"]).length;
     return { queue: [], pendingCount: pending, hidden: [], inFlight: this.#activeTurn, paused: false };
   }
 
   resumeQueue(): void { void this.#drainInbound(); }
   editQueued(): boolean { return false; }
   cancelQueued(id: string): boolean {
-    const item = this.#inbound.find((i) => i.clientId === id);
-    if (!item) return false;
-    this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
-    saveCodexInbound(this.id, this.#inbound);
+    const row = this.#ledger.getCommand(id);
+    if (!row || row.sessionId !== this.id || ["completed", "failed", "cancelled", "interrupted"].includes(row.state)) return false;
+    const inFlight = row.state !== "queued";
+    try { this.#ledger.requestCancel(id); if (inFlight) this.#ledger.transition(id, ["submitting", "accepted", "unknown", "running", "cancelling"], "cancelled", { terminalReason: "cancelled" }); }
+    catch (e) { process.stderr.write(`[opencode ${this.id}] ledger cancel ${id} failed: ${e instanceof Error ? e.message : e}\n`); }
     this.#recordOutcome(id, "cancelled");
-    if (item.state === "sentUnknown") {
+    if (inFlight) {
       // The HTTP prompt is in flight: it may be admitted after this. Tombstone
       // it (admission interrupts) and report "not plucked" so the caller aborts
       // now (Astra on 4b70d70c, #77).
@@ -726,8 +758,16 @@ export class OpencodeSession implements AgentSession {
     if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
   }
   queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
-    if (this.#inbound.some((i) => i.clientId === id)) return "pending";
-    return this.#itemOutcome.get(id) ?? "unknown";
+    const local = this.#itemOutcome.get(id);
+    if (local) return local;
+    const row = this.#ledger.getCommand(id);
+    if (!row || row.sessionId !== this.id) return this.#ledger.hasReceipt(this.id, "opencode_msg", id) ? "delivered" : "unknown";
+    switch (row.state) {
+      case "completed": return "delivered";
+      case "failed": return "failed";
+      case "cancelled": case "interrupted": return "cancelled";
+      default: return "pending";
+    }
   }
   reorderQueued(): boolean { return false; }
 
@@ -791,9 +831,13 @@ export class OpencodeSession implements AgentSession {
     } else {
       if (this.#relay && reason !== "restart") this.#archivePromise = this.#relay.archive(); // restart keeps the card
       this.#relay?.stop();
-      clearCodexInbound(this.id);
       if (reason !== "restart") this.#recordTerminated = deleteWindowRecord(this.id);
     }
+    // A killed session will never deliver: its queued rows are interrupted.
+    // A restart's replacement takes them; a process exit keeps them for the
+    // restart that follows (the record — and the server session — remain).
+    try { this.#ledger.closeGeneration(this.id, this.#generation, reason, { keepQueued: reason === "restart" || reason === "process_exited" }); }
+    catch (e) { process.stderr.write(`[opencode ${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
     this.#deps.broadcast("session_update", this.toJSON());
     return true;
   }
@@ -814,7 +858,8 @@ export class OpencodeSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       this.#recordTerminated = deleteWindowRecord(this.id);
-      clearCodexInbound(this.id); this.#inbound = []; // nothing left to deliver (#43)
+      try { this.#ledger.closeGeneration(this.id, this.#generation, "killed"); } // nothing left to deliver (#43)
+      catch (e) { process.stderr.write(`[opencode ${this.id}] ledger close on kill failed: ${e instanceof Error ? e.message : e}\n`); }
       this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }

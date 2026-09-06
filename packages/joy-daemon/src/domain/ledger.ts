@@ -370,18 +370,18 @@ export class Ledger {
    *  takes them); every other reason interrupts them too — an ended session
    *  will never deliver, and the app must not be told otherwise. Any command
    *  mid-flight is `interrupted` with the reason (its attempt → unknown). */
-  closeGeneration(sessionId: string, generation: number, reason: string): void {
+  closeGeneration(sessionId: string, generation: number, reason: string, opts: { keepQueued?: boolean } = {}): void {
     this.tx(() => {
       const row = this.#get("SELECT ended_at FROM session_generations WHERE session_id=? AND generation=?", sessionId, generation);
       if (!row || row.ended_at != null) return;
-      this.#closeGenerationInner(sessionId, generation, reason, this.#now());
+      this.#closeGenerationInner(sessionId, generation, reason, this.#now(), opts.keepQueued);
     }, "closeGeneration");
   }
-  #closeGenerationInner(sessionId: string, generation: number, reason: string, now: number): void {
+  #closeGenerationInner(sessionId: string, generation: number, reason: string, now: number, keepQueued?: boolean): void {
     this.#run("UPDATE session_generations SET ended_at=?, end_reason=? WHERE session_id=? AND generation=?", now, reason, sessionId, generation);
     this.#run(`UPDATE attempts SET state='unknown', settled_at=?, detail=? WHERE session_id=? AND generation=? AND state='submitting'`,
       now, `generation closed: ${reason}`, sessionId, generation);
-    if (reason === "restart" || reason === "superseded") {
+    if (keepQueued ?? (reason === "restart" || reason === "superseded")) {
       // The replacement (or the next daemon) owns the session: queued rows
       // stay queued; anything mid-flight is an explicit UNKNOWN outcome the
       // adapter reconciles before any resend (codex thread/read; claude
