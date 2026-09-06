@@ -35,7 +35,7 @@
 //     the newer attempt (review 95c4781e, wave C1). transition / setCheckpoint
 //     / acceptCommand take an optional generation (+ expectedAttemptId) and
 //     refuse when it is not current.
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { mkdirSecure, chmodSecretQuiet } from "./secretFile";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -358,6 +358,8 @@ export class Ledger {
   readonly path: string;
   readonly stateDir: string;
   #db: DatabaseSync;
+  /** Prepared statements by SQL text (see #stmt). */
+  #stmts = new Map<string, StatementSync>();
   #now: () => number;
   #txDepth = 0;
   #closed = false;
@@ -435,6 +437,10 @@ export class Ledger {
     if (!has("checkpoints", "pending_receipt_ord")) this.#db.exec("ALTER TABLE checkpoints ADD COLUMN pending_receipt_ord INTEGER");
     this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_ord ON receipts(session_id, kind, ord)");
     this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_position ON receipts(session_id, kind, transcript_path, byte_offset)");
+    // The insertion-time cap deletes the OLDEST covered rows (#560): ordinal
+    // order within one file, so the walk stops at the first covered rows
+    // instead of sorting the whole covered set per receipt (#627).
+    this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_file_ord ON receipts(session_id, kind, transcript_path, ord)");
     if (!this.#get("SELECT 1 AS x FROM schema_meta WHERE key='receipt_ord'")) {
       const max = Number(this.#get("SELECT COALESCE(MAX(ord),0) AS m FROM receipts")?.m ?? 0);
       this.#run("INSERT INTO schema_meta(key,value) VALUES('receipt_ord',?)", String(max));
@@ -453,22 +459,39 @@ export class Ledger {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#stmts.clear();
     try { this.#db.close(); } catch { /* already closed */ }
   }
 
   /** Tests: the underlying handle (to inject write failures). */
   get db(): DatabaseSync { return this.#db; }
 
-  // ── transactions ──
+  // ── statements ──
+  /** One prepared statement per distinct SQL text, kept for the handle's
+   *  life (#627). Preparing per call made every forwarded receipt pay ~5
+   *  compiles (existence check, ordinal, insert, cursor, cap) — 4-5x the
+   *  cost of executing them — so a 20k-receipt session took seconds and the
+   *  #560 tests timed out under a loaded shard. A statement fully resets
+   *  between uses (node:sqlite `run`/`get`/`all` reset before binding), and
+   *  SQLite re-prepares one itself after a schema change, so the migrations
+   *  in the constructor are safe under it. The SQL texts are finite (the
+   *  `placeholders(n)` variants are bounded by the enum lengths). */
+  #stmt(sql: string): StatementSync {
+    let s = this.#stmts.get(sql);
+    if (!s) { s = this.#db.prepare(sql); this.#stmts.set(sql, s); }
+    return s;
+  }
   #run(sql: string, ...params: Array<string | number | bigint | null>): { changes: number | bigint } {
-    return this.#db.prepare(sql).run(...params);
+    return this.#stmt(sql).run(...params);
   }
   #get(sql: string, ...params: Array<string | number | bigint | null>): Raw | undefined {
-    return this.#db.prepare(sql).get(...params) as Raw | undefined;
+    return this.#stmt(sql).get(...params) as Raw | undefined;
   }
   #all(sql: string, ...params: Array<string | number | bigint | null>): Raw[] {
-    return this.#db.prepare(sql).all(...params) as Raw[];
+    return this.#stmt(sql).all(...params) as Raw[];
   }
+
+  // ── transactions ──
 
   /** `BEGIN IMMEDIATE; fn(); COMMIT` — rollback + rethrow on error. Nested
    *  calls join the outer transaction. A thrown LedgerWriteError means
@@ -1027,8 +1050,10 @@ export class Ledger {
       st.covered = this.#coveredCount(sessionId, cursor);
     }
     if (st.covered <= 0) { this.#warnUncovered(sessionId, st.n, cursor); return; }
+    // INDEXED BY: the planner otherwise takes the byte_offset range and sorts
+    // every covered row by ord on each insert over the cap (#627).
     const deleted = Number(this.#run(`DELETE FROM receipts WHERE rowid IN (
-        SELECT rowid FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<? ORDER BY ord LIMIT ?)`,
+        SELECT rowid FROM receipts INDEXED BY receipts_file_ord WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<? ORDER BY ord LIMIT ?)`,
       sessionId, cursor.ref, cursor.offset, Math.min(st.covered, excess)).changes);
     st.n -= deleted; st.covered -= deleted;
   }
