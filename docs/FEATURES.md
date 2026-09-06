@@ -47,14 +47,19 @@ every relay; machines register per account.
   its outcome (a failed turn stays failed; an idle runtime with no turn end
   is `interrupted`, never "done"), a cancel is durable and retried until the
   harness confirms or is shown as unresolved, and a restart mid-turn ends
-  that message `interrupted` while the rest of the queue carries over. Codex,
-  opencode, pi and agy are drivers of it; claude still runs its own queue
-  behind the same facade. Claude adds verified typing into the pane.
-  Queued rows render app-side in a
+  that message `interrupted` while the rest of the queue carries over. All
+  five harnesses are drivers of it (claude's driver is the session's pane
+  gate + hook-owned turn edges: a message is `queued` until the box is
+  verifiably idle and empty, typed with its Enter pending, and running once
+  Claude's own hook or transcript echo proves it landed; a timeout pauses the
+  queue with the message still queued, never silently re-typed). Claude
+  adds verified typing into the pane. Queued rows render app-side in a
   drafts-style collapsible strip (`QUEUED · N`) with per-item
   edit/cancel/**steer** (arrow = cancel + `/steer` immediate send).
-- **Steer**: `/steer` bypasses the queue mid-turn (claude); codex/opencode/pi
-  route through their native steer/queue semantics.
+- **Steer**: `/steer` (and `/btw`) is a command of origin `steer` the
+  coordinator dispatches ahead of the queue through the harness's steer op —
+  claude types it into the pane now (mid-turn or idle), one pane operation at
+  a time; opencode/pi route through their native steer semantics.
 - **Drafts**: composer stash button; drafts sit at the chat bottom.
 - **Slash commands** the daemon owns: `/title`, `/steer`, `/btw`,
   `/login-code`, `/joy-prompt` (re-inject current instructions — the fix for

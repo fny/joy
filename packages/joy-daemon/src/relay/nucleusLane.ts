@@ -35,7 +35,7 @@ import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
 import { coordinatorFor } from "../domain/coordinator";
 import { writeAttachmentToCwd } from "../domain/attachments";
-import { queueFor, isTerminal, type LegacyWaitEnv } from "../domain/queueFacade";
+import { queueFor, isTerminal } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
 
@@ -277,24 +277,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // window and the boot resume pass).
   const inFlight = new Set<string>();
   // Executing turns → the local session + the command that carries them:
-  // output rows are tagged with their turn, and a cancel for a turn whose
-  // adapter is still legacy (claude) needs the item to pluck.
-  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; cancelled: boolean }>();
+  // output rows are tagged with their turn.
+  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean }>();
   // Turns whose attachments are still being materialized: the one window
   // before the command row exists, so a cancel there aborts the preparation.
   const preparing = new Map<string, () => void>();
-  // Legacy adapters only: the adapter's own verdict on the running turn
-  // (its turn-end status), read by the pre-C2 wait heuristics (#584).
-  const legacyOutcome = new Map<string, string>();
   // local session id → v2 session id (the inverse of `bound`), for the
   // record sink, which only knows the local id.
   const boundByLocal = new Map<string, string>();
-  // Cancels for turns with NO command row and no loop here (a legacy
-  // adapter's turn after a restart), keyed by target turn: the relay
-  // re-offers an outstanding cancel every control claim until the turn
-  // terminalizes — without this dedup the SAME abort fired dozens of times
-  // (observed: 61×). Turns with a row dedupe on the durable cancel flag.
-  const handledCancels = new Set<string>();
+
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
@@ -593,8 +584,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // idle loop that terminalizes the relay turn used to pick `completed`
     // solely because no cancel was requested — a provider error the adapter
     // had already reported as failed was relayed as a success.
-    const ev = (wire.content as { data?: { ev?: { t?: string; status?: string } } } | undefined)?.data?.ev;
-    if (turnEntry && turnEntry[1].started && ev?.t === "turn-end" && typeof ev.status === "string") legacyOutcome.set(localId, ev.status);
     const row: NewOutbound = {
       sessionId: localId, kind: "output", body: wire,
       runtimeEventId: recLocalId ? `rec:${recLocalId}` : `rec:${bootNonce}:${randomUUID()}`,
@@ -1252,9 +1241,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // The command row carries the relay turn: a re-offer dedupes on it and
       // every later line for this turn names the session AND the command, so
       // "turn X completed" can be tied to the message it carried.
-      legacyOutcome.delete(sess.id);
       const accepted = queueFor(sess).accept(text, { source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: turnId, relayCommandId: offer.commandId });
-      activeTurns.set(turnId, { localId: sess.id, commandId: accepted.id, lease: leaseRef, started: false, cancelled: false });
+      activeTurns.set(turnId, { localId: sess.id, commandId: accepted.id, lease: leaseRef, started: false });
       const tag = `turn ${turnId.slice(0, 8)} [${sess.id}/${accepted.id}]`;
 
       // A joy-owned slash command (/title, /joy-prompt, …) is executed at
@@ -1307,7 +1295,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     } finally {
       inFlight.delete(turnId);
       activeTurns.delete(turnId);
-      handledCancels.delete(turnId);
     }
   }
 
@@ -1327,14 +1314,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function driveTurn(turnId: string, localId: string, commandId: string, leaseRef: Lease, opts: { startPosted: boolean; dropFiles?: () => void; tag: string }): Promise<void> {
     const { tag } = opts;
     const sessionNow = () => registry.get(localId);
-    // `queueFor` on the CURRENT object under the id (a restart replaces it);
-    // without one, the command is still the coordinator's.
-    const q = () => queueFor(sessionNow() ?? ({ id: localId } as AgentSession));
-    const env: LegacyWaitEnv = {
-      session: sessionNow,
-      outcome: () => legacyOutcome.get(localId),
-      cancelled: () => activeTurns.get(turnId)?.cancelled === true,
-    };
+    // The command is the coordinator's whatever object (or none) is under
+    // the id right now — a restart replaces it.
+    const q = () => queueFor({ id: localId });
     const finish = async (state: CommandState, reason?: string | null) => {
       if (state !== "completed") opts.dropFiles?.();
       await postTerminal(turnId, localId, terminalBody(state, reason), leaseRef);
@@ -1344,7 +1326,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // Phase A — OUR prompt reaches the agent and its turn is running. A
       // message legitimately queued behind a long turn must not time out,
       // so the wait is as long as the turn itself may run.
-      const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: TURN_CAP_MS, legacy: env });
+      const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: TURN_CAP_MS });
       if (r.state === null) return finish("failed", "command_lost");
       if (isTerminal(r.state)) return finish(r.state, r.reason);
       if (r.state !== "running") {
@@ -1378,7 +1360,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // Phase C — the command's terminal IS the turn's: completed/failed from
     // the runtime's turn-end, cancelled once the interrupt is confirmed,
     // interrupted on idle-without-terminal, a restart or a kill (#463).
-    const done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: TURN_CAP_MS, legacy: env });
+    const done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: TURN_CAP_MS });
     if (done.state === null) return finish("failed", "command_lost");
     if (!isTerminal(done.state)) {
       // Stop the REAL agent too — reporting interrupted while the agent
@@ -1399,7 +1381,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (inFlight.has(turnId)) return;
     inFlight.add(turnId);
     const started = row.state === "running" || row.state === "cancelling";
-    activeTurns.set(turnId, { localId: row.sessionId, commandId: row.id, lease: leaseRef, started, cancelled: false });
+    activeTurns.set(turnId, { localId: row.sessionId, commandId: row.id, lease: leaseRef, started });
     const tag = `turn ${turnId.slice(0, 8)} [${row.sessionId}/${row.id}]`;
     log(`${tag}: resumed from the ledger (${row.state})`);
     try {
@@ -1410,7 +1392,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     } finally {
       inFlight.delete(turnId);
       activeTurns.delete(turnId);
-      handledCancels.delete(turnId);
     }
   }
 
@@ -1421,11 +1402,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   function resumeLedgerTurns(leaseRef: Lease): void {
     const sessions = (registry as { list?: () => AgentSession[] }).list?.() ?? [];
     for (const s of sessions) {
-      if (s.enqueue) continue; // a legacy adapter's relay turns died with the previous daemon
       for (const row of ledger.listCommands(s.id)) {
         if (!row.relayTurnId) continue;
         if (isTerminalState(row.state)) {
-          if (!ledger.hasOutboundEvent(`term:${row.relayTurnId}`)) void postTerminal(row.relayTurnId, s.id, terminalBody(row.state, row.terminalReason), leaseRef);
+          if (!ledger.hasOutboundEvent(`term:${row.relayTurnId}`)) {
+            log(`turn ${row.relayTurnId.slice(0, 8)} [${s.id}/${row.id}]: ${row.state} in the ledger with no terminal row — posting it (previous daemon died before it could)`);
+            void postTerminal(row.relayTurnId, s.id, terminalBody(row.state, row.terminalReason), leaseRef);
+          }
           continue;
         }
         if (!inFlight.has(row.relayTurnId)) void resumeTurn(row, leaseRef);
@@ -1453,46 +1436,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const fresh = row.cancelRequestedAt == null;
       if (!fresh) return false;
       const r = coordinator.cancel(row.id);
-      const ctx = activeTurns.get(turnId);
-      if (ctx) ctx.cancelled = true;
       log(`cancel ${turnId.slice(0, 8)}: ${row.id} ${r.kind}`);
       return true;
     }
     // Still materializing attachments: abort the preparation (never accepted).
     const prep = preparing.get(turnId);
     if (prep) { prep(); log(`cancel ${turnId.slice(0, 8)}: aborted during attachment download`); return true; }
-    // A legacy adapter's turn: pluck the queued item, then abort the session.
-    const ctx = activeTurns.get(turnId);
-    if (ctx) {
-      if (ctx.cancelled) return false;
-      ctx.cancelled = true;
-      const s = registry.get(ctx.localId);
-      if (s) {
-        if (ctx.commandId) { try { queueFor(s).cancel(ctx.commandId); } catch { /* stub adapters */ } }
-        let aborted = false; let why = "";
-        try { const r = await s.abort(); aborted = r.ok !== false; why = r.error ?? ""; } catch (e) { why = e instanceof Error ? e.message : String(e); }
-        if (!aborted) {
-          // The interrupt did not land: leave this cancel UNHANDLED so the
-          // relay's re-offer retries it instead of the log claiming success (#8).
-          ctx.cancelled = false;
-          log(`cancel ${turnId.slice(0, 8)}: abort failed (${why}) — the re-offer retries`);
-          return false;
-        }
-        log(`cancel ${turnId.slice(0, 8)}: queued plucked + abort sent`);
-      }
-      return true;
-    }
-    // A turn we are NOT running (a legacy adapter restarted mid-turn): abort
-    // whatever the session is doing, once; the turn resolves when it is
-    // reconciled or retried.
-    if (handledCancels.has(turnId)) return false;
-    handledCancels.add(turnId);
-    const session = localSession(offer.sessionId);
-    if (session) {
-      try { const r = await session.abort(); if (r.ok === false) { handledCancels.delete(turnId); return false; } }
-      catch { /* pane teardown */ }
-    }
-    return true;
+    // No row and nothing preparing: this turn never reached the coordinator
+    // here (a previous daemon's, or never offered) — nothing runs for it;
+    // received, and the relay resolves it when the turn is reconciled.
+    return false;
   }
 
   const isLeaseDeath = (e: unknown) =>
@@ -1700,9 +1653,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   // A session restarted in place: its running command ends interrupted
-  // {restart} in the coordinator's retire (a legacy adapter's turn is caught
-  // by the wait emulation seeing the object replaced) — the turn loop reads
-  // the state; nothing here has to guess from busy().
+  // {restart} in the coordinator's retire — the turn loop reads the state;
+  // nothing here has to guess from busy().
   // A daemon-created session (fork, teleport, a handoff target) can be bound
   // on demand instead of waiting for the next announce pass.
   (registry as { setAnnouncer?: (fn: (s: AgentSession) => Promise<void>) => void }).setAnnouncer?.((s) => announceLocalSession(s));
@@ -1869,7 +1821,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         }
         if (lease) sender.start(); // boot failed mid-way: the outbox still holds the rows
         if (!announced) {
-          log(`${lane} lane idle (${String((e as Error).message ?? e)}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
+          const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+          log(`${lane} lane idle (${String((e as Error).message ?? e)}${cause ? `: ${cause.code ?? cause.message ?? ""}` : ""}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
           announced = true;
         }
         await sleep(lane === "work" ? ACQUIRE_RETRY_MS : 5_000);

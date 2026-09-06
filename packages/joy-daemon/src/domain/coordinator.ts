@@ -99,13 +99,22 @@ export type Observation =
 export type TurnStatus = "completed" | "failed" | "cancelled" | "interrupted";
 export type QueuePauseReason = "input_dirty" | "dispatch_timeout" | "dispatch_mismatch" | "dispatch_failed";
 
-export interface HandledCommand { handled: true; /** text to queue as a hidden follow-up (e.g. /joy-prompt's reinjection) */ reinjection?: string }
+export type HandledCommand =
+  | { handled: true; /** text to queue as a hidden follow-up (e.g. /joy-prompt's reinjection) */ reinjection?: string }
+  /** The text is a steer: accept `steer` as a command of origin `steer` (R15/#34). */
+  | { handled?: false; steer: string };
 
 export interface RuntimeDriver {
   readonly sessionId: string;
   readonly generation: number;
   readonly capabilities: DriverCapabilities;
   submit(cmd: CommandView, attempt: AttemptRef, signal: AbortSignal): Promise<SubmitResult>;
+  /** Wait until the runtime can take a submission (claude: the pane gate —
+   *  idle, ready prompt, empty box). Runs BEFORE the attempt is committed, so
+   *  a row waiting at the gate stays `queued` and a cancel meanwhile is an
+   *  ordinary queued → cancelled. `cancelled` = the command is no longer
+   *  dispatchable; `retired` = the driver is gone. */
+  prepare?(cmd: CommandView, signal: AbortSignal): Promise<"ready" | "cancelled" | "retired">;
   /** Stop the attempt (targeted when the driver can), or whatever is running
    *  when no attempt is named. `noop` = nothing was running. */
   interrupt(target: { attempt: AttemptRef | null }): Promise<InterruptResult>;
@@ -118,6 +127,8 @@ export interface RuntimeDriver {
   handleCommand?(text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }): HandledCommand | null;
   /** Post-commit hook for a freshly accepted command (mirror its user row). */
   accepted?(cmd: CommandView): void;
+  /** A queue pause the driver reported was lifted by the app / CLI. */
+  resume?(): void;
   /** The runtime ref a submission carries. Default: the command id, then
    *  `<id>#a<n>` per resend so two submissions stay distinguishable. A
    *  runtime whose ids are idempotent server-side (opencode messageID)
@@ -312,6 +323,8 @@ interface Actor {
   cancelOps: Map<string, string>;
   /** A session-wide interrupt in flight (untargeted drivers). */
   sessionInterrupt: Promise<void> | null;
+  /** Aborts the driver's `prepare` wait so the pump re-plans (a steer arrived). */
+  prepareAbort: AbortController | null;
   drafts: string[];
   reconciling: boolean;
 }
@@ -376,7 +389,7 @@ export class SessionCoordinator {
       sessionId, driver, generation: driver.generation, ready: false, retired: false, paused: false,
       unsubscribe: () => {}, pumping: false, pumpAgain: false, holdUntil: 0, holdTimer: null,
       abort: new AbortController(), foreignTurn: null, unresolved: new Set(), cancelTimers: new Map(), cancelOps: new Map(),
-      sessionInterrupt: null, drafts: [], reconciling: false,
+      sessionInterrupt: null, prepareAbort: null, drafts: [], reconciling: false,
     };
     actor.unsubscribe = driver.observe((o) => this.#observe(actor, o));
     this.#actors.set(sessionId, actor);
@@ -451,7 +464,11 @@ export class SessionCoordinator {
     const origin = input.origin ?? (input.mode === "steer" ? "steer" : input.seq != null || input.relayTurnId ? "relay" : "local");
     if (input.mode !== "steer" && actor.driver.handleCommand) {
       const h = actor.driver.handleCommand(input.text, { source: input.source, mirrorToRelay: input.mirrorToRelay, seq: input.seq });
-      if (h) {
+      if (h && "steer" in h && typeof h.steer === "string") {
+        // A steer is never an editable chip: it goes ahead of the FIFO now.
+        return this.accept({ ...input, text: h.steer, mode: "steer", origin: "steer", visible: false });
+      }
+      if (h && h.handled) {
         const out = this.ledger.tx(() => {
           const r = this.ledger.acceptCommand({ ...input, origin: "command", state: "queued", generation: actor.generation });
           if (r.deduped === "none") this.ledger.transition(r.id, ["queued"], "completed", { terminalReason: "handled_as_command", generation: actor.generation });
@@ -470,6 +487,7 @@ export class SessionCoordinator {
     if (r.deduped === "none") {
       const view = this.#view(r.row!);
       try { actor.driver.accepted?.(view); } catch (e) { this.#log(`${input.sessionId}: driver.accepted threw: ${e instanceof Error ? e.message : e}`); }
+      if (origin === "steer") actor.prepareAbort?.abort(); // a steer goes ahead of a prompt waiting at the gate
     }
     this.#emitCommand(r.id);
     this.#pump(actor.sessionId);
@@ -507,12 +525,14 @@ export class SessionCoordinator {
     if (ok) this.#emitCommand(commandId);
     return ok;
   }
-  /** Lift a driver-reported pause and pump. */
+  /** Lift a driver-reported pause (the driver clears what it paused on —
+   *  claude wipes a dirty box first) and pump. */
   resume(sessionId: string): void {
     const actor = this.#actors.get(sessionId);
     if (!actor) return;
     actor.paused = false; actor.pauseReason = undefined;
     actor.holdUntil = 0;
+    try { actor.driver.resume?.(); } catch (e) { this.#log(`${sessionId}: driver.resume threw: ${e instanceof Error ? e.message : e}`); }
     this.#emit({ type: "session", sessionId });
     this.#pump(sessionId);
   }
@@ -542,12 +562,17 @@ export class SessionCoordinator {
     for (const r of inFlight) this.cancel(r.id);
     // A session-wide interrupt stops everything at once: one op covers them all.
     const ops = actor.driver.capabilities.targetedInterrupt ? inFlight : inFlight.slice(0, 1);
+    let invoked = 0;
     for (const r of ops) {
       actor.cancelTimers.get(r.id)?.(); actor.cancelTimers.delete(r.id);
       const res = await this.#interruptOp(actor, r.id);
+      if (res) invoked++;
       if (res?.kind === "failed") errors.push(res.error ?? "interrupt failed");
     }
-    if (inFlight.length && !actor.foreignTurn) return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
+    // Nothing reached the driver (every attempt still submitting — its
+    // completion consults the cancel flag) — but Stop means the runtime
+    // itself, so the session-wide interrupt still goes out once.
+    if (inFlight.length && !actor.foreignTurn && invoked > 0) return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
     try {
       const r = await actor.driver.interrupt({ attempt: null });
       if (r.kind === "failed") return { ok: false, error: r.error ?? "interrupt failed" };
@@ -649,11 +674,31 @@ export class SessionCoordinator {
       const running = pending.some((r) => r.state === "running" || r.state === "cancelling");
       const head = pending.find((r) => r.state === "queued" && r.origin === "steer") ?? pending.find((r) => r.state === "queued");
       if (!head) return;
-      const asSteer = running && head.origin === "steer" && driver.capabilities.steer && !!driver.steer;
+      // A steer goes through the driver's steer op whenever it has one: into
+      // the running turn, or — a turn the coordinator does not own (typed at
+      // the terminal), or none — typed and submitted now, bypassing the gate.
+      const asSteer = head.origin === "steer" && driver.capabilities.steer && !!driver.steer;
       if (running && !asSteer && !driver.capabilities.concurrentSubmit) return;
       if (this.ledger.outboundPressure(sessionId).over) return; // the outbox scheduler pumps when it drains
       const wait = actor.holdUntil - this.#now();
       if (wait > 0) { this.#holdPump(actor, wait); return; }
+      if (driver.prepare && !asSteer) {
+        // The gate wait is pre-emptible: a steer accepted meanwhile aborts it
+        // and the loop re-plans with the steer at the head.
+        const pre = new AbortController();
+        actor.prepareAbort = pre;
+        const onRetire = () => pre.abort();
+        actor.abort.signal.addEventListener("abort", onRetire, { once: true });
+        let r: "ready" | "cancelled" | "retired";
+        try { r = await driver.prepare(this.#view(head), pre.signal); }
+        catch (e) { this.#log(`${sessionId}: driver.prepare threw: ${e instanceof Error ? e.message : e}`); actor.holdUntil = this.#now() + this.#o.persistRetryMs; continue; }
+        finally { actor.abort.signal.removeEventListener("abort", onRetire); if (actor.prepareAbort === pre) actor.prepareAbort = null; }
+        if (actor.retired) return;
+        if (r === "retired") continue; // pre-empted: re-plan
+        if (r === "cancelled") continue; // the row is settled (cancelled / gone); the loop takes the next head
+        const again = this.ledger.getCommand(head.id);
+        if (!again || again.state !== "queued") continue;
+      }
       await this.#dispatch(actor, head, asSteer);
     }
   }
@@ -718,11 +763,16 @@ export class SessionCoordinator {
         const gen = this.ledger.currentGeneration(actor.sessionId);
         const owns = !!row && row.activeOp === ref.token && !!gen && gen.open && gen.generation === actor.generation && !actor.retired;
         if (!owns) {
-          // The row moved on without us (a cancel confirmed by a generation
-          // close, a restart): record what the runtime said, apply nothing.
-          orphanAccepted = result.kind === "accepted";
+          // The row moved on without us. An attempt the runtime's own
+          // evidence already settled (the echo / turn end beat the response
+          // and completed the command) is a late result, nothing more. One
+          // still unsettled is an orphan (a cancel confirmed by a generation
+          // close, a restart): record what the runtime said, apply nothing —
+          // and interrupt the turn it accepted, which nobody tracks.
           const a = this.ledger.getAttempt(ref.attemptId);
-          if (a && a.state === "submitting") this.ledger.settleAttempt(ref.attemptId, result.kind === "accepted" ? "accepted" : result.kind === "unknown" ? "unknown" : "rejected", { runtimeTurnId: result.kind === "accepted" ? result.runtimeTurnId ?? undefined : undefined, detail: "orphaned: the op no longer owns the row", command: null, generation: actor.generation });
+          const unsettled = !!a && (a.state === "submitting" || a.state === "unknown");
+          orphanAccepted = result.kind === "accepted" && unsettled;
+          if (a && a.state === "submitting") this.ledger.settleAttempt(ref.attemptId, result.kind === "accepted" ? "accepted" : result.kind === "unknown" ? "unknown" : "rejected", { runtimeTurnId: result.kind === "accepted" ? result.runtimeTurnId ?? undefined : undefined, detail: "orphaned: the op no longer owns the row", command: null , generation: actor.generation });
           return;
         }
         if (result.kind === "accepted") {

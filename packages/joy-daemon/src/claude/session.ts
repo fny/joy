@@ -31,8 +31,9 @@ import {
   type JoyDialogInfo,
 } from "../relay/relay.ts";
 import type { DeliverySource } from "../domain/agentSession";
-import { ledgerFor, type Ledger, NON_TERMINAL_STATES, StaleCommandError, StaleGenerationError } from "../domain/ledger";
-import type { SessionCoordinator } from "../domain/coordinator";
+import { ledgerFor, type Ledger } from "../domain/ledger";
+import { coordinatorFor, type SessionCoordinator, type CommandView, type AttemptRef, type SubmitResult, type InterruptResult, type HandledCommand } from "../domain/coordinator";
+import { ClaudeDriver } from "./claudeDriver";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
 import { saveWindowRecord, loadWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
@@ -554,14 +555,13 @@ export interface QueuedItem extends QueuedMessage {
    *  relay, so the hook-confirm and the delayed-Enter paths mirror it exactly
    *  once between them (#483). */
   mirrored?: boolean;
-  /** In-memory only. Set when a dispatch timed out and was put back at the
-   *  queue head with its pending/received receipt twins LEFT IN PLACE so a
-   *  late echo can still match them (#31); the re-dispatch (or a cancel/edit)
-   *  neutralizes those stale twins right before it records fresh ones. */
-  requeued?: boolean;
-  /** In-memory only. The ledger attempt this dispatch made (recordAttempt);
-   *  settled on confirm / timeout / cancel. */
+  /** In-memory only. The runtime took this dispatch (a confirm path settled
+   *  it) — the delayed-Enter callback still mirrors it exactly once (#483). */
+  delivered?: boolean;
+  /** In-memory only. The coordinator's attempt for this dispatch and the
+   *  runtime ref (flattened text) its echo is matched on. */
   attemptId?: string;
+  runtimeRef?: string;
 }
 
 /** Delivery outcome of ONE queued item, by id. The v2 lane needs proof that
@@ -837,21 +837,30 @@ export class Session {
    *  drain bookkeeping, and the pane's generating footer a safety check only. */
   #hookTurn: { open: boolean; at: number } | null = null;
 
-  // ── Message queue ──────────────────────────────────────────────────────────
-  // The ONE verified dispatch queue. EVERY app→Claude text — relay app-send,
-  // HTTP/RPC /send, explicit queue-add, 5xx auto-retry — funnels through here so
-  // nothing types into the pane until Claude is genuinely idle AND the input box
-  // is empty. Visible (user-queued) items stay editable until dispatched; hidden
-  // (relay/send/retry) items just serialize. The queue never contains the
-  // in-flight message — edit/cancel/reorder are plain array ops.
-  #queue: QueuedItem[] = [];
-  // Restored from disk in the constructor (see queueStore) — items queued
-  // before a daemon restart deliver on the next idle instead of vanishing.
-  // The message typed-but-not-yet-confirmed. Treated as busy: nothing else
-  // dispatches until Claude starts a turn in response (echo confirmation) or we
-  // time out. Confirmed when the next turn-start fires; failed on timeout. Holds
-  // the whole item so a timeout re-queues it with its original seq/source/opts.
+  // ── Dispatch ───────────────────────────────────────────────────────────────
+  // The queue itself is the session coordinator's (domain/coordinator.ts):
+  // EVERY app→Claude text — relay app-send, HTTP/RPC /send, explicit
+  // queue-add, 5xx auto-retry — is a ledger row it owns, and this session is
+  // the claude DRIVER (claudeDriver.ts): it dispatches ONE command at a time
+  // through the pane gate (nothing types until Claude is genuinely idle AND
+  // the input box is empty), and reports the runtime's verdict back.
+  #coordinator: SessionCoordinator;
+  #driver: ClaudeDriver;
+  #unsubscribeQueue: () => void = () => {};
+  // The message typed-but-not-yet-confirmed. Nothing else dispatches until
+  // Claude proves it took it (echo confirmation) or the echo window closes.
+  // Holds the whole item so every confirm path can name it.
   #dispatchInFlight: QueuedItem | null = null;
+  // Resolves the driver's submit for the in-flight item with the runtime's
+  // verdict (#settleDispatch); the dispatch loop waits on it.
+  #dispatchSettle: ((r: SubmitResult) => void) | null = null;
+  // Wakes the dispatch loop's gate wait early (turn end, resume, a steer
+  // releasing the pane) instead of waiting out its retry delay.
+  #gateWake: (() => void) | null = null;
+  // The runtime ref (flattened text) of the last dispatch the runtime took —
+  // a transcript turn-start right after it is that command's, not a foreign
+  // turn; cleared at turn end.
+  #lastConfirmedRef: string | null = null;
   #dispatchTimer: ReturnType<typeof setTimeout> | null = null;
   // How many times the current dispatch's echo timeout has been EXTENDED because
   // Claude is visibly working (slow turn-start on a huge context) — bounded so a
@@ -860,13 +869,8 @@ export class Session {
   // When the current in-flight dispatch typed + submitted (epoch ms) — the
   // causal guard for dialog-based delivery confirmation.
   #dispatchSubmittedAt: number | null = null;
-  #drainRetry: ReturnType<typeof setTimeout> | null = null;
   // Last #noteHold line (throttle clock) — see #noteHold.
   #holdLoggedAt = 0;
-  // Per-item delivery outcome, so a caller can ask about ITS message rather
-  // than infer from the session-wide busy flag. Bounded — only the recent tail
-  // matters (a caller asks while its turn is alive).
-  #itemOutcome = new Map<string, "delivered" | "cancelled">();
   // A human-typed draft captured from the input box right before a dispatch-
   // driven clear wiped it (drain gate / steer). Restored — typed back, never
   // submitted — once the queue is idle again, so text someone typed directly
@@ -907,8 +911,9 @@ export class Session {
   // the box — a steer arriving while an earlier one is still typing waits for
   // that type to finish before it captures, clears and supersedes it.
   #paneSection: Promise<void> | null = null;
-  // The in-progress drain pass, awaited by #steer so its capture never
-  // interleaves with a pass that is between "captured empty" and "typed".
+  // The in-progress dispatch's capture→type section, awaited by #steer and
+  // the draft restore so their capture never interleaves with a pass that is
+  // between "captured empty" and "typed".
   #drainDone: Promise<void> | null = null;
 
   /** Clear a pending steer submit AND settle its awaiting promise — a
@@ -930,11 +935,6 @@ export class Session {
   // drain: two failed episodes spaced 750ms → pause with the input_dirty banner.
   // Reset once the box is empty / on dispatch / when the pane isn't ready.
   #clearAttempts = 0;
-  // Async drain pump (control-mode captures are awaited). #draining serializes one
-  // drain at a time; #drainRequested re-runs once if a trigger (turn-end / enqueue)
-  // arrives while a drain is mid-await, so it isn't dropped.
-  #draining = false;
-  #drainRequested = false;
   // Set when a dispatch failed to land (no turn started) or the input box is
   // dirty and unclearable — stops auto-draining so we don't shovel messages into
   // a wedged/odd state. Cleared by resume. #pauseReason says why (for the app).
@@ -981,20 +981,70 @@ export class Session {
     // typed-but-unconfirmed prompt is retyped; a late echo of the first
     // typing still matches its attempt and is not mirrored as a duplicate).
     this.#generation = this.#ledger.openGeneration(this.id, "claude");
-    // Reload any queue items a previous daemon left undelivered (B1). They
-    // drain on the first idle exactly like freshly queued messages.
-    const rows = this.#ledger.listPending(this.id);
-    if (rows.length > 0 && this.status !== "ended") {
-      for (const r of rows) if (r.state !== "queued") this.#ledger.transition(r.id, NON_TERMINAL_STATES, "queued");
-      this.#queue = rows.map(r => ({
-        id: r.id, text: r.text, createdAt: r.createdAt,
-        source: (r.source as QueuedItem["source"]) ?? "rpc",
-        mirrorToRelay: r.mirrorToRelay,
-        seq: r.seq ?? undefined, visible: r.visible,
-      }));
-      process.stderr.write(`[queue-store] ${this.id}: restored ${rows.length} undelivered item(s) from the ledger\n`);
+    // The coordinator owns the queue rows a previous daemon left (B1): they
+    // dispatch on the first idle exactly like freshly queued messages; a
+    // dispatch it left mid-flight is reconciled once this driver is ready.
+    this.#coordinator = deps.coordinator ?? coordinatorFor(this.#ledger);
+    this.#driver = new ClaudeDriver(this.#runtimePort(), this.#generation);
+    this.#coordinator.adopt(this.id, this.#driver);
+    this.#unsubscribeQueue = this.#coordinator.subscribe((ev) => {
+      if (ev.type === "command" && ev.sessionId === this.id) this.#onCommandEvent(ev.commandId, ev.state);
+      if ((ev.type === "session" || ev.type === "command") && ev.sessionId === this.id) this.#broadcastQueue();
+    });
+    const restored = this.status !== "ended" ? this.#ledger.listPending(this.id).length : 0;
+    if (restored) process.stderr.write(`[queue-store] ${this.id}: ${restored} undelivered item(s) in the ledger await this generation\n`);
+    // The driver is ready from construction: the pane gate inside every
+    // dispatch decides the real readiness (a "starting" session types its
+    // first prompt to bootstrap the transcript). A dispatch the previous
+    // generation left unconfirmed is reconciled when `ready` lands — give the
+    // transcript replay a beat to pair its echo first (then it is already
+    // running, never retyped).
+    if (this.status !== "ended") {
+      const unknown = this.#ledger.listPending(this.id, ["unknown"]).length > 0;
+      if (!unknown) this.#driver.emit({ kind: "ready" });
+      else setTimeout(() => { if (this.status !== "ended") this.#driver.emit({ kind: "ready" }); }, 2_000).unref?.();
     }
   }
+
+  /** What the driver reads from / does through this session. */
+  #runtimePort() {
+    return {
+      sessionId: this.id,
+      awaitGate: (cmd: CommandView, signal: AbortSignal) => this.#awaitGate(cmd, signal),
+      dispatch: (cmd: CommandView, attempt: AttemptRef, signal: AbortSignal) => this.#dispatchOne(cmd, attempt, signal),
+      steer: (cmd: CommandView, attempt: AttemptRef, signal: AbortSignal) => this.#steer(cmd, attempt, signal),
+      interrupt: () => this.#interruptPane(),
+      runtimeRef: (text: string) => flattenForMatch(text),
+      handleCommand: (text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }) => this.#handleCommand(text, opts),
+      resume: () => this.resumeQueue(),
+    };
+  }
+
+  /** A cancel that lands on the in-flight dispatch (#35): typed with its
+   *  Enter still pending → drop the Enter and discard it (the text stays in
+   *  the box until the next gate clears it — docs/pane-input-clearing.md);
+   *  Enter already out → settle the submit as accepted so the coordinator's
+   *  interrupt (Escape) proceeds without waiting out the echo window. */
+  #onCommandEvent(commandId: string, state: string): void {
+    const inflight = this.#dispatchInFlight;
+    if (state !== "cancelling" || !inflight || inflight.id !== commandId) return;
+    this.#dispatchCancelledAt = Date.now();
+    if (this.#dispatchSubmittedAt === null) {
+      this.#clearSubmitTimer();
+      this.#dlog(`cancelled ${commandId} before its submit landed`);
+      this.#settleDispatch("cancel before submit", { kind: "rejected", permanent: false, detail: "cancelled before submit" });
+    } else {
+      this.#settleDispatch("cancel after submit", { kind: "accepted" }, { echo: false });
+    }
+  }
+
+  /** When a cancel last settled the in-flight dispatch: a Stop right after
+   *  must still send Escape (the typed text / a fired Enter may be in the
+   *  pane) instead of reading the box as unambiguously idle. */
+  #dispatchCancelledAt = 0;
+
+  /** Test/diagnostic access to the coordinator this session is adopted by. */
+  get coordinator(): SessionCoordinator { return this.#coordinator; }
 
   /** Test/diagnostic access to the session's ledger generation. */
   get ledgerGeneration(): number { return this.#generation; }
@@ -1164,7 +1214,7 @@ export class Session {
       }, 60_000);
     }
     // Reflect the current queue on (re)attach — recovery/reconnect included.
-    void rs.updateQueue(this.queueState());
+    void rs.updateQueue(this.#coordinator.snapshot(this.id));
     // Receipts are written ON SERVER ACK now (codex review finding 1): the
     // relay stamps each transcript entry's receipt on its group's last row
     // and calls back here once that row is durably appended. Registered
@@ -1238,7 +1288,6 @@ export class Session {
     if (this.#taskReconcileTimer) { clearInterval(this.#taskReconcileTimer); this.#taskReconcileTimer = null; }
     this.#turn5xxStatus = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-    if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     if (this.#hookSessionEndTimer) { clearTimeout(this.#hookSessionEndTimer); this.#hookSessionEndTimer = null; }
     this.#needsInput = null;
     this.#clearDirtyRecheck();
@@ -1251,15 +1300,14 @@ export class Session {
     void this.#relay?.updateDialog(null);
     this.#clearSubmitTimer();
     this.#cancelSteerSubmit();
-    // An ended session will never deliver: everything still staged is
-    // cancelled in the ledger — except on a restart, whose replacement takes
-    // the queued rows (takeQueuedForRestart already plucked them from memory).
-    if (reason !== "restart") for (const q of this.#queue) this.#recordOutcome(q.id, "cancelled");
-    if (this.#dispatchInFlight) this.#recordOutcome(this.#dispatchInFlight.id, "cancelled");
-    this.#queue = [];
-    this.#dispatchInFlight = null;
-    try { this.#ledger.closeGeneration(this.id, this.#generation, reason); }
-    catch (e) { process.stderr.write(`[${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
+    // A dispatch mid-flight ends with the process: its verdict is unknown to
+    // this generation (the coordinator's retire settles the row — a restart's
+    // replacement reconciles it; a kill interrupts it). Queued rows stay for
+    // a restart / process exit, are interrupted on a kill.
+    if (this.#dispatchInFlight) this.#settleDispatch(`end(${reason})`, { kind: "unknown", detail: `session ended (${reason}) during dispatch` });
+    this.#gateWake?.();
+    this.#unsubscribeQueue();
+    this.#coordinator.retire(this.id, reason);
 
     this.status = "ended";
     this.endReason = reason;
@@ -1350,66 +1398,29 @@ export class Session {
    * the pane shows an empty ready box (bootstrapping the first transcript).
    */
   sendText(text: string, opts: SendOptions): { buffered: boolean } {
-    this.enqueue(text, { seq: opts.seq, source: opts.source, mirrorToRelay: opts.mirrorToRelay, visible: false });
+    this.#coordinator.accept({ sessionId: this.id, text, seq: opts.seq, source: opts.source, mirrorToRelay: opts.mirrorToRelay, visible: false });
     return { buffered: false };
   }
 
-  // ── Message queue API ───────────────────────────────────────────────────────
+  // ── Dispatch state ──────────────────────────────────────────────────────────
 
   /**
    * True when the session is doing or holding ANY work: an open turn, a
    * dispatch awaiting its echo, a pending submit Enter, the thinking flag, or
-   * queued messages. This is the scripting-facing "can I ask now?" signal —
+   * queued commands. This is the scripting-facing "can I ask now?" signal —
    * the CLI's exclusive send refuses (busy error) instead of queueing, so a
    * program never silently lines up behind an in-flight turn.
    */
   busy(): boolean {
     return !!(this.#turnRunning() || this.#dispatchInFlight || this.#submitTimer || this.#thinking)
-      || this.#queue.length > 0;
+      || this.#coordinator.snapshot(this.id).pendingCount > 0;
   }
 
-  /** The terminal outcome of a queue item, committed to the ledger (delivered
-   *  = command completed + its attempt done; cancelled = command cancelled +
-   *  attempt superseded). The in-memory map is only a cache. A ledger failure
-   *  is logged, never thrown: the callers are confirm/teardown paths. */
-  #recordOutcome(id: string, outcome: "delivered" | "cancelled"): void {
-    this.#itemOutcome.set(id, outcome);
-    if (this.#itemOutcome.size > 200) {
-      for (const k of this.#itemOutcome.keys()) {
-        this.#itemOutcome.delete(k);
-        if (this.#itemOutcome.size <= 150) break;
-      }
-    }
-    try {
-      if (outcome === "delivered") {
-        // A plain prompt confirmed by a hook / dialog / turn start still gets
-        // a transcript echo later: its attempt stays awaiting so that echo
-        // pairs with it (never mirrored as a duplicate bubble, #483). A
-        // command (`!bash`, `/slash`) never echoes as user text — settle now.
-        const text = this.#ledger.getCommand(id)?.text ?? "";
-        const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
-        this.#ledger.confirmDelivery(id, [], { settleAttempts: isCommand, generation: this.#generation });
-      } else this.#ledger.transition(id, NON_TERMINAL_STATES, "cancelled", { terminalReason: "cancelled" });
-    } catch (e) {
-      process.stderr.write(`[${this.id}] ledger outcome ${outcome} for ${id} failed: ${e instanceof Error ? e.message : e}\n`);
-    }
-  }
-
-  /** Delivery state of one queued item — see QueueItemState. */
-  queueItemState(id: string): QueueItemState {
-    if (this.#dispatchInFlight?.id === id) return "pending";
-    if (this.#queue.some((q) => q.id === id)) return "pending";
-    if (this.#carried.has(id)) return "pending"; // moved to the restart replacement
-    const cached = this.#itemOutcome.get(id);
-    if (cached) return cached;
-    const row = this.#ledger.getCommand(id);
-    if (!row || row.sessionId !== this.id) return "unknown";
-    switch (row.state) {
-      case "completed": return "delivered";
-      case "cancelled": case "interrupted": return "cancelled";
-      case "failed": return "failed";
-      default: return "pending"; // staged in the ledger (a replacement's, or not yet loaded)
-    }
+  /** Has the coordinator been asked to cancel this command? Consulted at
+   *  every gate boundary of a dispatch (R9). */
+  #cancelRequested(commandId: string): boolean {
+    const row = this.#coordinator.command(commandId);
+    return !row || row.cancelRequestedAt != null || row.state === "cancelling" || row.state === "cancelled";
   }
 
   /** Has this transcript uuid already been handled (mirrored or matched)?
@@ -1448,168 +1459,60 @@ export class Session {
     }
   }
 
-  /** Ids handed to a restart replacement (takeQueuedForRestart): still
-   *  "pending" as far as this object is concerned, so the lane's turn loop —
-   *  which may poll this object for a beat before the replacement exists —
-   *  never sees them as lost. */
-  #carried = new Set<string>();
-  takeQueuedForRestart(): QueuedItem[] {
-    // Not the in-flight one: it is mid-typing/mid-turn and ends cancelled
-    // with the process. Restart used to cancel ALL of these and drop the
-    // spool — a message queued behind a long turn vanished with no trace
-    // (codex review, 2026-09-04).
-    const carried = this.#queue.splice(0, this.#queue.length);
-    for (const q of carried) this.#carried.add(q.id);
-    return carried;
-  }
-
-  queueState(): QueueState {
-    // Only VISIBLE items are user-facing chips. Hidden (relay/send/retry) items
-    // already have a chat bubble, so showing them as editable chips would be a
-    // duplicate with false edit/cancel semantics — they serialize silently.
-    const visible = this.#queue.filter(q => q.visible);
-    const inFlight = this.#dispatchInFlight?.visible ? this.#dispatchInFlight.text : null;
-    return {
-      queue: visible.map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt })),
-      hidden: this.#queue.filter(q => !q.visible).map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt })),
-      pendingCount: this.#queue.length + (this.#dispatchInFlight ? 1 : 0),
-      inFlight,
-      paused: this.#queuePaused,
-      pauseReason: this.#queuePaused ? this.#pauseReason : undefined,
-    };
-  }
-
   /**
-   * Add a message to the verified dispatch queue. opts default to an explicit,
-   * visible queue-add (mirrored to the relay so it shows in chat). The other
-   * callers override: v2-lane app-sends pass {source:"rpc",visible:false} (the
-   * app already has the bubble); /send passes {mirrorToRelay:true,visible:false};
-   * 5xx retry passes {visible:false}.
+   * Joy-owned commands, handled at accept time — before the text is queued or
+   * reaches Claude (the coordinator completes their row in the accept
+   * transaction; nothing is dispatched for them):
+   *   /steer <msg>  a command of origin `steer`: typed straight into the pane
+   *                 ahead of the FIFO, mid-turn if a turn is running, through
+   *                 the same pane serialization as every other write (#34).
+   *   /btw <q>      Claude Code's BUILT-IN side-question command — joy's only
+   *                 job is transport: steer the literal "/btw <q>" NOW.
+   *   /title <text> set the session's conversation title (the summary the app shows).
+   *   /login-code   type the code into the live login form (#482).
+   *   /joy-prompt   re-deliver the CURRENT instruction block in-band as a
+   *                 hidden follow-up command (attention decays in long sessions).
    */
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; id?: string }): QueuedMessage {
-    // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
-    //   /steer <msg>  type <msg> straight into the pane and submit it now, BYPASSING the
-    //                 queue + its idle gate, so it lands immediately (mid-turn if a turn
-    //                 is running) instead of waiting behind the queue.
-    //   /title <text> set the session's conversation title (the summary the app shows).
-    // None are queued or sent to Claude; we return a synthetic record so queue-add
-    // callers still get an id.
+  #handleCommand(text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }): HandledCommand | null {
     const cmd = parseJoyCommand(text);
-    if (cmd) {
-      // Every branch below is fire-and-forget by design, but the promise
-      // must be OBSERVED: #steer rejects when typing fails (pane gone, tmux
-      // control watchdog, a kill in the same second) and an unhandled
-      // rejection took the whole daemon down (issue #29).
-      const bg = (p: Promise<unknown>, what: string) => { p.catch((e) => process.stderr.write(`[${this.id}] ${what} failed: ${e instanceof Error ? e.message : e}\n`)); };
-      if (cmd.name === "steer" && cmd.args.trim()) {
-        bg(this.#steer(cmd.args, {
-          seq: opts?.seq,
-          source: opts?.source ?? "rpc",
-          mirrorToRelay: opts?.mirrorToRelay ?? true,
-        }), "/steer");
-      } else if (cmd.name === "btw" && cmd.args.trim()) {
-        // /btw is Claude Code's BUILT-IN side-question command (immediate,
-        // control-request dispatch — answers without interrupting the main
-        // conversation). Joy's only job is transport: steer the literal
-        // "/btw <q>" into the pane NOW, bypassing the queue — parked behind
-        // the idle gate it would answer long after the moment passed. The
-        // CLI runs the command and its reply lands in the transcript like
-        // any other output; no collection channel needed.
-        bg(this.#steer(text, {
-          seq: opts?.seq,
-          source: opts?.source ?? "rpc",
-          mirrorToRelay: opts?.mirrorToRelay ?? true,
-        }), "/btw");
-      } else if (cmd.name === "title") {
-        this.#setTitle(cmd.args, { byUser: true });
-      } else if (cmd.name === "login-code" && cmd.args.trim()) {
-        bg(this.#submitLoginCode(cmd.args), "/login-code");
-      } else if (cmd.name === "joy-prompt") {
-        // Re-deliver the CURRENT instruction block in-band (system-prompt
-        // attention decays in long sessions). Invisible + unmirrored: the
-        // user's /joy-prompt row is the chat record; the ~6KB body would
-        // just be a wall of text there.
-        this.enqueue(joyPromptReinjection(OPTIONS_SYSTEM_PROMPT), {
-          source: opts?.source ?? "rpc", mirrorToRelay: false, visible: false,
-        });
-      }
-      this.#dlog(`handled ${cmd.name} as a joy command — nothing queued`);
-      return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now(), handled: "command" };
-    }
-    const item: QueuedItem = {
-      id: opts?.id ?? crypto.randomUUID().slice(0, 8),
-      text,
-      createdAt: Date.now(),
-      source: opts?.source ?? "rpc",
-      mirrorToRelay: opts?.mirrorToRelay ?? true,
-      seq: opts?.seq,
-      visible: opts?.visible ?? true,
-    };
-    // Acceptance = the ledger commit. It throws (nothing staged, no ack) when
-    // the commit fails or the session has ended (#551, #553). Dedupe lives
-    // there too: a re-pulled seq / a carried id already staged returns the
-    // same item (#516 — a seq already DELIVERED is acked without re-running).
-    const accepted = this.#accept(item, opts?.seq != null ? "relay" : "local");
-    if (accepted.deduped !== "none") {
-      const dup = this.#queue.find((q) => q.id === accepted.id)
-        ?? (this.#dispatchInFlight?.id === accepted.id ? this.#dispatchInFlight : undefined)
-        ?? accepted.existing;
-      process.stderr.write(`[queue] ${this.id}: dedupe ${accepted.deduped === "receipt" ? "already-delivered" : "re-pulled"} ${item.seq != null ? `seq=${item.seq}` : `id=${item.id}`} (staged as ${accepted.id})\n`);
-      if (accepted.deduped === "pending" && dup && !this.#queue.includes(dup) && this.#dispatchInFlight?.id !== dup.id && !this.#carried.has(dup.id)) {
-        // Staged in the ledger (a previous object's row) but not in this
-        // object's memory: adopt it so it drains.
-        this.#queue.push(dup);
-        this.#broadcastQueue();
-        this.#maybeDrainQueue();
-      }
-      return { id: accepted.id, text: dup?.text ?? text, createdAt: dup?.createdAt ?? item.createdAt };
-    }
-    this.#queue.push(item);
-    this.#broadcastQueue();
-    this.#dlog(`queued ${item.id} (src=${item.source} chars=${item.text.length}${item.seq != null ? ` seq=${item.seq}` : ""}) queue=${this.#queue.length} gate: ${this.#holdReason()}`);
-    this.#maybeDrainQueue(); // drains immediately if Claude is idle
-    return { id: item.id, text: item.text, createdAt: item.createdAt };
+    if (!cmd) return null;
+    const bg = (p: Promise<unknown>, what: string) => { p.catch((e) => process.stderr.write(`[${this.id}] ${what} failed: ${e instanceof Error ? e.message : e}\n`)); };
+    if (cmd.name === "steer" && cmd.args.trim()) return { steer: cmd.args };
+    if (cmd.name === "btw" && cmd.args.trim()) return { steer: text };
+    if (cmd.name === "title") { this.#setTitle(cmd.args, { byUser: true }); this.#dlog("handled title as a joy command — nothing queued"); return { handled: true }; }
+    if (cmd.name === "login-code" && cmd.args.trim()) { bg(this.#submitLoginCode(cmd.args), "/login-code"); return { handled: true }; }
+    if (cmd.name === "joy-prompt") { void opts; return { handled: true, reinjection: joyPromptReinjection(OPTIONS_SYSTEM_PROMPT) }; }
+    this.#dlog(`handled ${cmd.name} as a joy command — nothing queued`);
+    return { handled: true };
   }
 
   /**
-   * /steer: type a message straight into the pane and submit it NOW, bypassing the
-   * dispatch queue and its empty-box/idle gate — so it reaches Claude immediately, even
-   * while a turn is in flight (Claude takes it as its next input). Unlike #armSubmit this
-   * submits WITHOUT the #turn / #dispatchInFlight guards — submitting mid-turn is the
-   * whole point. Records a receipt so the transcript echo is deduped (not re-mirrored),
-   * and mirrors to the relay once the Enter actually lands.
+   * A steer command (origin `steer`): type a message straight into the pane
+   * and submit it NOW — mid-turn if a turn is running — through the SAME pane
+   * serialization as every other writer (the coordinator runs one pane
+   * operation at a time, #34: a steer never interleaves with a dispatch's
+   * capture→type or a draft restore). Resolves `accepted` once the Enter
+   * actually lands (the relay pull awaits that, so the cursor covers the
+   * whole delivery); the UserPromptSubmit hook / the transcript echo then
+   * prove delivery. A pane with no live input box (dialog, not ready) or a
+   * dirty box the C-u loop cannot empty PARKS it — `rejected` as busy, so the
+   * coordinator retries it once the runtime is idle again — never typed over
+   * a dialog whose digits would select options (#33).
    */
-  async #steer(text: string, opts: SendOptions): Promise<void> {
-    if (this.status === "ended") return;
+  async #steer(cmd: CommandView, _attempt: AttemptRef, signal: AbortSignal): Promise<SubmitResult> {
+    if (this.status === "ended" || signal.aborted) return { kind: "unknown", detail: "session ended before the steer was typed" };
+    const text = cmd.text;
+    const parked = (why: string): SubmitResult => ({ kind: "rejected", permanent: false, busy: true, detail: `parked: ${why}` });
     // Settle any PENDING steer submit before touching the pane (5.6-sol
     // verify round 2): cancelling it only after our capture/clear/type awaits
     // let the old timer fire MID-STAGING — submitting our half-typed text
     // while acknowledging the old steer.
     let superseded = this.#cancelSteerSubmit();
-    const typed = flattenForMatch(text); // dedup key; real newlines are typed (see #typeLines)
-    // If a queued dispatch is in its typed-but-not-yet-submitted window (#submitTimer
-    // pending), steer's clear below would wipe that text AND its stale submit Enter would
-    // then fire under our steer — corrupting both. Put that dispatch back on the queue
-    // head (neutralizing its receipt) and cancel its submit, so it re-dispatches cleanly
-    // after steer settles, instead of being clobbered.
-    if (this.#submitTimer && this.#dispatchInFlight) {
-      this.#clearSubmitTimer();
-      // Also kill that dispatch's echo-timeout — otherwise it stays live and could
-      // prematurely time out the message once it RE-dispatches after the steer.
-      if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-      this.#queue.unshift(this.#dispatchInFlight);
-      this.#unstage(this.#dispatchInFlight, "superseded");
-      this.#dispatchInFlight = null;
-      this.#broadcastQueue();
-    }
     // Own the pane for the whole steer (#34): the lease is THIS steer's
     // identity from here until its Enter lands. Taking it before any await
-    // stands the drain pump, the dirty-clear and a draft restore down, and
-    // tells an earlier steer still settling that the release is no longer
-    // its to make. The exclusive section is then awaited so a writer already
-    // past its capture (an earlier steer mid-type, a draft restore) finishes
-    // typing before this one captures — the two can never interleave (steered
-    // text C-u'd by the drain as a "draft", or two messages typed into one box).
+    // stands the dirty-clear and a draft restore down. The exclusive section
+    // is then awaited so a writer already past its capture (a draft restore,
+    // a dispatch mid-type) finishes typing before this one captures.
     const lease = Symbol("steer");
     this.#paneOwner = lease;
     let section: Promise<void> | null = null;
@@ -1617,123 +1520,76 @@ export class Session {
     try {
       while (this.#paneSection) await this.#paneSection;
       while (this.#drainDone) await this.#drainDone;
-      if ((this.status as string) === "ended") return; // re-read after the await
+      if ((this.status as string) === "ended" || signal.aborted) return { kind: "unknown", detail: "session ended before the steer was typed" };
       if (this.#paneOwner !== lease) {
-        // A newer steer arrived while we waited: it owns the pane and this
-        // text was never typed. A relay steer must not read as delivered —
-        // reject so the pull retries it (same rule as the superseded submit).
         this.#dlog("steer superseded before it captured — nothing typed");
-        if (opts.source === "relay") throw new Error("steer superseded before submit");
-        return;
+        return parked("pane taken by another writer");
       }
-      // The writer we waited on may have been an earlier steer that armed its
-      // Enter meanwhile: supersede that submit now, the same way as above.
+      if (this.#cancelRequested(cmd.id)) return { kind: "rejected", permanent: false, detail: "cancelled before the steer was typed" };
       superseded = this.#cancelSteerSubmit() ?? superseded;
       section = new Promise<void>((r) => { releaseSection = r; });
       this.#paneSection = section;
       // No dispatch gate here (steering types alongside an in-flight turn), so clear any
       // leftover ourselves — guarded on the box actually holding text (never clear a box
-      // that reads empty). See docs/pane-input-clearing.md for why C-u, not C-c. Let it
-      // settle before the type so it can't be folded into a multi-line paste (the
-      // \x15-class bug). If the clear can't empty the box (a stalled/damaged pane —
-      // keys aren't being processed), do NOT type over the residue: the two would
-      // concatenate into one garbled submit. Fall back to the queue head + the
-      // input_dirty banner, the same recovery path the dispatch gate uses.
+      // that reads empty). See docs/pane-input-clearing.md for why C-u, not C-c.
       const pane = await this.#captureBox();
-      // Parked = accepted in the ledger as a queued command at the head.
-      const parked = (): QueuedItem => {
-        const item: QueuedItem = {
-          id: crypto.randomUUID().slice(0, 8),
-          text,
-          createdAt: Date.now(),
-          source: opts.source,
-          mirrorToRelay: opts.mirrorToRelay ?? true,
-          seq: opts.seq,
-          visible: false,
-        };
-        const a = this.#accept(item, "steer");
-        this.#ledger.reorderCommand(a.id, 0);
-        return a.existing ?? item;
-      };
       // A steer needs a LIVE input box to land in. With a dialog up (permission
       // prompt, AskUserQuestion, "Switch model?", the trust dialog) there is no
       // box: the digits of the steer text select options and its Enter
-      // confirms the highlighted default — approving a permission, or
-      // answering "No, exit" and killing the session — while the receipt
-      // records the steer as delivered (#33). Same for a capture that failed
-      // or shows no box at all: unknown is not "safe to type". Park it at the
-      // queue head instead; the drain gate dispatches it once the ready
-      // prompt is back (no pause — nothing is wrong with the pane).
+      // confirms the highlighted default (#33). Same for a capture that failed
+      // or shows no box at all: unknown is not "safe to type".
       const box = pane.ok ? paneInputText(pane.out) : null;
       if (!pane.ok || box === null || dialogFromPane(stripAnsi(pane.out)) !== null) {
-        this.#dlog(`steer parked on the queue head — ${!pane.ok ? "pane capture failed" : "no live input box (dialog or not ready)"}`);
-        this.#queue.unshift(parked());
-        this.#broadcastQueue();
-        return;
+        const why = !pane.ok ? "pane capture failed" : "no live input box (dialog or not ready)";
+        this.#dlog(`steer parked on the queue head — ${why}`);
+        return parked(why);
       }
       if (box) {
         // A superseded steer's own text is not a human draft — clear it, never restore it.
         if (superseded === null || flattenForMatch(box) !== flattenForMatch(superseded)) this.#preserveDraft(box);
         if (!(await this.#clearBoxWithCtrlU())) {
-          this.#queue.unshift(parked());
           this.#pauseDispatch("input_dirty");
-          return;
+          return parked("input box holds text the C-u loop could not clear");
         }
         await sleep(CLEAR_SETTLE_MS);
       }
       if (!(await this.#typeLines(text))) {
-        // Typing failed → the caller (relay pull) must NOT confirm this seq.
-        throw new Error("steer: typing into the pane failed");
+        // Typing failed → nothing reached the pane; the pull must not confirm this seq.
+        this.#pauseDispatch("dispatch_failed");
+        return parked("typing into the pane failed");
       }
-      // Typed: the exclusive section ends here. The next writer may capture
-      // (and supersede this Enter) during the settle delay; the lease itself is
-      // held until the Enter lands.
+      // Typed: the exclusive section ends here. The lease itself is held
+      // until the Enter lands.
       releaseSection();
       if (this.#paneSection === section) this.#paneSection = null;
       // Submit after the settle delay (paste-detection swallows an immediate Enter).
-      // Coalesce rapid steers; record the receipt + mirror only once the Enter actually
-      // lands. The returned promise resolves when the Enter LANDS (or the steer is
-      // deliberately superseded by a newer one) and rejects when it fails — the
-      // relay pull awaits this, so the cursor covers the whole delivery, not just
-      // the typing (5.6-sol audit #5: a crash inside the submit delay lost the
-      // steer while the cursor had already moved on).
-      await new Promise<void>((resolve, reject) => {
+      // The promise resolves when the Enter LANDS and rejects when it fails.
+      const landed = await new Promise<boolean>((resolve, reject) => {
         const timer = setTimeout(async () => {
           this.#steerSubmitTimer = null;
           try {
-            if (this.status === "ended") { resolve(); return; } // dead session — nothing to deliver to
+            if (this.status === "ended") { resolve(false); return; } // dead session — nothing to deliver to
             const e = await this.#tmux.key(this.tmuxWindow, "Enter");
             if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
-            // The Enter landed: record the steer as a submitted command so
-            // its transcript echo matches (not mirrored as a duplicate) and
-            // survives a restart the way a queued dispatch's attempt does.
-            try {
-              const a = this.#ledger.acceptCommand({ sessionId: this.id, text, origin: "steer", source: opts.source, seq: opts.seq, visible: false, mirrorToRelay: opts.mirrorToRelay });
-              if (a.deduped === "none" || a.row?.state === "queued") this.#ledger.recordAttempt(a.id, this.#generation, typed, "steer");
-            } catch (err) {
-              process.stderr.write(`[${this.id}] steer: ledger record failed: ${err instanceof Error ? err.message : err}\n`);
-            }
-            if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
-            resolve();
+            if (cmd.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
+            this.#setThinking(true);
+            this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(text);
+            resolve(true);
           } catch (e) { reject(e as Error); }
         }, ENTER_SUBMIT_DELAY_MS);
-        // A NEWER steer superseding this one clears the timer. For a RELAY
-        // steer that must not read as delivered — its text never got Enter —
-        // so REJECT and let the pull retry it (5.6-sol verify #5). Pull
-        // serialization makes this path rare (only an RPC steer can preempt a
-        // relay steer mid-delay). Non-relay callers get resolve (fire-and-
-        // forget semantics preserved).
-        const onSuperseded = opts.source === "relay"
-          ? () => reject(new Error("steer superseded before submit"))
-          : resolve;
+        // Superseded by a newer writer before its Enter: the text never got
+        // Enter — it must not read as delivered; the coordinator retries it.
+        const onSuperseded = () => resolve(false);
         this.#steerSubmitTimer = Object.assign(timer, { onSuperseded, text }) as typeof timer;
-      });
+      }).catch((e: Error) => { this.#dlog(`steer submit failed: ${e.message}`); return null; });
+      if (landed === null) return { kind: "unknown", detail: "steer: submit Enter failed" };
+      if (!landed) return parked("steer superseded before submit");
+      return { kind: "accepted" };
     } finally {
       releaseSection(); // no-op once released after the type
       if (section && this.#paneSection === section) this.#paneSection = null;
       // Only the steer that still HOLDS the lease releases the pane and wakes
-      // the drain; a superseded one settles silently — the newer steer owns
-      // the pane and the release (#34).
+      // the dispatch gate; a superseded one settles silently (#34).
       if (this.#paneOwner === lease) {
         this.#paneOwner = null;
         this.#maybeDrainQueue();
@@ -1751,62 +1607,6 @@ export class Session {
     return this.#tmux.captureFresh(this.tmuxWindow, { color: true });
   }
 
-  editQueued(id: string, text: string): boolean {
-    const m = this.#queue.find(q => q.id === id);
-    if (!m) return false; // already dispatched or unknown
-    // A timed-out item still has its attempt awaiting a late echo of its OLD
-    // text (#31); retire that — the new text makes its own attempt on dispatch.
-    if (m.requeued) { this.#unstage(m, "superseded"); m.requeued = false; }
-    if (!this.#ledger.editCommand(id, text)) return false; // no longer queued in the ledger (delivered by another route)
-    m.text = text;
-    this.#broadcastQueue();
-    return true;
-  }
-
-  cancelQueued(id: string): boolean {
-    const i = this.#queue.findIndex(q => q.id === id);
-    if (i >= 0) {
-      const [item] = this.#queue.splice(i, 1);
-      if (item.requeued) this.#unstage(item, "superseded"); // its stale attempt will never match now (#31)
-      this.#recordOutcome(id, "cancelled");
-      this.#broadcastQueue();
-      return true;
-    }
-    // The item is IN FLIGHT but not yet submitted: typed (or still typing) with
-    // its Enter pending. A relay cancel landing in that window used to find
-    // nothing to cancel here, and abort() then mistook the just-armed submit
-    // for a NEW send — so the cancelled prompt was submitted and ran to
-    // completion (#35). Cancel it for real: drop the Enter, neutralize its
-    // receipt (it will never echo) and record the outcome. The typed text
-    // stays in the box until the next gate clears it (docs/pane-input-
-    // clearing.md — no control keys outside the pre-type gates); the
-    // drain's ownership check abandons a type still in progress.
-    const inflight = this.#dispatchInFlight;
-    if (inflight && inflight.id === id && this.#dispatchSubmittedAt === null) {
-      this.#clearSubmitTimer();
-      if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-      this.#recordOutcome(id, "cancelled"); // settles its attempt as superseded too
-      this.#dispatchInFlight = null;
-      this.#dispatchExtends = 0;
-      this.#dlog(`cancelled ${id} before its submit landed`);
-      this.#broadcastQueue();
-      return true;
-    }
-    return false;
-  }
-
-  /** Move a queued message to a new index (clamped). */
-  reorderQueued(id: string, toIndex: number): boolean {
-    const from = this.#queue.findIndex(q => q.id === id);
-    if (from < 0) return false;
-    const [m] = this.#queue.splice(from, 1);
-    const to = Math.max(0, Math.min(this.#queue.length, Math.floor(toIndex)));
-    this.#queue.splice(to, 0, m);
-    this.#ledger.reorderCommand(id, to);
-    this.#broadcastQueue();
-    return true;
-  }
-
   /** Re-enable auto-drain after a paused (failed/dirty) dispatch. The app's
    *  banner for input_dirty says "tap to CLEAR and resume" — so honor it:
    *  wipe the stray box text first, otherwise the next drain re-detects the
@@ -1814,10 +1614,12 @@ export class Session {
    *  the e2e suite). Async best-effort: the drain kicks after the clear. */
   resumeQueue(): void {
     const wasDirty = this.#pauseReason === "input_dirty";
+    const wasPaused = this.#queuePaused;
     this.#queuePaused = false;
     this.#pauseReason = undefined;
     this.#clearAttempts = 0;
     this.#clearDirtyRecheck(); // the human beat the self-heal probe to it
+    if (wasPaused) this.#driver.emit({ kind: "resumed" });
     this.#broadcastQueue();
     if (wasDirty) {
       void this.#clearInputIfDirty(true).then(() => this.#maybeDrainQueue());
@@ -1831,6 +1633,7 @@ export class Session {
     this.#queuePaused = true;
     this.#pauseReason = reason;
     this.#clearAttempts = 0;
+    this.#driver.emit({ kind: "paused", reason });
     this.#broadcastQueue();
     // input_dirty is the one pause whose blocking condition is externally
     // VERIFIABLE (the box is empty or it isn't), so it self-heals; the
@@ -1896,6 +1699,7 @@ export class Session {
       this.#pauseReason = undefined;
       this.#clearAttempts = 0;
       this.#clearDirtyRecheck();
+      this.#driver.emit({ kind: "resumed" });
       this.#broadcastQueue();
       this.#maybeDrainQueue();
       return;
@@ -1904,23 +1708,26 @@ export class Session {
   }
 
   clearQueue(): void {
-    for (const q of this.#queue) this.#recordOutcome(q.id, "cancelled");
-    this.#queue = [];
-    this.#broadcastQueue();
+    for (const c of this.#coordinator.snapshot(this.id).commands) if (c.state === "queued") this.#coordinator.cancel(c.id);
   }
 
-  /** Publish the queue state (debug SSE + the app's card). Persistence is
-   *  NOT here any more: every mutation commits to the ledger at the point it
-   *  happens, so there is no whole-array rewrite and no "saved?" boolean. */
+  /** Publish the queue state (debug SSE + the app's card): the coordinator's
+   *  snapshot plus this session's own pause. */
   #broadcastQueue(): void {
     // A retired instance publishes nothing: after end("restart") the SAME
     // session id belongs to the replacement (#481).
     if (this.status === "ended") return;
-    const state = this.queueState();
+    const state = { ...this.#coordinator.snapshot(this.id), paused: this.#queuePaused, ...(this.#queuePaused && this.#pauseReason ? { pauseReason: this.#pauseReason } : {}) };
     this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...state });
     // Push to the app via session metadata so it doesn't have to poll.
     void this.#relay?.updateQueue(state);
   }
+
+  /** Texts the coordinator still has to deliver (queued or in flight). */
+  #pendingTexts(): string[] {
+    return this.#coordinator.snapshot(this.id).commands.filter((c) => c.state !== "running" && c.state !== "cancelling").map((c) => c.text);
+  }
+  #pendingCount(): number { return this.#coordinator.snapshot(this.id).pendingCount; }
 
   /**
    * Clear the live input box IF it currently holds real text (see
@@ -1962,9 +1769,12 @@ export class Session {
    */
   #preserveDraft(box: string): void {
     const flat = flattenForMatch(box);
-    const isPendingSend = this.#queue.some(q => flattenForMatch(q.text) === flat)
+    const isPendingSend = this.#pendingTexts().some((t) => flattenForMatch(t) === flat)
       || (this.#dispatchInFlight !== null && flattenForMatch(this.#dispatchInFlight.text) === flat);
-    if (!isPendingSend) this.#preservedDraft = box;
+    if (!isPendingSend) {
+      this.#preservedDraft = box;
+      this.#driver.emit({ kind: "draft_preserved", text: box });
+    }
   }
 
   /**
@@ -1978,7 +1788,7 @@ export class Session {
   async #restoreDraftIfAny(): Promise<void> {
     const draft = this.#preservedDraft;
     if (!draft || this.status === "ended") return;
-    if (this.#queue.length > 0 || this.#dispatchInFlight || this.#paneOwner) return; // box is needed again — keep holding
+    if (this.#pendingCount() > 0 || this.#dispatchInFlight || this.#paneOwner) return; // box is needed again — keep holding
     // CLAIM the draft before the first await and run one restore at a time: a
     // command echo started a restore and then kicked the drain, which started
     // a second restore before the first capture resolved — both saw an empty
@@ -1995,7 +1805,7 @@ export class Session {
       // writer stands down, so the checks below stay true across the awaits.
       while (this.#paneSection) await this.#paneSection;
       while (this.#drainDone) await this.#drainDone;
-      if ((this.status as string) === "ended" || this.#queue.length > 0 || this.#dispatchInFlight || this.#paneOwner) { handBack(); return; }
+      if ((this.status as string) === "ended" || this.#pendingCount() > 0 || this.#dispatchInFlight || this.#paneOwner) { handBack(); return; }
       this.#paneOwner = lease;
       section = new Promise<void>((r) => { releaseSection = r; });
       this.#paneSection = section;
@@ -2005,7 +1815,7 @@ export class Session {
       // the draft into its replacement's window — a steer may have taken the
       // lease, or a message may have been queued. None of those may be typed
       // over; hand the draft back for the next idle trigger.
-      if ((this.status as string) === "ended" || this.#paneOwner !== lease || this.#queue.length > 0 || this.#dispatchInFlight) { handBack(); return; }
+      if ((this.status as string) === "ended" || this.#paneOwner !== lease || this.#pendingCount() > 0 || this.#dispatchInFlight) { handBack(); return; }
       if (!pane.ok || paneInputText(pane.out) !== "") { handBack(); return; } // capture failed / user typed anew / no box — never merge
       if (!(await this.#typeLines(draft))) handBack(); // typing failed — keep for retry
     } finally {
@@ -2016,7 +1826,7 @@ export class Session {
         // A drain refused while the lease was held (a message queued mid-
         // restore) needs its trigger back; an empty queue needs nothing (and a
         // kick would re-run this restore on a failed capture, unbounded).
-        if (this.#queue.length > 0) this.#maybeDrainQueue();
+        if (this.#pendingCount() > 0) this.#maybeDrainQueue();
       }
     }
   }
@@ -2060,10 +1870,15 @@ export class Session {
     return false; // budget exhausted with text left
   }
 
-  /** True when a drain could proceed by the runtime/queue state alone (the
-   *  pane's box/dialog safety checks come after, on a fresh capture). */
-  #canDrain(): boolean {
-    return this.#queue.length > 0 && this.promptReadiness().ready;
+  /** The gate a dispatch of OURS waits on: promptReadiness minus the
+   *  in-flight check (we are the one in flight) — the pane's box/dialog
+   *  safety checks come after, on a fresh capture. */
+  #gateReadiness(): { ready: boolean; reason: string } {
+    if (this.status === "ended") return { ready: false, reason: "session ended" };
+    if (this.#queuePaused) return { ready: false, reason: `queue paused (${this.#pauseReason ?? "?"})` };
+    if (this.#turnRunning()) return { ready: false, reason: this.#hooksLive && this.#hookTurn?.open ? "turn running (hook)" : "turn running (transcript)" };
+    if (this.#paneOwner) return { ready: false, reason: "pane leased (steer / draft restore)" };
+    return { ready: true, reason: "clear to send" };
   }
 
   /**
@@ -2090,9 +1905,15 @@ export class Session {
   /** The runtime turn as the authority sees it (busy(), `joy check`). */
   turnOpen(): boolean { return this.#turnRunning(); }
 
-  #armDrainRetry(ms: number): void {
-    if (this.#drainRetry) clearTimeout(this.#drainRetry);
-    this.#drainRetry = setTimeout(() => { this.#drainRetry = null; this.#maybeDrainQueue(); }, ms);
+  /** Sleep `ms` inside the dispatch gate, woken early by #maybeDrainQueue. */
+  #waitGate(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; clearTimeout(t); if (this.#gateWake === finish) this.#gateWake = null; signal.removeEventListener("abort", finish); resolve(); };
+      const t = setTimeout(finish, ms);
+      this.#gateWake = finish;
+      signal.addEventListener("abort", finish, { once: true });
+    });
   }
 
   // ── Dispatch tracing ────────────────────────────────────────────────────────
@@ -2117,7 +1938,7 @@ export class Session {
   /** Log a held head item at most every 30s, and only once it has waited 10s —
    *  a drain retries twice a second, so an unthrottled line would be noise. */
   #noteHold(reason: string): void {
-    const head = this.#queue[0];
+    const head = this.#dispatchInFlight ?? this.#gateItem;
     if (!head) return;
     const waited = Date.now() - head.createdAt;
     if (waited < 10_000) return;
@@ -2127,44 +1948,28 @@ export class Session {
     this.#dlog(`held ${head.id} ${Math.round(waited / 1000)}s — ${reason}`);
   }
 
-  /**
-   * Drain the queue's head IF Claude is genuinely idle AND the input box is empty.
-   * The gate AWAITS a FRESH pane capture (control mode) where a stale read would
-   * cause data loss, so it runs as a serialized async PUMP, not a sync tick:
-   * #draining lets one drain run at a time; a trigger (turn-end / enqueue / resume /
-   * #drainRetry) arriving mid-await sets #drainRequested so it re-runs once instead
-   * of being dropped. The sync entry point is kept since many callers fire it.
-   */
+  /** Wake the dispatch gate (turn-end / resume / a writer releasing the
+   *  pane) and, with nothing left to deliver, restore a preserved human
+   *  draft (rare: gated on the field). */
   #maybeDrainQueue(): void {
-    if (this.#draining) { this.#drainRequested = true; return; }
-    // Queue fully idle → this trigger (turn-end/resume/…) is also the retry
-    // point for restoring a preserved human draft (rare: gated on the field).
-    if (this.#preservedDraft && this.#queue.length === 0 && !this.#dispatchInFlight) {
+    if (this.#preservedDraft && !this.#dispatchInFlight && this.#pendingCount() === 0) {
       void this.#restoreDraftIfAny();
       return;
     }
-    void this.#kickDrain();
+    this.#gateWake?.();
   }
 
-  async #kickDrain(): Promise<void> {
-    this.#draining = true;
-    let done!: () => void;
-    this.#drainDone = new Promise<void>((r) => { done = r; }); // awaited by #steer (#34)
-    try {
-      await this.#drainOnce();
-    } finally {
-      this.#draining = false;
-      this.#drainDone = null;
-      done();
-      if (this.#drainRequested) { this.#drainRequested = false; this.#maybeDrainQueue(); }
-    }
-  }
+  /** The command waiting at the gate (for #noteHold), before it is in flight. */
+  #gateItem: QueuedItem | null = null;
 
   /**
-   * One drain attempt. Re-checks #canDrain() after EVERY await (queue/turn/pause can
-   * change while a capture is in flight). Pane gating mirrors the sync version:
-   *   1. NOT generating ("esc to interrupt") — #turn lags turn-start, so the pane's
-   *      real-time signal is what stops a dispatch into a live turn (double-queue).
+   * Dispatch ONE command (the driver's submit): wait at the gate until Claude
+   * is genuinely idle AND the input box is empty, type it, arm the delayed
+   * Enter, and resolve with the runtime's verdict once a confirm path settles
+   * it (#settleDispatch) or the echo window closes. The gate AWAITS a FRESH
+   * pane capture where a stale read would cause data loss:
+   *   1. NOT generating ("esc to interrupt") — unless the hooks say idle: the
+   *      pane's real-time signal is what stops a dispatch into a live turn.
    *   2. AT the ready prompt (not a dialog/spinner) — repaint lag → recheck shortly.
    * Then REQUIRE an EMPTY box: dispatch ONLY when paneInputText === "" — a null box
    * (no live input box detected) is "not ready", NOT "empty", so it retries; stuck
@@ -2172,136 +1977,152 @@ export class Session {
    * MATTERS here: a busy claude processes buffered keys LATE, so a single quick
    * re-capture misreads "busy" as "unclearable" (see docs/pane-input-clearing.md).
    * Two full failed episodes, spaced 750ms, are required before pausing with the
-   * input_dirty banner. (Background shells alone don't block — that's why it's
-   * "esc to interrupt", not paneShowsWorking.)
+   * input_dirty banner — the wait then continues until the pause lifts. A
+   * cancel is consulted at every gate boundary (R9): a cancelled command is
+   * never typed.
    */
-  async #drainOnce(): Promise<void> {
-    if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
-    if (!this.#canDrain()) { this.#noteHold(this.#holdReason()); return; }
-
-    const pane = await this.#captureBox();
-    if (!this.#canDrain()) return; // re-check after the await
-    // The generating footer is a hard veto only while the pane is the
-    // authority: with hooks live and the last turn edge saying idle, a frame
-    // still painting "esc to interrupt" is stale — the ready-prompt and empty-
-    // box checks below remain (hook authority owns readiness, the pane owns
-    // what it alone can see: drafts and dialogs).
-    if (!pane.ok || (paneShowsGenerating(pane.out) && !this.#hookSaysIdle()) || !paneShowsReadyPrompt(pane.out)) {
-      this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
-      this.#noteHold(!pane.ok ? "pane capture failed" : "pane busy or not at the prompt");
-      this.#armDrainRetry(500);
-      return;
-    }
-
-    const box = paneInputText(pane.out);
-    if (box !== "") {
-      if (box === null) { this.#clearAttempts = 0; this.#noteHold("no input box on screen"); this.#armDrainRetry(500); return; } // not-ready, not empty
-      // Stuck text → run a verified clear episode. Only a FAILED episode ("dirty":
-      // keys went out but the box still holds text) counts toward the pause;
-      // "skipped" means state changed under us (turn started / not ready), which
-      // ends the episode without blame. Two failed episodes spaced 750ms → pause:
-      // the spacing gives a busy claude time to process buffered keys before we
-      // declare the pane unclearable (docs/pane-input-clearing.md).
-      const res = await this.#clearInputIfDirty(true);
-      if (res === "cleared") { this.#clearAttempts = 0; this.#armDrainRetry(200); return; }
-      if (res === "skipped") { this.#clearAttempts = 0; this.#armDrainRetry(500); return; }
-      this.#noteHold("input box holds text we could not clear");
-      this.#clearAttempts += 1;
-      if (this.#clearAttempts >= 2) {
-        process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
-        this.#pauseDispatch("input_dirty");
-        return;
-      }
-      this.#armDrainRetry(750);
-      return;
-    }
-
-    // box === "" → empty, safe to type.
-    this.#clearAttempts = 0;
-    if (!this.#canDrain()) return; // final re-check before committing the dispatch
-
-    const next = this.#queue.shift()!;
-    // A timed-out item kept its attempt awaiting a LATE echo (#31). Now that
-    // it is really being re-typed, retire that attempt first: the fresh one
-    // below is what the echo pairs with.
-    if (next.requeued) { this.#unstage(next, "superseded"); next.requeued = false; }
-    // The dispatch attempt is COMMITTED before a single key is sent: a crash
-    // between the type and the echo is then an explicit unknown outcome the
-    // next generation reconciles, never a prompt that vanished. The ledger
-    // refuses an item whose cancel landed meanwhile (#77/#35) and an item
-    // another route already delivered — both are dropped here, not typed.
+  async #awaitGate(view: CommandView, signal: AbortSignal): Promise<"ready" | "cancelled" | "retired"> {
+    const item: QueuedItem = {
+      id: view.id, text: view.text, createdAt: view.createdAt,
+      source: view.source as DeliverySource, mirrorToRelay: view.mirrorToRelay,
+      seq: view.seq ?? undefined, visible: view.visible,
+    };
+    this.#gateItem = item;
     try {
-      next.attemptId = this.#ledger.recordAttempt(next.id, this.#generation, flattenForMatch(next.text), "dispatch").id;
-    } catch (e) {
-      if (e instanceof StaleGenerationError) return; // retired: the replacement owns the queue (#481)
-      if (e instanceof StaleCommandError) {
-        this.#dlog(`dispatch ${next.id} skipped — ${e.message}`);
-        this.#itemOutcome.set(next.id, this.#ledger.getCommand(next.id)?.state === "completed" ? "delivered" : "cancelled");
-        this.#broadcastQueue();
-        this.#armDrainRetry(0);
-        return;
+      for (;;) {
+        if (signal.aborted || this.status === "ended") return "retired";
+        if (this.#cancelRequested(item.id)) return "cancelled";
+        const gate = this.#gateReadiness();
+        if (!gate.ready) { this.#noteHold(gate.reason); await this.#waitGate(this.#queuePaused ? 1_000 : 500, signal); continue; }
+        const pane = await this.#captureBox();
+        if (signal.aborted || (this.status as string) === "ended") return "retired";
+        if (this.#cancelRequested(item.id)) return "cancelled";
+        if (!this.#gateReadiness().ready) continue; // re-check after the await
+        // The generating footer is a hard veto only while the pane is the
+        // authority: with hooks live and the last turn edge saying idle, a frame
+        // still painting "esc to interrupt" is stale — the ready-prompt and empty-
+        // box checks below remain (hook authority owns readiness, the pane owns
+        // what it alone can see: drafts and dialogs).
+        if (!pane.ok || (paneShowsGenerating(pane.out) && !this.#hookSaysIdle()) || !paneShowsReadyPrompt(pane.out)) {
+          this.#clearAttempts = 0; // a not-ready/busy pane ends any in-progress clear episode
+          this.#noteHold(!pane.ok ? "pane capture failed" : "pane busy or not at the prompt");
+          await this.#waitGate(500, signal);
+          continue;
+        }
+        const box = paneInputText(pane.out);
+        if (box !== "") {
+          if (box === null) { this.#clearAttempts = 0; this.#noteHold("no input box on screen"); await this.#waitGate(500, signal); continue; } // not-ready, not empty
+          // Stuck text → run a verified clear episode. Only a FAILED episode ("dirty":
+          // keys went out but the box still holds text) counts toward the pause;
+          // "skipped" means state changed under us (turn started / not ready), which
+          // ends the episode without blame. Two failed episodes spaced 750ms → pause:
+          // the spacing gives a busy claude time to process buffered keys before we
+          // declare the pane unclearable (docs/pane-input-clearing.md).
+          const res = await this.#clearInputIfDirty(true);
+          if (res === "cleared") { this.#clearAttempts = 0; await this.#waitGate(200, signal); continue; }
+          if (res === "skipped") { this.#clearAttempts = 0; await this.#waitGate(500, signal); continue; }
+          this.#noteHold("input box holds text we could not clear");
+          this.#clearAttempts += 1;
+          if (this.#clearAttempts >= 2) {
+            process.stderr.write(`[queue] input box dirty + unclearable for ${this.id} — paused\n`);
+            this.#pauseDispatch("input_dirty");
+            continue; // the wait above holds until the pause lifts (resume / self-heal)
+          }
+          await this.#waitGate(750, signal);
+          continue;
+        }
+        return "ready"; // box === "" → empty, safe to type.
       }
-      // The ledger refused the write: the item stays queued (nothing was
-      // typed) and the queue pauses like any other dispatch failure.
-      this.#queue.unshift(next);
-      this.#pauseDispatch("dispatch_failed");
-      process.stderr.write(`[queue] dispatch ledger write failed for ${this.id}: ${e instanceof Error ? e.message : e}\n`);
-      return;
+    } finally {
+      this.#gateItem = null;
     }
-    this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
+  }
+
+  /** Type ONE command the gate cleared, arm its delayed Enter, and resolve
+   *  with the runtime's verdict once a confirm path settles it. */
+  async #dispatchOne(view: CommandView, attempt: AttemptRef, signal: AbortSignal): Promise<SubmitResult> {
+    if (signal.aborted || this.status === "ended") return { kind: "unknown", detail: "session retired during dispatch" };
+    if (this.#cancelRequested(view.id)) return { kind: "rejected", permanent: false, detail: "cancelled before dispatch" };
+    const item: QueuedItem = {
+      id: view.id, text: view.text, createdAt: view.createdAt,
+      source: view.source as DeliverySource, mirrorToRelay: view.mirrorToRelay,
+      seq: view.seq ?? undefined, visible: view.visible, attemptId: attempt.attemptId, runtimeRef: attempt.runtimeRef,
+    };
+    this.#clearAttempts = 0;
+    this.#dispatchInFlight = item;
     // null until THIS item's delayed Enter actually lands (#armSubmit) — reset
     // the moment the item goes in flight, BEFORE the first awaited write. The
     // dialog causal guard treats null as +Infinity, so a dialog first sighted
-    // before our submit (including one racing the type→Enter window) can never
-    // be credited to this dispatch; cancelQueued / abort read null as "typed,
-    // Enter not out". It used to be reset only after the type, so a cancel
-    // landing in the typing window still saw the PREVIOUS item's submit mark,
-    // was refused, and the cancelled prompt got its Enter anyway (#35).
+    // before our submit can never be credited to this dispatch; a cancel /
+    // abort reads null as "typed, Enter not out" (#35).
     this.#dispatchSubmittedAt = null;
+    this.#dispatchExtends = 0;
+    const settled = new Promise<SubmitResult>((resolve) => { this.#dispatchSettle = resolve; });
     this.#broadcastQueue();
-    // OWNERSHIP CHECK for everything after the awaited write (#481). While the
-    // keystrokes are in flight this instance can be RETIRED — a restart plucks
-    // the rest of the queue for its replacement (takeQueuedForRestart) and
-    // end("restart") cancels this dispatch — or the dispatch can be settled by
-    // another path (a kill, a command echo). Either way `next` is no longer
-    // ours to requeue, pause on, or arm timers for: the old code requeued the
-    // cancelled item and persisted it under the shared session id, clobbering
-    // the replacement's spool.
-    const stillOurs = () => this.status !== "ended" && this.#dispatchInFlight === next;
+    // The capture→type section: a steer or a draft restore arriving now waits
+    // for it (#34) so two writers never interleave in the box.
+    let releaseSection: () => void = () => {};
+    this.#drainDone = new Promise<void>((r) => { releaseSection = r; });
+    const stillOurs = () => (this.status as string) !== "ended" && this.#dispatchInFlight === item;
     try {
-      // Type DIRECTLY (not via sendText) — the gate proved the pane is ready + empty,
-      // and a "starting" session must type now to bootstrap its transcript. Awaited:
+      // Type DIRECTLY — the gate proved the pane is ready + empty, and a
+      // "starting" session must type now to bootstrap its transcript. Awaited:
       // the keystrokes go over control mode and a failure must reach the catch below.
-      await this.#typeIntoTmux(next.text, { seq: next.seq, source: next.source, mirrorToRelay: next.mirrorToRelay });
+      await this.#typeIntoTmux(item.text, { seq: item.seq, source: item.source, mirrorToRelay: item.mirrorToRelay });
     } catch (e) {
+      releaseSection(); this.#drainDone = null;
       if (!stillOurs()) {
-        // Retired (or superseded) mid-write: the write failing is expected — its
-        // tmux server was killed with the old process. Nothing to requeue.
-        process.stderr.write(`[queue] ${this.id}: dispatch ${next.id} write failed after the session was ${this.status === "ended" ? `ended (${this.endReason})` : "superseded"} — not requeued (#481)\n`);
-        return;
+        process.stderr.write(`[queue] ${this.id}: dispatch ${item.id} write failed after the session was ${(this.status as string) === "ended" ? `ended (${this.endReason})` : "settled"} — abandoned (#481)\n`);
+        return settled;
       }
-      // Send failed outright — put it back at the head and pause.
-      this.#unstage(next, "superseded"); // nothing reached the pane: no echo will ever match this attempt
-      this.#queue.unshift(next);
-      this.#dispatchInFlight = null;
-      this.#pauseDispatch("dispatch_failed");
+      // Send failed outright — nothing reached the pane: pause, the
+      // coordinator retries once the pause lifts.
       process.stderr.write(`[queue] dispatch send failed for ${this.id}: ${e}\n`);
-      return;
+      this.#pauseDispatch("dispatch_failed");
+      this.#settleDispatch("typing failed", { kind: "rejected", permanent: false, busy: true, detail: "dispatch_failed" });
+      return settled;
     }
+    releaseSection(); this.#drainDone = null;
     if (!stillOurs()) {
-      // Typed into a window that no longer belongs to a live dispatch: drop the
-      // submit Enter #typeIntoTmux just armed (its target is already gone) and
-      // arm no echo timeout for it.
+      // Typed into a window that no longer belongs to a live dispatch (a
+      // cancel or an end settled it meanwhile): drop the submit Enter
+      // #typeIntoTmux just armed and arm no echo timeout for it.
       this.#clearSubmitTimer();
-      process.stderr.write(`[queue] ${this.id}: dispatch ${next.id} completed typing after the session was ${this.status === "ended" ? `ended (${this.endReason})` : "superseded"} — abandoned (#481)\n`);
-      return;
+      return settled;
     }
     this.#holdLoggedAt = 0; // the hold is over — the next one logs promptly
-    this.#dlog(`typed ${next.id} (chars=${next.text.length}) — Enter pending`);
+    this.#dlog(`typed ${item.id} (chars=${item.text.length}) — Enter pending`);
     // Arm the echo-confirmation timeout: a successful dispatch produces a new turn.
     // If none appears, the message didn't land.
-    this.#dispatchExtends = 0;
     this.#dispatchTimer = setTimeout(() => this.#onDispatchTimeout(), DISPATCH_ECHO_TIMEOUT_MS);
+    return settled;
+  }
+
+  /** THE settlement of the in-flight dispatch: release the slot, resolve the
+   *  driver's submit with the verdict and — when the runtime took it — report
+   *  the echo (the transcript path reports its own, with the uuid receipt).
+   *  A command (`!bash`, `/slash`) never runs a turn of its own: its delivery
+   *  IS its completion, so its turn end is reported at once. */
+  #settleDispatch(how: string, result: SubmitResult, opts: { echo?: boolean } = {}): void {
+    const item = this.#dispatchInFlight;
+    if (!item) return;
+    this.#dispatchInFlight = null;
+    this.#dispatchExtends = 0;
+    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    const settle = this.#dispatchSettle;
+    this.#dispatchSettle = null;
+    this.#dlog(`${result.kind === "accepted" ? "confirmed" : result.kind} ${item.id} by ${how}`);
+    if (result.kind === "accepted") {
+      item.delivered = true;
+      this.#lastConfirmedRef = item.runtimeRef ?? flattenForMatch(item.text);
+      const ref = item.runtimeRef ?? flattenForMatch(item.text);
+      if (opts.echo !== false) this.#driver.emit({ kind: "echo", runtimeRef: ref });
+      const isCommand = /^\s*!/.test(item.text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(item.text);
+      if (isCommand) this.#driver.emit({ kind: "turn_ended", runtimeRef: ref, status: "completed" });
+    }
+    settle?.(result);
+    this.#broadcastQueue();
+    if (result.kind === "accepted") void this.#restoreDraftIfAny();
   }
 
   /** Delivery confirmed by a post-submit interactive DIALOG (not by echo):
@@ -2318,13 +2139,8 @@ export class Session {
     // dialog is up — no ready prompt), but a pre-existing dialog that raced
     // the gate's capture must not confirm a command it didn't come from.
     if (dialogSince < (this.#dispatchSubmittedAt ?? Number.POSITIVE_INFINITY)) return;
-    this.#dlog(`confirmed ${inflight.id} by dialog`);
-    this.#recordOutcome(inflight.id, "delivered");
-    this.#dispatchExtends = 0;
-    this.#dispatchInFlight = null;
     this.#clearSubmitTimer();
-    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-    this.#broadcastQueue();
+    this.#settleDispatch("dialog", { kind: "accepted" });
   }
 
   /** Called from onTranscriptEntry when a new turn starts (byTurnStart) or a
@@ -2362,7 +2178,7 @@ export class Session {
       void this.#confirmOnTurnStartWithFreshBox(this.#dispatchInFlight, cmdLike);
       return;
     }
-    this.#settleDispatchDelivered(this.#dispatchInFlight, "transcript echo");
+    this.#settleDispatch("transcript echo", { kind: "accepted" }, { echo: false }); // the transcript path reported the echo with its uuid receipt
   }
 
   /** The hook-less (and command) turn-start confirmation, against a FRESH box
@@ -2399,20 +2215,7 @@ export class Session {
         return;
       }
     }
-    this.#settleDispatchDelivered(item, "turn start");
-  }
-
-  /** The in-flight dispatch is delivered: record it, release the slot, and
-   *  hand back any human draft the dispatch's box-clear captured (types into
-   *  the now-empty box; the new turn's generation just buffers the keys). */
-  #settleDispatchDelivered(item: QueuedItem, how: string): void {
-    this.#dlog(`confirmed ${item.id} by ${how}`);
-    this.#recordOutcome(item.id, "delivered");
-    this.#dispatchInFlight = null;
-    this.#dispatchExtends = 0;
-    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-    this.#broadcastQueue();
-    void this.#restoreDraftIfAny();
+    this.#settleDispatch("turn start", { kind: "accepted" });
   }
 
   #onDispatchTimeout(): void {
@@ -2463,25 +2266,19 @@ export class Session {
       }
     }
     // No turn started in time and Claude isn't visibly working → the message
-    // didn't land. Re-queue the WHOLE item at the head (so its seq/source/mirror/
-    // visible survive) and pause so we don't pile more into a bad state; resume
-    // re-clears the box and re-types it. The pending/received receipt twins are
-    // deliberately LEFT IN PLACE (#31): the documented late-landing cases (tailer
-    // bound after the echo window, a 600k-context turn start slower than the
-    // extension budget, a narrow pane hiding "esc to interrupt") echo AFTER this
-    // point, and only a still-pending entry lets that echo match — which is what
-    // fires the late-echo self-heal (drop the requeued twin, resume) instead of
-    // mirroring the prompt as a duplicate bubble and re-running it on resume.
-    // The twins are neutralized when the item is really re-typed, edited or
-    // cancelled (item.requeued).
-    this.#dispatchExtends = 0;
-    this.#dispatchInFlight = null;
+    // didn't land. The row goes back to queued (a transient, uncounted
+    // rejection) and the queue pauses so we don't pile more into a bad state;
+    // resume re-clears the box and re-types it. The attempt stays matchable
+    // for a LATE echo (#31): the documented late-landing cases (tailer bound
+    // after the echo window, a 600k-context turn start slower than the
+    // extension budget, a narrow pane hiding "esc to interrupt") echo AFTER
+    // this point — the coordinator pairs that echo with this attempt by its
+    // ref, the command runs instead of being re-typed, and the transcript
+    // path lifts this pause (the late-echo self-heal).
     this.#clearSubmitTimer();
-    inflight.requeued = true;
-    this.#unstage(inflight, "unknown"); // attempt stays matchable for the late echo (#31)
-    this.#queue.unshift(inflight);
     this.#pauseDispatch("dispatch_timeout");
     process.stderr.write(`[queue] dispatch for ${this.id} never echoed — paused\n`);
+    this.#settleDispatch("echo timeout", { kind: "rejected", permanent: false, busy: true, detail: "dispatch_timeout" });
   }
 
   /**
@@ -2603,8 +2400,14 @@ export class Session {
     return parsePermissionModeFromPane(pane.out);
   }
 
-  /** Escape → Claude Code interactive interprets as "interrupt generation". */
+  /** Stop: every command in flight is cancelled durably and the Escape path
+   *  runs (the coordinator retries it until the turn's end confirms). */
   async abort(): Promise<{ ok: boolean; error?: string }> {
+    return this.#coordinator.abortRunning(this.id);
+  }
+
+  /** Escape → Claude Code interactive interprets as "interrupt generation". */
+  async #interruptPane(): Promise<InterruptResult> {
     // Snapshot the pending submit BEFORE the awaited capture: if a NEW dispatch
     // starts during that await, this (now possibly stale) abort must not cancel it.
     const submitBefore = this.#submitTimer;
@@ -2645,7 +2448,7 @@ export class Session {
     // the cancelled prompt ran to completion (#35). Same item → cancellable.
     const sameDispatchTyped = inflightBefore !== null && this.#dispatchInFlight === inflightBefore
       && this.#dispatchSubmittedAt === null;
-    if (this.#submitTimer !== null && this.#submitTimer !== submitBefore && !sameDispatchTyped) return { ok: true };
+    if (this.#submitTimer !== null && this.#submitTimer !== submitBefore && !sameDispatchTyped) return { kind: "noop" };
     // Require !#thinking: during the PRE-OUTPUT phase of a turn (long
     // initial cogitation) the transcript has no entries yet (#turn null), the
     // dispatch is already echo-confirmed (#dispatchInFlight null), and the
@@ -2655,9 +2458,13 @@ export class Session {
     // turn is in flight; trust it. (Outstanding background tasks do NOT make
     // an idle session abortable — Escape can't reach them; see below.)
     if (!this.#turn && !this.#dispatchInFlight && !this.#submitTimer && !this.#thinking &&
+        Date.now() - this.#dispatchCancelledAt > 2_000 &&
         pane.ok &&
         paneShowsEmptyReadyPrompt(pane.out) && !paneShowsGenerating(pane.out)) {
-      return { ok: true };
+      // Unambiguously idle: nothing to interrupt — a command still recorded
+      // as running ended without a terminal we saw, and idle is the verdict.
+      this.#driver.emit({ kind: "idle" });
+      return { kind: "noop" };
     }
     // Cancel the pending submit Enter — but ONLY the one that was pending when abort
     // BEGAN, and only if one existed at all: submitBefore === null means the Enter
@@ -2681,15 +2488,14 @@ export class Session {
       // no-clear note at the end of abort() for why that's deliberate.
       this.#clearSubmitTimer();
       if (this.#dispatchInFlight) {
-        if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-        this.#recordOutcome(this.#dispatchInFlight.id, "cancelled"); // its attempt is retired with it: no echo will come
-
-        this.#dispatchInFlight = null;
-        this.#broadcastQueue();
+        // Stop means the message is gone, not re-queued: cancel it durably,
+        // then settle the submit — no echo will come.
+        this.#coordinator.cancel(this.#dispatchInFlight.id);
+        this.#settleDispatch("abort before submit", { kind: "rejected", permanent: false, detail: "aborted before submit" });
       }
     }
     const esc = await this.#tmux.key(this.tmuxWindow, "Escape");
-    if (!esc.ok) return { ok: false, error: esc.error ?? "tmux send-keys failed" }; // the agent was NOT interrupted (#8)
+    if (!esc.ok) return { kind: "failed", error: esc.error ?? "tmux send-keys failed" }; // the agent was NOT interrupted (#8)
     this.#setThinking(false);
     this.#needsInput = null; // Escape dismisses a permission prompt too
     // Interrupting mid-tool means Claude won't write that tool's result — close any
@@ -2711,8 +2517,12 @@ export class Session {
       this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn.turnId, time: Date.now() }));
       this.#turnUsage = null;
       this.#turn = null;
-      this.#maybeDrainQueue();
     }
+    // The Escape landed: whatever was executing is over — the coordinator
+    // confirms the cancel on this (the transcript's interrupt marker follows).
+    this.#lastConfirmedRef = null;
+    this.#driver.emit({ kind: "turn_ended", status: "cancelled" });
+    this.#maybeDrainQueue();
     // Background tasks are DELIBERATELY untouched by abort: Escape interrupts
     // Claude's turn, not the background processes — the monitor keeps watching,
     // the build keeps building, and their <task-notification> completions still
@@ -2735,7 +2545,7 @@ export class Session {
     // the tmux pane until the next send's gate clears it (or indefinitely on an
     // abandoned session), where a human attached to the pane could submit it
     // with a stray Enter. Do not "fix" that by re-adding an abort-time clear.
-    return { ok: true };
+    return { kind: "sent" };
   }
 
   /**
@@ -2966,7 +2776,8 @@ export class Session {
     // re-armed and the turn-end handler calls #scheduleRetry for the next step.
     // mirrorToRelay so the re-sent prompt shows in chat (its bubble was the prior
     // turn's); visible:false — it's a system re-send, not an editable queue chip.
-    this.enqueue(text, { source: "rpc", mirrorToRelay: true, visible: false });
+    try { this.#coordinator.accept({ sessionId: this.id, text, source: "rpc", mirrorToRelay: true, visible: false, origin: "reinjection" }); }
+    catch (e) { process.stderr.write(`[retry] ${this.id}: could not queue the re-send: ${e instanceof Error ? e.message : e}\n`); }
   }
 
   /** Tear down any pending retry (timer + banner). */
@@ -2991,14 +2802,9 @@ export class Session {
     if (!echoedCmd || !inflight || inflight.text.trim().split(/\s+/)[0] !== echoedCmd) return;
     process.stderr.write(`[queue] ${this.id} command echo confirmed dispatch (${echoedCmd})\n`);
     this.#clearSubmitTimer();
-    // No plain-text echo will EVER come for this dispatch — its attempt is
-    // settled by the outcome (done), so it cannot match a later identical send.
-    this.#recordOutcome(inflight.id, "delivered");
-    this.#dispatchInFlight = null;
-    this.#dispatchExtends = 0;
-    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-    this.#broadcastQueue();
-    void this.#restoreDraftIfAny();
+    // No plain-text echo will EVER come for this dispatch: the command echo
+    // IS its delivery (and its completion — see #settleDispatch).
+    this.#settleDispatch("command echo", { kind: "accepted" });
     this.#maybeDrainQueue();
   }
 
@@ -3040,12 +2846,7 @@ export class Session {
     if (!m || flattenForMatch(m[1]) !== flattenForMatch(echoedCmd)) return;
     process.stderr.write(`[queue] ${this.id} bash echo confirmed dispatch (!${echoedCmd.slice(0, 40)})\n`);
     this.#clearSubmitTimer();
-    this.#recordOutcome(inflight.id, "delivered");
-    this.#dispatchInFlight = null;
-    this.#dispatchExtends = 0;
-    if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-    this.#broadcastQueue();
-    void this.#restoreDraftIfAny();
+    this.#settleDispatch("bash echo", { kind: "accepted" });
     this.#maybeDrainQueue();
   }
 
@@ -3174,7 +2975,7 @@ export class Session {
       // abandoned skipped the mirror, and the transcript echo was then eaten by
       // the pending receipt — the prompt ran but appeared in no chat (#483).
       const st: string = this.status; // re-read: it may have flipped to "ended" during the await
-      const delivered = this.#itemOutcome.get(target.id) === "delivered";
+      const delivered = target.delivered === true;
       if (st === "ended" || !target || (this.#dispatchInFlight !== target && !delivered)) return;
       if (this.#dispatchInFlight === target && this.#turnRunning()) return;
       if (this.#dispatchInFlight === target) this.#dispatchSubmittedAt = Date.now(); // Enter is out — dialogs after this are ours
@@ -3768,36 +3569,33 @@ export class Session {
         // why a slash command is exempt.
         this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(prompt);
         this.#idlePolls = 0;
-        if (prompt && this.#dispatchInFlight
-          && flattenForMatch(prompt) === flattenForMatch(this.#dispatchInFlight.text)) {
+        const flat = prompt ? flattenForMatch(prompt) : null;
+        if (flat && this.#dispatchInFlight && flat === flattenForMatch(this.#dispatchInFlight.text)) {
           process.stderr.write(`[hook] ${this.id} UserPromptSubmit confirmed dispatch\n`);
           const item = this.#dispatchInFlight;
-          this.#recordOutcome(item.id, "delivered");
           // The hook proves the submit landed: mirror the bubble here if the
           // Enter callback has not yet (it may still be awaiting its write) —
           // exactly once between the two paths (#483).
           if (item.mirrorToRelay) this.#mirrorDispatch(item, item.text);
           this.#clearSubmitTimer(); // our delayed Enter would fire into an empty box — harmless, but don't
-          this.#dispatchInFlight = null;
-          this.#dispatchExtends = 0;
-          if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-          this.#broadcastQueue();
-          void this.#restoreDraftIfAny();
-        } else if (prompt && this.#queue.length > 0) {
-          // The same text reached Claude by ANOTHER route (steer, typed in the
-          // pane) while a copy sat queued. Drop the queued copy: it would
-          // re-deliver later as a duplicate turn, and until then the app shows
-          // "queued" for a message that already ran (seen live with a steered
-          // "/goal clear" stuck in the spool). Exact-match, first match only.
-          const flat = flattenForMatch(prompt);
-          const i = this.#queue.findIndex((q) => flattenForMatch(q.text) === flat);
-          if (i >= 0) {
-            process.stderr.write(`[hook] ${this.id} UserPromptSubmit dropped queued duplicate ${this.#queue[i].id}\n`);
-            const [dup] = this.#queue.splice(i, 1);
-            this.#recordOutcome(dup.id, "delivered"); // the text ran — by another route
-            this.#broadcastQueue();
+          this.#settleDispatch("UserPromptSubmit", { kind: "accepted" });
+        } else if (flat) {
+          // The prompt reached Claude by ANOTHER route (a steer whose Enter
+          // landed, typing in the pane): the coordinator pairs the echo with
+          // the steer's attempt, or records a foreign turn. A copy of the same
+          // text still QUEUED would re-deliver later as a duplicate turn (seen
+          // live with a steered "/goal clear" stuck in the spool): cancel it.
+          this.#driver.emit({ kind: "echo", runtimeRef: flat });
+          const dup = this.#coordinator.snapshot(this.id).commands.find((c) => c.state === "queued" && flattenForMatch(c.text) === flat);
+          if (dup) {
+            process.stderr.write(`[hook] ${this.id} UserPromptSubmit dropped queued duplicate ${dup.id}\n`);
+            this.#coordinator.cancel(dup.id);
           }
         }
+        // THE turn edge: this prompt's turn is open (ours when the ref pairs
+        // with an attempt, foreign otherwise — a turn start never confirms a
+        // dispatch by itself, #32).
+        this.#driver.emit({ kind: "turn_started", runtimeRef: flat ?? this.#lastConfirmedRef });
         return { ok: true };
       }
       case "Stop": {
@@ -3813,6 +3611,8 @@ export class Session {
         this.#needsInput = null;
         this.#hookTurn = { open: false, at: Date.now() };
         this.#idlePolls = 0;
+        this.#lastConfirmedRef = null;
+        this.#driver.emit({ kind: "turn_ended", status: "completed" });
         this.#maybeDrainQueue();
         return { ok: true };
       }
@@ -3831,6 +3631,8 @@ export class Session {
         this.#needsInput = null;
         this.#hookTurn = { open: false, at: Date.now() };
         this.#idlePolls = 0;
+        this.#lastConfirmedRef = null;
+        this.#driver.emit({ kind: "turn_ended", status: "failed", detail: errorType });
         const now = Date.now();
         if (errorType === "authentication_failed") {
           this.#authFailure = { errorType, since: now };
@@ -3895,7 +3697,12 @@ export class Session {
         process.stderr.write(`[hook] ${this.id} Notification${nt ? ` (${nt})` : ""}: ${(str("message") ?? "").slice(0, 80)}\n`);
         this.#setThinking(false);
         this.#idlePolls = 0;
-        if (nt === "idle_prompt") { this.#thinkingLeaseUntil = 0; this.#hookTurn = { open: false, at: Date.now() }; }
+        if (nt === "idle_prompt") {
+          this.#thinkingLeaseUntil = 0; this.#hookTurn = { open: false, at: Date.now() };
+          // 60 s at the prompt: a command still recorded as running had no
+          // terminal we saw — idle is the verdict (#463).
+          this.#driver.emit({ kind: "idle" });
+        }
         if (nt === "auth_success") {
           if (this.#authFailure) process.stderr.write(`[hook] ${this.id} auth episode closed by auth_success\n`);
           this.#authFailure = null;
@@ -4387,6 +4194,9 @@ export class Session {
       this.#closeOpenTools(entryTimeMs); // a tool abandoned by an errored turn shouldn't spin forever
       this.#turn = null;
       this.#setThinking(false);
+      // The transcript's turn end (the authority without hooks; a duplicate
+      // of the Stop edge with them — harmless, nothing is executing then).
+      if (entryTimeMs >= this.#tailBoundAt - 60_000) { this.#lastConfirmedRef = null; this.#driver.emit({ kind: "turn_ended", status: "completed" }); }
       // 500-error auto-retry: if Claude exhausted its own retries on a 5xx this
       // turn, re-send on the backoff schedule. A turn that ended cleanly while a
       // retry was pending means the re-send worked → clear it.
@@ -4496,6 +4306,9 @@ export class Session {
           this.#turn = null;
         }
         this.#setThinking(false);
+        // The runtime's own record of the interrupt (a terminal Esc that no
+        // hook reports): whatever was executing is cancelled.
+        if (entryTimeMs >= this.#tailBoundAt - 60_000) { this.#lastConfirmedRef = null; this.#driver.emit({ kind: "turn_ended", status: "cancelled" }); }
         this.#maybeDrainQueue();
         return;
       }
@@ -4600,16 +4413,17 @@ export class Session {
         // are persisted, so a restart between the type and the echo (the old
         // in-memory pending queue's blind spot) still pairs the echo with its
         // send instead of mirroring it back as a duplicate bubble.
-        const attempt = this.#ledger.matchAttemptByRef(this.id, matchContent);
-        if (attempt) {
-          // The echo, its uuid receipt and the seq receipt commit together with
-          // the command's terminal outcome (delivered) — one transaction.
-          const cmd = this.#ledger.getCommand(attempt.commandId);
-          const receipts = [{ kind: "transcript_uuid", ref: uuid }, ...(cmd?.seq != null ? [{ kind: "seq", ref: String(cmd.seq) }] : [])];
-          try { this.#ledger.confirmDelivery(attempt.commandId, receipts, { attemptId: attempt.id, generation: this.#generation }); }
-          catch (e) { process.stderr.write(`[${this.id}] echo confirm for ${attempt.commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
-          this.#uuidSeen.add(uuid);
-          this.#itemOutcome.set(attempt.commandId, "delivered");
+        const attempt = this.#ledger.matchAttemptByRef(this.id, matchContent) ?? this.#ledger.attemptByRef(this.id, matchContent);
+        const attemptCmd = attempt ? this.#ledger.getCommand(attempt.commandId) : null;
+        if (attempt && attemptCmd && !(attemptCmd.state === "completed" || attemptCmd.state === "failed" || attemptCmd.state === "interrupted") && !this.#hasUuid(uuid)) {
+          // The echo of OUR submission: its uuid receipt is retained (a replay
+          // never mirrors it back), and the coordinator pairs the echo with
+          // the attempt — the command is running from here; a late echo of a
+          // dispatch that timed out pairs with that attempt by its ref (#31)
+          // instead of the prompt being re-typed.
+          const wasQueued = attemptCmd.state === "queued";
+          this.#noteUuid(uuid, { commandId: attempt.commandId, attemptId: attempt.id });
+          this.#driver.emit({ kind: "echo", runtimeRef: matchContent });
           // codex-4: record the prompt for 5xx auto-retry BEFORE returning —
           // app/queue/RPC sends match here and used to skip the #lastUserText
           // assignment below, so #fireRetry had nothing to re-send.
@@ -4617,28 +4431,14 @@ export class Session {
           // codex-3: the echo proves the dispatched prompt landed. Confirm it now
           // instead of waiting for assistant output — a turn that errors before any
           // output (api_error → turn_duration with no assistant blocks) would
-          // otherwise leave #dispatchInFlight set until the dispatch echo timeout requeues +
+          // otherwise leave #dispatchInFlight set until the dispatch echo timeout
           // pauses an already-delivered message.
-          if (this.#dispatchInFlight &&
-              flattenForMatch(this.#dispatchInFlight.text) === matchContent) {
+          if (this.#dispatchInFlight && flattenForMatch(this.#dispatchInFlight.text) === matchContent) {
             this.#confirmDispatchIfAwaiting();
           }
-          // Late-echo self-heal: a dispatch that timed out (e.g. the tailer
-          // bound after the 20s window) re-queued its item and paused. This
-          // echo proves that message DID land — drop the re-queued twin and
-          // resume, otherwise tapping "resume" would deliver it twice. Guarded
-          // to the wedged state so a genuine duplicate send (same text queued
-          // while another is in flight) is never swallowed.
-          // Late-echo self-heal, generalized: a copy of this command still
-          // waiting in the queue (re-queued after a timeout, or restored by
-          // a restart) would run the prompt a second time — drop it, and
-          // lift a dispatch_timeout pause that was waiting for exactly this.
-          const dupAt = this.#queue.findIndex((q) => q.id === attempt.commandId);
-          if (dupAt >= 0) {
-            this.#queue.splice(dupAt, 1);
-            if (!this.#dispatchInFlight && this.#queuePaused && this.#pauseReason === "dispatch_timeout") this.resumeQueue();
-            else this.#broadcastQueue();
-          }
+          // Late-echo self-heal: a dispatch that timed out paused the queue
+          // waiting for exactly this echo — the message DID land; lift the pause.
+          if (wasQueued && !this.#dispatchInFlight && this.#queuePaused && this.#pauseReason === "dispatch_timeout") this.resumeQueue();
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
         // No attempt match: the persisted attempts already cover the restart
@@ -4720,6 +4520,9 @@ export class Session {
           // landed — Claude is now responding to it (unless the pane shows the
           // message still sitting unsent in the box, #32).
           this.#confirmDispatchIfAwaiting({ byTurnStart: true });
+          // Without hooks the transcript is the turn edge: the turn belongs to
+          // the last dispatch the runtime took, else it is foreign (#78).
+          if (!this.#hooksLive && entryTimeMs >= this.#tailBoundAt - 60_000) this.#driver.emit({ kind: "turn_started", runtimeRef: this.#lastConfirmedRef });
         }
         // Capture token usage (cumulative per message) to report at turn-end —
         // AFTER the turn-start reset above so the first entry's usage isn't wiped.
@@ -4764,6 +4567,7 @@ export class Session {
           this.#turn = null;
           this.#setThinking(false);
           this.#deps.broadcast("stop", { session_id: sid });
+          if (entryTimeMs >= this.#tailBoundAt - 60_000) { this.#lastConfirmedRef = null; this.#driver.emit({ kind: "turn_ended", status: "completed" }); }
           this.#maybeDrainQueue(); // turn done → send the next queued message
           // Claude finished responding AND there's genuinely no more queued work
           // → push a "done" notification (the server suppresses it if you're
@@ -4791,8 +4595,7 @@ export class Session {
             // as #shouldEmitNote.
             entryTimeMs < this.#tailBoundAt - 60_000 ? "replay" : null,
             this.#dispatchInFlight ? "dispatch" : null,
-            this.#queue.length > 0 ? `queue=${this.#queue.length}` : null,
-            this.#drainRetry ? "drainRetry" : null,
+            this.#pendingCount() > 0 ? `queue=${this.#pendingCount()}` : null,
             this.#bgTasks.size > 0 ? `bgTasks=${this.#bgTasks.size}` : null,
           ].filter(Boolean);
           if (notifyBlockers.length === 0) {

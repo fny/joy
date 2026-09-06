@@ -37,7 +37,9 @@ function makeFakeRelay() {
       const body = raw ? JSON.parse(raw) : {};
       const path = req.url!.replace(/^\/joy\/v2/, "");
       const method = req.method!;
-      const send = (obj: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+      // No keep-alive: a second lane over the same server must not inherit a
+      // pooled socket the server already closed as idle (ECONNRESET).
+      const send = (obj: unknown, status = 200) => { res.writeHead(status, { "content-type": "application/json", connection: "close" }); res.end(JSON.stringify(obj)); };
       const a = answers.get(`${method} ${path}`);
       if (a) { calls.push({ method, path, body }); return send(a.body, a.status); }
       if (path === "/daemon/leases") return send({ leaseId: "L1", leaseToken: "T1", epoch: 1 });
@@ -56,6 +58,10 @@ function makeFakeRelay() {
     pushControl: (o: any) => controlOffers.push(o),
     facts: (turn: string) => calls.filter((c) => c.path === `/daemon/turns/${turn}/facts`).map((c) => c.body),
     terminal: (turn: string) => calls.find((c) => c.path === `/daemon/turns/${turn}/facts` && c.body.type === "terminal")?.body,
+    /** Every terminal publication for the turn: a turn fact under the lane's
+     *  own lease, or a reconcile carrying the recorded outcome (a previous
+     *  daemon's / lease's turn, #74). */
+    terminals: (turn: string) => calls.filter((c) => (c.path === `/daemon/turns/${turn}/facts` && c.body.type === "terminal") || (c.path === `/daemon/turns/${turn}/reconcile` && c.body.resolution === "terminal")).map((c) => c.body),
     count: (frag: string) => calls.filter((c) => c.path.includes(frag)).length,
   };
 }
@@ -160,6 +166,79 @@ describe("nucleusLane on the coordinator", () => {
     expect(relay.terminal("t3")).toMatchObject({ terminalState: "interrupted", meta: { reason: "restart" } });
     expect(ledger.getCommand(row.id)).toMatchObject({ state: "interrupted", terminalReason: "restart" });
   }, 25_000);
+
+  it("crash between /start and the terminal: a fresh lane over the same ledger re-drives the row once — no second /start, one terminal (R13)", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const { s, driver, ledger } = coordinatedSession("cs000005");
+    const registry: any = { get: (i: string) => (i === "cs000005" ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [{ id: "cs000005", v2SessionId: "v2s5" }], saveRecord: () => {} };
+    // Lane 1 runs the turn up to /start…
+    let lane1: NucleusLaneHandle | null = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m5", log: () => {} });
+    relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s5", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
+    await until(() => relay.count("/bind") === 1);
+    relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s5", kind: "prompt", turnId: "t6", ciphertext: enc("survive me") });
+    await until(() => driver.submits.length === 1);
+    const row = ledger.commandForRelayTurn("t6")!;
+    driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T6" });
+    await settle();
+    driver.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "T6" });
+    await until(() => relay.count("/turns/t6/start") === 1);
+    expect(relay.terminal("t6")).toBeUndefined();
+    // …and the daemon "crashes": the lane stops before any terminal is
+    // written; the row is `running` in the ledger, nothing else survives.
+    await lane1.stop(); lane1 = null;
+    expect(ledger.hasOutboundEvent("term:t6")).toBe(false);
+    // The runtime finishes while no lane is alive (or right after boot — the
+    // observation lands on the command either way).
+    driver.emit({ kind: "turn_ended", runtimeTurnId: "T6", status: "completed" });
+    expect(ledger.getCommand(row.id)?.state).toBe("completed");
+    expect(ledger.hasOutboundEvent("term:t6")).toBe(false);
+    // Boot a fresh lane over the same ledger: the boot pass settles the row —
+    // one terminal row, posted once — and never re-posts /start.
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m5", log: () => {} });
+    await until(() => relay.terminals("t6").length > 0, 10_000);
+    await sleep(1_500);
+    // Published exactly once — as the recorded outcome (a fact under this
+    // lane's lease, or a reconcile for the previous daemon's turn).
+    expect(relay.terminals("t6")).toHaveLength(1);
+    expect(relay.terminals("t6")[0]).toMatchObject({ terminalState: "completed" });
+    expect(relay.count("/turns/t6/start")).toBe(1);
+    expect(ledger.hasOutboundEvent("term:t6")).toBe(true);
+    // A second boot over the same ledger changes nothing: the terminal row
+    // is acked and its id (`term:<turn>`) is stable.
+    await handle.stop();
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m5", log: () => {} });
+    await sleep(1_500);
+    expect(relay.terminals("t6")).toHaveLength(1);
+    expect(relay.count("/turns/t6/start")).toBe(1);
+  }, 30_000);
+
+  it("crash between /start and the terminal, the turn still running at boot: the resumed loop waits for the runtime and posts once", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const { s, driver, ledger } = coordinatedSession("cs000006");
+    const registry: any = { get: (i: string) => (i === "cs000006" ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [{ id: "cs000006", v2SessionId: "v2s6" }], saveRecord: () => {} };
+    let lane1: NucleusLaneHandle | null = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m6", log: () => {} });
+    relay.pushWork({ deliveryId: "d0", commandId: "spawnc", sessionId: "v2s6", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
+    await until(() => relay.count("/bind") === 1);
+    relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2s6", kind: "prompt", turnId: "t7", ciphertext: enc("long") });
+    await until(() => driver.submits.length === 1);
+    const row = ledger.commandForRelayTurn("t7")!;
+    driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T7" });
+    await settle();
+    driver.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "T7" });
+    await until(() => relay.count("/turns/t7/start") === 1);
+    await lane1.stop(); lane1 = null;
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m6", log: () => {} });
+    await sleep(1_500);
+    expect(relay.count("/turns/t7/start")).toBe(1); // resumed as `running`: not re-started
+    expect(relay.terminal("t7")).toBeUndefined();   // still running: nothing to publish yet
+    driver.emit({ kind: "turn_ended", runtimeTurnId: "T7", status: "failed" });
+    await until(() => relay.terminals("t7").length > 0, 10_000);
+    await sleep(500);
+    expect(relay.terminals("t7")).toHaveLength(1);
+    expect(relay.terminals("t7")[0]).toMatchObject({ terminalState: "failed", meta: { reason: "agent_reported_failed" } });
+  }, 30_000);
 
   it("boot: a relay turn the ledger still carries gets its loop back and its terminal row (R13)", async () => {
     const relay = makeFakeRelay();

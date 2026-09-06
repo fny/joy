@@ -8,6 +8,7 @@ let home: string;
 beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-session-test-")); process.env.JOY_HOME_DIR = home; });
 afterAll(() => { delete process.env.JOY_HOME_DIR; rmSync(home, { recursive: true, force: true }); });
 import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, thinkingLeaseMs, THINKING_LEASE_MS, SLASH_THINKING_LEASE_MS, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
+import { queueFor } from "../domain/queueFacade";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
   expect(flattenForMatch("a\nb")).toBe("a b");
@@ -402,13 +403,15 @@ test("agent event falls back to a fresh timestamp when time omitted", () => {
 import { Session } from "./session";
 import { ledgerFor, SessionEndedError, LedgerWriteError } from "../domain/ledger";
 
+let qn = 0;
 function qSession() {
-  // status 'ended' so #maybeDrainQueue short-circuits before any tmux call —
-  // these tests exercise only the queue array ops (enqueue/list/edit/cancel/
-  // reorder/resume/clear), not dispatch. ('starting' now drains too, gated on the
-  // empty ready box, so it would attempt a tmux capture here.)
+  // status 'ended' so the driver never reports ready and nothing dispatches —
+  // these tests exercise only the queue ops (accept/list/edit/cancel/
+  // reorder/resume/clear), not dispatch. UNIQUE id per session: the rows are
+  // the coordinator's, persisted by session id.
+  const id = `q${Date.now().toString(36)}${(qn++).toString(36)}`;
   return new Session(
-    { id: "q1", tmuxWindow: "joy:dd-q1", cwd: "/tmp/q", flags: [], status: "ended", startedAt: 0 },
+    { id, tmuxWindow: `joy:dd-${id}`, cwd: "/tmp/q", flags: [], status: "ended", startedAt: 0 },
     { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
   );
 }
@@ -419,26 +422,26 @@ test("busy(): idle with an empty queue is not busy; a queued message is", () => 
   // assert the queue-length arm of busy() in isolation from dispatch state.
   const s = qSession();
   expect(s.busy()).toBe(false);
-  s.enqueue("queued work");
+  queueFor(s).accept("queued work", { visible: true });
   expect(s.busy()).toBe(true);
   expect(s.toJSON().busy).toBe(true);
 });
 
 test("queue: enqueue / list / edit / cancel", () => {
   const s = qSession();
-  const a = s.enqueue("first");
-  const b = s.enqueue("second");
-  expect(s.queueState().queue.map(q => q.text)).toEqual(["first", "second"]);
-  expect(s.queueState().inFlight).toBeNull();
-  expect(s.queueState().paused).toBe(false);
+  const a = queueFor(s).accept("first", { visible: true });
+  const b = queueFor(s).accept("second", { visible: true });
+  expect(queueFor(s).state().queue.map(q => q.text)).toEqual(["first", "second"]);
+  expect(queueFor(s).state().inFlight).toBeNull();
+  expect(queueFor(s).state().paused).toBe(false);
 
-  expect(s.editQueued(a.id, "FIRST")).toBe(true);
-  expect(s.editQueued("nope", "x")).toBe(false);
-  expect(s.queueState().queue.map(q => q.text)).toEqual(["FIRST", "second"]);
+  expect(queueFor(s).edit(a.id, "FIRST")).toBe(true);
+  expect(queueFor(s).edit("nope", "x")).toBe(false);
+  expect(queueFor(s).state().queue.map(q => q.text)).toEqual(["FIRST", "second"]);
 
-  expect(s.cancelQueued(a.id)).toBe(true);
-  expect(s.queueState().queue.map(q => q.text)).toEqual(["second"]);
-  expect(s.cancelQueued(a.id)).toBe(false); // already gone
+  expect(queueFor(s).cancel(a.id)).toBe(true);
+  expect(queueFor(s).state().queue.map(q => q.text)).toEqual(["second"]);
+  expect(queueFor(s).cancel(a.id)).toBe(false); // already gone
   void b;
 });
 
@@ -447,54 +450,54 @@ test("queue: enqueue / list / edit / cancel", () => {
 // completed while its own message was never typed (silent loss, 2026-09-03).
 test("queue: per-item delivery state tracks pending → cancelled, and unknown ids", () => {
   const s = qSession();
-  const a = s.enqueue("first");
-  expect(s.queueItemState(a.id)).toBe("pending");
-  expect(s.queueItemState("never-existed")).toBe("unknown");
-  expect(s.cancelQueued(a.id)).toBe(true);
-  expect(s.queueItemState(a.id)).toBe("cancelled");
+  const a = queueFor(s).accept("first", { visible: true });
+  expect(queueFor(s).itemState(a.id)).toBe("pending");
+  expect(queueFor(s).itemState("never-existed")).toBe("unknown");
+  expect(queueFor(s).cancel(a.id)).toBe(true);
+  expect(queueFor(s).itemState(a.id)).toBe("cancelled");
 });
 
 test("queue: a joy command is handled, not queued, and says so to its caller", () => {
   const s = qSession();
-  const r = s.enqueue("/title hello");
+  const r = queueFor(s).accept("/title hello", { visible: true });
   expect(r.handled).toBe("command");
-  expect(s.queueState().pendingCount).toBe(0);
+  expect(queueFor(s).state().pendingCount).toBe(0);
   // A real message is not marked handled.
-  expect(s.enqueue("just a message").handled).toBeUndefined();
+  expect(queueFor(s).accept("just a message", { visible: true }).handled).toBeUndefined();
 });
 
 test("queue: hidden (relay/send/retry) items don't surface as editable chips", () => {
   const s = qSession();
-  s.enqueue("visible one");                                                  // default visible:true
-  s.enqueue("hidden relay msg", { visible: false, source: "relay", mirrorToRelay: false, seq: 7 });
-  s.enqueue("visible two");
+  queueFor(s).accept("visible one", { visible: true });                                                  // default visible:true
+  queueFor(s).accept("hidden relay msg", { visible: false, source: "relay", mirrorToRelay: false, seq: 7 });
+  queueFor(s).accept("visible two", { visible: true });
   // Only visible items appear in the wire queue state — a relay app-send already
   // has its own chat bubble, so showing it as an editable chip would be a dup.
-  expect(s.queueState().queue.map(q => q.text)).toEqual(["visible one", "visible two"]);
+  expect(queueFor(s).state().queue.map(q => q.text)).toEqual(["visible one", "visible two"]);
   // enqueue still returns the slim wire shape for every item.
-  const r = s.enqueue("another", { visible: false });
+  const r = queueFor(s).accept("another", { visible: false });
   expect(Object.keys(r).sort()).toEqual(["createdAt", "id", "text"]);
 });
 
 test("queue: reorder clamps and moves", () => {
   const s = qSession();
-  const a = s.enqueue("a");
-  s.enqueue("b");
-  s.enqueue("c");
-  expect(s.reorderQueued(a.id, 2)).toBe(true);
-  expect(s.queueState().queue.map(q => q.text)).toEqual(["b", "c", "a"]);
+  const a = queueFor(s).accept("a", { visible: true });
+  queueFor(s).accept("b", { visible: true });
+  queueFor(s).accept("c", { visible: true });
+  expect(queueFor(s).reorder(a.id, 2)).toBe(true);
+  expect(queueFor(s).state().queue.map(q => q.text)).toEqual(["b", "c", "a"]);
   // clamp beyond end
-  expect(s.reorderQueued(a.id, 99)).toBe(true);
-  expect(s.queueState().queue.map(q => q.text)).toEqual(["b", "c", "a"]);
+  expect(queueFor(s).reorder(a.id, 99)).toBe(true);
+  expect(queueFor(s).state().queue.map(q => q.text)).toEqual(["b", "c", "a"]);
 });
 
 test("queue: resume clears paused, clearQueue empties", () => {
   const s = qSession();
-  s.enqueue("x");
+  queueFor(s).accept("x", { visible: true });
   s.resumeQueue();
-  expect(s.queueState().paused).toBe(false);
+  expect(queueFor(s).state().paused).toBe(false);
   s.clearQueue();
-  expect(s.queueState().queue).toEqual([]);
+  expect(queueFor(s).state().queue).toEqual([]);
 });
 
 
@@ -958,10 +961,10 @@ function mkSession(id: string) {
 
 test("enqueue dedupes a re-pulled seq — spool-written/cursor-unwritten replay is a no-op", () => {
   const s = mkSession("dd1");
-  const first = s.enqueue("hello", { seq: 42, source: "relay", mirrorToRelay: false, visible: false });
-  const replay = s.enqueue("hello", { seq: 42, source: "relay", mirrorToRelay: false, visible: false });
+  const first = queueFor(s).accept("hello", { seq: 42, source: "relay", mirrorToRelay: false, visible: false });
+  const replay = queueFor(s).accept("hello", { seq: 42, source: "relay", mirrorToRelay: false, visible: false });
   expect(replay.id).toBe(first.id); // same staged item, not a duplicate
-  expect(s.queueState().pendingCount).toBe(1);
+  expect(queueFor(s).state().pendingCount).toBe(1);
 });
 
 test("enqueue is durable or throws: a failed ledger commit stages nothing (no ack)", () => {
@@ -970,12 +973,12 @@ test("enqueue is durable or throws: a failed ledger commit stages nothing (no ac
   const exec = ledger.db.exec.bind(ledger.db);
   const spy = vi.spyOn(ledger.db, "exec").mockImplementation((sql: string) => { if (sql === "COMMIT") throw new Error("SQLITE_FULL"); return exec(sql); });
   try {
-    expect(() => s.enqueue("lost", { seq: 7, source: "relay", mirrorToRelay: false, visible: false })).toThrow(LedgerWriteError);
+    expect(() => queueFor(s).accept("lost", { seq: 7, source: "relay", mirrorToRelay: false, visible: false })).toThrow(LedgerWriteError);
   } finally { spy.mockRestore(); }
-  expect(s.queueState().pendingCount).toBe(0);
+  expect(queueFor(s).state().pendingCount).toBe(0);
   expect(ledger.listPending("dd2")).toEqual([]);
   // Disk recovered: the same seq is accepted (it was never staged).
-  expect(s.enqueue("lost", { seq: 7, source: "relay", mirrorToRelay: false, visible: false }).id).toBeTruthy();
+  expect(queueFor(s).accept("lost", { seq: 7, source: "relay", mirrorToRelay: false, visible: false }).id).toBeTruthy();
   expect(ledger.listPending("dd2")).toHaveLength(1);
 });
 
@@ -985,21 +988,21 @@ test("enqueue into an ended session is refused (session_ended), not queued into 
     { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
   );
   s.end("process_exited");
-  expect(() => s.enqueue("too late")).toThrow(SessionEndedError);
+  expect(() => queueFor(s).accept("too late", { visible: true })).toThrow(SessionEndedError);
   expect(ledgerFor().listPending("dd3")).toEqual([]);
 });
 
 test("a re-pulled seq that was already DELIVERED is acked without being staged again (#516)", () => {
   const s = mkSession("dd4");
   const ledger = ledgerFor();
-  const first = s.enqueue("run it", { seq: 3, source: "relay", mirrorToRelay: false, visible: false });
+  const first = queueFor(s).accept("run it", { seq: 3, source: "relay", mirrorToRelay: false, visible: false });
   // Delivered (echo confirmed) and the queue drained.
   ledger.recordAttempt(first.id, s.ledgerGeneration, "run it");
   ledger.confirmDelivery(first.id, [{ kind: "transcript_uuid", ref: "u-3" }, { kind: "seq", ref: "3" }]);
-  s.cancelQueued(first.id); // (the in-memory copy; the ledger row is already terminal)
-  const again = s.enqueue("run it", { seq: 3, source: "relay", mirrorToRelay: false, visible: false });
+  queueFor(s).cancel(first.id); // (the in-memory copy; the ledger row is already terminal)
+  const again = queueFor(s).accept("run it", { seq: 3, source: "relay", mirrorToRelay: false, visible: false });
   expect(again.id).toBe(first.id);
-  expect(s.queueState().pendingCount).toBe(0); // not re-run
+  expect(queueFor(s).state().pendingCount).toBe(0); // not re-run
   expect(ledger.listPending("dd4")).toEqual([]);
 });
 
