@@ -91,12 +91,17 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
   };
 }
 
-// The page's spec fetch must carry the same docs token it was opened with.
-const redocPage = (docsToken) => `<!doctype html><html><head><title>joy relay API</title>
+// The specification is EMBEDDED in the page rather than fetched: a second
+// request would have to carry both the docs token and the perimeter key the
+// page was opened with, and the generated URL carried only the token — under
+// a flipped gate the spec fetch got 401 and the docs never loaded (#616).
+// The already-authorized page is the only request there is.
+const redocPage = (spec) => `<!doctype html><html><head><title>joy relay API</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>body{margin:0}</style></head><body>
-<redoc spec-url="/openapi.json?token=${encodeURIComponent(docsToken)}"></redoc>
+<div id="redoc"></div>
 <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+<script>Redoc.init(${JSON.stringify(spec).replace(/</g, '\\u003c')}, {}, document.getElementById('redoc'));</script>
 </body></html>`;
 
 // Docs gate: a deliberately-simple token so the API surface isn't browsable
@@ -123,13 +128,19 @@ export function handleDocs(req, res, { version, routeTable = null }) {
     res.end(JSON.stringify({ error: 'docs token required (?token=…)' }));
     return true;
   }
-  const host = `https://${req.headers.host ?? 'joy.voltai.party:4997'}`;
+  // The advertised server is the scheme this request actually arrived on: a
+  // trusted proxy's x-forwarded-proto, else the socket itself. Hard-coding
+  // https made a plain-HTTP relay publish a server URL nothing served (#617).
+  const forwarded = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim();
+  const scheme = forwarded || (req.socket?.encrypted ? 'https' : 'http');
+  const host = `${scheme}://${req.headers.host ?? 'joy.voltai.party:4997'}`;
+  const spec = buildRelaySpec({ version, host, routeTable });
   if (path === '/openapi.json') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(buildRelaySpec({ version, host, routeTable })));
+    res.end(JSON.stringify(spec));
   } else {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(redocPage(DOCS_TOKEN));
+    res.end(redocPage(spec));
   }
   return true;
 }

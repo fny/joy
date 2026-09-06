@@ -14,6 +14,10 @@ const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
  *  (1s in the app, immediate in the daemon), not the 24h an unanswered QR gets. */
 const ANSWERED_TTL_MS = 10 * 60 * 1000;
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+/** Per-device Expo deadline, covering the request AND the body read (#608). */
+const PUSH_TIMEOUT_MS = 10_000;
+/** Devices contacted at once; one slow device no longer delays the rest. */
+const PUSH_CONCURRENCY = 4;
 
 /** Compact, URL-safe, collision-resistant id (no dashes so it stays \w). */
 export const newId = (prefix = 'a') => prefix + randomBytes(12).toString('hex');
@@ -27,6 +31,34 @@ function decodeKey(b64) {
 }
 const keyHex = (buf) => buf.toString('hex').toUpperCase();
 const ms = (d) => (d instanceof Date ? d : new Date(d)).getTime();
+
+/** Settle `p`, or reject as soon as `signal` aborts — for reads that do not
+ *  honour the fetch signal themselves (a trickling response body). */
+function underAbort(p, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason ?? new Error('aborted')); return; }
+    const onAbort = () => reject(signal.reason ?? new Error('aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(
+      (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e); });
+  });
+}
+
+/** `items.map(fn)` with at most `limit` in flight; results keep input order. */
+async function mapBounded(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  return out;
+}
 
 function machineOut(r, liveness) {
   const live = liveness?.get(r.id);
@@ -48,7 +80,7 @@ function machineOut(r, liveness) {
   };
 }
 
-export function createAccounts(db, tokens, { fetchImpl } = {}) {
+export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIMEOUT_MS, pushConcurrency = PUSH_CONCURRENCY } = {}) {
   const doFetch = fetchImpl ?? fetch;
 
   // ── login / identity ──────────────────────────────────────────────────────
@@ -109,8 +141,9 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
         `SELECT * FROM auth_requests WHERE kind = $1 AND public_key = $2`, [kind, hex]);
       if (existing) {
         // Enforced on READ too — the sweep is hourly, and an answer must not
-        // stay collectable for up to an hour past its ten minutes.
-        if (existing.response && Date.now() - ms(existing.updated_at) > ANSWERED_TTL_MS) {
+        // stay collectable for up to an hour past its ten minutes; likewise
+        // an unanswered QR past its day is gone, not still pending (#610).
+        if (pairingExpired(existing)) {
           await t.query(`DELETE FROM auth_requests WHERE id = $1`, [existing.id]);
           return { expired: true };
         }
@@ -129,39 +162,78 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
     if (row.deliver) {
       return { state: 'authorized', token: tokens.mint(row.response_account_id, { session: row.id }), response: row.response };
     }
-    if (row.consumed_at) return { state: 'consumed' };
+    if (row.consumed_at) {
+      // BY DESIGN, not a bug (#607 / #70): the credentials are handed out
+      // exactly once, and a requester whose authorized reply was lost in
+      // transit cannot collect them again — re-opening that window would
+      // re-open the replay attack #70 closed (anyone who saw the QR could be
+      // minted a bearer). The trade-off is a rare re-pair instead of a
+      // silent account takeover. What we owe the requester is LEGIBILITY:
+      // a specific code, the moment it happened, and what to do next, so a
+      // CLI or app can explain rather than spin.
+      return {
+        state: 'consumed',
+        error: 'pairing_answer_already_collected',
+        consumedAt: ms(row.consumed_at),
+        message: 'This pairing answer was already collected — by an earlier poll from this device whose reply was lost, ' +
+          'or by someone else who saw the code. It cannot be re-issued; start a new pairing.',
+      };
+    }
     return { state: 'requested' };
+  }
+
+  /** Unanswered past PAIRING_TTL (from creation) or answered past
+   *  ANSWERED_TTL (from the answer). Two clocks, one per phase — read,
+   *  answer and sweep all apply the SAME rule (#610). */
+  function pairingExpired(r, now = Date.now()) {
+    return r.response
+      ? now - ms(r.updated_at) > ANSWERED_TTL_MS
+      : now - ms(r.created_at) > PAIRING_TTL_MS;
   }
 
   async function pairingStatus(kind, publicKeyB64) {
     let hex;
     try { hex = keyHex(decodeKey(publicKeyB64)); } catch { return { status: 'not_found', supportsV2: false }; }
     const { rows: [r] } = await db.query(`SELECT * FROM auth_requests WHERE kind = $1 AND public_key = $2`, [kind, hex]);
-    if (!r) return { status: 'not_found', supportsV2: false };
-    if (r.response) return { status: 'authorized', supportsV2: !!r.supports_v2 };
+    if (!r || pairingExpired(r)) return { status: 'not_found', supportsV2: false };
+    if (r.response) return { status: 'authorized', supportsV2: !!r.supports_v2, consumed: !!r.consumed_at };
     return { status: 'pending', supportsV2: !!r.supports_v2 };
   }
 
-  /** First write wins; a repeat answer for an already-answered request is a no-op. */
+  /** First write wins; a repeat answer for an already-answered request is a
+   *  no-op. An EXPIRED request cannot be answered (#610): approving a QR
+   *  that had already aged out reported success and then lost the answer to
+   *  the next sweep. */
   async function pairingRespond(kind, accountId, { publicKey, response }) {
     const hex = keyHex(decodeKey(publicKey));
     if (typeof response !== 'string' || !response) throw new ApiError(400, 'missing_response');
     const found = await db.tx(async (t) => {
       const { rows: [r] } = await t.query(`SELECT * FROM auth_requests WHERE kind = $1 AND public_key = $2`, [kind, hex]);
-      if (!r) return false;
+      if (!r) return 'missing';
+      if (pairingExpired(r)) {
+        await t.query(`DELETE FROM auth_requests WHERE id = $1`, [r.id]);
+        return 'expired';
+      }
       if (!r.response) {
         await t.query(
           `UPDATE auth_requests SET response = $1, response_account_id = $2, updated_at = now() WHERE id = $3`,
           [response, accountId, r.id]);
       }
-      return true;
+      return 'ok';
     });
-    if (!found) throw new ApiError(404, 'request_not_found');
+    if (found === 'missing') throw new ApiError(404, 'request_not_found');
+    if (found === 'expired') throw new ApiError(410, 'request_expired');
     return { success: true };
   }
 
+  /** Unanswered requests age out from CREATION; answered ones from their
+   *  ANSWER. One combined created_at cutoff deleted a just-approved request
+   *  whose QR had sat pending for a day — the approval vanished before the
+   *  requester's next poll (#610). */
   async function sweepPairings() {
-    await db.query(`DELETE FROM auth_requests WHERE created_at < $1 OR (response IS NOT NULL AND updated_at < $2)`,
+    await db.query(
+      `DELETE FROM auth_requests
+       WHERE (response IS NULL AND created_at < $1) OR (response IS NOT NULL AND updated_at < $2)`,
       [new Date(Date.now() - PAIRING_TTL_MS).toISOString(), new Date(Date.now() - ANSWERED_TTL_MS).toISOString()]);
   }
 
@@ -197,7 +269,11 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
   /** Upsert: the daemon's full sealed blob replaces the stored one (version
    *  bump); a new daemonState lands only when the caller sends one. */
   async function upsertMachine(accountId, { id, metadata, daemonState, dataEncryptionKey }) {
-    if (typeof id !== 'string' || !/^[\w.-]{1,128}$/.test(id)) throw new ApiError(400, 'bad_machine_id');
+    // "." and ".." pass the character class but vanish under URL path
+    // normalisation, so such a machine could be created and listed yet never
+    // fetched, patched, deleted or tunnelled to (#609). Dots INSIDE a name
+    // stay legal (host.local).
+    if (typeof id !== 'string' || !/^[\w.-]{1,128}$/.test(id) || id === '.' || id === '..') throw new ApiError(400, 'bad_machine_id');
     if (typeof metadata !== 'string') throw new ApiError(400, 'missing_metadata');
     const row = await db.tx(async (t) => {
       const { rows: [existing] } = await t.query(`SELECT * FROM machines WHERE id = $1`, [id]);
@@ -288,32 +364,47 @@ export function createAccounts(db, tokens, { fetchImpl } = {}) {
   /** Deliver a notification to every device of the account via Expo. One
    *  request per token: Expo rejects batches that mix projects, and a single
    *  stale token from another Expo app would otherwise 400 the whole batch.
-   *  DeviceNotRegistered tokens are dropped so they stop costing a request. */
+   *  DeviceNotRegistered tokens are dropped so they stop costing a request.
+   *  Each device gets its own deadline that covers the request AND the body
+   *  read, and devices are contacted a few at a time: a 200 whose JSON never
+   *  completed used to hold a serial loop forever, so every later device on
+   *  the account got nothing (#608). */
   async function sendPush(accountId, { title, body, data }) {
     if (typeof title !== 'string' || !title) throw new ApiError(400, 'missing_title');
     const { tokens: list } = await listPushTokens(accountId);
-    let sent = 0;
-    const errors = [];
-    for (const { token } of list) {
+    const message = (token) => JSON.stringify([{
+      to: token, title, body: typeof body === 'string' && body ? body : undefined, sound: 'default',
+      data: { source: 'joy', timestamp: Date.now(), ...(data && typeof data === 'object' ? data : {}) },
+    }]);
+    const deliverOne = async (token) => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(new Error('expo_timeout')), pushTimeoutMs);
       try {
         const r = await doFetch(EXPO_PUSH_URL, {
           method: 'POST',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
-          body: JSON.stringify([{
-            to: token, title, body: typeof body === 'string' && body ? body : undefined, sound: 'default',
-            data: { source: 'joy', timestamp: Date.now(), ...(data && typeof data === 'object' ? data : {}) },
-          }]),
+          body: message(token),
+          signal: ac.signal,
         });
-        const j = r.ok ? await r.json().catch(() => null) : null;
+        const j = r.ok ? await underAbort(r.json().catch(() => null), ac.signal) : null;
         const ticket = j?.data?.[0];
-        if (r.ok && ticket?.status === 'ok') { sent++; continue; }
+        if (r.ok && ticket?.status === 'ok') return { ok: true };
         const detail = ticket?.details?.error ?? ticket?.message ?? `HTTP ${r.status}`;
-        errors.push({ token: token.slice(0, 24), error: detail });
         if (ticket?.details?.error === 'DeviceNotRegistered') await dropPushToken(token);
+        return { ok: false, error: detail };
       } catch (e) {
-        errors.push({ token: token.slice(0, 24), error: String(e?.message ?? e) });
+        return { ok: false, error: ac.signal.aborted ? 'timeout' : String(e?.message ?? e) };
+      } finally {
+        clearTimeout(timer);
       }
-    }
+    };
+    const results = await mapBounded(list.map((t) => t.token), pushConcurrency, deliverOne);
+    let sent = 0;
+    const errors = [];
+    results.forEach((res, i) => {
+      if (res.ok) sent++;
+      else errors.push({ token: list[i].token.slice(0, 24), error: res.error });
+    });
     return { sent, targeted: list.length, errors };
   }
 

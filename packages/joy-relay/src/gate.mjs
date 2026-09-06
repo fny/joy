@@ -26,8 +26,20 @@ function candidateFrom(req) {
   return null;
 }
 
-export function createGate() {
-  const key = process.env.JOY_RELAY_ACCESS_KEY || '';
+/** The same permissive CORS the v2 router applies to every response. The
+ *  gate answers BEFORE the router, so without these a browser client (the
+ *  web build) saw an opaque network error instead of the 401 — it could not
+ *  tell "wrong key" from "relay down" and never prompted for one (#85). */
+export function corsFor(req) {
+  return {
+    'access-control-allow-origin': req?.headers?.origin ?? '*',
+    'access-control-allow-headers': 'authorization, content-type, x-session, x-cipher-hash, x-joy-relay-key, x-joy-client',
+    'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+    vary: 'origin',
+  };
+}
+
+export function createGate(key = process.env.JOY_RELAY_ACCESS_KEY || '') {
   if (!key) {
     return { enabled: false, allows: () => true, rejectHttp: () => {}, rejectUpgrade: () => {} };
   }
@@ -37,8 +49,8 @@ export function createGate() {
       const candidate = candidateFrom(req);
       return candidate !== null && safeEqual(candidate, key);
     },
-    rejectHttp(res) {
-      res.writeHead(401, { 'content-type': 'application/json' });
+    rejectHttp(res, req = null) {
+      res.writeHead(401, { 'content-type': 'application/json', ...corsFor(req) });
       res.end(JSON.stringify({ error: 'relay key required', relay: 'joy-relay' }));
     },
     rejectUpgrade(socket) {

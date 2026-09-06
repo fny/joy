@@ -15,7 +15,7 @@
 // "orphaned" is the honest mayHaveDelivered case: the daemon died mid-flight
 // and reconcile has not yet proven what happened.
 import { randomUUID } from 'node:crypto';
-import { ApiError, hashToken, nextSeq, appendEvent } from './core.mjs';
+import { ApiError, hashToken, nextSeq, appendEvent, messageStatusOf } from './core.mjs';
 
 const CLAIM_WAIT_MS = 25_000;
 const TUNNEL_REQUEST_MAX = 32 * 1024 * 1024;
@@ -41,18 +41,12 @@ function readJson(req, limit = 512 * 1024) {
 }
 const intent = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-function messageStatus(cmdState, turnState, terminalState) {
-  if (cmdState === 'cancelled' || terminalState === 'cancelled') return 'cancelled';
-  if (cmdState === 'rejected') return 'failed';
-  if (cmdState === 'indeterminate' || turnState === 'orphaned') return 'failed';
-  if (turnState === 'terminal') return terminalState === 'completed' ? 'delivered' : 'failed';
-  if (turnState === 'running' || turnState === 'cancelling') return 'delivered';
-  if (turnState === 'dispatching') return 'delivering';
-  // Command acked by the daemon while the turn is still queued: the payload
-  // is OUT of our hands — reporting "queued" here made edits unsafe.
-  if (cmdState === 'delivered') return 'delivering';
-  return 'queued';
-}
+// One mapping, shared with the core so the DELETE precondition it checks
+// inside its transaction (#621) agrees with what clients read. Note the
+// command-acked-while-turn-queued case reads "delivering": the payload is OUT
+// of our hands, so the message is no longer editable.
+const messageStatus = (cmdState, turnState, terminalState) =>
+  messageStatusOf(cmdState, { state: turnState, terminal_state: terminalState });
 function failureFor(status, turnState, cmdState) {
   if (status !== 'failed') return undefined;
   if (cmdState === 'rejected') return { reason: 'rejected by daemon', retryable: false, mayHaveDelivered: false };
@@ -129,17 +123,24 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   route('GET', '/events/stream', {}, async (ctx, m, body, url, req, res) => {
     const handle = notify.addSse(ctx.accountId, res);
     if (!handle) throw new ApiError(429, 'too_many_streams');
+    // Cleanup is registered BEFORE the snapshot read (#619): a client that
+    // disconnected while listSessions was pending used to arm a heartbeat
+    // interval after its own close event, so nothing ever cleared it and the
+    // closed response stayed referenced for the life of the process.
+    let ping = null;
+    let closed = false;
+    res.on('close', () => { closed = true; if (ping) clearInterval(ping); });
     res.writeHead(200, {
       'content-type': 'text/event-stream', 'cache-control': 'no-cache',
       connection: 'keep-alive', 'x-accel-buffering': 'no',
     });
     const sessions = await core.listSessions(ctx.accountId);
+    if (closed || res.destroyed || res.writableEnded) return null; // gone during the read: no greeting, no timer
     res.write(`event: hello\ndata: ${JSON.stringify({
       v: 2, sessions: sessions.map((s) => ({ sessionId: s.sessionId, headSeq: s.headSeq, revision: s.revision })),
     })}\n\n`);
     handle.markReady();
-    const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
-    res.on('close', () => clearInterval(ping));
+    ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* closed */ } }, 15_000);
     return null; // handler owns the response
   });
 
@@ -212,18 +213,34 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
         // in reads, so the two cannot be confused round-trip.
         const to0 = Number(body.position);
         if (!Number.isInteger(to0) || to0 < 0) throw new ApiError(400, 'bad_position');
-        // Reorder among this session's QUEUED turns: permute their existing
-        // request_seq values so the global sequence stays dense and unique.
+        // Reorder among this session's EDITABLE turns only — queued turns
+        // whose command the daemon has not acknowledged — permuting their
+        // existing request_seq values so the global sequence stays dense and
+        // unique. An acknowledged head is already in the daemon's hands:
+        // moving another message ahead of it let the head enter dispatching
+        // behind the new front, where /start failed with not_queue_head and
+        // the execution slot stayed occupied (#620). Acknowledged turns keep
+        // their seq and stay ahead; the check is inside THIS transaction, so
+        // an ack that lands first fixes the turn and one that lands after is
+        // refused by the superseded delivery.
         const { rows: queued } = await t.query(
-          `SELECT id, request_seq FROM turns WHERE session_id = $1 AND state = 'queued' ORDER BY request_seq`, [m[1]]);
+          `SELECT tu.id, tu.request_seq, c.id AS command_id FROM turns tu JOIN commands c ON c.id = tu.prompt_command_id
+           WHERE tu.session_id = $1 AND tu.state = 'queued' AND c.state = 'queued' ORDER BY tu.request_seq`, [m[1]]);
         const from = queued.findIndex((q) => q.id === r.turn_id);
         const to = Math.min(queued.length - 1, to0);
         if (from >= 0 && from !== to) {
           const order = queued.map((q) => q.id);
           order.splice(to, 0, order.splice(from, 1)[0]);
           const seqs = queued.map((q) => q.request_seq);
+          const commandOf = new Map(queued.map((q) => [q.id, q.command_id]));
           for (let i = 0; i < order.length; i++) {
+            if (order[i] === queued[i].id) continue; // unmoved
             await t.query(`UPDATE turns SET request_seq = $1 WHERE id = $2`, [seqs[i], order[i]]);
+            // An offered-but-unacknowledged delivery of a moved turn carries
+            // a stale position: supersede it so /received refuses it and the
+            // daemon re-claims the true head (same discipline as an edit).
+            await t.query(`UPDATE deliveries SET disposition = 'superseded' WHERE command_id = $1 AND disposition IS NULL`,
+              [commandOf.get(order[i])]);
           }
         }
       }
@@ -234,15 +251,17 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   });
   route('DELETE', '/sessions/([\\w-]+)/messages/([\\w-]+)', {}, async (ctx, m) => {
     // Delete = cancel while still queued. Delegated to the cancellation core
-    // (terminalization, barrier bookkeeping, late-start CAS all shared).
+    // (terminalization, barrier bookkeeping, late-start CAS all shared). The
+    // queued-only precondition is checked INSIDE the cancellation
+    // transaction (#621): reading it here and cancelling in a second
+    // transaction let the daemon ack, submit and start the turn in between,
+    // and the "delete" interrupted a running agent.
     const r = await db.tx(async (t) => {
       await ownedSession(t, m[1], ctx.accountId);
       return loadMessage(t, m[1], m[2]);
     });
-    const status = messageStatus(r.cmd_state, r.turn_state, r.terminal_state);
-    if (status !== 'queued') throw new ApiError(409, { error: 'not_deletable', status });
     const out = await core.acceptCancellation(ctx.accountId, ctx.actorId, m[1], r.turn_id,
-      { clientIntentId: intent('v2d'), scope: 'turn' });
+      { clientIntentId: intent('v2d'), scope: 'turn' }, { requireQueued: true });
     return { ok: true, disposition: out.disposition };
   });
   route('POST', '/sessions/([\\w-]+)/messages/([\\w-]+)/retry', {}, async (ctx, m) => {
@@ -441,8 +460,11 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     withLeaseHeaders((lease, m, body) => core.updateSessionCard(m[1], lease, body).then(() => ({ ok: true }))));
   route('POST', '/daemon/sessions/([\\w-]+)/facts', { auth: false, summary: 'Daemon output outside a turn (sealed adapter record); lease-fenced' },
     withLeaseHeaders((lease, m, body) => core.sessionFact(m[1], lease, body ?? {})));
+  // `deliveryId` (optional) names the spawn attempt the report belongs to;
+  // a report for a superseded attempt is acknowledged but not applied (#612).
   route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false },
-    withLeaseHeaders((lease, m, body) => core.spawnFailed(m[1], lease, body.reason ?? 'spawn_failed')));
+    withLeaseHeaders((lease, m, body) => core.spawnFailed(m[1], lease, body.reason ?? 'spawn_failed',
+      { deliveryId: typeof body.deliveryId === 'string' ? body.deliveryId : undefined })));
   route('POST', '/daemon/turns/([\\w-]+)/submitted', { auth: false },
     withLeaseHeaders((lease, m) => core.turnSubmitted(m[1], lease).then(() => ({ ok: true }))));
   route('POST', '/daemon/turns/([\\w-]+)/start', { auth: false },
