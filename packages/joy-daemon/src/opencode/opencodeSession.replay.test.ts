@@ -4,12 +4,37 @@
 // the turn start and the assistant's answer but never the question, so the
 // imported history permanently lost the user's side. The replay projection is
 // pure, so the whole record stream a card would receive is asserted here.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { historyReplay, messageText, replayPlan, userHistoryBackfill, REPLAY_PROJECTION_KIND, REPLAY_PROJECTION_VERSION } from "./opencodeSession";
+
+// The session-level block below runs the real OpencodeSession start/reconcile
+// path against a real SQLite ledger; only the opencode server + HTTP client
+// are faked (history GET + the live event stream).
+const fake = vi.hoisted(() => ({
+  clients: [] as Array<{ listener?: (e: unknown) => void }>,
+  history: null as null | ((sid: string) => Promise<Array<Record<string, unknown>>>),
+}));
+vi.mock("./opencodeClient", () => ({
+  OpencodeClient: class {
+    listener?: (e: unknown) => void;
+    constructor() { fake.clients.push(this); }
+    onEvent(fn: (e: unknown) => void) { this.listener = fn; }
+    subscribeEvents() {}
+    messages(sid: string) { return fake.history!(sid); }
+    close() {}
+  },
+  spawnOpencodeServer: () => ({ proc: new EventEmitter(), port: Promise.resolve(12345) }),
+  isOpencodeServerPid: () => false,
+  killOpencodeServerPid: async () => true,
+}));
+
+import { OpencodeSession, historyReplay, messageText, replayPlan, userHistoryBackfill, REPLAY_PROJECTION_KIND, REPLAY_PROJECTION_VERSION } from "./opencodeSession";
 import { Ledger, closeAllLedgers } from "../domain/ledger";
+import { SessionCoordinator } from "../domain/coordinator";
+import type { WireRecord } from "../relay/relay";
 
 const SID = "ses_abc";
 const user = (id: string, text: string, created: number) => ({
@@ -105,7 +130,7 @@ describe("opencode replay projection version (#573 residual)", () => {
       ourPrompt: ourPrompt ?? ((mid) => ledger.ownsRuntimeRef(LOCAL, mid, "opencode_msg")),
     });
     if (plan.completedThrough) ledger.setCheckpoint(LOCAL, "opencode_msg", plan.completedThrough, 0, { throughSeq: "latest" });
-    if (plan.completedThrough || plan.projectionStale) ledger.setCheckpoint(LOCAL, REPLAY_PROJECTION_KIND, String(REPLAY_PROJECTION_VERSION), 0, { throughSeq: "latest" });
+    if (plan.projectionStale) ledger.setCheckpoint(LOCAL, REPLAY_PROJECTION_KIND, String(REPLAY_PROJECTION_VERSION), 0, { throughSeq: "latest" });
     return plan;
   };
   // The reviewer's fixture: question + finished answer, and a checkpoint an
@@ -176,5 +201,164 @@ describe("opencode replay projection version (#573 residual)", () => {
     const delivered = [user("mine", "app send", 1), assistant("a", "x", 2), { id: "blank", type: "user", time: { created: 3 }, content: [] }, user("tui", "typed in the TUI", 4)];
     const out = userHistoryBackfill(SID, delivered, { ourPrompt: (mid) => mid === "mine" });
     expect(out.map((e) => e.localId)).toEqual([`oc:${SID}:tui:user`]);
+  });
+});
+
+// #573 residual, wave F10 (Astra on 294b4cf4): the live event subscription
+// starts BEFORE the history fetch, and a live turn completing during (or
+// after a failed) initial fetch stamped the projection version on its own —
+// the backfill of the old prefix never ran, and the version it certified hid
+// the missing question for good. Real OpencodeSession start + reconcile
+// against a real SQLite ledger; only the server/client are faked.
+describe("opencode backfill vs live delivery (#573 residual, wave F10)", () => {
+  const LOCAL = "abcdef10";
+  const OC = "ses_f10";
+  const history = () => [user("u", "old question", 1), assistant("a", "old answer", 2)];
+  const recent = () => [user("u2", "new question", 3), assistant("a2", "new answer", 4)];
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const until = async (fn: () => boolean) => { for (let n = 0; n < 400; n++) { if (fn()) return; await tick(); } throw new Error("wait expired"); };
+
+  let dir: string;
+  let ledger: Ledger;
+  let sessions: OpencodeSession[];
+  let records: Array<{ record: WireRecord; id?: string }>;
+  let homeBefore: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "oc-f10-"));
+    homeBefore = process.env.JOY_HOME_DIR;
+    process.env.JOY_HOME_DIR = dir; // window records land here, not in ~/.joy
+    ledger = Ledger.open(dir);
+    sessions = []; records = []; fake.clients = [];
+    fake.history = async () => history();
+    // A mark an older daemon wrote after replaying only the answer: the
+    // question is behind it, and no version row exists.
+    ledger.setCheckpoint(LOCAL, "opencode_msg", "a", 0);
+  });
+  afterEach(() => {
+    for (const s of sessions) s.end("restart");
+    ledger.close(); closeAllLedgers();
+    rmSync(dir, { recursive: true, force: true });
+    if (homeBefore === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = homeBefore;
+  });
+
+  const noop = () => {};
+  function open(): OpencodeSession {
+    const coordinator = new SessionCoordinator({ ledger });
+    const s = new OpencodeSession(
+      { id: LOCAL, cwd: dir, status: "starting", startedAt: Date.now(), opencodeSessionId: OC },
+      { ledger, coordinator, broadcast: noop, addChatMessage: noop } as any,
+    );
+    // A relay whose send() spools to the real outbox, so the pending-until-
+    // acked checkpoint rule is the real one.
+    const relay: any = {
+      relaySessionId: LOCAL, outboundPersistDegraded: false,
+      setReceiptSink: noop, start: noop, stop: noop, pausePull: noop,
+      updateJoyState: noop, updateQueue: noop, setThinking: noop, updateModelCode: noop,
+      updateContext: noop, updateSummary: noop, archive: async () => true,
+      send(record: WireRecord, id?: string) {
+        records.push({ record, id });
+        ledger.enqueueOutbound([{ sessionId: LOCAL, kind: "output", runtimeEventId: id ?? `anon:${records.length}`, body: record, sealed: false }]);
+      },
+    };
+    s.attachRelay(relay);
+    sessions.push(s);
+    s.beginWatching();
+    return s;
+  }
+  const userRows = () => records.filter((r) => r.record.role === "user").map((r) => r.id);
+  const ackAll = () => { for (const row of ledger.pendingOutbound(LOCAL)) ledger.ackOutbound(row.seq); };
+  const restart = (s: OpencodeSession) => { s.end("restart"); ledger.close(); ledger = Ledger.open(dir); records = []; };
+  const version = () => ledger.getCheckpoint(LOCAL, REPLAY_PROJECTION_KIND);
+  /** The new turn arrives live: prompt admitted, one text part, finished. The
+   *  prompt is THIS daemon's (an `opencode_msg` receipt), so the app already
+   *  has its row — the live case the reviewer's fixture ran. */
+  function completeLiveTurn(): void {
+    ledger.addReceipt(LOCAL, { kind: "opencode_msg", ref: "u2" });
+    let seq = 0;
+    const emit = (type: string, data: Record<string, unknown>) =>
+      fake.clients.at(-1)!.listener!({ type, id: `ev${++seq}`, durable: { seq, aggregateID: OC }, data: { sessionID: OC, ...data } });
+    emit("session.next.prompt.admitted", { messageID: "u2" });
+    emit("session.next.step.started", { assistantMessageID: "a2" });
+    emit("session.next.text.ended", { assistantMessageID: "a2", textID: "a2_p0", text: "new answer" });
+    emit("session.next.step.ended", { assistantMessageID: "a2", finish: "stop" });
+  }
+
+  it("a live turn completing while the history fetch is held does not certify the version; the old question is still backfilled once", async () => {
+    let release!: (msgs: Array<Record<string, unknown>>) => void;
+    let requested = false;
+    fake.history = () => { requested = true; return new Promise((r) => { release = r; }); };
+    let s = open();
+    await until(() => requested);
+
+    completeLiveTurn();
+    ackAll();
+    // Delivery moved on; the projection version did not.
+    expect(ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref).toBe("a2");
+    expect(version()).toBeNull();
+    expect(userRows()).toEqual([]);
+
+    release([...history(), ...recent()]);
+    await until(() => s.status === "active");
+    // The pass ran against the boundary captured at fetch start ("a"): the
+    // question behind it is backfilled, exactly once, and the live-advanced
+    // mark is not rewound.
+    expect(userRows()).toEqual([`oc:${OC}:u:user`]);
+    expect(ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref).toBe("a2");
+    expect(version()).toMatchObject({ ref: "", pendingRef: String(REPLAY_PROJECTION_VERSION) });
+    ackAll();
+    expect(version()?.ref).toBe(String(REPLAY_PROJECTION_VERSION));
+
+    restart(s);
+    fake.history = async () => [...history(), ...recent()];
+    s = open();
+    await until(() => s.status === "active");
+    expect(userRows()).toEqual([]);
+  });
+
+  it("a failed initial history GET leaves the migration pending through a live turn; the next successful reconcile backfills once", async () => {
+    fake.history = async () => { throw new Error("503 history unavailable"); };
+    let s = open();
+    await until(() => s.status === "active");
+    expect(version()).toBeNull();
+
+    completeLiveTurn();
+    ackAll();
+    expect(ledger.getCheckpoint(LOCAL, "opencode_msg")?.ref).toBe("a2");
+    expect(version()).toBeNull(); // still pending: nothing ran over the old prefix
+
+    restart(s);
+    fake.history = async () => [...history(), ...recent()];
+    s = open();
+    await until(() => s.status === "active");
+    expect(userRows()).toEqual([`oc:${OC}:u:user`]);
+    expect(version()).toMatchObject({ ref: "", pendingRef: String(REPLAY_PROJECTION_VERSION) });
+    ackAll();
+    expect(version()?.ref).toBe(String(REPLAY_PROJECTION_VERSION));
+
+    restart(s);
+    s = open();
+    await until(() => s.status === "active");
+    expect(userRows()).toEqual([]);
+  });
+
+  it("control: the normal recovery path backfills once, keeps the version pending until acked, and a later restart emits nothing", async () => {
+    let s = open();
+    await until(() => s.status === "active");
+    expect(userRows()).toEqual([`oc:${OC}:u:user`]);
+    expect(version()).toMatchObject({ ref: "", pendingRef: String(REPLAY_PROJECTION_VERSION) });
+
+    // Reopened before the ack: the same stable id again, no second outbox row.
+    restart(s);
+    s = open();
+    await until(() => s.status === "active");
+    expect(userRows()).toEqual([`oc:${OC}:u:user`]);
+    expect(ledger.pendingOutbound(LOCAL)).toHaveLength(1);
+    ackAll();
+    expect(version()?.ref).toBe(String(REPLAY_PROJECTION_VERSION));
+
+    restart(s);
+    s = open();
+    await until(() => s.status === "active");
+    expect(userRows()).toEqual([]);
   });
 });

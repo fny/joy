@@ -132,7 +132,14 @@ export interface ReplayEmission { record: WireRecord; localId: string; chat?: st
 export const REPLAY_PROJECTION_VERSION = 2;
 /** Ledger checkpoint kind (additive) whose `ref` is the projection version the
  *  delivered history — everything at or below `opencode_msg` — was projected
- *  under. Absent on a card an older daemon wrote: version 0. */
+ *  under. Absent on a card an older daemon wrote: version 0.
+ *
+ *  ONLY the reconcile backfill stamps it, after a successful pass over the
+ *  delivered history (pending until that pass's rows are acked). A live turn
+ *  completion never does: it advances `opencode_msg`, but says nothing about
+ *  the prefix behind it — a turn that finished while the initial history
+ *  fetch was in flight (or after it failed) used to certify the current
+ *  version and hide the missing prompts for good (#573 residual, wave F10). */
 export const REPLAY_PROJECTION_KIND = "opencode_replay_projection";
 
 /** The user row for a stored prompt: stable `oc:<sid>:<mid>:user` identity,
@@ -462,16 +469,16 @@ export class OpencodeSession implements AgentSession {
 
   /** Commit the delivered-through mark, pending until every outbox row of
    *  this session so far is acked (#67); a restart before that replays from
-   *  the previous mark, deduped by the relay's runtime event ids. */
+   *  the previous mark, deduped by the relay's runtime event ids.
+   *
+   *  Delivery progress only — never the projection version. Whether the
+   *  history BEHIND the new mark has its user rows is the backfill's to say
+   *  (#reconcileHistory), and a live turn can complete before that pass ran. */
   #advanceDeliveredThrough(messageId: string): void {
     if (this.status === "ended") return;
     try {
       this.#ledger.setCheckpoint(this.id, "opencode_msg", messageId, 0, { throughSeq: "latest" });
       this.#deliveredThrough = messageId;
-      // The mark and the projection version it was written under travel
-      // together, so a restart never mistakes THIS daemon's mark for an
-      // older one's (#573 residual).
-      this.#stampProjectionVersion();
     } catch (e) {
       process.stderr.write(`[opencode ${this.id}] checkpoint ${messageId} failed: ${e instanceof Error ? e.message : e}\n`);
     }
@@ -484,7 +491,8 @@ export class OpencodeSession implements AgentSession {
   }
 
   /** Same pending-until-acked rule as the delivered mark (#67): a crash before
-   *  the backfill's rows are acked repeats the pass, deduped by localId. */
+   *  the backfill's rows are acked repeats the pass, deduped by localId.
+   *  Reconcile-only — see REPLAY_PROJECTION_KIND. */
   #stampProjectionVersion(): void {
     this.#ledger.setCheckpoint(this.id, REPLAY_PROJECTION_KIND, String(REPLAY_PROJECTION_VERSION), 0, { throughSeq: "latest" });
   }
@@ -644,11 +652,18 @@ export class OpencodeSession implements AgentSession {
     const client = this.#client;
     const sid = this.#ocSessionId;
     if (!client || !sid || !this.#norm) return;
+    // The recovery boundary is captured BEFORE the fetch: live events are
+    // already subscribed, so a turn completing while the GET is in flight
+    // moves `#deliveredThrough` past history this pass has yet to look at.
+    // The plan runs against the boundary as it stood when the pass began.
+    // (The version needs no re-read after the await: only this method writes
+    // it, once per start.)
+    const deliveredThrough = this.#deliveredThrough;
+    const version = this.#projectionVersion();
     try {
       const all = await client.messages(sid);
-      const version = this.#projectionVersion();
       const plan = replayPlan(sid, all, {
-        deliveredThrough: this.#deliveredThrough,
+        deliveredThrough,
         projectionVersion: version,
         // A prompt THIS daemon submitted already has a user row on the relay
         // — the app's own `turn.queued` for an app send, or #mirrorAccepted's
@@ -657,7 +672,7 @@ export class OpencodeSession implements AgentSession {
         // between the live mirror, this replay and its backfill (#573).
         ourPrompt: (mid) => this.#ledger.ownsRuntimeRef(this.id, mid, "opencode_msg"),
       });
-      if (this.#deliveredThrough && plan.replayed < all.length) {
+      if (deliveredThrough && plan.replayed < all.length) {
         process.stderr.write(`[opencode ${this.id}] reconcile: ${all.length - plan.replayed} messages already delivered, replaying ${plan.replayed}`
           + (plan.projectionStale ? ` (+ their user rows: projection v${version} → v${REPLAY_PROJECTION_VERSION})` : "") + "\n");
       }
@@ -666,9 +681,16 @@ export class OpencodeSession implements AgentSession {
         if (e.chat) this.#mirrorChat(e.localId, e.chat);
       }
       if (this.#relay?.outboundPersistDegraded) return; // records only in RAM: hold every mark
-      if (plan.completedThrough) this.#advanceDeliveredThrough(plan.completedThrough); // stamps the version too
-      else if (plan.projectionStale) this.#stampProjectionVersion();
+      // A live turn that completed during the fetch already moved the mark
+      // further than this plan saw; the plan's mark must not rewind it (the
+      // overlap the plan replayed dedupes at the relay by localId).
+      const liveMoved = this.#deliveredThrough !== deliveredThrough;
+      if (plan.completedThrough && !liveMoved) this.#advanceDeliveredThrough(plan.completedThrough);
+      // The pass over the delivered history ran and its rows are spooled:
+      // certify the version, pending until they are acked.
+      if (plan.projectionStale) this.#stampProjectionVersion();
     } catch (e) {
+      // The migration stays pending: the next successful reconcile backfills.
       process.stderr.write(`[opencode ${this.id}] reconcile failed: ${e}\n`);
     }
   }
