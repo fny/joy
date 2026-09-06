@@ -63,7 +63,7 @@ test("interrupt: names the attempt's turn, falls back to the active turn for a s
   expect(await broken.interrupt({ attempt: ref({ runtimeTurnId: "T9" }) })).toMatchObject({ kind: "failed" });
 });
 
-test("reconcile: a clientId in history is accepted (running when in progress on a rejoined server); one missing is absent on a fresh spawn, unknown on a rejoin", async () => {
+test("reconcile: a clientId in a terminal turn is accepted; in a live turn running on a rejoin; one missing is absent on a fresh spawn, unknown on a rejoin", async () => {
   const thread = { thread: { turns: [
     { id: "T1", status: "completed", items: [{ type: "userMessage", clientId: "c1" }] },
     { id: "T2", status: "inProgress", items: [{ type: "userMessage", clientUserMessageId: "c2#a2" }] },
@@ -73,7 +73,7 @@ test("reconcile: a clientId in history is accepted (running when in progress on 
   const fresh = new CodexDriver(port(client, { rejoined: () => false }), 1);
   expect(await fresh.reconcile(pending)).toEqual([
     { attemptId: "a1", outcome: "accepted", runtimeTurnId: "T1" },
-    { attemptId: "a2", outcome: "accepted", runtimeTurnId: "T2" },
+    { attemptId: "a2", outcome: "absent" }, // #625: the in-progress turn died with the old server and produced nothing — re-send
     { attemptId: "a3", outcome: "absent" },
   ]);
   const rejoined = new CodexDriver(port(client, { rejoined: () => true }), 1);
@@ -84,6 +84,31 @@ test("reconcile: a clientId in history is accepted (running when in progress on 
   ]);
   const down = new CodexDriver(port(null), 1);
   expect(await down.reconcile(pending)).toEqual(pending.map((p) => ({ attemptId: p.attemptId, outcome: "unknown" })));
+});
+
+test("#625 reconcile: on a FRESH spawn a clientId in a dead in-progress turn is absent when the turn holds only the prompt, and ends `interrupted` (turn_ended named by turn AND ref) when it visibly ran", async () => {
+  const thread = { thread: { turns: [
+    { id: "T-empty", status: "inProgress", items: [{ type: "userMessage", clientId: "c1" }] },
+    { id: "T-ran", status: "inProgress", items: [{ type: "userMessage", clientId: "c2" }, { type: "agentMessage", id: "msg_1", text: "half an answer" }] },
+  ] } };
+  const pending = [ref(), ref({ attemptId: "a2", commandId: "c2", runtimeRef: "c2" })];
+  const seen: unknown[] = [];
+  const fresh = new CodexDriver(port({ threadRead: async () => thread }, { rejoined: () => false }), 1);
+  fresh.observe((o) => seen.push(o));
+  expect(await fresh.reconcile(pending)).toEqual([
+    { attemptId: "a1", outcome: "absent" },
+    { attemptId: "a2", outcome: "accepted", runtimeTurnId: "T-ran" },
+  ]);
+  expect(seen).toEqual([{ kind: "turn_ended", runtimeTurnId: "T-ran", runtimeRef: "c2", status: "interrupted", detail: "app-server died mid-turn" }]);
+  // A rejoin never declares either dead: both are live turns, held.
+  seen.length = 0;
+  const rejoined = new CodexDriver(port({ threadRead: async () => thread }, { rejoined: () => true }), 1);
+  rejoined.observe((o) => seen.push(o));
+  expect(await rejoined.reconcile(pending)).toEqual([
+    { attemptId: "a1", outcome: "running", runtimeTurnId: "T-empty" },
+    { attemptId: "a2", outcome: "running", runtimeTurnId: "T-ran" },
+  ]);
+  expect(seen).toEqual([]);
 });
 
 test("codexTurnStatus maps interrupted/cancelled → cancelled, failed → failed, anything else → completed", () => {

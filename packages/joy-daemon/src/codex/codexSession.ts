@@ -841,6 +841,19 @@ export class CodexSession implements AgentSession {
         if (status !== "inProgress") continue;
       }
       const items = deferred ? [] : (Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : []);
+      // A turn the OLD server left in progress is dead with it on a fresh
+      // spawn (a rejoin keeps it live, below). One showing nothing but the
+      // prompt is not replayed at all (#625): no echo binds its row, so the
+      // row stays `unknown` and the coordinator's reconcile — the driver's
+      // thread/read finds it in a dead turn with no output — re-sends it.
+      // One that visibly ran is replayed and closed below, and its row ends
+      // `interrupted` so the prompt is never run twice.
+      const dead = status === "inProgress" && !this.#rejoined;
+      const ran = items.some((item) => String((item as { type?: unknown }).type ?? "") !== "userMessage");
+      if (dead && !ran) {
+        process.stderr.write(`[codex ${this.id}] turn ${tid} died with the previous app-server before any output — not replayed; its prompt is reconciled from thread/read\n`);
+        continue;
+      }
       // What replay is about to emit — id, ordinal, whole content — for the
       // live-buffer flush (#519).
       const ordinals = new Map<string, number>();
@@ -885,10 +898,16 @@ export class CodexSession implements AgentSession {
       //     (buffered now, flushed after reconcile) will complete it.
       //   - FRESH SPAWN: the old server (and its in-flight turn) died, so the
       //     turn is dead — close it as cancelled so the card doesn't spin.
+      // Either way the coordinator hears the turn end, as it does live: the
+      // replayed echo bound our attempt to this turn, and a row left waiting
+      // for a terminal the dead server can never send was stuck for good
+      // (#625). A turn none of our attempts rode is nobody's to settle.
       if (status !== "inProgress") {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status } } }));
+        this.#emitReplayedTurnEnd(tid, codexTurnStatus(status), "replayed from thread/read");
       } else if (!this.#rejoined) {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
+        this.#emitReplayedTurnEnd(tid, "interrupted", "app-server died mid-turn");
       } else {
         // A LIVE turn we rejoined: it is the active one — busy, thinking,
         // interruptible by id. Its turn/started fired before we connected
@@ -903,6 +922,14 @@ export class CodexSession implements AgentSession {
       }
     }
     // The high-water advances via terminal-row ACKs (setReceiptSink).
+  }
+
+  /** A history turn's end, told to the coordinator when one of our attempts
+   *  rode it (its replayed echo bound the turn id) — what the live path does
+   *  on every turn/completed (#625). */
+  #emitReplayedTurnEnd(tid: string, status: "completed" | "failed" | "cancelled" | "interrupted", detail: string): void {
+    if (!this.#ledger.attemptsByRuntimeTurnId(this.id, tid).length) return;
+    this.#driver.emit({ kind: "turn_ended", runtimeTurnId: tid, status, detail });
   }
 
   // ── app-facing state (the queue itself is the coordinator's) ────────────────
