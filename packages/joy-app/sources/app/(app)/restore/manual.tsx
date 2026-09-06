@@ -121,7 +121,14 @@ export default function Restore() {
                         placeholderTextColor={theme.colors.input.placeholder}
                         value={restoreKey}
                         onChangeText={setRestoreKey}
-                        autoCapitalize="characters"
+                        // The field accepts BOTH formats: the base32 backup
+                        // groups (case-insensitive — the parser uppercases)
+                        // and a raw base64url secret, which is case-
+                        // sensitive. autoCapitalize="characters" made mobile
+                        // keyboards uppercase a typed base64url key into a
+                        // DIFFERENT valid 32-byte secret, restoring the wrong
+                        // account (#159).
+                        autoCapitalize="none"
                         autoCorrect={false}
                         multiline={true}
                         numberOfLines={4}

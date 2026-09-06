@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { encodeBase64 } from "../encryption/base64";
-import { getServerUrl } from "@/sync/serverConfig";
+import { getServerUrl, relayAccessKeyHeaders } from "@/sync/serverConfig";
 import { getJoyClientId } from '@/sync/clientId';
 
 export async function authAccountApprove(token: string, publicKey: Uint8Array, answer: Uint8Array) {
@@ -12,6 +12,9 @@ export async function authAccountApprove(token: string, publicKey: Uint8Array, a
         headers: {
             'Authorization': `Bearer ${token}`,
             'X-Joy-Client': getJoyClientId(),
+            // axios does not go through the global fetch interceptor, so a
+            // gated relay rejected every device approval with 401 (#186).
+            ...relayAccessKeyHeaders(API_ENDPOINT),
         }
     });
 }

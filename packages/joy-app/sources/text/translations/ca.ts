@@ -305,6 +305,9 @@ export const ca: TranslationStructure = {
         failedToRemoveFriend: 'No s\'ha pogut eliminar l\'amic',
         searchFailed: 'La cerca ha fallat. Si us plau, torna-ho a provar.',
         failedToSendRequest: 'No s\'ha pogut enviar la sol·licitud d\'amistat',
+        logoutFailed: 'No s\'ha pogut eliminar l\'inici de sessió desat d\'aquest dispositiu. Torna-ho a provar.',
+        syncStartFailedReload: 'L\'aplicació no ha pogut iniciar la sincronització. Torna a carregar l\'aplicació i torna-ho a provar.',
+        pairingCodeExpired: 'El codi ha caducat — torna a escanejar-lo',
     },
 
     newSession: {
@@ -446,7 +449,8 @@ export const ca: TranslationStructure = {
         failedToConnectToServer: 'Ha fallat la connexió amb el servidor',
         currentlyUsingCustomServer: 'Actualment utilitzant un servidor personalitzat',
         customServerUrlLabel: 'URL del servidor personalitzat',
-        advancedFeatureFooter: 'Aquesta és una funció avançada. Només canvia el servidor si saps el que fas. Hauràs de tancar la sessió i tornar-la a iniciar després de canviar els servidors.'
+        advancedFeatureFooter: 'Aquesta és una funció avançada. Només canvia el servidor si saps el que fas. Hauràs de tancar la sessió i tornar-la a iniciar després de canviar els servidors.',
+        relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requereix una clau d'accés. Introdueix la clau d'aquest relay.`,
     },
 
     sessionInfo: {
@@ -839,6 +843,7 @@ export const ca: TranslationStructure = {
         clientSideProcessing: 'Processament del costat del client',
         linkProcessedLocally: 'Enllaç processat localment al navegador',
         linkProcessedOnDevice: 'Enllaç processat localment al dispositiu',
+        pairingRequestNotFound: 'No s\'ha trobat cap sol·licitud de connexió pendent per a aquest enllaç. Pot haver caducat o pertànyer a un altre relay: genera un enllaç nou al terminal i torna-ho a provar.',
     },
 
     modals: {
