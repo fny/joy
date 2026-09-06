@@ -733,8 +733,15 @@ export class CodexSession implements AgentSession {
           // The userMessage echo carrying a clientId we submitted proves
           // delivery; the coordinator pairs it with its attempt (a late one
           // for a cancelled row is interrupted there — the tombstone rule).
-          this.#flushHeldTurnStart(); // our own prompt's row is already in the card: the bracket opens here
-          if (this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client")) this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" });
+          // Only OUR id opens the bracket here (our prompt's row is already
+          // in the card). A foreign client id — the TUI / another app-server
+          // client stamps its own — is not ours to bracket: its user row is
+          // mirrored on item/completed and must land first, so the held
+          // turn-start waits for that effect (#131).
+          if (this.#ledger.ownsRuntimeRef(this.id, eff.clientId, "codex_client")) {
+            this.#flushHeldTurnStart();
+            this.#driver.emit({ kind: "echo", runtimeRef: eff.clientId, runtimeTurnId: eff.turn, receiptKind: "codex_client" });
+          }
           break;
         case "userMessage": {
           // Ours if this session ever submitted that clientId (an attempt

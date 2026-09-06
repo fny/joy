@@ -71,8 +71,9 @@ every relay; machines register per account.
   a time; opencode/pi route through their native steer semantics.
 - **Codex output & recovery** (`codex/codexSession.ts`): a prompt typed in the
   attached TUI is mirrored into the card once, BEFORE its turn bracket — the
-  turn-start record is held until the turn's first item, so the app groups it
-  like a joy-sent prompt (#131). A restart or rejoin replays thread history
+  turn-start record is held until the turn's first item, and a client id
+  this session never submitted opens nothing, so the app groups it like a
+  joy-sent prompt (#131). A restart or rejoin replays thread history
   through the same normalizer under deterministic ids; a live item that
   arrived while the read was pending binds to the replayed identity instead
   of a second one only on proof it is the same occurrence — inside the

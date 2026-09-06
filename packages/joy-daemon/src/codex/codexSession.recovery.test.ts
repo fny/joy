@@ -384,3 +384,23 @@ test("#131: a prompt typed in the attached TUI is mirrored BEFORE the turn brack
   expect(ledger().getCommand(c.id)?.state).toBe("completed");
   s.end("killed");
 });
+
+test.each([
+  ["clientId", (id: string) => ({ clientId: id })],
+  ["clientUserMessageId", (id: string) => ({ clientUserMessageId: id })],
+])("#131: a TUI prompt stamped with a FOREIGN %s is still mirrored BEFORE the turn bracket — a client id this session never submitted opens nothing", async (_form, stamp) => {
+  const { relay, sent } = fakeRelay();
+  const { s, client } = await started(`rec-131-foreign-${_form}`, { relay });
+  // The TUI (or another app-server client) stamps its own id on the prompt.
+  client.notify({ method: "turn/started", params: { threadId: "TH", turn: { id: "T-tui" } } });
+  client.notify({ method: "item/started", params: { threadId: "TH", turnId: "T-tui", item: { type: "userMessage", id: "m", ...stamp("external-tui-id") } } });
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-tui", item: { type: "userMessage", id: "m", ...stamp("external-tui-id"), text: "typed in TUI" } } });
+  client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-tui", item: { type: "agentMessage", id: "msg_2", text: "reply" } } });
+  client.notify({ method: "turn/completed", params: { threadId: "TH", turn: { id: "T-tui", status: "completed" } } });
+  expect(sent.map((x) => x.t)).toEqual(["user", "turn-start", "text", "turn-end"]);
+  expect(sent[0]).toMatchObject({ text: "typed in TUI", localId: "turn:T-tui:item:userMessage:0:user" });
+  expect(sent[1].localId).toBe("codex:TH:turn:T-tui:start");
+  // Nothing of ours was confirmed by it.
+  expect(queueFor(s).state()).toMatchObject({ inFlight: null, running: null });
+  s.end("killed");
+});
