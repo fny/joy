@@ -16,6 +16,7 @@ import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, tmpdir } from "os";
 import { writeFileAtomicAsync } from "./atomicWrite";
 import { TextAccumulator } from "./textStream";
+import { killProcessGroup, retireChildProcess } from "./bounded";
 
 const execAsync = promisify(exec);
 
@@ -405,10 +406,15 @@ export function jailedToolEnv(extraEnv?: Record<string, string>): NodeJS.Process
 // permission denied) cause success=false. Exported for its test only.
 export function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>, timeoutMs = TOOL_TIMEOUT_MS): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolveResult, rejectResult) => {
+    // `detached`: the tool leads its own process group, so the deadline can
+    // terminate everything it spawned (a shell's background job, a helper
+    // holding the pipes) with one group kill instead of signalling only the
+    // direct child and leaving a grandchild behind (#538 residual).
     const child = nodeSpawn(binary, args, {
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
       windowsHide: true,
+      detached: process.platform !== "win32",
       env: jailedToolEnv(extraEnv),
     });
     // Nothing is ever fed to the tool: close stdin so a tool that would read
@@ -423,9 +429,14 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
     const stderr = new TextAccumulator();
     // Deadline (#538): a child that never exits — a tool wedged on a fifo, a
     // pathological regex over a huge tree — used to hold the request and this
-    // promise forever. SIGTERM, then SIGKILL, then settle whether or not
-    // `close` ever fires: `close` waits for every holder of the pipes, and a
-    // signalled shell can leave a grandchild holding them open indefinitely.
+    // promise forever. On the deadline the listeners and pipes are released
+    // at once (`close` waits for every holder of the pipes, and a signalled
+    // shell can leave a grandchild holding them open indefinitely), the whole
+    // process group is terminated — SIGTERM, a bounded grace, SIGKILL — and
+    // the request settles when that kill has run its course: `timedOut`
+    // means the tool AND its descendants are gone, not merely signalled.
+    // A run that finishes in time clears the deadline, so no escalation
+    // timer outlives the result (the grace ticks live inside the kill).
     let settled = false;
     let timedOut = false;
     const settle = (exitCode: number) => {
@@ -435,13 +446,17 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       resolveResult({ exitCode, stdout: stdout.end(), stderr: stderr.end(), timedOut });
     };
     const deadline = setTimeout(() => {
+      if (settled) return;
       timedOut = true;
-      try { child.kill("SIGTERM"); } catch { /* already gone */ }
-      const hard = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
-        settle(-1);
-      }, 2_000);
-      hard.unref?.();
+      // Drop every lifecycle listener (a late `close` must not settle with a
+      // bogus exit code, a late `error` must not crash the daemon) and destroy
+      // the pipes: what was read so far is kept, nothing more is retained.
+      retireChildProcess(child, { stdin: "destroy" });
+      for (const pipe of [child.stdout, child.stderr]) { try { pipe.destroy(); } catch { /* already closed */ } }
+      const done = () => settle(-1);
+      if (!child.pid) { done(); return; }
+      const tag = `[tool] ${basename(binary)}`;
+      killProcessGroup(child.pid, { graceMs: 2_000, log: (line) => process.stderr.write(`${line.replace(/^\[kill-group\]/, tag)}\n`) }).then(done, done);
     }, timeoutMs);
     deadline.unref?.();
     child.stdout.on("data", (d: Buffer) => { stdout.push(d); });
@@ -462,6 +477,10 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
 // every unknown option) is refused rather than forwarded. Positionals keep
 // the caller's spelling (rg prints filenames relative to the operand it was
 // given, and the app parses that), only their containment is checked.
+/** What a jailed invocation does, decided from its PARSED options: rg
+ *  searches for a pattern (`search`) or lists the tree (`list`, `--files`);
+ *  difft diffs. */
+export type ToolMode = "search" | "list" | "diff";
 interface ArgvSpec {
   /** Options taking no value. */
   flags: Set<string>;
@@ -515,13 +534,38 @@ export function jailToolArgs(
   args: unknown,
   workingDirectory: string,
   extraRoots: string[] = [],
-): { ok: true; args: string[]; pathOperands: string[] } | { ok: false; error: string } {
+): { ok: true; args: string[]; pathOperands: string[]; mode: ToolMode } | { ok: false; error: string } {
   if (!Array.isArray(args) || !args.every((a) => typeof a === "string")) return { ok: false, error: "args must be an array of strings" };
   const spec = tool === "rg" ? RG_SPEC : DIFFT_SPEC;
   const argv = args as string[];
   const positionals: string[] = [];
   let sawPatternFlag = false;
+  let sawFiles = false;
   let optionsEnded = false;
+  type Parsed = { ok: true; next: number } | { ok: false; error: string };
+  // One parsed option at argv[i]. Its value is the inline remainder
+  // (`--opt=value`, `-Cvalue`) or else the NEXT word, which is consumed here
+  // — so a value that merely looks like an option (`-e --files`) is never
+  // read as one (#538 residual).
+  const takeOption = (name: string, inlineValue: string | undefined, i: number): Parsed => {
+    if (spec.flags.has(name)) {
+      if (inlineValue !== undefined) return { ok: false, error: `option ${name} takes no value` };
+      if (name === "--files") sawFiles = true;
+      return { ok: true, next: i };
+    }
+    if (spec.valued.has(name)) {
+      const check = spec.valued.get(name) ?? null;
+      const value = inlineValue ?? argv[i + 1];
+      if (value === undefined) return { ok: false, error: `option ${name} needs a value` };
+      if (check && !check(value)) return { ok: false, error: `invalid value for ${name}` };
+      if (name === "-e" || name === "--regexp") sawPatternFlag = true;
+      return { ok: true, next: inlineValue === undefined ? i + 1 : i };
+    }
+    // Every other option — `-f/--file`, `--pre`, `--pre-glob`, `-L/--follow`,
+    // `--ignore-file`, `--type-add`, `--config`, `-z/--search-zip` — is
+    // refused: unknown options can name files.
+    return { ok: false, error: `option ${name} is not allowed` };
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (optionsEnded || !a.startsWith("-") || a === "-") {
@@ -530,38 +574,43 @@ export function jailToolArgs(
       continue;
     }
     if (a === "--") { optionsEnded = true; continue; }
-    // --opt=value form.
-    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
-    const name = eq > 0 ? a.slice(0, eq) : a;
-    const inlineValue = eq > 0 ? a.slice(eq + 1) : undefined;
-    if (spec.flags.has(name)) {
-      if (inlineValue !== undefined) return { ok: false, error: `option ${name} takes no value` };
-      continue;
+    let r: Parsed;
+    if (a.startsWith("--")) {
+      // --opt or --opt=value.
+      const eq = a.indexOf("=");
+      r = takeOption(eq > 0 ? a.slice(0, eq) : a, eq > 0 ? a.slice(eq + 1) : undefined, i);
+    } else {
+      // A short-option cluster (`-in`, `-C3`, `-epattern`), parsed the way
+      // the tool parses it: every letter must itself be allowed, and a
+      // valued letter takes the rest of the cluster as its value (or the
+      // next word when nothing follows it), which ends the cluster.
+      r = { ok: true, next: i };
+      for (let j = 1; j < a.length && r.ok; j++) {
+        const name = `-${a[j]}`;
+        const rest = a.slice(j + 1);
+        const valued = spec.valued.has(name);
+        r = takeOption(name, valued && rest.length ? rest : undefined, i);
+        if (valued) break;
+      }
     }
-    if (spec.valued.has(name)) {
-      const check = spec.valued.get(name) ?? null;
-      const value = inlineValue ?? argv[++i];
-      if (value === undefined) return { ok: false, error: `option ${name} needs a value` };
-      if (check && !check(value)) return { ok: false, error: `invalid value for ${name}` };
-      if (name === "-e" || name === "--regexp") sawPatternFlag = true;
-      continue;
-    }
-    // Every other option — `-f/--file`, `--pre`, `--pre-glob`, `-L/--follow`,
-    // `--ignore-file`, `--type-add`, `--config`, `-z/--search-zip`, combined
-    // short flags (`-in`) — is refused: unknown options can name files.
-    return { ok: false, error: `option ${name} is not allowed` };
+    if (!r.ok) return r;
+    i = r.next;
   }
   const { paths, error } = spec.positionals(positionals);
   if (error) return { ok: false, error };
-  // rg's first positional is the PATTERN unless -e supplied one; patterns
-  // are not paths and are not checked (they never open a file).
-  const pathOperands = tool === "rg" && !sawPatternFlag && !argv.includes("--files") ? paths.slice(1) : paths;
+  // `--files` lists the tree and takes no pattern: every positional is a
+  // path. Otherwise rg's first positional is the PATTERN unless -e/--regexp
+  // supplied one; patterns are not paths and are not checked (they never
+  // open a file). Decided from the parsed options, never from a scan of the
+  // raw words: `-e --files` is a pattern (#538 residual).
+  const mode: ToolMode = tool !== "rg" ? "diff" : sawFiles ? "list" : "search";
+  const pathOperands = mode === "search" && !sawPatternFlag ? paths.slice(1) : paths;
   for (const p of pathOperands) {
     if (p === "-" || p === "") return { ok: false, error: "stdin / empty path operands are not allowed" };
     const v = validatePath(p, workingDirectory, extraRoots);
     if (!v.valid) return { ok: false, error: v.error ?? `Access denied: Path '${p}' is outside the working directory` };
   }
-  return { ok: true, args: argv, pathOperands };
+  return { ok: true, args: argv, pathOperands, mode };
 }
 
 export async function handleRipgrep(workingDirectory: string, data: RipgrepRequest, extraRoots: string[] = []): Promise<RipgrepResponse> {
@@ -591,7 +640,9 @@ export async function handleRipgrep(workingDirectory: string, data: RipgrepReque
     // prefixed, the way rg always renders them relative to the given operand.
     // Appended bare, never after a `--` of our own: a caller that already
     // ended option parsing would see a second `--` as a literal path.
-    const needsDefaultPath = jailed.pathOperands.length === 0 && !jailed.args.includes("--files");
+    // The mode comes from the jail's option parse, not a scan of the raw
+    // words: `-e --files` is a search for the pattern "--files" (#538 residual).
+    const needsDefaultPath = jailed.mode === "search" && jailed.pathOperands.length === 0;
     const argv = [...RG_FORCED_ARGS, ...jailed.args, ...(needsDefaultPath ? ["."] : [])];
     const result = await runTool(RG_BIN, argv, cwd ?? workingDirectory);
     if (result.timedOut) return { success: false, error: `ripgrep exceeded ${TOOL_TIMEOUT_MS / 1000}s and was terminated` };
