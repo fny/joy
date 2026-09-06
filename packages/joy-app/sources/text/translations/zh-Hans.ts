@@ -306,6 +306,9 @@ export const zhHans: TranslationStructure = {
         failedToRemoveFriend: '删除好友失败',
         searchFailed: '搜索失败。请重试。',
         failedToSendRequest: '发送好友请求失败',
+        sessionFull: '此会话已满 — 请在新会话中继续',
+        pairingCodeExpired: '验证码已过期 — 请重新扫描',
+        machineBusy: '设备正忙 — 请稍后重试',
     },
 
     newSession: {

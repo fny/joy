@@ -15,10 +15,18 @@ import { t } from '@/text';
  *  replay and is refused). Every screen shows `e.message`, so the wording is
  *  applied here once; `.code` keeps the raw reason for logs. */
 const DAEMON_OUTDATED_CODES = new Set(['unbound_response', 'bad_response_head']);
+/** Relay-level refusals with a user-facing sentence (#84): `daemon_busy` is
+ *  the relay's per-daemon inbox cap (503 + retry-after: 1) — the machine is
+ *  reachable, just saturated; `daemon_offline` is the machine itself. */
+const RELAY_CODE_MESSAGES: Record<string, () => string> = {
+    daemon_busy: () => t('errors.machineBusy'),
+    daemon_offline: () => t('newSession.machineOffline'),
+};
 async function userFacing<T>(p: Promise<T>): Promise<T> {
     try { return await p; }
     catch (e) {
         if (e instanceof TunnelError && DAEMON_OUTDATED_CODES.has(e.code)) throw new TunnelError(e.status, e.code, t('errors.daemonOutdated'));
+        if (e instanceof TunnelError && RELAY_CODE_MESSAGES[e.code]) throw new TunnelError(e.status, e.code, RELAY_CODE_MESSAGES[e.code]());
         throw e;
     }
 }

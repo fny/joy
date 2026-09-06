@@ -137,6 +137,14 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
 
   // 3. pick up the approval
   const resp = await post(relayUrl, "/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  if (resp.state === "consumed") {
+    // One-shot by design (#607/#70): the answer was already handed out — to an
+    // earlier poll of ours whose reply was lost, or to someone who saw the
+    // code. The relay says so in words and names the moment; print THAT, not
+    // a generic "not authorized" (joy auth prints e.message).
+    const when = typeof resp.consumedAt === "number" ? ` (collected at ${new Date(resp.consumedAt).toISOString()})` : "";
+    throw new Error(`${String(resp.message ?? "pairing answer already collected — start a new pairing")}${when}`);
+  }
   if (resp.state !== "authorized") throw new Error(`pairing not authorized (state=${String(resp.state)})`);
   const decrypted = decryptBox(unb64(String(resp.response)), termKp.secretKey);
   if (!decrypted || decrypted[0] !== 0) throw new Error("bad approval payload");

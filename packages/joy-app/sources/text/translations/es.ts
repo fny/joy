@@ -305,6 +305,9 @@ export const es: TranslationStructure = {
         failedToRemoveFriend: 'No se pudo eliminar al amigo',
         searchFailed: 'La búsqueda falló. Por favor, intenta de nuevo.',
         failedToSendRequest: 'No se pudo enviar la solicitud de amistad',
+        sessionFull: 'Esta sesión está llena — continúa en una sesión nueva',
+        pairingCodeExpired: 'El código expiró — escanéalo de nuevo',
+        machineBusy: 'La máquina está ocupada — inténtalo de nuevo en un momento',
     },
 
     newSession: {

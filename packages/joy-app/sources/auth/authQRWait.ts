@@ -4,6 +4,8 @@ import { getServerUrl } from '@/sync/serverConfig';
 import { QRAuthKeyPair } from './authQRStart';
 import { decryptBox } from '@/encryption/libsodium';
 import { getJoyClientId } from '@/sync/clientId';
+import { Modal } from '@/modal';
+import { t } from '@/text';
 
 export interface AuthCredentials {
     secret: Uint8Array;
@@ -46,7 +48,16 @@ export async function authQRWait(keypair: QRAuthKeyPair, onProgress?: (dots: num
             // reply was lost — and 'expired' that it aged out: neither can
             // succeed by polling on, so stop and let the user re-scan.
             if (response.data.state === 'consumed' || response.data.state === 'expired') {
-                console.log(`\n\nPairing request ${response.data.state}. Please start again.`);
+                // A consumed poll carries `error`, `consumedAt` and a `message`
+                // that says what happened and what to do (#607); an expired
+                // one just needs a fresh code (#610). Show the specific line —
+                // "Authentication failed" alone left the user guessing.
+                const message = response.data.state === 'consumed' && typeof response.data.message === 'string'
+                    ? response.data.message
+                    : t('errors.pairingCodeExpired');
+                console.log(`\n\nPairing request ${response.data.state}: ${message}`
+                    + (response.data.consumedAt ? ` (consumedAt=${new Date(response.data.consumedAt).toISOString()})` : ''));
+                Modal.alert(t('common.error'), message, [{ text: t('common.ok'), style: 'cancel' }]);
                 return null;
             }
             if (response.data.state === 'authorized') {

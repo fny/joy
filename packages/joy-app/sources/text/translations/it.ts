@@ -303,6 +303,9 @@ export const it: TranslationStructure = {
         failedToRemoveFriend: 'Impossibile rimuovere l\'amico',
         searchFailed: 'Ricerca non riuscita. Riprova.',
         failedToSendRequest: 'Impossibile inviare la richiesta di amicizia',
+        sessionFull: 'Questa sessione è piena — continua in una nuova sessione',
+        pairingCodeExpired: 'Il codice è scaduto — scansionalo di nuovo',
+        machineBusy: 'La macchina è occupata — riprova tra un momento',
     },
 
     newSession: {

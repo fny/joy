@@ -562,6 +562,13 @@ class Sync {
             console.error('[v2] send failed', e);
             // The text goes back to the composer (caller); the ghost row must go.
             storage.getState().dismissLocalMessage(sessionId, localId);
+            // 429 session_event_budget_exhausted (#613): the relay refuses new
+            // prompts once the session's event budget is spent — retrying never
+            // clears it, so the reason says what to do instead of "failed".
+            // Mapped here, once, for every send path (composer, drafts, cards).
+            if (e instanceof V2ApiError && e.code === 'session_event_budget_exhausted') {
+                return { ok: false, reason: t('errors.sessionFull') };
+            }
             return { ok: false, reason: `v2 send failed: ${e instanceof Error ? e.message : e}` };
         }
         // The relay's accepted response IS the durable ack: a draft released

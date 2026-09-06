@@ -305,6 +305,9 @@ export const ca: TranslationStructure = {
         failedToRemoveFriend: 'No s\'ha pogut eliminar l\'amic',
         searchFailed: 'La cerca ha fallat. Si us plau, torna-ho a provar.',
         failedToSendRequest: 'No s\'ha pogut enviar la sol·licitud d\'amistat',
+        sessionFull: 'Aquesta sessió està plena — continua en una sessió nova',
+        pairingCodeExpired: 'El codi ha caducat — torna a escanejar-lo',
+        machineBusy: 'La màquina està ocupada — torna-ho a provar en un moment',
     },
 
     newSession: {
