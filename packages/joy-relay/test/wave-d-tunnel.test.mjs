@@ -278,3 +278,37 @@ describe('(7) housekeeping: lastPoll ages out; frame posts are checked before th
     expect(own.stats().trackedDaemons).toBe(1);
   });
 });
+
+describe('(8) #84 a parked request outlives neither its client nor the idle deadline', () => {
+  /** A client response the tunnel can answer: records the head and body,
+   *  never drains (no socket), and reports `destroyed` like a real one. */
+  function clientRes() {
+    const res = new EventEmitter();
+    Object.assign(res, {
+      destroyed: false, writableEnded: false, headersSent: false, status: null, headers: null, body: '',
+      writeHead(status, headers) { res.headersSent = true; res.status = status; res.headers = headers; },
+      write() { return true; },
+      end(body) { res.writableEnded = true; if (body) res.body += body; },
+      destroy() { res.destroyed = true; res.emit('close'); },
+    });
+    return res;
+  }
+
+  it('a daemon that attached and then died never collects the request: the client hears 504 and the inbox is empty again', async () => {
+    const own = createTunnel({ notify: createNotify(), responseIdleMs: 120 });
+    await own.claim('mach-f8', 1); // attached — and never polls again
+    const res = clientRes();
+    own.clientRequest('mach-f8', Buffer.alloc(64 * 1024, 0x42), res);
+    expect(own.stats()).toMatchObject({ pending: 1, inboxRequests: 1, inboxBytes: 64 * 1024 });
+    await sleep(50);
+    expect(own.stats().inboxRequests).toBe(1); // still parked inside the deadline
+    for (let i = 0; i < 100 && own.stats().inboxRequests !== 0; i++) await sleep(10);
+    // Failed AND dequeued: nothing outlives the idle deadline in relay memory.
+    expect(own.stats()).toMatchObject({ pending: 0, inboxRequests: 0, inboxBytes: 0 });
+    expect(res.status).toBe(504);
+    expect(JSON.parse(res.body).error).toBe('daemon_response_timeout');
+    // The daemon coming back (or a re-paired machine under the same id) is
+    // handed nothing — it must never execute a request nobody awaits.
+    expect((await own.claim('mach-f8', 1)).requests).toEqual([]);
+  });
+});
