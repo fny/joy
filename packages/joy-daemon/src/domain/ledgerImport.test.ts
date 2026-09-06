@@ -567,7 +567,7 @@ test("a truncated window record keeps its dependent outbound source unconsumed (
   l2.close();
 });
 
-test("a readable record that fails (a string offset) holds every source its session owns — the outbound file naming it by localId, its queue and receipts — while another session's sources import; the repair imports them together", () => {
+test("a readable record that fails (a string offset) holds every source its session owns — its outbound rows, its queue and receipts — while another session's sources AND its outbound rows import; the repair imports them together", () => {
   write("window-aaaa0001.json", { launchCwd: "/repo", v2SessionId: "v2a", transcriptCheckpoint: { path: "/t", offset: "100" } });
   write("window-bbbb0002.json", { launchCwd: "/other", v2SessionId: "v2b" });
   write("v2-outbound.json", [
@@ -583,27 +583,128 @@ test("a readable record that fails (a string offset) holds every source its sess
     { file: "window-aaaa0001.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa0001" },
     { file: "aaaa0001.receipts.json", error: expect.stringMatching(/^deferred: window-aaaa0001\.json failed to import/), sessionId: "aaaa0001" },
     { file: "queue-aaaa0001.json", error: expect.stringMatching(/^deferred: window-aaaa0001\.json failed to import/), sessionId: "aaaa0001" },
-    { file: "v2-outbound.json", error: expect.stringMatching(/^deferred: v2-outbound entry held belongs to session aaaa0001, whose window-aaaa0001\.json failed to import/) },
+    { file: "v2-outbound.json", error: expect.stringMatching(/^deferred: v2-outbound entry held belongs to session aaaa0001, whose window-aaaa0001\.json failed to import/), sessionId: "aaaa0001" },
   ]);
   expect(r.quarantine).toEqual(["aaaa0001"]);
-  expect(r.files).toEqual(["queue-bbbb0002.json"]);
+  expect(r.files).toEqual(["queue-bbbb0002.json"]); // the outbound file is not consumed while a row of it waits
+  expect(r.outbox).toBe(1);
   expect(l.listPending("bbbb0002").map((c) => c.id)).toEqual(["q-fine"]);
   expect(l.listCommands("aaaa0001")).toEqual([]);
   expect(l.listReceipts("aaaa0001")).toEqual([]);
   expect(l.pendingOutbound("aaaa0001")).toEqual([]);
-  expect(l.pendingOutbound("bbbb0002")).toEqual([]); // the whole file waits: one transaction, one marker
+  // The healthy owner's rows commit on their own (per-owner marker); only the failed owner's wait.
+  expect(l.pendingOutbound("bbbb0002").map((o) => o.runtimeEventId)).toEqual(["rec:fine"]);
+  expect(l.getImportSource("v2-outbound.json#bbbb0002")).not.toBeNull();
+  expect(l.getImportSource("v2-outbound.json#aaaa0001")).toBeNull();
+  expect(l.getImportSource("v2-outbound.json")).toBeNull();
   expect(listLegacyFiles(dir)).toEqual(["aaaa0001.receipts.json", "queue-aaaa0001.json", "v2-outbound.json"]);
   expect(l.getMeta("import_v1")).toBeNull();
   // Repaired: the held sources import together with the record.
   write("window-aaaa0001.json", { launchCwd: "/repo", v2SessionId: "v2a", transcriptCheckpoint: { path: "/t", offset: 100 } });
   const r2 = importLegacyState(l, dir, { sealsContent: false });
   expect(r2.failed).toEqual([]);
+  expect(r2.outbox).toBe(1); // only the held owner's row is applied now
   expect(l.listPending("aaaa0001").map((c) => c.id)).toEqual(["q-held"]);
   expect(l.getReceipt("aaaa0001", "seq", "3")).not.toBeNull();
   expect(l.pendingOutbound("aaaa0001").map((o) => o.runtimeEventId)).toEqual(["rec:held"]);
   expect(l.pendingOutbound("bbbb0002").map((o) => o.runtimeEventId)).toEqual(["rec:fine"]);
+  expect(l.getImportSource("v2-outbound.json")).not.toBeNull();
+  expect(existsSync(join(dir, "imported-v1", "v2-outbound.json"))).toBe(true);
   expect(l.getMeta("import_v1")).toBe("done");
   l.close();
+});
+
+// Review 9d2225c3: A has a malformed checkpoint; B has a valid record, an OLDER
+// outbound row and a NEWER queued prompt. Deferring the whole global file let
+// B's prompt import while its earlier output waited for A's repair — B was free
+// to resume and publish newer work ahead of it. The file imports per owner.
+function seedSiblingOwners() {
+  write("window-aaaa1111.json", { launchCwd: "/a", v2SessionId: "v2-a", transcriptCheckpoint: { path: "/a", offset: "bad" } });
+  write("window-bbbb1111.json", { launchCwd: "/b", v2SessionId: "v2-b" });
+  write("queue-bbbb1111.json", [{ id: "newer-b-prompt", text: "next prompt" }]);
+  write("v2-outbound.json", [
+    { id: "old-b-1", localId: "bbbb1111", v2SessionId: "v2-b", kind: "output", runtimeEventId: "old-b-output-1", turnId: "tb", wire: wire("b first"), sealed: false, at: 1 },
+    { id: "old-a", localId: "aaaa1111", v2SessionId: "v2-a", kind: "output", runtimeEventId: "old-a-output", wire: wire("a"), sealed: false, at: 2 },
+    { id: "old-b-2", localId: "bbbb1111", v2SessionId: "v2-b", kind: "output", runtimeEventId: "old-b-output-2", turnId: "tb", wire: wire("b second"), sealed: false, at: 3 },
+    { id: "end-b", localId: "bbbb1111", v2SessionId: "v2-b", kind: "terminal", turnId: "tb", body: { type: "terminal", terminalState: "completed" }, at: 4 },
+  ]);
+}
+const outboxCount = (l: Ledger) => (l.db.prepare("SELECT COUNT(*) AS n FROM outbox").get() as { n: number }).n;
+
+test("the global outbound file imports PER OWNER: a malformed sibling record (A) defers only A's rows and quarantines only A; B's older output imports with its newer prompt, in order, file kept (review 9d2225c3)", () => {
+  seedSiblingOwners();
+  const l = Ledger.open(dir);
+  const logs: string[] = [];
+  const r = importLegacyState(l, dir, { sealsContent: false, log: (s) => logs.push(s) });
+  expect(r.failed).toEqual([
+    { file: "window-aaaa1111.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative integer", sessionId: "aaaa1111" },
+    { file: "v2-outbound.json", error: expect.stringMatching(/^deferred: v2-outbound entry old-a belongs to session aaaa1111, whose window-aaaa1111\.json failed to import/), sessionId: "aaaa1111" },
+  ]);
+  expect(r.quarantine).toEqual(["aaaa1111"]); // B is NOT quarantined: nothing of B's waits
+  expect(r.files).toEqual(["queue-bbbb1111.json"]);
+  expect(r.outbox).toBe(3);
+  // B: the newer prompt AND the older output, the output in file order ahead of the terminal.
+  expect(l.listPending("bbbb1111").map((c) => c.id)).toEqual(["newer-b-prompt"]);
+  expect(l.pendingOutbound("bbbb1111").map((o) => o.runtimeEventId)).toEqual(["old-b-output-1", "old-b-output-2", "term:tb"]);
+  // A: nothing committed, its rows wait in the file.
+  expect(l.pendingOutbound("aaaa1111")).toEqual([]);
+  expect(l.hasOutboundEvent("old-a-output")).toBe(false);
+  // Durable per-owner progress; no whole-file marker; the file stays where it is.
+  expect(l.getImportSource("v2-outbound.json#bbbb1111")).not.toBeNull();
+  expect(l.getImportSource("v2-outbound.json#aaaa1111")).toBeNull();
+  expect(l.getImportSource("v2-outbound.json")).toBeNull();
+  expect(existsSync(join(dir, "v2-outbound.json"))).toBe(true);
+  expect(existsSync(join(dir, "imported-v1", "v2-outbound.json"))).toBe(false);
+  expect(l.getMeta("import_v1")).toBeNull();
+  expect(logs.some((s) => s.includes("v2-outbound.json: deferred") && s.includes("rows of session aaaa1111 left in place, other owners' rows committed"))).toBe(true);
+  l.close();
+});
+
+test("a second boot before the repair re-applies nothing already committed: B's rows once, A still deferred and quarantined, file kept", () => {
+  seedSiblingOwners();
+  const l1 = Ledger.open(dir);
+  importLegacyState(l1, dir, { sealsContent: false });
+  expect(outboxCount(l1)).toBe(3);
+  l1.close();
+  const l2 = Ledger.open(dir);
+  const again = importLegacyState(l2, dir, { sealsContent: false });
+  expect(again.outbox).toBe(0);
+  expect(again.files).toEqual([]);
+  expect(again.quarantine).toEqual(["aaaa1111"]);
+  expect(again.failed.map((f) => [f.file, f.sessionId])).toEqual([["window-aaaa1111.json", "aaaa1111"], ["v2-outbound.json", "aaaa1111"]]);
+  expect(outboxCount(l2)).toBe(3);
+  expect(l2.pendingOutbound("bbbb1111").map((o) => o.runtimeEventId)).toEqual(["old-b-output-1", "old-b-output-2", "term:tb"]);
+  expect(l2.hasOutboundEvent("old-a-output")).toBe(false);
+  expect(existsSync(join(dir, "v2-outbound.json"))).toBe(true);
+  expect(l2.getMeta("import_v1")).toBeNull();
+  l2.close();
+});
+
+test("repairing A and rebooting imports A's rows exactly once and duplicates none of B's; the file is then marked, moved, and the import done", () => {
+  seedSiblingOwners();
+  const l1 = Ledger.open(dir);
+  importLegacyState(l1, dir, { sealsContent: false });
+  l1.close();
+  write("window-aaaa1111.json", { launchCwd: "/a", v2SessionId: "v2-a", transcriptCheckpoint: { path: "/a", offset: 7 } });
+  const l2 = Ledger.open(dir);
+  const repaired = importLegacyState(l2, dir, { sealsContent: false });
+  expect(repaired.failed).toEqual([]);
+  expect(repaired.quarantine).toEqual([]);
+  expect(repaired.files).toEqual(["window-aaaa1111.json", "v2-outbound.json"]);
+  expect(repaired.outbox).toBe(1); // A's row only
+  expect(outboxCount(l2)).toBe(4);
+  expect(l2.pendingOutbound("aaaa1111").map((o) => o.runtimeEventId)).toEqual(["old-a-output"]);
+  expect(l2.pendingOutbound("bbbb1111").map((o) => o.runtimeEventId)).toEqual(["old-b-output-1", "old-b-output-2", "term:tb"]);
+  expect(l2.getCheckpoint("aaaa1111", "claude_transcript")?.offset).toBe(7);
+  expect(l2.getImportSource("v2-outbound.json#aaaa1111")).not.toBeNull();
+  expect(l2.getImportSource("v2-outbound.json")).not.toBeNull();
+  expect(existsSync(join(dir, "imported-v1", "v2-outbound.json"))).toBe(true);
+  expect(listLegacyFiles(dir)).toEqual([]);
+  expect(l2.getMeta("import_v1")).toBe("done");
+  // Later boots skip the scan; nothing multiplies.
+  expect(importLegacyState(l2, dir, { sealsContent: false }).skipped).toBe(true);
+  expect(outboxCount(l2)).toBe(4);
+  l2.close();
 });
 
 test("with every record readable, an outbound entry whose v2 session no record maps has no possible owner: dropped and logged, the import completes", () => {
