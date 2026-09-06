@@ -50,6 +50,8 @@ function declaredLength(req) {
  *  (one was logged per abort, a free log-spam vector). */
 const isClientAbort = (e, req) => !(e instanceof ApiError) && (e?.code === 'ECONNRESET' || e?.message === 'aborted' || req.destroyed === true);
 const intent = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+/** Every native_sessions.state (db.mjs CHECK) — what a DELETE `ifStatus` may name. */
+const SESSION_STATES = new Set(['provisioning', 'starting', 'active', 'detached', 'failed', 'archived']);
 
 // One mapping, shared with the core so the DELETE precondition it checks
 // inside its transaction (#621) agrees with what clients read. Note the
@@ -109,9 +111,21 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   route('GET', '/sessions', {}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
   route('POST', '/sessions', {}, async (ctx, m, body) => core.createSession(ctx.accountId, ctx.actorId, body));
   route('GET', '/sessions/([\\w-]+)', {}, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
-  route('DELETE', '/sessions/([\\w-]+)', {}, async (ctx, m) => {
+  // Optional `?ifStatus=a,b` (#173): the record goes only while its state is
+  // one of those AT THE DELETE — else 409 status_mismatch with the current
+  // state — mirroring the daemon kill's `ifStatus`. The app's folder cleanup
+  // passes the not-live states so a record whose agent may still be working
+  // (or restarted while the dialog was open) is never deleted unstopped.
+  route('DELETE', '/sessions/([\\w-]+)', {}, async (ctx, m, body, url) => {
+    const ifStatus = url.searchParams.get('ifStatus');
+    let expected = null;
+    if (ifStatus !== null) {
+      expected = ifStatus.split(',').map((s) => s.trim()).filter(Boolean);
+      if (expected.length === 0 || expected.some((s) => !SESSION_STATES.has(s))) throw new ApiError(400, 'bad_ifStatus');
+    }
     await db.tx(async (t) => {
-      await ownedSession(t, m[1], ctx.accountId);
+      const s = await ownedSession(t, m[1], ctx.accountId);
+      if (expected && !expected.includes(s.state)) throw new ApiError(409, { error: 'status_mismatch', status: s.state });
       await attachments.purgeSession(t, m[1]);
       await t.query(`DELETE FROM deliveries WHERE command_id IN (SELECT id FROM commands WHERE session_id = $1)`, [m[1]]);
       await t.query(`DELETE FROM session_events WHERE session_id = $1`, [m[1]]);

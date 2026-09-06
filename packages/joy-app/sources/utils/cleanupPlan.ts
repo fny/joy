@@ -35,6 +35,34 @@ export function planFolderDeletion(candidates: CleanupCandidate[]): FolderDeleti
     return { deleteNow, stopFirst };
 }
 
+/** The relay states a folder-cleanup delete is allowed to remove: the ones
+ *  with no live agent behind them. Sent as the delete's `ifStatus` so the
+ *  RELAY refuses (409 status_mismatch) when a session is provisioning,
+ *  starting or active at the delete — a card read before the dialog, or a
+ *  kill that reported "not found", is not the last word (#173). */
+export const FOLDER_DELETE_IF_STATUS = 'detached,archived,failed';
+
+export interface DeletionTally {
+    /** Records removed. */
+    deleted: string[];
+    /** Refused by the relay because the session was live at the delete (kept). */
+    live: string[];
+    /** Any other failure (network, no relay link) — retry later. */
+    failed: string[];
+}
+
+/** Sort the per-record delete results so the report can say WHY a record
+ *  stayed: a live one is a session to stop, a failed one is a retry. */
+export function tallyDeletions(results: { id: string; success: boolean; code?: string }[]): DeletionTally {
+    const tally: DeletionTally = { deleted: [], live: [], failed: [] };
+    for (const r of results) {
+        if (r.success) tally.deleted.push(r.id);
+        else if (r.code === 'status_mismatch') tally.live.push(r.id);
+        else tally.failed.push(r.id);
+    }
+    return tally;
+}
+
 export interface DetachedRecheck {
     /** Still detached per the fresh lookup — safe to close. */
     kill: string[];
