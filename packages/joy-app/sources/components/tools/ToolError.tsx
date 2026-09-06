@@ -3,17 +3,30 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 
-export function ToolError(props: { message: string }) {
+interface ToolErrorProps {
+    message: string;
+    /** `error` for a failure (red), `muted` for a denial / interruption. */
+    tone?: 'error' | 'muted';
+    /** Short label shown before the reason (e.g. "Cancelled"). */
+    label?: string | null;
+}
+
+export function ToolError(props: ToolErrorProps) {
     const { theme } = useUnistyles();
+    const tone = props.tone ?? 'error';
     const { isToolUseError, errorMessage } = parseToolUseError(props.message);
     const displayMessage = isToolUseError && errorMessage ? errorMessage : props.message;
-    
+    const muted = tone === 'muted';
+
     return (
-        <View style={[styles.errorContainer, isToolUseError && styles.toolUseErrorContainer]}>
-            {isToolUseError && (
-                <Ionicons name="warning" size={16} color={theme.colors.box.warning.text} />
-            )}
-            <Text style={[styles.errorText, isToolUseError && styles.toolUseErrorText]}>
+        <View style={[styles.errorContainer, muted && styles.mutedContainer]}>
+            <Ionicons
+                name={muted ? 'remove-circle-outline' : 'warning'}
+                size={16}
+                color={muted ? theme.colors.textSecondary : theme.colors.box.warning.text}
+            />
+            <Text style={[styles.errorText, muted && styles.mutedText]}>
+                {props.label ? <Text style={styles.label}>{props.label}{displayMessage ? ' — ' : ''}</Text> : null}
                 {displayMessage}
             </Text>
         </View>
@@ -34,16 +47,19 @@ const styles = StyleSheet.create((theme) => ({
         maxHeight: 115,
         overflow: 'hidden',
     },
-    toolUseErrorContainer: {
-        backgroundColor: theme.colors.box.error.background,
-        borderColor: theme.colors.box.error.border,
+    mutedContainer: {
+        backgroundColor: theme.colors.surfaceHigh,
+        borderColor: theme.colors.divider,
     },
     errorText: {
         fontSize: 13,
         color: theme.colors.box.error.text,
         flex: 1,
     },
-    toolUseErrorText: {
-        color: theme.colors.box.error.text,
+    mutedText: {
+        color: theme.colors.textSecondary,
+    },
+    label: {
+        fontWeight: '600',
     },
 }));

@@ -1,129 +1,173 @@
 import * as React from 'react';
 import { ToolViewProps } from './_all';
-import { Text, View, ActivityIndicator, StyleSheet, Platform } from 'react-native';
-import { knownTools } from '../../tools/knownTools';
+import { Text, View, ActivityIndicator, Platform } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { ToolCall } from '@/sync/typesMessage';
-import { useUnistyles } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { getToolModel, ToolOutcome } from '@/sync/toolModel';
+import { describeChildTool } from '../toolPresentation';
+import { ToolOutcomeView } from '../ToolOutcomeView';
+import { MarkdownView } from '@/components/markdown/MarkdownView';
+import { toolFullViewStyles } from '../ToolFullView';
 
-interface FilteredTool {
+interface ChildRow {
     tool: ToolCall;
     title: string;
-    state: 'running' | 'completed' | 'error';
+    outcome: ToolOutcome;
 }
 
-export const TaskView = React.memo<ToolViewProps>(({ tool, metadata, messages }) => {
-    const { theme } = useUnistyles();
-    const filtered: FilteredTool[] = [];
+const PREVIEW_ROWS = 3;
 
-    for (let m of messages) {
-        if (m.kind === 'tool-call') {
-            const knownTool = knownTools[m.tool.name as keyof typeof knownTools] as any;
-            
-            // Extract title using extractDescription if available, otherwise use title
-            let title = m.tool.name;
-            if (knownTool) {
-                if ('extractDescription' in knownTool && typeof knownTool.extractDescription === 'function') {
-                    title = knownTool.extractDescription({ tool: m.tool, metadata });
-                } else if (knownTool.title) {
-                    // Handle optional title and function type
-                    if (typeof knownTool.title === 'function') {
-                        title = knownTool.title({ tool: m.tool, metadata });
-                    } else {
-                        title = knownTool.title;
-                    }
-                }
-            }
-
-            if (m.tool.state === 'running' || m.tool.state === 'completed' || m.tool.state === 'error') {
-                filtered.push({
-                    tool: m.tool,
-                    title,
-                    state: m.tool.state
-                });
-            }
-        }
+function childRows(messages: ToolViewProps['messages'], metadata: ToolViewProps['metadata']): ChildRow[] {
+    const rows: ChildRow[] = [];
+    for (const m of messages) {
+        if (m.kind !== 'tool-call') continue;
+        rows.push({
+            tool: m.tool,
+            // Safe: a child with `input: null` gets its name, not a thrown card.
+            title: describeChildTool(m.tool, metadata),
+            outcome: getToolModel(m.tool).outcome,
+        });
     }
+    return rows;
+}
 
-    const styles = StyleSheet.create({
-        container: {
-            paddingVertical: 4,
-            paddingBottom: 12
-        },
-        toolItem: {
-            flexDirection: 'row',
-            alignItems: 'center',
-            paddingVertical: 4,
-            paddingLeft: 4,
-            paddingRight: 2
-        },
-        toolTitle: {
-            fontSize: 14,
-            fontWeight: '500',
-            color: theme.colors.textSecondary,
-            fontFamily: 'monospace',
-            flex: 1,
-        },
-        statusContainer: {
-            marginLeft: 'auto',
-            paddingLeft: 8,
-        },
-        loadingItem: {
-            flexDirection: 'row',
-            alignItems: 'center',
-            paddingVertical: 8,
-            paddingHorizontal: 4,
-        },
-        loadingText: {
-            marginLeft: 8,
-            fontSize: 14,
-            color: theme.colors.textSecondary,
-        },
-        moreToolsItem: {
-            paddingVertical: 4,
-            paddingHorizontal: 4,
-        },
-        moreToolsText: {
-            fontSize: 14,
-            color: theme.colors.textSecondary,
-            fontStyle: 'italic',
-            opacity: 0.7,
-        },
-    });
+function ChildOutcomeIcon({ outcome }: { outcome: ToolOutcome }) {
+    const { theme } = useUnistyles();
+    switch (outcome) {
+        case 'pending':
+            return <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={theme.colors.warning} />;
+        case 'succeeded':
+            return <Ionicons name="checkmark-circle" size={16} color={theme.colors.success} />;
+        case 'failed':
+            return <Ionicons name="close-circle" size={16} color={theme.colors.textDestructive} />;
+        case 'cancelled':
+        case 'denied':
+            return <Ionicons name="remove-circle" size={16} color={theme.colors.textSecondary} />;
+    }
+}
 
-    if (filtered.length === 0) {
+/**
+ * Compact Task / Agent card: the last few sub-tool calls. `slice(max(0, n-3))`
+ * — the previous negative slice hid one of two children.
+ */
+export const TaskView = React.memo<ToolViewProps>(({ metadata, messages }) => {
+    const rows = childRows(messages, metadata);
+
+    if (rows.length === 0) {
         return null;
     }
 
-    const visibleTools = filtered.slice(filtered.length - 3);
-    const remainingCount = filtered.length - 3;
+    const visibleRows = rows.slice(Math.max(0, rows.length - PREVIEW_ROWS));
+    const remainingCount = Math.max(0, rows.length - PREVIEW_ROWS);
 
     return (
         <View style={styles.container}>
-            {visibleTools.map((item, index) => (
+            {visibleRows.map((item, index) => (
                 <View key={`${item.tool.name}-${index}`} style={styles.toolItem}>
                     <Text style={styles.toolTitle}>{item.title}</Text>
                     <View style={styles.statusContainer}>
-                        {item.state === 'running' && (
-                            <ActivityIndicator size={Platform.OS === 'ios' ? "small" : 14 as any} color={theme.colors.warning} />
-                        )}
-                        {item.state === 'completed' && (
-                            <Ionicons name="checkmark-circle" size={16} color={theme.colors.success} />
-                        )}
-                        {item.state === 'error' && (
-                            <Ionicons name="close-circle" size={16} color={theme.colors.textDestructive} />
-                        )}
+                        <ChildOutcomeIcon outcome={item.outcome} />
                     </View>
                 </View>
             ))}
-            {remainingCount > 0 && (
+            {remainingCount > 0 ? (
                 <View style={styles.moreToolsItem}>
                     <Text style={styles.moreToolsText}>
                         {t('tools.taskView.moreTools', { count: remainingCount })}
                     </Text>
                 </View>
-            )}
+            ) : null}
         </View>
     );
 });
+
+/**
+ * Full Task / Agent details: the prompt, every sub-tool, and the subagent's
+ * answer (or failure) — the persisted result that the compact preview omits.
+ */
+export const TaskViewFull = React.memo<ToolViewProps>(({ tool, metadata, messages, sessionId }) => {
+    const model = getToolModel(tool);
+    const rows = childRows(messages, metadata);
+    const prompt = model.arguments.value.prompt;
+    const answer = model.outcome === 'succeeded' ? model.outputText : null;
+
+    return (
+        <View>
+            {typeof prompt === 'string' && prompt.trim().length > 0 ? (
+                <View style={toolFullViewStyles.section}>
+                    <Text style={styles.sectionTitle}>{t('tools.detail.prompt')}</Text>
+                    <MarkdownView markdown={prompt} sessionId={sessionId} />
+                </View>
+            ) : null}
+            {rows.length > 0 ? (
+                <View style={toolFullViewStyles.section}>
+                    <Text style={styles.sectionTitle}>{t('tools.detail.subTools')}</Text>
+                    {rows.map((item, index) => (
+                        <View key={`${item.tool.name}-${index}`} style={styles.toolItem}>
+                            <Text style={styles.toolTitle}>{item.title}</Text>
+                            <View style={styles.statusContainer}>
+                                <ChildOutcomeIcon outcome={item.outcome} />
+                            </View>
+                        </View>
+                    ))}
+                </View>
+            ) : null}
+            {answer !== null ? (
+                <View style={toolFullViewStyles.section}>
+                    <Text style={styles.sectionTitle}>{t('tools.detail.answer')}</Text>
+                    <MarkdownView markdown={answer} sessionId={sessionId} />
+                </View>
+            ) : null}
+            {model.outcome === 'succeeded' && answer === null && model.blocks.length > 0 ? (
+                <View style={toolFullViewStyles.section}>
+                    <Text style={styles.sectionTitle}>{t('tools.detail.answer')}</Text>
+                    <ToolOutcomeView model={model} mode="full" titled={false} />
+                </View>
+            ) : null}
+        </View>
+    );
+});
+
+const styles = StyleSheet.create((theme) => ({
+    container: {
+        paddingVertical: 4,
+        paddingBottom: 12
+    },
+    sectionTitle: {
+        fontSize: 13,
+        fontWeight: '600',
+        color: theme.colors.textSecondary,
+        marginBottom: 6,
+        textTransform: 'uppercase',
+    },
+    toolItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 4,
+        paddingLeft: 4,
+        paddingRight: 2
+    },
+    toolTitle: {
+        fontSize: 14,
+        fontWeight: '500',
+        color: theme.colors.textSecondary,
+        fontFamily: 'monospace',
+        flex: 1,
+    },
+    statusContainer: {
+        marginLeft: 'auto',
+        paddingLeft: 8,
+    },
+    moreToolsItem: {
+        paddingVertical: 4,
+        paddingHorizontal: 4,
+    },
+    moreToolsText: {
+        fontSize: 14,
+        color: theme.colors.textSecondary,
+        fontStyle: 'italic',
+        opacity: 0.7,
+    },
+}));

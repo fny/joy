@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Message } from '@/sync/typesMessage';
 import { knownTools } from '@/components/tools/knownTools';
+import { getToolModel } from '@/sync/toolModel';
 import { t } from '@/text';
 
 // Display item types for the grouped message list
@@ -322,10 +323,11 @@ function isUserAttachment(msg: Message): boolean {
     return msg.kind === 'tool-call' && msg.tool.name === 'file';
 }
 
-function hasPendingPermission(messages: Message[]): boolean {
+/** True when any tool in the group — or nested under a Task — awaits approval. */
+export function hasPendingPermission(messages: Message[]): boolean {
     return messages.some((msg) => (
         msg.kind === 'tool-call'
-        && msg.tool.permission?.status === 'pending'
+        && (msg.tool.permission?.status === 'pending' || hasPendingPermission(msg.children))
     ));
 }
 
@@ -341,26 +343,56 @@ const TOOL_CATEGORIES: Record<string, string> = {
     Task: 'task', Agent: 'task',
 };
 
-/** Generate a human-readable summary of tools in a group */
+/**
+ * Generate a human-readable summary of tools in a group. Totals follow the
+ * canonical OUTCOME: only a successful (or still-running) call counts as an
+ * edit / read / command; failed calls are reported as failures and pending
+ * approvals as awaiting, so a rejected Edit never reads "Edited 1 file". Edit
+ * totals count distinct affected files, not tool calls.
+ */
 export function generateGroupSummary(messages: Message[]): string {
     const counts: Record<string, number> = {};
+    const editedPaths = new Set<string>();
+    let unnamedEdits = 0;
+    let failed = 0;
+    let awaiting = 0;
 
     for (const msg of messages) {
-        if (msg.kind === 'tool-call') {
-            const category = TOOL_CATEGORIES[msg.tool.name] || 'other';
-            counts[category] = (counts[category] || 0) + 1;
+        if (msg.kind !== 'tool-call') continue;
+        const model = getToolModel(msg.tool);
+        if (msg.tool.permission?.status === 'pending') {
+            awaiting++;
+            continue;
         }
+        if (model.outcome === 'failed') {
+            failed++;
+            continue;
+        }
+        if (model.outcome === 'denied' || model.outcome === 'cancelled') {
+            continue;
+        }
+        const category = TOOL_CATEGORIES[msg.tool.name] || 'other';
+        if (category === 'edit') {
+            const paths = (model.fileChanges ?? []).map((change) => change.path).filter((path) => path.length > 0);
+            if (paths.length === 0) unnamedEdits++;
+            for (const path of paths) editedPaths.add(path);
+            continue;
+        }
+        counts[category] = (counts[category] || 0) + 1;
     }
 
     const parts: string[] = [];
+    const editCount = editedPaths.size + unnamedEdits;
 
-    if (counts.edit) parts.push(t('toolGroup.editedFiles', { count: counts.edit }));
+    if (editCount) parts.push(t('toolGroup.editedFiles', { count: editCount }));
     if (counts.read) parts.push(t('toolGroup.readFiles', { count: counts.read }));
     if (counts.terminal) parts.push(t('toolGroup.ranCommands', { count: counts.terminal }));
     if (counts.search) parts.push(t('toolGroup.searched', { count: counts.search }));
     if (counts.web) parts.push(t('toolGroup.fetchedUrls', { count: counts.web }));
     if (counts.task) parts.push(t('toolGroup.ranTasks', { count: counts.task }));
     if (counts.other) parts.push(t('toolGroup.usedTools', { count: counts.other }));
+    if (failed) parts.push(t('tools.group.failed', { count: failed }));
+    if (awaiting) parts.push(t('tools.group.awaiting', { count: awaiting }));
 
     return parts.join(', ') || t('toolGroup.usedTools', { count: messages.length });
 }

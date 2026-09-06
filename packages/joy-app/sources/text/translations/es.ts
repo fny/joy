@@ -706,7 +706,26 @@ export const es: TranslationStructure = {
             other: 'Otro',
             otherDescription: 'Escribe tu propia respuesta',
             otherPlaceholder: 'Escribe tu respuesta...',
-        }
+        },
+        outcome: {
+            succeeded: 'Completado',
+            failed: 'Falló',
+            cancelled: 'Cancelado',
+            denied: 'Denegado',
+            pending: 'Esperando',
+            proposed: 'Cambio propuesto — no aplicado',
+            image: 'Imagen',
+        },
+        detail: {
+            prompt: 'Instrucción',
+            answer: 'Respuesta',
+            subTools: 'Subherramientas',
+            command: 'Comando',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} con error`,
+            awaiting: ({ count }: { count: number }) => `${count} esperando aprobación`,
+        },
     },
 
     files: {

@@ -560,10 +560,9 @@ export const storage = create<StorageState>()((set, get) => {
                 const existingDraft = state.sessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
                 const savedPermissionMode = savedPermissionModes[session.id] ?? null;
-                const existingPermissionModeRaw = state.sessions[session.id]?.permissionMode ?? null;
-                const existingPermissionMode = existingPermissionModeRaw === 'default' && savedPermissionMode !== 'default'
-                    ? null
-                    : existingPermissionModeRaw;
+                // An explicit `default` IS an override (the user chose it) and
+                // survives an ordinary session poll like any other value.
+                const existingPermissionMode = state.sessions[session.id]?.permissionMode ?? null;
                 const resolvedPermissionMode = existingPermissionMode ?? savedPermissionMode ?? session.permissionMode ?? null;
 
                 // Restore model mode / effort level from MMKV on first load — server
@@ -749,25 +748,11 @@ export const storage = create<StorageState>()((set, get) => {
             let changed = new Set<string>();
             let hasReadyEvent = false;
 
-            // Track plan mode transitions through the batch in order.
-            // Set true on EnterPlanMode, false on ExitPlanMode. The final value
-            // tells us whether the batch ends with an unresolved plan entry.
-            // This prevents history replays (which contain both Enter + Exit) from
-            // re-triggering plan mode, while still catching real-time EnterPlanMode.
+            // Plan-mode transitions come from the reducer, which reports one
+            // only for FRESH messages (newer than everything it has projected).
+            // Scanning each batch on its own flipped the current mode to `plan`
+            // whenever an older history page carrying an EnterPlanMode loaded.
             let shouldEnterPlanMode = false;
-            for (const msg of messages) {
-                if (msg.role === 'agent') {
-                    for (const c of msg.content) {
-                        if (c.type === 'tool-call') {
-                            if (c.name === 'EnterPlanMode' || c.name === 'enter_plan_mode') {
-                                shouldEnterPlanMode = true;
-                            } else if (c.name === 'ExitPlanMode' || c.name === 'exit_plan_mode') {
-                                shouldEnterPlanMode = false;
-                            }
-                        }
-                    }
-                }
-            }
 
             set((state) => {
 
@@ -775,7 +760,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const existingSession: SessionMessages = state.sessionMessages[sessionId] || {
                     messages: [],
                     messagesMap: {},
-                    reducerState: createReducer(),
+                    reducerState: createReducer(sessionId),
                     isLoaded: false,
                     hasMoreOlder: false,
                     isLoadingOlder: false
@@ -797,6 +782,7 @@ export const storage = create<StorageState>()((set, get) => {
                 if (reducerResult.hasReadyEvent) {
                     hasReadyEvent = true;
                 }
+                shouldEnterPlanMode = reducerResult.planModeTransition === 'enter';
 
                 // Merge messages. A streamed batch touches a handful of messages in a
                 // potentially multi-thousand-message history, so a full
@@ -872,12 +858,14 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
-            // Persist plan mode change
+            // Persist plan mode change — EVERY explicit override, `default`
+            // included, exactly as updateSessionPermissionMode persists them;
+            // filtering `default` out here deleted other sessions' saved choice.
             if (shouldEnterPlanMode) {
                 const allModes: Record<string, string> = {};
                 const currentState = get();
                 Object.entries(currentState.sessions).forEach(([id, sess]) => {
-                    if (sess.permissionMode && sess.permissionMode !== 'default') {
+                    if (sess.permissionMode) {
                         allModes[id] = sess.permissionMode;
                     }
                 });
@@ -997,7 +985,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const agentState = session?.agentState;
 
                 // Create new reducer state
-                const reducerState = createReducer();
+                const reducerState = createReducer(sessionId);
 
                 // Process AgentState if it exists
                 let messages: Message[] = [];

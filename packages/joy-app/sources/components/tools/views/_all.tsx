@@ -8,11 +8,11 @@ import { WriteView } from './WriteView';
 import { TodoView } from './TodoView';
 import { ExitPlanToolView } from './ExitPlanToolView';
 import { MultiEditView } from './MultiEditView';
-import { TaskView } from './TaskView';
+import { TaskView, TaskViewFull } from './TaskView';
 import { BashViewFull } from './BashViewFull';
 import { EditViewFull } from './EditViewFull';
 import { MultiEditViewFull } from './MultiEditViewFull';
-import { CodexBashView } from './CodexBashView';
+import { CodexBashView, CodexBashViewFull } from './CodexBashView';
 import { CodexPatchView } from './CodexPatchView';
 import { CodexDiffView } from './CodexDiffView';
 import { AskUserQuestionView } from './AskUserQuestionView';
@@ -36,7 +36,9 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashView,
     CodexBash: CodexBashView,
     CodexPatch: CodexPatchView,
+    GeminiPatch: CodexPatchView,
     CodexDiff: CodexDiffView,
+    GeminiDiff: CodexDiffView,
     Write: WriteView,
     TodoWrite: TodoView,
     ExitPlanMode: ExitPlanToolView,
@@ -53,11 +55,11 @@ export const toolViewRegistry: Record<string, ToolViewComponent> = {
 
 export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Bash: BashViewFull,
-    CodexBash: CodexBashView,
+    CodexBash: CodexBashViewFull,
     Edit: EditViewFull,
     MultiEdit: MultiEditViewFull,
-    Task: TaskView,
-    Agent: TaskView,
+    Task: TaskViewFull,
+    Agent: TaskViewFull,
 };
 
 // Registry lookups are OWN-property only: a tool named "__proto__" or
@@ -74,7 +76,7 @@ export function getToolFullViewComponent(toolName: string): ToolViewComponent | 
 // Export individual components
 export { EditView } from './EditView';
 export { BashView } from './BashView';
-export { CodexBashView } from './CodexBashView';
+export { CodexBashView, CodexBashViewFull } from './CodexBashView';
 export { CodexPatchView } from './CodexPatchView';
 export { CodexDiffView } from './CodexDiffView';
 export { BashViewFull } from './BashViewFull';
@@ -82,7 +84,7 @@ export { EditViewFull } from './EditViewFull';
 export { MultiEditViewFull } from './MultiEditViewFull';
 export { ExitPlanToolView } from './ExitPlanToolView';
 export { MultiEditView } from './MultiEditView';
-export { TaskView } from './TaskView';
+export { TaskView, TaskViewFull } from './TaskView';
 export { AskUserQuestionView } from './AskUserQuestionView';
 export { GeminiEditView } from './GeminiEditView';
 export { GeminiExecuteView } from './GeminiExecuteView';

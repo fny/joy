@@ -9,16 +9,15 @@ import { Message, ToolCall } from '@/sync/typesMessage';
 import { CodeView } from '../CodeView';
 import { ToolSectionView } from './ToolSectionView';
 import { useElapsedTime } from '@/hooks/useElapsedTime';
-import { ToolError } from './ToolError';
-import { knownTools } from '@/components/tools/knownTools';
 import { useToolsCollapsed } from '@/hooks/useToolsCollapsed';
 import { Metadata } from '@/sync/storageTypes';
 import { useRouter } from 'expo-router';
 import { PermissionFooter } from './PermissionFooter';
-import { parseToolUseError } from '@/utils/toolErrorParser';
-import { formatMCPTitle } from './views/MCPToolView';
 import { t } from '@/text';
 import { getTerminalToolCommand, shouldRenderToolCardHeader } from '@/utils/toolDisplay';
+import { getToolModel, safeStringify } from '@/sync/toolModel';
+import { describeTool, primaryFilePath } from './toolPresentation';
+import { ToolOutcomeView } from './ToolOutcomeView';
 
 interface ToolViewProps {
     metadata: Metadata | null;
@@ -29,10 +28,18 @@ interface ToolViewProps {
     messageId?: string;
 }
 
+/**
+ * Compact tool card. Presentation-only: every fact it shows (title, status
+ * icon, failure text, output) comes from the canonical model and the safe
+ * `describeTool` facts, so a malformed record renders as a raw fallback and a
+ * failure classified by the model shows the same way in every card.
+ */
 export const ToolView = React.memo<ToolViewProps>((props) => {
     const { tool, onPress, sessionId, messageId } = props;
     const router = useRouter();
     const { theme } = useUnistyles();
+    const model = getToolModel(tool);
+    const presentation = describeTool(tool, props.metadata, props.messages);
 
     // Global collapse-all (session header button) + per-card override. The
     // override resets whenever the global toggles (nonce bump) so the button
@@ -46,7 +53,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     // For file-editing tools, navigate to file route instead of message detail
     const fileEditTools = ['Edit', 'MultiEdit', 'Write'];
     const isFileEditTool = fileEditTools.includes(tool.name);
-    const filePath = isFileEditTool && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
+    const filePath = isFileEditTool ? primaryFilePath(tool) : null;
 
     // Create default onPress handler for navigation
     const handlePress = React.useCallback(() => {
@@ -61,7 +68,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
 
     // joy mod 08 (permanent): "Open file" affordance for Read tools.
     // Read has no SpecificToolView, so this renders in the default content branch.
-    const readFilePath = tool.name === 'Read' && typeof tool.input?.file_path === 'string' ? tool.input.file_path : null;
+    const readFilePath = tool.name === 'Read' ? primaryFilePath(tool) : null;
     const handleOpenReadFile = React.useCallback(() => {
         if (!sessionId || !readFilePath) return;
         router.push(`/session/${sessionId}/file?path=${encodePathParam(readFilePath)}`);
@@ -70,129 +77,65 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     // Enable pressable if either onPress is provided or we have navigation params
     const isPressable = !!(onPress || (sessionId && filePath) || (sessionId && messageId));
 
-    let knownTool = knownTools[tool.name as keyof typeof knownTools] as any;
-
     // Internal Claude Code tools (e.g. ToolSearch) are completely hidden from the UI
-    if (knownTool?.hidden) {
+    if (presentation.hidden) {
         return null;
     }
 
-    let description: string | null = null;
-    let status: string | null = null;
-    let minimal = false;
-    let icon = <Ionicons name="construct-outline" size={18} color={theme.colors.textSecondary} />;
-    let noStatus = false;
-    let hideDefaultError = false;
-    
-    // For Gemini: unknown tools should be rendered as minimal (hidden)
-    // This prevents showing raw INPUT/OUTPUT for internal Gemini tools
-    // that we haven't explicitly added to knownTools
-    const isGemini = props.metadata?.flavor === 'gemini';
-    if (!knownTool && isGemini) {
-        minimal = true;
-    }
+    let minimal = presentation.minimal;
+    const { status, subtitle: description, noStatus, hideDefaultError } = presentation;
+    const toolTitle = presentation.title;
 
-    // Extract status first to potentially use as title
-    if (knownTool && typeof knownTool.extractStatus === 'function') {
-        const state = knownTool.extractStatus({ tool, metadata: props.metadata });
-        if (typeof state === 'string' && state) {
-            status = state;
-        }
-    }
-
-    // Handle optional title and function type
-    let toolTitle = tool.name;
-    
-    // Special handling for MCP tools
+    let icon: React.ReactNode = <Ionicons name="construct-outline" size={18} color={theme.colors.textSecondary} />;
     if (tool.name.startsWith('mcp__')) {
-        toolTitle = formatMCPTitle(tool.name);
         icon = <Ionicons name="extension-puzzle-outline" size={18} color={theme.colors.textSecondary} />;
-        minimal = true;
-    } else if (knownTool?.title) {
-        if (typeof knownTool.title === 'function') {
-            toolTitle = knownTool.title({ tool, metadata: props.metadata });
-        } else {
-            toolTitle = knownTool.title;
-        }
-    }
-
-    if (knownTool && typeof knownTool.extractSubtitle === 'function') {
-        const subtitle = knownTool.extractSubtitle({ tool, metadata: props.metadata });
-        if (typeof subtitle === 'string' && subtitle) {
-            description = subtitle;
-        }
-    }
-    if (knownTool && knownTool.minimal !== undefined) {
-        if (typeof knownTool.minimal === 'function') {
-            minimal = knownTool.minimal({ tool, metadata: props.metadata, messages: props.messages });
-        } else {
-            minimal = knownTool.minimal;
-        }
-    }
-    
-    // Special handling for CodexBash to determine icon based on parsed_cmd
-    if (tool.name === 'CodexBash' && tool.input?.parsed_cmd && Array.isArray(tool.input.parsed_cmd) && tool.input.parsed_cmd.length > 0) {
-        const parsedCmd = tool.input.parsed_cmd[0];
-        if (parsedCmd.type === 'read') {
+    } else if (tool.name === 'CodexBash' && model.command && model.command.operations.length === 1) {
+        // A single harness-parsed operation picks the icon for what it does.
+        const operation = model.command.operations[0];
+        if (operation.kind === 'read') {
             icon = <Octicons name="eye" size={18} color={theme.colors.text} />;
-        } else if (parsedCmd.type === 'write') {
+        } else if (operation.kind === 'write') {
             icon = <Octicons name="file-diff" size={18} color={theme.colors.text} />;
         } else {
             icon = <Octicons name="terminal" size={18} color={theme.colors.text} />;
         }
-    } else if (knownTool && typeof knownTool.icon === 'function') {
-        icon = knownTool.icon(18, theme.colors.text);
-    }
-    
-    if (knownTool && typeof knownTool.noStatus === 'boolean') {
-        noStatus = knownTool.noStatus;
-    }
-    if (knownTool && typeof knownTool.hideDefaultError === 'boolean') {
-        hideDefaultError = knownTool.hideDefaultError;
+    } else if (presentation.icon) {
+        icon = presentation.icon(18, theme.colors.text);
     }
 
-    let statusIcon = null;
-
-    let isToolUseError = false;
-    if (tool.state === 'error' && tool.result && parseToolUseError(tool.result).isToolUseError) {
-        isToolUseError = true;
-        console.log('isToolUseError', tool.result);
-    }
-
-    // Check permission status first for denied/canceled states
-    if (tool.permission && (tool.permission.status === 'denied' || tool.permission.status === 'canceled')) {
-        statusIcon = <Ionicons name="remove-circle-outline" size={20} color={theme.colors.textSecondary} />;
-    } else if (isToolUseError) {
-        statusIcon = <Ionicons name="remove-circle-outline" size={20} color={theme.colors.textSecondary} />;
-        hideDefaultError = true;
-        minimal = true;
-    } else {
-        switch (tool.state) {
-            case 'running':
-                if (!noStatus) {
-                    statusIcon = <ActivityIndicator size="small" color={theme.colors.text} style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }} />;
-                }
-                break;
-            case 'completed':
-                // if (!noStatus) {
-                //     statusIcon = <Ionicons name="checkmark-circle" size={20} color="#34C759" />;
-                // }
-                break;
-            case 'error':
-                statusIcon = <Ionicons name="alert-circle-outline" size={20} color={theme.colors.warning} />;
-                break;
-        }
+    // The status icon follows the model's OUTCOME. A denial or an interruption
+    // is muted; an ordinary failure (Claude wraps those in <tool_use_error>
+    // too) is a warning with its reason kept, never a cancellation.
+    let statusIcon: React.ReactNode = null;
+    switch (model.outcome) {
+        case 'pending':
+            if (!noStatus) {
+                statusIcon = <ActivityIndicator size="small" color={theme.colors.text} style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }} />;
+            }
+            break;
+        case 'failed':
+            statusIcon = <Ionicons name="alert-circle-outline" size={20} color={theme.colors.warning} />;
+            break;
+        case 'cancelled':
+        case 'denied':
+            statusIcon = <Ionicons name="remove-circle-outline" size={20} color={theme.colors.textSecondary} />;
+            break;
+        case 'succeeded':
+            break;
     }
 
     const terminalCommand = getTerminalToolCommand(tool);
     const isCompactTerminalTool = terminalCommand !== null;
     const isInlineCodexPatch = Platform.OS === 'web' && tool.name === 'CodexPatch';
-    const renderCardHeader = shouldRenderToolCardHeader(tool.name, Platform.OS);
-    const renderPermissionFooter = () => (
-        tool.permission && sessionId && tool.name !== 'AskUserQuestion'
-            ? <PermissionFooter permission={tool.permission} sessionId={sessionId} toolName={tool.name} toolInput={tool.input} metadata={props.metadata} />
-            : null
-    );
+    // The inline web patch normally has no card header; while collapsed it
+    // needs one, or there is nothing left to expand it with.
+    const renderCardHeader = shouldRenderToolCardHeader(tool.name, Platform.OS) || isCollapsed;
+    const permissionFooter = tool.permission && sessionId && tool.name !== 'AskUserQuestion'
+        ? <PermissionFooter permission={tool.permission} sessionId={sessionId} toolName={tool.name} toolInput={tool.input} metadata={props.metadata} />
+        : null;
+    // The footer travels into the inline patch view only when that view is
+    // shown; a collapsed body must never take the approval controls with it.
+    const footerInsidePatch = isInlineCodexPatch && !isCollapsed && !minimal;
 
     const renderHeaderContent = () => {
         if (isCompactTerminalTool) {
@@ -206,11 +149,11 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                     <Text style={styles.compactCommandText} numberOfLines={1}>
                         {terminalCommand}
                     </Text>
-                    {tool.state === 'running' && (
+                    {model.outcome === 'pending' ? (
                         <View style={styles.elapsedContainer}>
                             <ElapsedView from={tool.createdAt} />
                         </View>
-                    )}
+                    ) : null}
                     {statusIcon}
                 </View>
             );
@@ -223,17 +166,17 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 </View>
                 <View style={styles.titleContainer}>
                     <Text style={styles.toolName} numberOfLines={1}>{toolTitle}{status ? <Text style={styles.status}>{` ${status}`}</Text> : null}</Text>
-                    {description && (
+                    {description ? (
                         <Text style={styles.toolDescription} numberOfLines={1}>
                             {description}
                         </Text>
-                    )}
+                    ) : null}
                 </View>
-                {tool.state === 'running' && (
+                {model.outcome === 'pending' ? (
                     <View style={styles.elapsedContainer}>
                         <ElapsedView from={tool.createdAt} />
                     </View>
-                )}
+                ) : null}
                 {statusIcon}
             </View>
         );
@@ -252,6 +195,68 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
         </TouchableOpacity>
     ) : null;
 
+    const renderBody = () => {
+        // A minimal card has no body — unless it failed: the reason must
+        // still be visible somewhere.
+        if (minimal || isCompactTerminalTool || isCollapsed) {
+            if (!hideDefaultError && !isCollapsed && (model.outcome === 'failed')) {
+                return (
+                    <View style={styles.content}>
+                        <ToolOutcomeView model={model} mode="compact" />
+                    </View>
+                );
+            }
+            return null;
+        }
+
+        // Try to use a specific tool view component first
+        const SpecificToolView = getToolViewComponent(tool.name);
+        if (SpecificToolView) {
+            return (
+                <View style={styles.content}>
+                    <SpecificToolView
+                        tool={tool}
+                        metadata={props.metadata}
+                        messages={props.messages ?? []}
+                        sessionId={sessionId}
+                        permissionFooter={footerInsidePatch ? permissionFooter : undefined}
+                    />
+                    {!hideDefaultError ? <ToolOutcomeView model={model} mode="compact" /> : null}
+                </View>
+            );
+        }
+
+        // Fall back to default view: arguments, then the outcome (failure
+        // reason, or every result block).
+        const hasInput = model.arguments.ok
+            ? Object.keys(model.arguments.value).length > 0
+            : (model.raw.input !== undefined && model.raw.input !== null);
+        return (
+            <View style={styles.content}>
+                {hasInput ? (
+                    <ToolSectionView title={t('toolView.input')}>
+                        <CodeView code={model.arguments.ok ? safeStringify(model.arguments.value) : safeStringify(model.raw.input)} />
+                    </ToolSectionView>
+                ) : null}
+
+                {readFilePath && sessionId ? (
+                    <ToolSectionView>
+                        <TouchableOpacity
+                            style={styles.openFileButton}
+                            onPress={handleOpenReadFile}
+                            activeOpacity={0.7}
+                        >
+                            <Ionicons name="open-outline" size={16} color={theme.colors.button.primary.tint} />
+                            <Text style={styles.openFileButtonText}>{t('toolView.openFile')}</Text>
+                        </TouchableOpacity>
+                    </ToolSectionView>
+                ) : null}
+
+                <ToolOutcomeView model={model} mode="full" />
+            </View>
+        );
+    };
+
     return (
         <View style={isCompactTerminalTool ? styles.compactContainer : isInlineCodexPatch ? styles.inlineContainer : styles.container}>
             {renderCardHeader ? (
@@ -268,82 +273,11 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
                 )
             ) : null}
 
-            {/* Content area - either custom children or tool-specific view */}
-            {(() => {
-                // Check if minimal first - minimal tools don't show content
-                if (minimal || isCompactTerminalTool || isCollapsed) {
-                    return null;
-                }
-
-                // Try to use a specific tool view component first
-                const SpecificToolView = getToolViewComponent(tool.name);
-                if (SpecificToolView) {
-                    return (
-                        <View style={styles.content}>
-                            <SpecificToolView
-                                tool={tool}
-                                metadata={props.metadata}
-                                messages={props.messages ?? []}
-                                sessionId={sessionId}
-                                permissionFooter={isInlineCodexPatch ? renderPermissionFooter() : undefined}
-                            />
-                            {tool.state === 'error' && tool.result &&
-                                !(tool.permission && (tool.permission.status === 'denied' || tool.permission.status === 'canceled')) &&
-                                !hideDefaultError && (
-                                    <ToolError message={String(tool.result)} />
-                                )}
-                        </View>
-                    );
-                }
-
-                // Show error state if present (but not for denied/canceled permissions and not when hideDefaultError is true)
-                if (tool.state === 'error' && tool.result &&
-                    !(tool.permission && (tool.permission.status === 'denied' || tool.permission.status === 'canceled')) &&
-                    !isToolUseError) {
-                    return (
-                        <View style={styles.content}>
-                            <ToolError message={String(tool.result)} />
-                        </View>
-                    );
-                }
-
-                // Fall back to default view
-                return (
-                    <View style={styles.content}>
-                        {/* Default content when no custom view available */}
-                        {tool.input && (
-                            <ToolSectionView title={t('toolView.input')}>
-                                <CodeView code={JSON.stringify(tool.input, null, 2)} />
-                            </ToolSectionView>
-                        )}
-
-                        {readFilePath && sessionId && (
-                            <ToolSectionView>
-                                <TouchableOpacity
-                                    style={styles.openFileButton}
-                                    onPress={handleOpenReadFile}
-                                    activeOpacity={0.7}
-                                >
-                                    <Ionicons name="open-outline" size={16} color={theme.colors.button.primary.tint} />
-                                    <Text style={styles.openFileButtonText}>{t('toolView.openFile')}</Text>
-                                </TouchableOpacity>
-                            </ToolSectionView>
-                        )}
-
-                        {tool.state === 'completed' && tool.result && (
-                            <ToolSectionView title={t('toolView.output')}>
-                                <CodeView
-                                    code={typeof tool.result === 'string' ? tool.result : JSON.stringify(tool.result, null, 2)}
-                                />
-                            </ToolSectionView>
-                        )}
-                    </View>
-                );
-            })()}
+            {renderBody()}
 
             {/* Permission footer - always renders when permission exists to maintain consistent height */}
             {/* AskUserQuestion has its own Submit button UI - no permission footer needed */}
-            {!isInlineCodexPatch ? renderPermissionFooter() : null}
+            {!footerInsidePatch ? permissionFooter : null}
         </View>
     );
 });

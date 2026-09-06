@@ -705,7 +705,26 @@ export const pt: TranslationStructure = {
             other: 'Outro',
             otherDescription: 'Digite sua própria resposta',
             otherPlaceholder: 'Digite sua resposta...',
-        }
+        },
+        outcome: {
+            succeeded: 'Concluído',
+            failed: 'Falhou',
+            cancelled: 'Cancelado',
+            denied: 'Negado',
+            pending: 'Aguardando',
+            proposed: 'Alteração proposta — não aplicada',
+            image: 'Imagem',
+        },
+        detail: {
+            prompt: 'Instrução',
+            answer: 'Resposta',
+            subTools: 'Subferramentas',
+            command: 'Comando',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} com falha`,
+            awaiting: ({ count }: { count: number }) => `${count} aguardando aprovação`,
+        },
     },
 
     files: {

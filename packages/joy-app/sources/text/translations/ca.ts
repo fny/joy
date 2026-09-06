@@ -706,7 +706,26 @@ export const ca: TranslationStructure = {
             other: 'Altres',
             otherDescription: 'Escriu la teva pròpia resposta',
             otherPlaceholder: 'Escriu la teva resposta...',
-        }
+        },
+        outcome: {
+            succeeded: 'Completat',
+            failed: 'Ha fallat',
+            cancelled: 'Cancel·lat',
+            denied: 'Denegat',
+            pending: 'En espera',
+            proposed: 'Canvi proposat — no aplicat',
+            image: 'Imatge',
+        },
+        detail: {
+            prompt: 'Instrucció',
+            answer: 'Resposta',
+            subTools: 'Subeines',
+            command: 'Ordre',
+        },
+        group: {
+            failed: ({ count }: { count: number }) => `${count} amb error`,
+            awaiting: ({ count }: { count: number }) => `${count} esperant aprovació`,
+        },
     },
 
     files: {
