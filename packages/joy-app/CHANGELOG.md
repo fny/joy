@@ -1,3 +1,14 @@
+# Sep 7 (3) — Sync and sending, made durable
+
+- **Sessions deleted on another device disappear on the next refresh** instead of lingering, and reloading a chat during a fetch no longer strands its history behind one message.
+- **A send whose response was lost after the relay accepted it stays in the chat**, and sending into a session the app had evicted from memory no longer hides its older history.
+- **Starting a session after a dropped connection no longer creates a duplicate**, startup no longer hangs when the relay stops answering after accepting, and a long-open "Create directory?" prompt no longer reports a false failure.
+- **Queue actions report daemon failures**; steering or removing a queued message can no longer lose it or leave a ghost send; clearing the composer no longer restores the saved draft.
+- **Approving or denying a tool request reports failure when the daemon did not apply it**, and renaming a machine cannot overwrite concurrent updates after a decrypt hiccup.
+- **Settings written by a newer app version are preserved** instead of being stripped and synced back.
+- **Terminal: failed sends put your text back**, and the window size is retried once the daemon is reachable. Attachments survive resizing across the sidebar breakpoint, session search keeps its place when matches change, and the model chip on Codex, pi and Antigravity sessions no longer types into the terminal.
+- **Live updates no longer stall** when the relay's event stream splits a line ending across chunks.
+
 # Sep 7 (2) — Git status and Markdown, exact
 
 - **File names are shown exactly as they are** (trailing spaces, quotes, pipes, accents, emoji); the file you see is the file that opens. Line counts are exact or absent: binary, untracked and unread files show no number instead of 0, and a failed read no longer wipes known counts. *Needs the updated daemon for exact names and counts; an older daemon still lists files without them.*
