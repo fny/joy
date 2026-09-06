@@ -238,7 +238,10 @@ export function notifyVoiceUnexpectedDisconnect(): void {
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         if (intentionalStop || !isVoiceArmed()) return;
-        startVoice(sessionId, { silentWake: true })
+        // Resolve the focused session when the attempt RUNS, not when the
+        // drop happened: focus moved to another session during the delay
+        // must not be undone by reconnecting to the captured one (#338).
+        startVoice(currentSessionId ?? sessionId, { silentWake: true })
             .then((ok) => { if (!ok && !intentionalStop) notifyVoiceUnexpectedDisconnect(); })
             .catch(() => { if (!intentionalStop) notifyVoiceUnexpectedDisconnect(); });
     }, delay);
