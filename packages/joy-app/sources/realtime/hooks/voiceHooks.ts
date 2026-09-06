@@ -14,6 +14,7 @@ import type { Message } from '@/sync/typesMessage';
 import type { Session } from '@/sync/storageTypes';
 import { VOICE_CONFIG } from '../voiceConfig';
 import { PendingPromptQueue, shouldQueuePrompt } from '../pendingPrompts';
+import { SessionContextLedger } from './contextLedger';
 
 /**
  * Feeds the voice agent from app state. Two channels:
@@ -24,8 +25,9 @@ import { PendingPromptQueue, shouldQueuePrompt } from '../pendingPrompts';
  *   Retention rules live in pendingPrompts.ts.
  */
 
-// Sessions whose full context the CURRENT connection has received.
-let shownSessions = new Set<string>();
+// Sessions whose full context the CURRENT connection has received, and what
+// changed in them while the line was down (#340). See contextLedger.ts.
+const shown = new SessionContextLedger<Message>();
 const pending = new PendingPromptQueue();
 const seenRequests = new Set<string>();
 const seenQuestions = new Set<string>();
@@ -77,7 +79,9 @@ export function flushPendingPrompts(): void {
     if (pending.size === 0) return;
     // A prompt queued while the line was down says "the previous messages
     // are its summary" about a session this connection may never have been
-    // shown — only the focused session goes into the system prompt (#340).
+    // shown — only the focused session goes into the system prompt — or was
+    // shown before the event it refers to happened (#340). Either way the
+    // agent gets the session's context first.
     for (const sid of pending.sessionIds()) injectSessionContext(sid);
     const batched = pending.drain().join('\n\n');
     log('prompt (flush):', batched);
@@ -119,18 +123,35 @@ function sessionContextFor(sessionId: string): string | null {
 }
 
 /**
- * Inject a session's context over a LIVE line, once per connection. It is
- * marked shown only when actually sent: marking it while the line was down
- * (and the update silently dropped) meant the session was never injected
- * after the reconnect either (#340).
+ * Bring a session's context up to date over a LIVE line: the full history
+ * once per connection, then whatever changed while the line was down.
+ *
+ * It is marked shown only when actually sent: marking it while the line was
+ * down (and the update silently dropped) meant the session was never
+ * injected after the reconnect either (#340). A session shown at connect
+ * time — the focused one, briefed in the system prompt — may have moved on
+ * while the token and the SDK connect were pending; those updates were
+ * deferred by onMessages and are replayed here, before any prompt about
+ * them, so the agent never summarises a result it was not sent (#340).
  */
 function injectSessionContext(sessionId: string): void {
-    if (shownSessions.has(sessionId)) return;
     if (!getVoiceSession() || !isVoiceConnected()) return;
+    if (shown.isShown(sessionId)) {
+        refreshSessionContext(sessionId);
+        return;
+    }
     const ctx = sessionContextFor(sessionId);
     if (!ctx) return;
-    shownSessions.add(sessionId);
+    shown.markShown(sessionId);
     sendContext(ctx);
+}
+
+/** Replay the updates deferred against a shown session's snapshot. */
+function refreshSessionContext(sessionId: string): void {
+    const deferred = shown.takeDeferred(sessionId);
+    if (deferred.length === 0) return;
+    log('context (deferred since snapshot):', sessionId, deferred.length);
+    sendContext(formatNewMessages(sessionId, deferred, sessionOf(sessionId)));
 }
 
 function announceFocus(sessionId: string): void {
@@ -201,7 +222,13 @@ export const voiceHooks = {
                 }
             }
         }
-        if (!isVoiceConnected()) return;
+        if (!isVoiceConnected()) {
+            // The line is down. A session already in the agent's context —
+            // the one briefed while this connect is in flight — would
+            // otherwise never hear of this change (#340).
+            shown.defer(sessionId, messages);
+            return;
+        }
         injectSessionContext(sessionId);
         sendContext(formatNewMessages(sessionId, messages, session));
     },
@@ -212,24 +239,32 @@ export const voiceHooks = {
         sendPrompt(sessionId, formatReadyEvent(sessionId, sessionOf(sessionId)));
     },
 
-    /** Builds the prompt context for a (re)connect. */
+    /** Builds the prompt context for a (re)connect. The focused session's
+     *  snapshot is taken now; what changes in it before the line is up is
+     *  deferred and replayed on connect (#340). */
     onVoiceStarted(sessionId: string): string {
         log('voice started for', sessionId);
-        shownSessions.clear();
+        shown.clear();
         ensureModeSubscription();
         let prompt = formatSessionDirectory() + '\n\n';
         const ctx = sessionContextFor(sessionId);
         if (ctx) {
-            shownSessions.add(sessionId);
+            shown.markShown(sessionId);
             prompt += 'FOCUSED SESSION:\n\n' + ctx;
         }
         return prompt;
     },
 
+    /** The line is up: replay what changed in the briefed sessions since
+     *  their snapshot, before any focus announcement or queued prompt. */
+    onVoiceConnected() {
+        for (const sid of shown.staleSessions()) refreshSessionContext(sid);
+    },
+
     /** Voice fully ended (disarmed). Hang-ups keep the queue. */
     onVoiceStopped() {
         log('voice stopped');
-        shownSessions.clear();
+        shown.clear();
         pending.clear();
         seenRequests.clear();
         seenQuestions.clear();

@@ -302,6 +302,9 @@ export function notifyVoiceConnected(): void {
     clearReconnectTimer();
     connectedAt = Date.now();
     armIdleTimer();
+    // What changed in the briefed sessions while the line was coming up is
+    // delivered before anything else is said about them (#340).
+    voiceHooks.onVoiceConnected();
     syncContextToFocus();
     // Anything queued while the line was down is spoken now.
     setTimeout(flushPendingPrompts, 300);

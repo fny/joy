@@ -18,7 +18,20 @@ import { SOUND_WAKE, SpeechDetector } from './soundWakeDetector';
 // while the first kept the mic; the next startVoice then failed (#24).
 const KEY = 'soundWake.native';
 
+/**
+ * expo-audio has no metering without a file, and one recording ran on until
+ * stop — an armed phone left idle for hours filled its cache with audio
+ * nobody wanted (#345). The recording is rotated on this period: a fresh
+ * recorder takes over and the old file is deleted, so at most one bounded
+ * file exists (LOW_QUALITY is 64 kbit/s ≈ 2.4 MB per period).
+ */
+export const SOUND_WAKE_ROTATE_MS = 5 * 60_000;
+/** A rotation that failed to open a recorder is retried after this. */
+export const SOUND_WAKE_RETRY_MS = 10_000;
+
 let recorder: AudioRecorder | null = null;
+let recordingSince = 0;
+let rotating = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 let detector: SpeechDetector | null = null;
 // The ambient floor survives restarts so a noisy room does not re-trigger on
@@ -32,28 +45,29 @@ export async function startSoundWake(onSpeech: () => void): Promise<void> {
     try {
         await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
         if (!isLatest(KEY, gen)) return;
-        r = new AudioModule.AudioRecorder({ ...RecordingPresets.LOW_QUALITY, isMeteringEnabled: true });
-        await r.prepareToRecordAsync();
-        if (!isLatest(KEY, gen) || recorder || timer) {
-            // Stopped (or restarted) while preparing.
+        r = await openRecorder(gen);
+        if (!r) return; // stopped (or restarted) while preparing
+        if (recorder || timer) {
             await discardRecorder(r);
             return;
         }
-        r.record();
-        recorder = r;
     } catch (e) {
         console.warn('[voice] sound wake unavailable:', e);
-        // The allocation happened even though it never reached `recorder`;
-        // Expo's registry keeps it (and any file prepare created) until it is
-        // released explicitly (#346).
-        if (r) await discardRecorder(r);
         return;
     }
+    recorder = r;
+    recordingSince = Date.now();
 
     const d = new SpeechDetector(lastFloor ?? undefined);
     detector = d;
     timer = setInterval(() => {
+        if (rotating) return;
         const rec = recorder;
+        const period = rec ? SOUND_WAKE_ROTATE_MS : SOUND_WAKE_RETRY_MS;
+        if (Date.now() - recordingSince >= period) {
+            void rotateRecording(gen);
+            return;
+        }
         if (!rec) return;
         let level: number | undefined;
         try { level = rec.getStatus().metering; } catch { return; }
@@ -75,6 +89,62 @@ export async function stopSoundWake(): Promise<void> {
 }
 
 /**
+ * A prepared, recording recorder for generation `gen`, or null when the
+ * generation was retired while preparing. The allocation happens before it
+ * reaches `recorder`, and Expo's registry keeps it (and any file prepare
+ * created) until it is released explicitly, so every exit that does not
+ * hand the recorder back discards it (#346).
+ */
+async function openRecorder(gen: number): Promise<AudioRecorder | null> {
+    let r: AudioRecorder | null = null;
+    try {
+        r = new AudioModule.AudioRecorder({ ...RecordingPresets.LOW_QUALITY, isMeteringEnabled: true });
+        await r.prepareToRecordAsync();
+        if (!isLatest(KEY, gen)) {
+            await discardRecorder(r);
+            return null;
+        }
+        r.record();
+        return r;
+    } catch (e) {
+        if (r) await discardRecorder(r);
+        throw e;
+    }
+}
+
+/**
+ * Swap the current recording for a fresh one (#345). Sequential — stop and
+ * delete the old before opening the new — because two recorders on the
+ * microphone at once is not something every Android MediaRecorder allows.
+ * The ticks in between see no recorder and skip; the detector window is
+ * one second, so nothing is lost that a wake would need. A failed open
+ * leaves the ticks blind and is retried after SOUND_WAKE_RETRY_MS.
+ */
+async function rotateRecording(gen: number): Promise<void> {
+    if (rotating) return;
+    rotating = true;
+    try {
+        const old = recorder;
+        recorder = null;
+        if (old) await discardRecorder(old);
+        if (!isLatest(KEY, gen)) return;
+        const fresh = await openRecorder(gen);
+        if (!fresh) return;
+        if (!isLatest(KEY, gen) || timer === null) {
+            // Stopped while opening.
+            await discardRecorder(fresh);
+            return;
+        }
+        recorder = fresh;
+    } catch (e) {
+        console.warn('[voice] sound wake: recording not rotated:', e);
+    } finally {
+        recordingSince = Date.now();
+        rotating = false;
+    }
+}
+
+/**
  * Stop, release and delete the throwaway recording. expo-audio writes each
  * recording to a UUID-named file in the cache directory and deletes it
  * neither on stop nor on release, so idle listening accumulated audio on
@@ -85,12 +155,22 @@ async function discardRecorder(r: AudioRecorder): Promise<void> {
     let uri: string | null = null;
     try { uri = r.uri; } catch { /* released */ }
     try { r.release(); } catch { /* already released */ }
-    if (!uri) return;
-    // delete() throws when there is nothing at the uri — prepare failed before
-    // writing, or the file is already gone — which is the outcome we want.
-    try { new File(uri).delete(); } catch { /* nothing to delete */ }
+    if (uri) deleteRecording(uri);
+}
+
+/** Delete a recording file. Nothing at the uri — prepare failed before
+ *  writing, or the file is already gone — is the outcome we want; any other
+ *  failure is a file that will sit in the cache, so it is reported. */
+function deleteRecording(uri: string): void {
+    try {
+        const file = new File(uri);
+        if (!file.exists) return;
+        file.delete();
+    } catch (e) {
+        console.warn('[voice] sound wake: throwaway recording not deleted:', uri, e);
+    }
 }
 
 export function isSoundWakeListening(): boolean {
-    return recorder !== null;
+    return timer !== null;
 }
