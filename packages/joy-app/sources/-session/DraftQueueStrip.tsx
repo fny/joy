@@ -14,6 +14,9 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
     const drafts = React.useMemo(() => all.filter((d) => draftReason(d) === 'draft'), [all]);
     const update = useDraftQueueStore((s) => s.update);
     const remove = useDraftQueueStore((s) => s.remove);
+    // One send per draft at a time: beginSend mints a new key for a pending
+    // duplicate, so a second tap before the ack sent the draft twice (#10).
+    const sending = React.useRef(new Set<string>());
     const rows = React.useMemo<QueueRowModel[]>(() => drafts.map((d) => ({
         id: d.id, text: d.text,
         error: d.lastError ?? null,
@@ -21,6 +24,8 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
         onRemove: () => remove(sessionId, d.id),
         onSend: () => {
             if (!d.text.trim()) { remove(sessionId, d.id); return; }
+            if (sending.current.has(d.id)) return;
+            sending.current.add(d.id);
             // The draft is removed only once the relay accepted it; a failed
             // send keeps it (with the error on the row) and says so (#10).
             const sentText = d.text;
@@ -41,7 +46,7 @@ export const DraftQueueStrip = React.memo(function DraftQueueStrip({ sessionId }
                 sendFailed(scope, localId);
                 useDraftQueueStore.getState().revertRelease(sessionId, d.id, res.reason);
                 if (!res.reason.startsWith('attachment upload failed')) Modal.alert(t('errors.sendFailedTitle'), t('errors.sendFailedMessage'), [{ text: t('common.ok'), style: 'cancel' }]);
-            });
+            }).finally(() => { sending.current.delete(d.id); });
         },
     })), [drafts, sessionId, update, remove]);
     return <QueueStack title={t('joyQueue.draftsTitle')} rows={rows} />;

@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 6 — Review fixes",
+      "summary": "",
+      "markdown": "- **A chat you return to keeps updating.** Going back to a session that stayed open under another screen could leave it frozen: the app had stopped treating it as the one on screen, so it no longer polled. Focus now decides which session is live.\n- **Scrolling up reaches all of the history.** A long run of invisible bookkeeping rows could make the app decide there was nothing older even though the relay said there was; the page bound now advances through them.\n- **Drafts send once.** Tapping Send twice on a saved draft before the relay answered sent it twice.\n- **Diff views with very long lines stay responsive**: paired long lines are shown whole instead of computing a word-by-word highlight that took seconds.\n- **The all-files diff never shows a stale result** for a file that was cleaned and changed again while an earlier fetch was still running."
+    },
+    {
       "title": "Sep 5 (5) — Faster chat loading",
       "summary": "",
       "markdown": "- **Opening a long session is fast again, and scrolling up costs one request.** Loading older messages used to re-read the whole conversation from the beginning every time; the relay now serves pages backwards. *Needs the updated relay first — an older relay ignores the new page request.*\n- **Only the session on screen polls.** The app polled every session in the account every 2.5 seconds, decrypting everything and undoing the memory limit; now only the visible session (and one with a send still settling) does.\n- **Edit cards with very long lines no longer freeze the app** while their diff is computed."
@@ -291,5 +296,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 5 (5) — Faster chat loading"
+  "latestTitle": "Sep 6 — Review fixes"
 }
