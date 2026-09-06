@@ -258,6 +258,11 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   needed`, `Clarification needed`); `JOY_PUSH_SNIPPETS=1` opts the reply
   snippet and AI title back in (#118). Machine metadata is merged with a
   compare-and-set on a fresh read, never overwriting an app-side rename (#61).
+  Preserve-unknown: a machine row whose sealed metadata the daemon cannot
+  open is left exactly as it is — no metadata write and no key-envelope
+  repair, whether or not the row carries a `dataEncryptionKey` (a missing
+  envelope is not proof the blob is disposable; a paired client may still
+  hold its key). There is no recovery policy that overwrites such a row.
 - Tunnel executor: the sealed request path (`p`) MUST be `/`-rooted,
   same-origin and URL-encoded — a daemon-local request-target such as
   `/v2/files/content?path=%2Fhome%2Fme%2FMy%20Docs`. It is resolved against
