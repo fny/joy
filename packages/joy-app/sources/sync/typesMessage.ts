@@ -96,4 +96,33 @@ export type ToolCallMessage = {
     meta?: MessageMeta;
 }
 
-export type Message = UserTextMessage | AgentTextMessage | ToolCallMessage | ModeSwitchMessage;
+/**
+ * A span `(fromSeq, toSeq]` of history rows this device could not decrypt
+ * with the key it had — `count` rows, as the relay reported them — kept by
+ * the sync as a recoverable gap and re-read when the session key changes
+ * (#128). Mirrored into the store for display only.
+ */
+export type UnopenableGapRange = {
+    fromSeq: number;
+    toSeq: number;
+    count: number;
+}
+
+/**
+ * The chat's placeholder for one {@link UnopenableGapRange}: "could not
+ * decrypt N messages — will retry when keys change". SYNTHETIC — projected
+ * from the gap ranges when the chat reads its messages (sync/unopenableGapRows),
+ * never emitted by the reducer nor stored in a session's history.
+ */
+export type UnopenableGapMessage = {
+    kind: 'unopenable-gap';
+    id: string;
+    /** The oldest seq of the span, so the row sorts where the gap begins. */
+    seq: number;
+    createdAt: number;
+    count: number;
+    fromSeq: number;
+    toSeq: number;
+}
+
+export type Message = UserTextMessage | AgentTextMessage | ToolCallMessage | ModeSwitchMessage | UnopenableGapMessage;

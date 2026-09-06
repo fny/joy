@@ -1063,6 +1063,7 @@ export const es: TranslationStructure = {
         unknownEvent: 'Evento desconocido',
         usageLimitUntil: ({ time }: { time: string }) => `Límite de uso alcanzado hasta ${time}`,
         unknownTime: 'tiempo desconocido',
+        unopenableGap: ({ count }: { count: number }) => `No se ${plural({ count, singular: 'pudo descifrar', plural: 'pudieron descifrar' })} ${count} ${plural({ count, singular: 'mensaje', plural: 'mensajes' })} — se reintentará cuando cambien las claves`,
     },
 
     codex: {

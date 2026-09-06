@@ -73,11 +73,11 @@ describe('forgetSession (#406)', () => {
         let removed = false;
         const rows: unknown[] = [];
         const filesForgotten: string[] = [];
-        const Sync = buildSyncSubset(['fetchForwardSince', 'assertFresh', 'forgetSession'], {
+        const Sync = buildSyncSubset(['fetchForwardSince', 'assertFresh', 'forgetSession', 'publishUnopenableGaps'], {
             v2MessagesAfter: () => page.promise,
             log: quiet,
             StaleFetchError,
-            storage: { getState: () => ({ deleteSession: () => { removed = true; } }) },
+            storage: { getState: () => ({ deleteSession: () => { removed = true; }, applyUnopenableGaps: () => { } }) },
             gitStatusSync: { clearForSession: () => { } },
             clearGitStatusForSession: () => { }, // E4: the git resource replaced gitStatusSync
             forgetSessionFiles: (id: string) => { filesForgotten.push(id); }, // E4: the session's file/diff cache goes with it

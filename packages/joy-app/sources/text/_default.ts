@@ -1110,6 +1110,8 @@ export const en = {
         unknownEvent: 'Unknown event',
         usageLimitUntil: ({ time }: { time: string }) => `Usage limit reached until ${time}`,
         unknownTime: 'unknown time',
+        // Placeholder row for history this device could not decrypt (#128)
+        unopenableGap: ({ count }: { count: number }) => `Could not decrypt ${count} ${plural({ count, singular: 'message', plural: 'messages' })} — will retry when keys change`,
     },
 
     codex: {
