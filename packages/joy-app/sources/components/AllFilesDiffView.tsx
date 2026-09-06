@@ -101,6 +101,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
             if (resultsMap.size > 0) setResultsMap(new Map());
             fetchedSignatures.current.clear();
             inFlight.current.clear();
+            fetchGen.current.clear(); // outstanding requests lose ownership
             setHasLoadedOnce(true);
             return;
         }
@@ -112,12 +113,17 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         const nextKeys = new Set(files.map((f) => f.fullPath));
         let mapChanged = false;
         const reconciled = new Map(resultsMap);
-        for (const key of reconciled.keys()) {
+        // Include paths that are only in flight (no result yet): a removed
+        // pending path kept its inFlight entry and generation, so re-adding it
+        // started nothing and the pre-removal result committed (Astra on
+        // bfcec9fd, #91). Retiring the generation makes that completion a no-op.
+        const known = new Set<string>([...reconciled.keys(), ...inFlight.current, ...fetchedSignatures.current.keys(), ...fetchGen.current.keys()]);
+        for (const key of known) {
             if (!nextKeys.has(key)) {
-                reconciled.delete(key);
+                if (reconciled.delete(key)) mapChanged = true;
                 fetchedSignatures.current.delete(key);
                 inFlight.current.delete(key);
-                mapChanged = true;
+                fetchGen.current.delete(key);
             }
         }
         if (mapChanged) setResultsMap(reconciled);
