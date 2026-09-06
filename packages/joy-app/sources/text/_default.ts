@@ -795,6 +795,7 @@ export const en = {
         fileConflictDescription: 'This file was modified on the device while you were editing. Reload to see the latest version.',
         reload: 'Reload',
         overwrite: 'Overwrite',
+        conflicted: 'Conflict',
     },
 
 

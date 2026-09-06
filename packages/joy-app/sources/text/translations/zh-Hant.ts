@@ -748,6 +748,7 @@ export const zhHant: TranslationStructure = {
         fileConflictDescription: '編輯期間檔案已在裝置上被修改。重新載入以查看最新版本。',
         reload: '重新載入',
         overwrite: '覆蓋',
+        conflicted: '衝突',
     },
 
 

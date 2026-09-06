@@ -11,7 +11,7 @@ import Animated, {
     Easing,
 } from 'react-native-reanimated';
 import { storage, useSessionGitStatus, useSessionGitStatusFiles, useSessionProjectFiles, useSessionExpandedDirs } from '@/sync/storage';
-import { getGitStatusFiles, GitFileStatus } from '@/sync/gitStatusFiles';
+import { getGitStatusFiles, GitFileStatus, knownLines, mergeChangeRows } from '@/sync/gitStatusFiles';
 import { getProjectFiles, ProjectFile } from '@/sync/projectFiles';
 import { FileIcon } from '@/components/FileIcon';
 import { Typography } from '@/constants/Typography';
@@ -54,7 +54,10 @@ const INDENT_PX = 10;
 // Build a nested tree from a flat file list, then path-compress any dir chain
 // where every intermediate dir has a single directory child. So a/b/c/file.ts
 // where a and b each have only one dir child becomes a single "a / b / c" node.
-function buildTree<T extends { fullPath: string }>(files: T[]): AnyTreeNode<T>[] {
+// `fullPath` is the file's IDENTITY (keys, selection, opening); node names come
+// from `displayPath` when the file carries one, so a name with a newline or an
+// undecodable byte is shown safely without changing what gets opened.
+export function buildTree<T extends { fullPath: string; displayPath?: string }>(files: T[]): AnyTreeNode<T>[] {
     // De-dup files by fullPath (a file can appear in both staged and unstaged).
     const uniq = new Map<string, T>();
     for (const file of files) {
@@ -65,7 +68,7 @@ function buildTree<T extends { fullPath: string }>(files: T[]): AnyTreeNode<T>[]
 
     for (const file of uniq.values()) {
         // Support both forward and back slashes (Windows paths)
-        const parts = file.fullPath.split(/[/\\]/).filter(Boolean);
+        const parts = (file.displayPath ?? file.fullPath).split(/[/\\]/).filter(Boolean);
         let cursor = root;
         for (let i = 0; i < parts.length - 1; i++) {
             const segment = parts[i];
@@ -77,7 +80,7 @@ function buildTree<T extends { fullPath: string }>(files: T[]): AnyTreeNode<T>[]
             }
             cursor = child;
         }
-        const leafName = parts[parts.length - 1] ?? file.fullPath;
+        const leafName = parts[parts.length - 1] ?? file.displayPath ?? file.fullPath;
         cursor.children.push({
             kind: 'file',
             name: leafName,
@@ -87,7 +90,12 @@ function buildTree<T extends { fullPath: string }>(files: T[]): AnyTreeNode<T>[]
     }
 
     sortTree(root);
-    compressTree(root);
+    // Compress the root's CHILDREN, never the synthetic root itself: merging
+    // its only folder into the root made "src/a.ts, src/b.ts" render as two
+    // root-level files with no folder to collapse (#215).
+    for (const child of root.children) {
+        if (child.kind === 'dir') compressTree(child);
+    }
     return root.children;
 }
 
@@ -204,11 +212,11 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
         router.push(`/session/${sessionId}/file?path=${encodedPath}`);
     }, [router, sessionId, onFilePress]);
 
-    const allFiles = React.useMemo(() => {
-        const staged = gitStatusFiles?.stagedFiles ?? [];
-        const unstaged = gitStatusFiles?.unstagedFiles ?? [];
-        return [...staged, ...unstaged];
-    }, [gitStatusFiles]);
+    const allFiles = React.useMemo(
+        () => mergeChangeRows(gitStatusFiles?.stagedFiles ?? [], gitStatusFiles?.unstagedFiles ?? []),
+        [gitStatusFiles],
+    );
+    const headerLines = gitStatus ? knownLines(gitStatus.totalLines) : null;
 
     const tree = React.useMemo(() => buildTree(allFiles), [allFiles]);
     const filteredTree = tree;
@@ -263,13 +271,13 @@ export const FilesSidebar = React.memo<FilesSidebarProps>(({
                 ) : (
                     <Text style={styles.headerTitle} numberOfLines={1}>{t('files.changes')}</Text>
                 )}
-                {mode === 'changes' && hasFiles && gitStatus && (gitStatus.linesAdded > 0 || gitStatus.linesRemoved > 0) ? (
+                {mode === 'changes' && hasFiles && headerLines && (headerLines.added > 0 || headerLines.removed > 0) ? (
                     <View style={styles.headerLineChanges}>
-                        {gitStatus.linesAdded > 0 && (
-                            <Text style={styles.headerAdded}>+{gitStatus.linesAdded}</Text>
+                        {headerLines.added > 0 && (
+                            <Text style={styles.headerAdded}>+{headerLines.added}</Text>
                         )}
-                        {gitStatus.linesRemoved > 0 && (
-                            <Text style={styles.headerRemoved}>-{gitStatus.linesRemoved}</Text>
+                        {headerLines.removed > 0 && (
+                            <Text style={styles.headerRemoved}>-{headerLines.removed}</Text>
                         )}
                     </View>
                 ) : null}

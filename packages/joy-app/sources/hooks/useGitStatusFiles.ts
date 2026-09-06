@@ -18,13 +18,15 @@
 import * as React from 'react';
 import { useFocusEffect } from 'expo-router';
 import { fetchGitStatusFiles } from '@/sync/gitStatusFiles';
+import { createRefreshScope } from '@/sync/gitStatusModel';
 import { storage, useSession, useSessionGitStatusFiles } from '@/sync/storage';
 
 // Refresh generation per project key, MODULE-level: the screen that started
 // the stale request may have unmounted by the time it resolves, and a fresh
-// hook instance must still be able to outrank it.
-const latestRefreshGen = new Map<string, number>();
-let genCounter = 0;
+// hook instance must still be able to outrank it. The focus effect retires
+// the generation on blur/unmount, so a refresh that completes after the
+// screen went away publishes nothing (#316).
+const refreshScope = createRefreshScope();
 
 export function useGitStatusFiles(sessionId: string) {
     const cached = useSessionGitStatusFiles(sessionId);
@@ -41,12 +43,11 @@ export function useGitStatusFiles(sessionId: string) {
 
     const refresh = React.useCallback(async () => {
         if (!pathKey) return;
-        const myGen = ++genCounter;
-        latestRefreshGen.set(pathKey, myGen);
+        const myGen = refreshScope.begin(pathKey);
         setIsFetching(true);
         try {
             const result = await fetchGitStatusFiles(sessionId);
-            if (latestRefreshGen.get(pathKey) !== myGen) return; // superseded by a newer refresh (#316)
+            if (!refreshScope.isCurrent(pathKey, myGen)) return; // superseded by a newer refresh, or the screen blurred (#316)
             if (result.kind === 'ok') {
                 storage.getState().applyGitStatusFiles(pathKey, result.files);
             } else if (result.kind === 'not-repo') {
@@ -58,15 +59,21 @@ export function useGitStatusFiles(sessionId: string) {
         } catch (error) {
             console.error('Failed to load git status files:', error);
         } finally {
-            if (latestRefreshGen.get(pathKey) === myGen) setIsFetching(false);
+            if (refreshScope.isCurrent(pathKey, myGen)) setIsFetching(false);
         }
     }, [sessionId, pathKey]);
 
-    // Refresh on mount and every time the screen is focused
+    // Refresh on mount and every time the screen is focused; on blur/unmount
+    // retire the project's generation so the in-flight refresh cannot publish
+    // into the cache from a screen that is no longer showing it (#316).
     useFocusEffect(
         React.useCallback(() => {
             refresh();
-        }, [refresh])
+            return () => {
+                if (pathKey) refreshScope.retire(pathKey);
+                setIsFetching(false);
+            };
+        }, [refresh, pathKey])
     );
 
     return {
