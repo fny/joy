@@ -1067,6 +1067,7 @@ export const ru: TranslationStructure = {
         unknownEvent: 'Неизвестное событие',
         usageLimitUntil: ({ time }: { time: string }) => `Лимит использования достигнут до ${time}`,
         unknownTime: 'неизвестное время',
+        unopenableGap: ({ count }: { count: number }) => `Не удалось расшифровать ${count} ${plural({ count, one: 'сообщение', few: 'сообщения', many: 'сообщений' })} — повторим, когда ключи изменятся`,
     },
 
     codex: {

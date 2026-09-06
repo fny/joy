@@ -14,7 +14,7 @@ import { Session, Machine, GitStatus, isJoyDaemonSource } from "./storageTypes";
 import type { ProjectFilesList } from "./projectFiles";
 import { createReducer, reducer, reconcileSentSeqs, ReducerState, advanceDeliveryStage, bindTurnToLocal, forgetLocalMessage } from "./reducer/reducer";
 import { reconcileMachineMetadata } from "./machineReconcile";
-import { Message } from "./typesMessage";
+import { Message, UnopenableGapRange } from "./typesMessage";
 import { resolveMessageLink } from '@/utils/messageLink';
 import { NormalizedMessage } from "./typesRaw";
 import { getSessionName, getSessionSubtitle, getSessionAvatarId, type SessionState } from '@/utils/sessionUtils';
@@ -191,6 +191,10 @@ interface StorageState {
     sessionListViewData: SessionListViewItem[] | null;
     sessionMessages: Record<string, SessionMessages>;
     sessionMessageMru: string[];  // session ids, most-recently-viewed first (for memory eviction)
+    /** History spans a session could not decrypt yet (#128), mirrored from the
+     *  sync's gap bookkeeping. NOT history: the chat projects a placeholder
+     *  row from each span when it reads the messages. Absent when none. */
+    unopenableGaps: Record<string, UnopenableGapRange[]>;
     // Git status and file contents are RESOURCES (sync/gitStatusResource,
     // sync/fileContents on sync/resource), not store slots.
     pathProjectFiles: Record<string, ProjectFilesList | null>;  // keyed by "machineId:path"
@@ -221,6 +225,8 @@ interface StorageState {
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     reconcileSentMessages: (sessionId: string, acks: Array<{ id: string; seq: number; localId: string | null }>) => void;
     applyMessagesLoaded: (sessionId: string) => void;
+    /** Replace a session's undecryptable spans (empty = none). */
+    applyUnopenableGaps: (sessionId: string, ranges: UnopenableGapRange[]) => void;
     /** Drop a session's messages AND reducer state so the next fetch replays from
      *  scratch — the interior-gap heal (the reducer is order-dependent, so rows
      *  that arrive older-than-processed can't just be merged in). */
@@ -441,6 +447,7 @@ export const storage = create<StorageState>()((set, get) => {
         sessionListViewData: null,
         sessionMessages: {},
         sessionMessageMru: [],
+        unopenableGaps: {},
         pathProjectFiles: {},
         pathExpandedDirs: {},
         socketStatus: 'connecting', // cold start is "connecting", not "no connection" (#11)
@@ -865,6 +872,15 @@ export const storage = create<StorageState>()((set, get) => {
             const sessionMessages = { ...state.sessionMessages };
             delete sessionMessages[sessionId];
             return { ...state, sessionMessages };
+        }),
+        applyUnopenableGaps: (sessionId, ranges) => set((state) => {
+            if (ranges.length === 0) {
+                if (!state.unopenableGaps[sessionId]) return state;
+                const unopenableGaps = { ...state.unopenableGaps };
+                delete unopenableGaps[sessionId];
+                return { ...state, unopenableGaps };
+            }
+            return { ...state, unopenableGaps: { ...state.unopenableGaps, [sessionId]: ranges } };
         }),
         applyDeliveryStage: (sessionId, ref, stage) => set((state) => {
             const existing = state.sessionMessages[sessionId];
@@ -1468,6 +1484,13 @@ export function useSessionMessages(sessionId: string): {
             isLoadingOlder: session?.isLoadingOlder ?? false
         };
     }));
+}
+
+const emptyGaps: UnopenableGapRange[] = [];
+
+/** The spans of `sessionId`'s history this device could not decrypt (#128). */
+export function useUnopenableGaps(sessionId: string): UnopenableGapRange[] {
+    return storage((state) => state.unopenableGaps[sessionId] ?? emptyGaps);
 }
 
 /**

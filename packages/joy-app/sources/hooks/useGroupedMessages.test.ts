@@ -146,6 +146,26 @@ describe('useGroupedMessages', () => {
         ]);
     });
 
+    it('keeps a could-not-decrypt placeholder as its own row instead of folding it into agent work (#128)', () => {
+        const messages: Message[] = [
+            { kind: 'agent-text', id: 'agent-final', localId: null, createdAt: 6, text: 'done' },
+            toolMessage('tool-latest', 5),
+            { kind: 'unopenable-gap', id: 'gap', seq: 3, createdAt: 0, count: 2, fromSeq: 2, toSeq: 4 },
+            toolMessage('tool-earliest', 2),
+            { kind: 'user-text', id: 'user', localId: null, createdAt: 1, text: 'run tools' },
+        ];
+
+        const items = groupMessagesForDisplay(messages, true);
+
+        // The agent work around the gap still collapses; the gap stays visible.
+        expect(items.map((item) => item.type)).toEqual(['message', 'message', 'agent-work-group', 'message']);
+        expect(items[1]).toMatchObject({ type: 'message', id: 'gap' });
+        if (items[2].type !== 'agent-work-group') {
+            throw new Error('Expected an agent work group');
+        }
+        expect(items[2].messages.map((message) => message.id)).toEqual(['tool-latest', 'tool-earliest']);
+    });
+
     it('does not collapse the current turn while the agent is still working', () => {
         const messages: Message[] = [
             {

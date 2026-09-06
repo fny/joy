@@ -86,8 +86,11 @@ function parseTable(lines: string[], startIndex: number, budget: ParseBudget): {
     // that LLMs often insert between table rows. A blank gap followed by a NEW
     // header/separator pair starts a second table, not more rows of this one —
     // otherwise its cells landed under the first table's headers (#265).
-    // One budget unit per collected row: a table is consumed once it is
-    // found, so total table work is linear in the input.
+    // One budget unit per collected row, and one per skipped blank line: a
+    // table is consumed once it is found, so total table work is linear in
+    // the input. A blank run is inspected ONCE and then stepped over whole —
+    // advancing by a single line re-scanned the same run from every line in
+    // it, quadratic in the run and unpaid for (40k blank lines: 12s, #622).
     while (index < lines.length) {
         if (lines[index].includes('|')) {
             if (!budget.spend()) break;
@@ -96,6 +99,7 @@ function parseTable(lines: string[], startIndex: number, budget: ParseBudget): {
         } else if (lines[index].trim() === '') {
             let next = index;
             while (next < lines.length && lines[next].trim() === '') next++;
+            if (!budget.spend(next - index)) break;
             if (
                 tableLines.length >= 2
                 && next + 1 < lines.length
@@ -105,7 +109,7 @@ function parseTable(lines: string[], startIndex: number, budget: ParseBudget): {
                 index = next;
                 break;
             }
-            index++;
+            index = next;
         } else {
             break;
         }

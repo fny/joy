@@ -94,6 +94,17 @@ function findNestedCall(message: Message, callId: string): ToolCallMessage | nul
 }
 
 /**
+ * A row of the store by id — OWN properties only. The store keeps an
+ * ordinary `{}` map, so a link id spelled like a prototype member
+ * ("constructor", "toString", "__proto__", "hasOwnProperty") read an
+ * inherited function and reported it found before the history it names
+ * had loaded (#165 residual).
+ */
+function ownRow(store: MessageLinkStore, id: string): Message | null {
+    return Object.hasOwn(store.messagesMap, id) ? store.messagesMap[id] ?? null : null;
+}
+
+/**
  * The projected message a link addresses, or null when it is not in the
  * store (yet — the caller pages history). Accepts, in order: a row id of
  * this store, a tool call id (root row, or a row nested inside a Task at
@@ -105,7 +116,7 @@ export function resolveMessageLink(store: MessageLinkStore | null | undefined, l
     const candidates = decoded === linkId ? [linkId] : [linkId, decoded];
 
     for (const id of candidates) {
-        const direct = store.messagesMap[id];
+        const direct = ownRow(store, id);
         if (direct) return direct;
     }
 
@@ -117,7 +128,7 @@ export function resolveMessageLink(store: MessageLinkStore | null | undefined, l
         const nestedMid = reducerState.sidechainToolIdToMessageId.get(id);
         if (nestedMid) {
             const rootMid = rootMidOf(reducerState, nestedMid);
-            const root = rootMid ? store.messagesMap[rootMid] : undefined;
+            const root = rootMid ? ownRow(store, rootMid) : null;
             const nested = root ? findNestedCall(root, id) : null;
             if (nested) return nested;
         }
@@ -125,7 +136,7 @@ export function resolveMessageLink(store: MessageLinkStore | null | undefined, l
         // permission placeholder for a nested one).
         const rootMid = reducerState.toolIdToMessageId.get(id);
         if (rootMid) {
-            const root = store.messagesMap[rootMid];
+            const root = ownRow(store, rootMid);
             if (root) return root;
         }
     }
@@ -134,7 +145,7 @@ export function resolveMessageLink(store: MessageLinkStore | null | undefined, l
     for (const id of candidates) {
         for (const [mid, row] of reducerState.messages) {
             if (row.realID === id && !row.ownerCallId) {
-                const root = store.messagesMap[mid];
+                const root = ownRow(store, mid);
                 if (root) return root;
             }
         }

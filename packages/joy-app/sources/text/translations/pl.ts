@@ -1079,6 +1079,7 @@ export const pl: TranslationStructure = {
         unknownEvent: 'Nieznane zdarzenie',
         usageLimitUntil: ({ time }: { time: string }) => `Osiągnięto limit użycia do ${time}`,
         unknownTime: 'nieznany czas',
+        unopenableGap: ({ count }: { count: number }) => `Nie udało się odszyfrować ${count} ${plural({ count, one: 'wiadomości', few: 'wiadomości', many: 'wiadomości' })} — ponowna próba po zmianie kluczy`,
     },
 
     codex: {

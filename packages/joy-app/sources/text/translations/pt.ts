@@ -1062,6 +1062,7 @@ export const pt: TranslationStructure = {
         unknownEvent: 'Evento desconhecido',
         usageLimitUntil: ({ time }: { time: string }) => `Limite de uso atingido até ${time}`,
         unknownTime: 'horário desconhecido',
+        unopenableGap: ({ count }: { count: number }) => `Não foi possível descriptografar ${count} ${plural({ count, singular: 'mensagem', plural: 'mensagens' })} — será tentado novamente quando as chaves mudarem`,
     },
 
     codex: {
