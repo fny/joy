@@ -4,10 +4,8 @@
 // state, attachments, SSE and the E2E tunnel (see docs/joy-relay-design.md).
 // No upstream, no passthrough: an unknown path is a 404.
 import * as http from 'node:http';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
 import { openDb } from './src/db.mjs';
+import { loadOrCreateTokenSecret } from './src/secret.mjs';
 import { createCore } from './src/core.mjs';
 import { createNotify } from './src/notify.mjs';
 import { createAuth } from './src/auth.mjs';
@@ -23,15 +21,10 @@ const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
 // Data lives OUTSIDE the rsynced checkout so deploys never wipe it.
 const DATA_DIR = process.env.JOY_RELAY_DATA_DIR ?? '/home/ubuntu/joy-relay-data/dev';
 
-/** Token signing secret: JOY_RELAY_TOKEN_SECRET, else one generated once and
- *  kept beside the data (losing it invalidates every device's token). */
-function tokenSecret() {
-  if (process.env.JOY_RELAY_TOKEN_SECRET) return process.env.JOY_RELAY_TOKEN_SECRET;
-  mkdirSync(DATA_DIR, { recursive: true });
-  const file = join(DATA_DIR, 'token.secret');
-  if (!existsSync(file)) writeFileSync(file, randomBytes(48).toString('base64'), { mode: 0o600 });
-  return readFileSync(file, 'utf8').trim();
-}
+// Token signing secret: JOY_RELAY_TOKEN_SECRET, else one generated once and
+// kept beside the data (losing it invalidates every device's token). Written
+// atomically; an interrupted first write is detected, not served (#606).
+const tokenSecret = () => loadOrCreateTokenSecret(DATA_DIR);
 // Accepted token issuers; the first mints. Extra labels let a deployment keep
 // honouring tokens minted under an earlier issuer name.
 const ISSUERS = (process.env.JOY_RELAY_TOKEN_ISSUERS ?? 'joy').split(',').map((s) => s.trim()).filter(Boolean);
@@ -64,7 +57,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS' && req.url?.startsWith('/joy/v2')) {
       if (await v2.handle(req, res)) return;
     }
-    if (!gate.allows(req)) return gate.rejectHttp(res);
+    if (!gate.allows(req)) return gate.rejectHttp(res, req); // req: CORS on the 401 (#85)
     if (handleDocs(req, res, { version: '0.2.0', routeTable: { routes: v2.routeTable(), served: true } })) return;
     if (await v2.handle(req, res)) return;
     res.writeHead(404, { 'content-type': 'application/json' });
