@@ -579,7 +579,18 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   an entry without a `localId` whose `v2SessionId` no readable record
   maps while some record could not be read at all (it may be the owner);
   only when every record is readable is such an entry an orphan and
-  dropped. Only sources whose owner record imported are consumed.
+  dropped. Only sources whose owner record imported are consumed. The
+  global `v2-outbound.json` is consumed PER OWNER (review 9d2225c3): the
+  rows of every session whose record imported commit in their own
+  transaction with a per-owner progress marker (`import_sources` path
+  `v2-outbound.json#<localId>`, same content hash — a second boot
+  re-applies none of them), the rows of a failed owner are deferred and
+  reported with THAT session (it is the one quarantined, not its healthy
+  siblings), and the whole-file marker and the move to `imported-v1/`
+  happen only once every row has been consumed — so a healthy session's
+  older output never waits on another session's repair while its newer
+  prompt imports and it resumes. An owner's rows enter the outbox in file
+  order, whichever boot commits them.
   Settlements obey the current-owner rule:
   `settleAttempt`/`confirmDelivery` change the command only when the claimed
   generation is the session's current one AND the attempt is the command's

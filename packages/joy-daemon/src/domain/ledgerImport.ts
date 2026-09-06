@@ -42,6 +42,17 @@
 //     owns — including one without a localId whose v2SessionId no readable
 //     record maps while some record could not be read at all (it may be
 //     the owner). Only sources whose owner record imported are consumed.
+//   - The global v2-outbound.json is imported PER OWNER (review 9d2225c3):
+//     the rows of every session whose record imported commit in one
+//     transaction per owner, together with a per-owner marker
+//     (`import_sources` path `v2-outbound.json#<localId>`, same content
+//     hash), so a second boot re-applies none of them; the rows of a failed
+//     owner are deferred, reported with THAT session (quarantined, retried
+//     next boot), and a healthy sibling's older output is never held
+//     hostage to another session's repair — it would otherwise resume and
+//     publish newer work ahead of it. The whole-file marker is committed and
+//     the file moved only once every row has been consumed. Per-session
+//     order is kept: an owner's rows enter the outbox in file order.
 //   - A failed file changes nothing, the report's counters included: they
 //     are restored with the rows when its transaction rolls back.
 //   - A legacy checkpoint never moves the ledger's cursor backwards: it is
@@ -186,10 +197,10 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
       log(`[ledger-import] ${name}: imported but could not be moved aside (${errMsg(e)}) — re-imported (no-op) next boot`);
     }
   };
-  const fail = (file: string, sessionId: string | undefined, what: string, error: string): void => {
+  const fail = (file: string, sessionId: string | undefined, what: string, error: string, detail = "left in place, nothing imported"): void => {
     report.failed.push({ file, error, ...(sessionId ? { sessionId } : {}) });
     if (sessionId && !report.quarantine.includes(sessionId)) report.quarantine.push(sessionId);
-    log(`[ledger-import] ${file}: ${what} (${error}) — left in place, nothing imported, retried next boot${sessionId ? `; session ${sessionId} accepts no work until then` : ""}`);
+    log(`[ledger-import] ${file}: ${what} (${error}) — ${detail}, retried next boot${sessionId ? `; session ${sessionId} accepts no work until then` : ""}`);
   };
 
   // Window records FIRST: the three execution fields move; the record stays.
@@ -250,13 +261,37 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
     // nothing of it is consumed until its session can be recovered.
     const owner = sessionId ? owners.failed.get(sessionId) : undefined;
     if (owner !== undefined) { fail(name, sessionId, "deferred", new DeferredSource(`window-${sessionId}.json failed to import (${owner}) — this file waits for its repair`).message); continue; }
+    // The global outbound file has many owners: each imports on its own (or
+    // waits on its own, its session quarantined), and the file is consumed
+    // only when every row was (review 9d2225c3).
+    if (LEGACY.outbound.test(name)) {
+      let groups: OutboundGroups;
+      try { groups = groupOutbound(name, src.doc, opts.sealsContent, owners, log); }
+      catch (e) { fail(name, undefined, e instanceof MalformedSource ? "malformed" : "import failed", errMsg(e)); continue; }
+      let consumed = true;
+      for (const [localId, rows] of groups.byOwner) {
+        const key = `${name}#${localId}`;
+        if (ledger.getImportSource(key)?.contentHash === src.hash) continue; // this owner's rows committed on an earlier boot
+        const before = counters();
+        try {
+          ledger.tx(() => { report.outbox += ledger.enqueueOutbound(rows).length; ledger.recordImportSource(key, src.hash); }, `import ${key}`);
+        } catch (e) { restore(before); consumed = false; fail(name, localId, "import failed", `rows of session ${localId}: ${errMsg(e)}`, "those rows left in place"); }
+      }
+      for (const [localId, why] of groups.deferred) { consumed = false; fail(name, localId, "deferred", why, `rows of session ${localId} left in place, other owners' rows committed`); }
+      if (groups.unknownOwner) { consumed = false; fail(name, undefined, "deferred", groups.unknownOwner, "that entry left in place, other owners' rows committed"); }
+      if (!consumed) continue;
+      try { ledger.recordImportSource(name, src.hash); }
+      catch (e) { fail(name, undefined, "import failed", `every owner committed but the file marker did not: ${errMsg(e)}`, "rows committed, file left in place"); continue; }
+      report.files.push(name);
+      move(name);
+      continue;
+    }
     const before = counters();
     try {
       ledger.tx(() => {
         let m: RegExpExecArray | null;
         if ((m = LEGACY.queue.exec(name))) importQueue(ledger, m[1], src.doc, report);
         else if ((m = LEGACY.receipts.exec(name))) importReceipts(ledger, m[1], src.doc, src.hash, report, now());
-        else if (LEGACY.outbound.test(name)) importOutbound(ledger, src.doc, report, opts.sealsContent, owners, log);
         else if ((m = LEGACY.codexInbound.exec(name))) importCodexInbound(ledger, m[1], src.doc, report);
         else if ((m = LEGACY.codexCheckpoint.exec(name))) importCodexCheckpoint(ledger, m[1], src.doc, report);
         else if (LEGACY.spawns.test(name)) importSpawns(ledger, src.doc, report);
@@ -405,25 +440,31 @@ function importReceipts(ledger: Ledger, sessionId: string, doc: unknown, sourceH
   });
 }
 
-function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, sealsContent: boolean, owners: RecordOwners, log: (l: string) => void): void {
-  if (!Array.isArray(doc)) throw new MalformedSource("v2-outbound.json is an array of entries");
-  const rows: NewOutbound[] = [];
+/** The global outbound file sorted by owner: the rows of every owner whose
+ *  record imported (in file order, so an owner's line keeps its order), the
+ *  owners whose record failed (id → why their rows wait), and the deferral
+ *  an entry nobody could attribute raised while some record was unreadable. */
+interface OutboundGroups { byOwner: Map<string, NewOutbound[]>; deferred: Map<string, string>; unknownOwner?: string }
+function groupOutbound(name: string, doc: unknown, sealsContent: boolean, owners: RecordOwners, log: (l: string) => void): OutboundGroups {
+  if (!Array.isArray(doc)) throw new MalformedSource(`${name} is an array of entries`);
+  const groups: OutboundGroups = { byOwner: new Map(), deferred: new Map() };
   for (const e of doc) {
     if (!isRecord(e) || typeof e.id !== "string") continue;
     const v2 = str(e.v2SessionId) || null;
     const localId = str(e.localId) ?? (v2 ? owners.localByV2.get(v2) : undefined);
     // An entry only its window record can attribute (no localId) is not
-    // orphaned while a record nobody could read may be that owner: the file
-    // waits for the repair instead of dropping the entry (review 7679a27e).
-    if (!localId && owners.unreadable.length) throw new DeferredSource(`v2-outbound entry ${e.id} has no local session (v2 ${v2 ?? "none"}) and ${owners.unreadable.join(", ")} could not be read — it may own the entry; waits for the repair`);
+    // orphaned while a record nobody could read may be that owner: the entry
+    // waits for the repair instead of being dropped (review 7679a27e).
+    if (!localId && owners.unreadable.length) { groups.unknownOwner ??= new DeferredSource(`v2-outbound entry ${e.id} has no local session (v2 ${v2 ?? "none"}) and ${owners.unreadable.join(", ")} could not be read — it may own the entry; waits for the repair`).message; continue; }
     if (!localId) { log(`[ledger-import] v2-outbound entry ${e.id} has no local session (v2 ${v2 ?? "none"}) — dropped`); continue; }
     // An entry whose owner record failed is imported only once that record is.
     const owner = owners.failed.get(localId);
-    if (owner !== undefined) throw new DeferredSource(`v2-outbound entry ${e.id} belongs to session ${localId}, whose window-${localId}.json failed to import (${owner}) — waits for its repair`);
+    if (owner !== undefined) { if (!groups.deferred.has(localId)) groups.deferred.set(localId, new DeferredSource(`v2-outbound entry ${e.id} belongs to session ${localId}, whose window-${localId}.json failed to import (${owner}) — waits for its repair`).message); continue; }
+    let row: NewOutbound;
     if (e.kind === "terminal") {
       const turnId = str(e.turnId);
       if (!turnId || !isRecord(e.body)) continue;
-      rows.push({ sessionId: localId, kind: "terminal", runtimeEventId: `term:${turnId}`, relayTurnId: turnId, v2SessionId: v2, sealed: false, body: e.body, createdAt: num(e.at) });
+      row = { sessionId: localId, kind: "terminal", runtimeEventId: `term:${turnId}`, relayTurnId: turnId, v2SessionId: v2, sealed: false, body: e.body, createdAt: num(e.at) };
     } else if (e.kind === "output") {
       const runtimeEventId = str(e.runtimeEventId);
       if (!runtimeEventId || !isRecord(e.wire)) continue;
@@ -431,11 +472,12 @@ function importOutbound(ledger: Ledger, doc: unknown, report: ImportReport, seal
       // that seals, it is treated as sealed (dropped at send without a key)
       // rather than leaked in plaintext (#582).
       const sealed = typeof e.sealed === "boolean" ? e.sealed : sealsContent;
-      rows.push({ sessionId: localId, kind: "output", runtimeEventId, relayTurnId: str(e.turnId) ?? null, v2SessionId: v2, sealed, keyB64: str(e.key) ?? null, body: e.wire, createdAt: num(e.at) });
-    }
+      row = { sessionId: localId, kind: "output", runtimeEventId, relayTurnId: str(e.turnId) ?? null, v2SessionId: v2, sealed, keyB64: str(e.key) ?? null, body: e.wire, createdAt: num(e.at) };
+    } else continue;
+    const rows = groups.byOwner.get(localId);
+    if (rows) rows.push(row); else groups.byOwner.set(localId, [row]);
   }
-  const seqs = ledger.enqueueOutbound(rows);
-  report.outbox += seqs.length;
+  return groups;
 }
 
 function importCodexInbound(ledger: Ledger, sessionId: string, doc: unknown, report: ImportReport): void {
