@@ -1,6 +1,6 @@
 import type { MarkdownBlock, MarkdownSpan } from "./parseMarkdown";
 import { parseMarkdownSpans } from "./parseMarkdownSpans";
-import { exceedsInputBudget, parseBudget } from "@/utils/parseBudget";
+import { exceedsInputBudget, parseBudget, type ParseBudget } from "@/utils/parseBudget";
 
 const OPTIONS_OPEN = '<joy-options>';
 const OPTIONS_CLOSE = '</joy-options>';
@@ -66,7 +66,19 @@ function isTableSeparatorLine(line: string): boolean {
     return /^[|\s\-:=]*$/.test(trimmed) && trimmed.includes('-');
 }
 
-function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock | null; nextIndex: number } {
+function parseTable(lines: string[], startIndex: number, budget: ParseBudget): { table: MarkdownBlock | null; nextIndex: number } {
+    // Decide BEFORE collecting: a table is a header line whose next pipe
+    // line (blank lines between them tolerated, as below) is the separator.
+    // Collecting the whole pipe run first and checking afterwards made every
+    // failed candidate re-scan the run — `a|b` repeated N times cost O(N²)
+    // (#622). The cheap check here is exactly what the post-collection check
+    // used to require: tableLines[1] exists, holds a pipe, and is a separator.
+    let second = startIndex + 1;
+    while (second < lines.length && lines[second].trim() === '') second++;
+    if (second >= lines.length || !lines[second].includes('|') || !isTableSeparatorLine(lines[second])) {
+        return { table: null, nextIndex: startIndex };
+    }
+
     let index = startIndex;
     const tableLines: string[] = [];
 
@@ -74,8 +86,11 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
     // that LLMs often insert between table rows. A blank gap followed by a NEW
     // header/separator pair starts a second table, not more rows of this one —
     // otherwise its cells landed under the first table's headers (#265).
+    // One budget unit per collected row: a table is consumed once it is
+    // found, so total table work is linear in the input.
     while (index < lines.length) {
         if (lines[index].includes('|')) {
+            if (!budget.spend()) break;
             tableLines.push(lines[index]);
             index++;
         } else if (lines[index].trim() === '') {
@@ -390,7 +405,7 @@ export function parseMarkdownBlock(markdown: string) {
 
         // Check for table
         if (trimmed.includes('|') && !trimmed.startsWith('```')) {
-            const { table, nextIndex } = parseTable(lines, index - 1);
+            const { table, nextIndex } = parseTable(lines, index - 1, budget);
             if (table) {
                 blocks.push(table);
                 index = nextIndex;
