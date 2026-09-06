@@ -2,6 +2,7 @@ import React from 'react';
 import { View, TextInput, StyleSheet, Platform } from 'react-native';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { shouldHandlePaletteKey } from './paletteKeys';
 
 interface CommandPaletteInputProps {
     value: string;
@@ -13,13 +14,13 @@ interface CommandPaletteInputProps {
 export function CommandPaletteInput({ value, onChangeText, onKeyPress, inputRef }: CommandPaletteInputProps) {
     const handleKeyDown = React.useCallback((e: any) => {
         if (Platform.OS === 'web' && onKeyPress) {
-            const key = e.nativeEvent.key;
-            
-            // Handle navigation keys
-            if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(key)) {
+            // Navigation keys only, and never while an IME composition is
+            // open — the Enter that confirms a Japanese/Chinese word must not
+            // run the selected command (#204).
+            if (shouldHandlePaletteKey(e.nativeEvent)) {
                 e.preventDefault();
                 e.stopPropagation();
-                onKeyPress(key);
+                onKeyPress(e.nativeEvent.key);
             }
         }
     }, [onKeyPress]);

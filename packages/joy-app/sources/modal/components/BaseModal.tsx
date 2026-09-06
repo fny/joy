@@ -23,6 +23,10 @@ interface BaseModalProps {
     animationType?: 'fade' | 'slide' | 'none';
     transparent?: boolean;
     closeOnBackdrop?: boolean;
+    /** False for a dialog that is stacked UNDER another one: it stays mounted
+     *  (its state survives) but is hidden and ignores close requests, so only
+     *  the top-most dialog is visible and interactive (#332/#333). */
+    active?: boolean;
 }
 
 export function BaseModal({
@@ -31,7 +35,8 @@ export function BaseModal({
     children,
     animationType = 'fade',
     transparent = true,
-    closeOnBackdrop = true
+    closeOnBackdrop = true,
+    active = true
 }: BaseModalProps) {
     const fadeAnim = useRef(new Animated.Value(0)).current;
 
@@ -52,7 +57,7 @@ export function BaseModal({
     }, [visible, fadeAnim]);
 
     const handleBackdropPress = () => {
-        if (closeOnBackdrop && onClose) {
+        if (active && closeOnBackdrop && onClose) {
             onClose();
         }
     };
@@ -62,10 +67,10 @@ export function BaseModal({
             visible={visible}
             transparent={transparent}
             animationType={animationType}
-            onRequestClose={onClose}
+            onRequestClose={active ? onClose : noop}
         >
             <KeyboardAvoidingView
-                style={styles.container}
+                style={[styles.container, !active && styles.inactive]}
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
                 {...webEventHandlers}
             >
@@ -104,7 +109,12 @@ export function BaseModal({
     );
 }
 
+const noop = () => {};
+
 const styles = StyleSheet.create({
+    inactive: {
+        display: 'none'
+    },
     container: {
         flex: 1,
         justifyContent: 'center',

@@ -15,6 +15,19 @@ interface CommandPaletteModalProps {
     children: React.ReactNode;
 }
 
+const CLOSE_ANIMATION_MS = 150;
+/** Small delay so the native Modal is hidden before onClose unmounts us. */
+const CLOSE_SETTLE_MS = 50;
+
+/**
+ * The palette's animated shell. The mounted/visible state FOLLOWS the
+ * `visible` prop (#205): before, the native Modal mounted visible even for
+ * `visible=false`, a `true → false` change never hid it, and after a backdrop
+ * dismissal a `false → true` change only replayed the animation while the
+ * component kept returning null — the palette could not reopen. Every
+ * animation completion and close timer is tied to a run id so a stale
+ * completion (a reopen during the closing animation, an unmount) is ignored.
+ */
 export function CommandPaletteModal({
     visible,
     onClose,
@@ -22,50 +35,100 @@ export function CommandPaletteModal({
 }: CommandPaletteModalProps) {
     const fadeAnim = useRef(new Animated.Value(0)).current;
     const scaleAnim = useRef(new Animated.Value(0.95)).current;
-    const [isModalVisible, setIsModalVisible] = React.useState(true);
+    const [isModalVisible, setIsModalVisible] = React.useState(visible);
+    // Bumped on every open/close transition; async completions compare
+    // against it and bail when superseded.
+    const runRef = useRef(0);
+    const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const onCloseRef = useRef(onClose);
+    onCloseRef.current = onClose;
 
-    useEffect(() => {
-        if (visible) {
-            // Opening animation
-            Animated.parallel([
-                Animated.timing(fadeAnim, {
-                    toValue: 1,
-                    duration: 200,
-                    useNativeDriver: true
-                }),
-                Animated.spring(scaleAnim, {
-                    toValue: 1,
-                    friction: 10,
-                    tension: 60,
-                    useNativeDriver: true
-                })
-            ]).start();
+    const clearCloseTimer = React.useCallback(() => {
+        if (closeTimerRef.current !== null) {
+            clearTimeout(closeTimerRef.current);
+            closeTimerRef.current = null;
         }
-    }, [visible, fadeAnim, scaleAnim]);
+    }, []);
 
-    const handleClose = React.useCallback(() => {
-        // Closing animation
+    const animateOpen = React.useCallback(() => {
+        // Bumping the run id retires any in-flight close completion/timer so a
+        // reopen during the closing animation cannot be hidden by it.
+        runRef.current++;
+        clearCloseTimer();
+        fadeAnim.stopAnimation();
+        scaleAnim.stopAnimation();
+        setIsModalVisible(true);
+        Animated.parallel([
+            Animated.timing(fadeAnim, {
+                toValue: 1,
+                duration: 200,
+                useNativeDriver: true
+            }),
+            Animated.spring(scaleAnim, {
+                toValue: 1,
+                friction: 10,
+                tension: 60,
+                useNativeDriver: true
+            })
+        ]).start();
+    }, [fadeAnim, scaleAnim, clearCloseTimer]);
+
+    /** Play the closing animation, hide the Modal, then (optionally) tell the
+     *  owner. Superseded by any later open/close. */
+    const animateClose = React.useCallback((notifyOwner: boolean) => {
+        const run = ++runRef.current;
+        clearCloseTimer();
+        fadeAnim.stopAnimation();
+        scaleAnim.stopAnimation();
         Animated.parallel([
             Animated.timing(fadeAnim, {
                 toValue: 0,
-                duration: 150,
+                duration: CLOSE_ANIMATION_MS,
                 useNativeDriver: true
             }),
             Animated.timing(scaleAnim, {
                 toValue: 0.95,
-                duration: 150,
+                duration: CLOSE_ANIMATION_MS,
                 useNativeDriver: true
             })
         ]).start(() => {
+            if (run !== runRef.current) return;
             setIsModalVisible(false);
-            // Small delay to ensure modal is hidden before calling onClose
-            setTimeout(() => {
-                if (onClose) {
-                    onClose();
-                }
-            }, 50);
+            if (!notifyOwner) return;
+            closeTimerRef.current = setTimeout(() => {
+                closeTimerRef.current = null;
+                if (run !== runRef.current) return;
+                onCloseRef.current?.();
+            }, CLOSE_SETTLE_MS);
         });
-    }, [fadeAnim, scaleAnim, onClose]);
+    }, [fadeAnim, scaleAnim, clearCloseTimer]);
+
+    // Follow the controlled prop: open on every rising edge, close (with the
+    // exit animation) on every falling edge. The owner already knows about a
+    // prop-driven close, so it is not notified again.
+    const firstRenderRef = useRef(true);
+    useEffect(() => {
+        if (visible) {
+            animateOpen();
+        } else if (!firstRenderRef.current) {
+            animateClose(false);
+        }
+        firstRenderRef.current = false;
+    }, [visible, animateOpen, animateClose]);
+
+    // Unmount: no completion may touch state or call onClose afterwards.
+    useEffect(() => () => {
+        runRef.current++;
+        clearCloseTimer();
+        fadeAnim.stopAnimation();
+        scaleAnim.stopAnimation();
+    }, [clearCloseTimer, fadeAnim, scaleAnim]);
+
+    // Backdrop / hardware back / Escape: the modal closes ITSELF and then
+    // notifies the owner so it can drop the palette from the modal stack.
+    const handleClose = React.useCallback(() => {
+        animateClose(true);
+    }, [animateClose]);
 
     const handleBackdropPress = () => {
         handleClose();
@@ -82,12 +145,12 @@ export function CommandPaletteModal({
             animationType="none"
             onRequestClose={handleClose}
         >
-            <KeyboardAvoidingView 
+            <KeyboardAvoidingView
                 style={styles.container}
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             >
                 <TouchableWithoutFeedback onPress={handleBackdropPress}>
-                    <Animated.View 
+                    <Animated.View
                         style={[
                             styles.backdrop,
                             {
@@ -99,7 +162,7 @@ export function CommandPaletteModal({
                         ]}
                     />
                 </TouchableWithoutFeedback>
-                
+
                 <Animated.View
                     style={[
                         styles.content,

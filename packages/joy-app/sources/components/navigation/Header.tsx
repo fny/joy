@@ -70,7 +70,14 @@ export const Header = React.memo((props: HeaderProps) => {
                     </View>
 
                     <View style={styles.centerContainer}>
-                        {title}
+                        {/* A raw string/number under a View throws on native
+                            ("Text strings must be rendered within a <Text>");
+                            the prop type accepts ReactNode, so wrap primitives
+                            in the header title style and render elements
+                            as they are (#268). */}
+                        {typeof title === 'string' || typeof title === 'number'
+                            ? <Text style={[styles.title, headerTitleStyle]} numberOfLines={1}>{title}</Text>
+                            : title}
                         {subtitle && <Text style={subtitleStyle} numberOfLines={1}>{subtitle}</Text>}
                     </View>
 

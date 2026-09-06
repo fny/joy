@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { Pressable } from 'react-native';
 import { DropdownMenu, DropdownMenuItem } from '@expo/ui/jetpack-compose';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { Session } from '@/sync/storageTypes';
@@ -31,34 +32,49 @@ export function SessionActionsNativeMenu({
         onAfterDelete,
     });
 
+    // The Compose DropdownMenu is CONTROLLED: it reads `expanded` (default
+    // false) and its Trigger only renders its children — nothing ever opened
+    // the menu (#235). We own the state: a press on the trigger expands it,
+    // tapping outside asks to dismiss, and every action closes it first.
+    const [expanded, setExpanded] = React.useState(false);
+    const close = React.useCallback(() => setExpanded(false), []);
+    const run = React.useCallback((action: () => void) => () => {
+        close();
+        action();
+    }, [close]);
+
     return (
-        <DropdownMenu>
+        <DropdownMenu expanded={expanded} onDismissRequest={close}>
             <DropdownMenu.Items>
-                <DropdownMenuItem onClick={openDetails}>
+                <DropdownMenuItem onClick={run(openDetails)}>
                     <DropdownMenuItem.Text>Details</DropdownMenuItem.Text>
                 </DropdownMenuItem>
                 {canArchive && (
-                    <DropdownMenuItem onClick={deleteSession}>
+                    <DropdownMenuItem onClick={run(deleteSession)}>
                         <DropdownMenuItem.Text>Delete</DropdownMenuItem.Text>
                     </DropdownMenuItem>
                 )}
                 {canArchive && (
-                    <DropdownMenuItem onClick={archiveSession}>
+                    <DropdownMenuItem onClick={run(archiveSession)}>
                         <DropdownMenuItem.Text>Archive</DropdownMenuItem.Text>
                     </DropdownMenuItem>
                 )}
                 {canResume && (
-                    <DropdownMenuItem onClick={restartSession}>
+                    <DropdownMenuItem onClick={run(restartSession)}>
                         <DropdownMenuItem.Text>Resume</DropdownMenuItem.Text>
                     </DropdownMenuItem>
                 )}
                 {canCopySessionMetadata && (
-                    <DropdownMenuItem onClick={copySessionMetadata}>
+                    <DropdownMenuItem onClick={run(copySessionMetadata)}>
                         <DropdownMenuItem.Text>{t('sessionInfo.copyMetadata')}</DropdownMenuItem.Text>
                     </DropdownMenuItem>
                 )}
             </DropdownMenu.Items>
-            <DropdownMenu.Trigger>{children}</DropdownMenu.Trigger>
+            <DropdownMenu.Trigger>
+                <Pressable accessibilityRole="button" onPress={() => setExpanded(true)}>
+                    {children}
+                </Pressable>
+            </DropdownMenu.Trigger>
         </DropdownMenu>
     );
 }
