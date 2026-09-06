@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { AgentDefaultOverridesSchema } from './agentDefaults';
 import { recoverFields } from '@/utils/isolateBad';
+import { preserveUnknownFields } from './settingsPreserve';
 
 //
 // Settings Schema
@@ -159,6 +160,19 @@ export function settingsParse(settings: unknown): Settings {
     if (value.preferredLanguage === 'zh') {
         console.log('[Settings Migration] Converting language code from "zh" to "zh-Hans"');
         value.preferredLanguage = 'zh-Hans';
+    }
+
+    // Nested forward compatibility: Zod strips keys it does not know from
+    // nested objects (a newer client's voice-agent fields, an `opencode` entry
+    // in dismissedCLIWarnings), and the next ordinary edit here synced the
+    // stripped objects back, deleting the newer client's configuration (#400).
+    // Restore what the schema dropped — only under fields that VALIDATED, so a
+    // rejected value can never be partially resurrected; validated keys win.
+    const invalid = new Set(invalidKeys);
+    const known = value as Record<string, unknown>;
+    for (const key of Object.keys(SettingsSchema.shape)) {
+        if (invalid.has(key) || !Object.prototype.hasOwnProperty.call(input, key)) continue;
+        known[key] = preserveUnknownFields(known[key], input[key]);
     }
 
     // Preserve unknown fields (forward compatibility): everything that is not

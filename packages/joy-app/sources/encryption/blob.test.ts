@@ -9,10 +9,13 @@ vi.mock('expo-crypto', () => ({
     },
 }));
 
-// Mock the libsodium.lib import to use the Node.js libsodium-wrappers
-vi.mock('@/encryption/libsodium.lib', () => {
-    const s = require('libsodium-wrappers');
-    return { default: s };
+// Mock the libsodium.lib import to use the Node.js libsodium-wrappers, but
+// under the NATIVE argument contract (every arg = its whole backing store):
+// that is what makes leaked views/Buffers fail here the way they do on iOS (#305).
+vi.mock('@/encryption/libsodium.lib', async () => {
+    const s = (await import('libsodium-wrappers')).default;
+    const { withNativeBufferContract } = await import('./sodiumNativeContract.testutil');
+    return { default: withNativeBufferContract(s) };
 });
 
 import { encryptBlob, decryptBlob } from './blob';
@@ -120,5 +123,29 @@ describe('blob encryption', () => {
 
         // crypto_secretbox: 24-byte nonce + 16-byte auth tag + plaintext
         expect(encrypted.length).toBe(data.length + 24 + 16);
+    });
+
+    it('#305: a Buffer view over a larger pool encrypts only its own bytes', () => {
+        const backing = Buffer.from([9, 1, 2, 9]);
+        const view = backing.subarray(1, 3); // Buffer: still a view, .slice() would be too
+        const encrypted = encryptBlob(view, TEST_KEY);
+        expect(Array.from(decryptBlob(encrypted, TEST_KEY)!)).toEqual([1, 2]);
+    });
+
+    it('#305: a Buffer ciphertext decrypts (nonce/ciphertext slices own their bytes)', () => {
+        const data = new Uint8Array([4, 5, 6]);
+        const encrypted = encryptBlob(data, TEST_KEY);
+        const asBuffer = Buffer.from(Array.from(encrypted)); // pooled → shares a backing store
+        expect(Array.from(decryptBlob(asBuffer, TEST_KEY)!)).toEqual([4, 5, 6]);
+    });
+
+    it('#305: a 32-byte key view over a 64-byte buffer works for both directions', () => {
+        const wide = new Uint8Array(64);
+        wide.set(TEST_KEY, 16);
+        const keyView = wide.subarray(16, 48);
+        const bufferKeyView = Buffer.from(wide.buffer, 16, 32);
+        const encrypted = encryptBlob(new Uint8Array([7]), keyView);
+        expect(Array.from(decryptBlob(encrypted, TEST_KEY)!)).toEqual([7]);
+        expect(Array.from(decryptBlob(encrypted, bufferKeyView)!)).toEqual([7]);
     });
 });

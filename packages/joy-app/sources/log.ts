@@ -7,6 +7,81 @@ import { serializeForLogs } from '@/utils/truncateForLogs';
 type ConsoleLogLevel = 'log' | 'info' | 'warn' | 'error' | 'debug';
 export const MAX_APP_LOG_ENTRIES = 5000;
 
+const ERROR_WALK_MAX_DEPTH = 10;
+// Stack traces are long by nature; the default 500-char truncation would
+// keep ~2 frames. Values carrying an Error get a roomier budget.
+const ERROR_MAX_STRING_LENGTH = 2000;
+
+/**
+ * Replace every Error inside `value` (at any depth, including `cause`
+ * chains) with a plain object carrying its diagnostic fields.
+ *
+ * #330: Error's name/message/stack are NON-enumerable, so a generic
+ * JSON walk (serializeForLogs) turns `new Error('connection refused')`
+ * into `{}` and the in-app log loses the failure reason entirely.
+ * Own enumerable extras (code, status, …) are kept as well.
+ */
+export function errorsToPlain(value: unknown, depth = 0, ancestors: WeakSet<object> = new WeakSet()): unknown {
+    if (value === null || typeof value !== 'object') {
+        return value;
+    }
+    if (depth >= ERROR_WALK_MAX_DEPTH) {
+        return value instanceof Error ? `${value.name}: ${value.message}` : value;
+    }
+    // Ancestor set, not a visited set: the same Error legitimately appears
+    // twice (as a cause and in a list); only a true cycle is cut.
+    if (ancestors.has(value)) {
+        return '[Circular]';
+    }
+    ancestors.add(value);
+    try {
+        if (value instanceof Error) {
+            const plain: Record<string, unknown> = { name: value.name, message: value.message };
+            if (value.stack) {
+                plain.stack = value.stack;
+            }
+            for (const [key, extra] of Object.entries(value)) {
+                if (!(key in plain)) {
+                    plain[key] = errorsToPlain(extra, depth + 1, ancestors);
+                }
+            }
+            const cause = (value as { cause?: unknown }).cause;
+            if (cause !== undefined) {
+                plain.cause = errorsToPlain(cause, depth + 1, ancestors);
+            }
+            return plain;
+        }
+        if (Array.isArray(value)) {
+            return value.map((item) => errorsToPlain(item, depth + 1, ancestors));
+        }
+        const out: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+            out[key] = errorsToPlain(item, depth + 1, ancestors);
+        }
+        return out;
+    } finally {
+        ancestors.delete(value);
+    }
+}
+
+function containsError(value: unknown, depth = 0): boolean {
+    if (value instanceof Error) {
+        return true;
+    }
+    if (value === null || typeof value !== 'object' || depth >= ERROR_WALK_MAX_DEPTH) {
+        return false;
+    }
+    return Object.values(value as Record<string, unknown>).some((item) => containsError(item, depth + 1));
+}
+
+/** Serialize any value for the in-app log, keeping Error diagnostics (#330). */
+export function formatLogValue(value: unknown): string {
+    if (!containsError(value)) {
+        return serializeForLogs(value);
+    }
+    return serializeForLogs(errorsToPlain(value), ERROR_MAX_STRING_LENGTH);
+}
+
 class Logger {
     private logs: string[] = [];
     private maxLogs = MAX_APP_LOG_ENTRIES;
@@ -26,7 +101,7 @@ class Logger {
     }
 
     private formatValue(value: unknown): string {
-        return serializeForLogs(value);
+        return formatLogValue(value);
     }
 
     private formatConsoleMessage(level: ConsoleLogLevel, args: unknown[]): string {

@@ -15,6 +15,8 @@ import { randomUUID } from 'expo-crypto';
 import { getCurrentAuth } from '@/auth/AuthContext';
 import { getServerUrl } from '../serverConfig';
 import { MMKV } from 'react-native-mmkv';
+import { createSseParser } from './sse';
+import { encodeSpawnSpec } from './spawnSpec';
 
 const v2Config = new MMKV({ id: 'v2-mode-config' });
 const V2_URL_KEY = 'v2-base-url';
@@ -153,12 +155,25 @@ export const v2 = {
         /** Clone this repository into cwd before launching (the daemon clones
          *  first and reports `clone_failed:<msg>` as a spawn failure; #151). */
         gitUrl?: string;
+    }, opts?: {
+        /** The creation's identity at the relay. The relay dedupes by
+         *  (account, actor, creationIntentId) and REPLAYS the accepted
+         *  session for a repeat — so a retry after a lost response must pass
+         *  the SAME id (spawn.ts allocates it before the first POST; #417).
+         *  Omitted → a fresh id, i.e. a distinct creation. */
+        creationIntentId?: string;
+        /** Seal the spec (see spawnSpec.ts) instead of sending plain JSON.
+         *  Only valid once the target daemon opens sealed specs — today no
+         *  caller passes a key, so the wire is unchanged (#107). */
+        sealKey?: Uint8Array | null;
     }) =>
         v2fetch('POST', '/sessions', {
-            mode: 'spawn', daemonId: machineId, creationIntentId: randomUUID(),
+            mode: 'spawn', daemonId: machineId, creationIntentId: opts?.creationIntentId ?? randomUUID(),
             // The daemon's nucleus lane decodes this envelope to launch the
-            // real agent session (same plaintext seam as message content).
-            ...(spec ? { spawnSpec: JSON.stringify({ v: 1, t: 'spawn', ...spec }) } : {}),
+            // real agent session. Plain JSON until the daemon side of #107
+            // lands (the relay stores it verbatim, so cwd/extraArgs are
+            // readable there — see spawnSpec.ts for the sealed contract).
+            ...(spec ? { spawnSpec: encodeSpawnSpec(spec, opts?.sealKey ?? null) } : {}),
         }),
     deleteSession: (id: string) => v2fetch('DELETE', `/sessions/${id}`),
     // Retry a spawn that FAILED (e.g. directory missing), opting into
@@ -269,42 +284,21 @@ export function connectV2Stream(handlers: V2StreamHandlers): () => void {
                 return;
             }
             const decoder = new TextDecoder();
-            let buf = '';
-            // Frames end on a blank line; normalize CRLF so \r\n\r\n splits too.
-            const frameEnd = () => {
-                const lf = buf.indexOf('\n\n');
-                return lf; // CRLF already normalized to LF below
-            };
+            // Frame splitting lives in sse.ts: it carries a CR across chunk
+            // boundaries so a CRLF split by the network still ends a frame
+            // and never leaks into an event name (#414).
+            const parser = createSseParser(({ event, data }) => {
+                try {
+                    const d = JSON.parse(data);
+                    if (event === 'hello') handlers.onHello?.(d.sessions ?? []);
+                    else if (event === 'ephemeral') handlers.onEphemeral?.(d.sessionId, d.turnId);
+                    else handlers.onPoke?.(d.sessionId ?? d.id, d.changed ?? []);
+                } catch { /* malformed frame — skip */ }
+            });
             while (!stopped) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
-                let idx: number;
-                while ((idx = frameEnd()) >= 0) {
-                    const frame = buf.slice(0, idx);
-                    buf = buf.slice(idx + 2);
-                    let event = 'message';
-                    const dataLines: string[] = [];
-                    for (const line of frame.split('\n')) {
-                        if (line === '' || line.startsWith(':')) continue; // blank / comment
-                        const colon = line.indexOf(':');
-                        const field = colon === -1 ? line : line.slice(0, colon);
-                        // Per the SSE grammar a single leading space after the
-                        // colon is stripped; `data:x` (no space) is also valid.
-                        let val = colon === -1 ? '' : line.slice(colon + 1);
-                        if (val.startsWith(' ')) val = val.slice(1);
-                        if (field === 'event') event = val;
-                        else if (field === 'data') dataLines.push(val); // multiple → joined
-                    }
-                    if (dataLines.length === 0) continue;
-                    const data = dataLines.join('\n');
-                    try {
-                        const d = JSON.parse(data);
-                        if (event === 'hello') handlers.onHello?.(d.sessions ?? []);
-                        else if (event === 'ephemeral') handlers.onEphemeral?.(d.sessionId, d.turnId);
-                        else handlers.onPoke?.(d.sessionId ?? d.id, d.changed ?? []);
-                    } catch { /* malformed frame — skip */ }
-                }
+                parser.push(decoder.decode(value, { stream: true }));
             }
         } catch { /* aborted or network drop */ }
         if (!stopped) handlers.onClose?.();

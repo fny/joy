@@ -29,19 +29,29 @@ export function useDraft(
         lastSavedValue.current = draft;
     }, [sessionId]);
 
-    // Load draft on mount and when focused
+    // Load draft on mount and on a real session/focus transition ONLY. The
+    // latest onChange and value are read through refs: with onChange in the
+    // deps, a caller passing an inline callback re-ran this on every render,
+    // and the render right after the user deleted all text (value '' while
+    // storage still held the old draft, because the autosave effect below
+    // runs AFTER this one) restored the draft the user had just cleared —
+    // into the input and, via autosave, back into storage (#315).
+    const onChangeRef = useRef(onChange);
+    onChangeRef.current = onChange;
+    const valueRef = useRef(value);
+    valueRef.current = value;
     useEffect(() => {
         if (!sessionId || !isFocused) return;
 
         const session = storage.getState().sessions[sessionId];
-        if (session?.draft && !value) {
-            onChange(session.draft);
+        if (session?.draft && !valueRef.current) {
+            onChangeRef.current(session.draft);
             lastSavedValue.current = session.draft;
         } else if (!session?.draft) {
             // Ensure lastSavedValue is empty if there's no draft
             lastSavedValue.current = '';
         }
-    }, [sessionId, isFocused, onChange]);
+    }, [sessionId, isFocused]);
 
     // Auto-save with smart debouncing
     useEffect(() => {

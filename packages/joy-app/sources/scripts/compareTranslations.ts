@@ -13,29 +13,42 @@ import { en } from '../text/translations/en';
 import { ru } from '../text/translations/ru';
 import { pl } from '../text/translations/pl';
 import { es } from '../text/translations/es';
+import { it } from '../text/translations/it';
 import { pt } from '../text/translations/pt';
 import { ca } from '../text/translations/ca';
 import { zhHans } from '../text/translations/zh-Hans';
+import { zhHant } from '../text/translations/zh-Hant';
+import { ja } from '../text/translations/ja';
+import { SUPPORTED_LANGUAGES, type SupportedLanguage } from '../text/_all';
+import type { TranslationStructure } from '../text/_default';
 
-const translations = {
+// Keyed by SupportedLanguage so `pnpm typecheck` fails the moment a language
+// is added to _all.ts without being compared here. #102: it, ja and zh-Hant
+// shipped for months while this table silently omitted them, so the
+// "All Translations Complete" verdict covered only two thirds of the app.
+const translations: Record<SupportedLanguage, TranslationStructure> = {
     en,
     ru,
     pl,
     es,
+    it,
     pt,
     ca,
     'zh-Hans': zhHans,
+    'zh-Hant': zhHant,
+    ja,
 };
 
-const languageNames: Record<string, string> = {
-    en: 'English',
-    ru: 'Russian',
-    pl: 'Polish',
-    es: 'Spanish',
-    pt: 'Portuguese',
-    ca: 'Catalan',
-    'zh-Hans': 'Chinese (Simplified)',
-};
+const languageNames: Record<SupportedLanguage, string> = Object.fromEntries(
+    Object.values(SUPPORTED_LANGUAGES).map(({ code, englishName }) => [code, englishName]),
+) as Record<SupportedLanguage, string>;
+
+// Runtime guard for the same invariant (tsx runs without type-checking).
+for (const code of Object.keys(SUPPORTED_LANGUAGES) as SupportedLanguage[]) {
+    if (!(code in translations)) {
+        throw new Error(`compareTranslations: '${code}' is in SUPPORTED_LANGUAGES but not compared (#102)`);
+    }
+}
 
 // Function to recursively extract all keys from an object
 function extractKeys(obj: any, prefix = ''): Set<string> {
@@ -112,7 +125,7 @@ const missingKeys: Record<string, string[]> = {};
 const untranslatedStrings: Record<string, string[]> = {};
 
 // Compare each language with English
-for (const [langCode, translation] of Object.entries(translations)) {
+for (const [langCode, translation] of Object.entries(translations) as [SupportedLanguage, TranslationStructure][]) {
     if (langCode === 'en') continue;
 
     const langKeys = extractKeys(translation);
@@ -171,7 +184,7 @@ if (Object.keys(missingKeys).length > 0 || Object.keys(untranslatedStrings).leng
     // Report missing keys
     if (Object.keys(missingKeys).length > 0) {
         console.log('### Missing Translation Keys\n');
-        for (const [langCode, missing] of Object.entries(missingKeys)) {
+        for (const [langCode, missing] of Object.entries(missingKeys) as [SupportedLanguage, string[]][]) {
             console.log(`#### ${languageNames[langCode]} (${langCode})\n`);
             console.log('Missing the following keys:');
             for (const key of missing) {
@@ -189,7 +202,7 @@ if (Object.keys(missingKeys).length > 0 || Object.keys(untranslatedStrings).leng
     // Report untranslated strings
     if (Object.keys(untranslatedStrings).length > 0) {
         console.log('### Untranslated Strings (Still in English)\n');
-        for (const [langCode, untranslated] of Object.entries(untranslatedStrings)) {
+        for (const [langCode, untranslated] of Object.entries(untranslatedStrings) as [SupportedLanguage, string[]][]) {
             console.log(`#### ${languageNames[langCode]} (${langCode})\n`);
             console.log('The following strings appear to be untranslated:');
             for (const item of untranslated) {
@@ -209,7 +222,7 @@ const sampleKeys = ['common.cancel', 'settings.title', 'errors.networkError', 'c
 
 for (const key of sampleKeys) {
     console.log(`### Key: \`${key}\`\n`);
-    for (const [langCode, translation] of Object.entries(translations)) {
+    for (const [langCode, translation] of Object.entries(translations) as [SupportedLanguage, TranslationStructure][]) {
         const value = getNestedValue(translation, key);
         console.log(`- **${languageNames[langCode]}**: ${typeof value === 'string' ? `"${value}"` : '(function)'}`);
     }

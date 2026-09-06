@@ -291,7 +291,10 @@ export function storeTempText(content: string): string {
 
 export function retrieveTempText(id: string): string | null {
     const content = mmkv.getString(`temp_text_${id}`);
-    if (content) {
+    // Presence, not truthiness (#383): an empty string is a stored value that
+    // must round-trip AND be deleted; the old truthy check returned null for
+    // it and left the entry behind forever.
+    if (content !== undefined) {
         // Auto-delete after retrieval
         mmkv.delete(`temp_text_${id}`);
         return content;

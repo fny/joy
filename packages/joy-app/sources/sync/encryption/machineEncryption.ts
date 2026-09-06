@@ -49,7 +49,9 @@ export class MachineEncryption {
         try {
             const encryptedData = decodeBase64(encrypted, 'base64');
             const decrypted = await this.encryptor.decrypt([encryptedData]);
-            if (!decrypted[0]) {
+            // Nullish, not falsy (#354): the decryptor signals failure with
+            // null/undefined; anything else is an opened value for the schema.
+            if (decrypted[0] == null) {
                 return null;
             }
 
@@ -126,7 +128,10 @@ export class MachineEncryption {
         try {
             const encryptedData = decodeBase64(encrypted, 'base64');
             const decrypted = await this.encryptor.decrypt([encryptedData]);
-            return decrypted[0] || null;
+            // `?? null`, not `|| null` (#354): a successfully opened false, 0
+            // or '' is a value, and `||` made it indistinguishable from a
+            // failed decryption. decryptDaemonState already does this.
+            return decrypted[0] ?? null;
         } catch (error) {
             console.error('Failed to decrypt raw data:', error);
             return null;
