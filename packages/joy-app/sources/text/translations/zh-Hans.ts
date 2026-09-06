@@ -1062,6 +1062,10 @@ export const zhHans: TranslationStructure = {
         codeCopied: '代码已复制',
         copyFailed: '复制失败',
         mermaidRenderFailed: '渲染 mermaid 图表失败',
+        // Remote markdown images load on tap only (#94)
+        loadImage: ({ host }: { host: string }) => `从 ${host} 加载图片`,
+        // A task notification sharing a message with a real prompt renders as a line (#269)
+        taskNotificationLine: ({ status, summary }: { status: string; summary: string }) => `后台任务 ${status}：${summary}`,
     },
 
 

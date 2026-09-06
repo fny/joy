@@ -48,3 +48,37 @@ describe('parseMarkdownSpans — bounded bracket matching', () => {
         expect(parseMarkdownSpans(md, false)).toEqual([{ styles: [], text: md, url: null }]);
     });
 });
+
+describe('parseMarkdownSpans — parentheses in link destinations (#266)', () => {
+    const wiki = 'https://en.wikipedia.org/wiki/Function_(mathematics)';
+
+    it('an explicit link keeps its balanced parenthesis', () => {
+        expect(parseMarkdownSpans(`[page](${wiki})`, false)).toEqual([{ styles: [], text: 'page', url: wiki }]);
+    });
+
+    it('inside bold too', () => {
+        expect(parseMarkdownSpans(`**[page](${wiki})**`, false)).toEqual([{ styles: ['bold'], text: 'page', url: wiki }]);
+    });
+
+    it('a bare URL keeps a matched closing parenthesis and sheds an unmatched one', () => {
+        expect(parseMarkdownSpans(`see ${wiki}.`, false)).toEqual([
+            { styles: [], text: 'see ', url: null },
+            { styles: [], text: wiki, url: wiki },
+            { styles: [], text: '.', url: null },
+        ]);
+        expect(parseMarkdownSpans(`(see ${wiki})`, false)).toEqual([
+            { styles: [], text: '(see ', url: null },
+            { styles: [], text: wiki, url: wiki },
+            { styles: [], text: ')', url: null },
+        ]);
+        expect(parseMarkdownSpans('(https://example.com)', false)).toEqual([
+            { styles: [], text: '(', url: null },
+            { styles: [], text: 'https://example.com', url: 'https://example.com' },
+            { styles: [], text: ')', url: null },
+        ]);
+    });
+
+    it('escaped parentheses in a destination are unescaped', () => {
+        expect(parseMarkdownSpans('[x](https://a/b\\(c\\))', false)).toEqual([{ styles: [], text: 'x', url: 'https://a/b(c)' }]);
+    });
+});

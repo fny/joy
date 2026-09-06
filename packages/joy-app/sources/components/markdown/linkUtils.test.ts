@@ -15,3 +15,19 @@ describe('isHttpMarkdownLink', () => {
         expect(isHttpMarkdownLink('packages/joy-app/index.tsx')).toBe(false);
     });
 });
+
+import { markdownImageHost } from './linkUtils';
+
+describe('markdownImageHost (#94)', () => {
+    it('returns the host of an http(s) image URL', () => {
+        expect(markdownImageHost('https://cdn.example.com/a.png?x=1')).toBe('cdn.example.com');
+        expect(markdownImageHost(' http://localhost:8080/p.png ')).toBe('localhost:8080');
+    });
+
+    it('is null for anything that must never be fetched automatically', () => {
+        expect(markdownImageHost('file:///etc/passwd')).toBeNull();
+        expect(markdownImageHost('data:image/png;base64,AAAA')).toBeNull();
+        expect(markdownImageHost('/Users/me/shot.png')).toBeNull();
+        expect(markdownImageHost('https://')).toBeNull();
+    });
+});

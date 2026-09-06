@@ -22,11 +22,25 @@ const BINARY_EXTENSIONS = new Set([
     'db', 'sqlite', 'sqlite3',
 ]);
 
+/**
+ * Lower-cased extension of the path's basename, '' when it has none. The
+ * separator must be present and not the basename's first character: a
+ * root-level file named "a", "key" or "png" has NO extension — split('.').pop()
+ * returned the whole name and classified it as binary / an image, while the
+ * same file as "./png" was text (#422). A dotfile (".env") is extensionless too.
+ */
+export function fileExtension(path: string): string {
+    const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    const basename = slash === -1 ? path : path.slice(slash + 1);
+    const dot = basename.lastIndexOf('.');
+    if (dot <= 0 || dot === basename.length - 1) return '';
+    return basename.slice(dot + 1).toLowerCase();
+}
+
 /** True when the path's extension is a known non-text (un-diffable) type.
  *  NOTE: svg is intentionally NOT here — it's XML text and diffs fine. */
 export function isBinaryPath(path: string): boolean {
-    const ext = path.split('.').pop()?.toLowerCase();
-    return ext ? BINARY_EXTENSIONS.has(ext) : false;
+    return BINARY_EXTENSIONS.has(fileExtension(path));
 }
 
 // Renderable image formats — the subset of binaries the app can DISPLAY
@@ -35,6 +49,5 @@ export function isBinaryPath(path: string): boolean {
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'avif']);
 
 export function isImagePath(path: string): boolean {
-    const ext = path.split('.').pop()?.toLowerCase();
-    return ext ? IMAGE_EXTENSIONS.has(ext) : false;
+    return IMAGE_EXTENSIONS.has(fileExtension(path));
 }

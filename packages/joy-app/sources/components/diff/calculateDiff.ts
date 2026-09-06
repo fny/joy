@@ -253,49 +253,43 @@ function createHunks(lines: DiffLine[], contextLines: number): DiffHunk[] {
         return hunks;
     }
 
-    // Group changes into hunks with context
+    // Group changes into hunks with context. A hunk is a CONTIGUOUS run of
+    // lines: the next change joins the current hunk only when its context
+    // window touches (or overlaps) the lines already included. The old test
+    // ("gap > 2×context → split") merged windows separated by a few lines and
+    // then skipped those lines, so one hunk claimed lines 2–17 while silently
+    // omitting 9–10 and reporting a 14-line range (#252).
+    const finishHunk = (hunkLines: DiffLine[]) => {
+        if (hunkLines.length === 0) return;
+        const firstLine = hunkLines[0];
+        hunks.push({
+            oldStart: firstLine.oldLineNumber || 1,
+            oldLines: hunkLines.filter(l => l.oldLineNumber).length,
+            newStart: firstLine.newLineNumber || 1,
+            newLines: hunkLines.filter(l => l.newLineNumber).length,
+            lines: hunkLines,
+        });
+    };
+
     let currentHunk: DiffLine[] = [];
     let lastIncludedIndex = -1;
 
-    changes.forEach((change, i) => {
+    for (const change of changes) {
         const startContext = Math.max(0, change.index - contextLines);
         const endContext = Math.min(lines.length - 1, change.index + contextLines);
 
-        // Add lines from last included index to current hunk
+        if (currentHunk.length > 0 && startContext > lastIncludedIndex + 1) {
+            finishHunk(currentHunk);
+            currentHunk = [];
+        }
+
         for (let j = Math.max(lastIncludedIndex + 1, startContext); j <= endContext; j++) {
             currentHunk.push(lines[j]);
         }
-        lastIncludedIndex = endContext;
-
-        // Check if we should start a new hunk
-        const nextChange = changes[i + 1];
-        if (nextChange && nextChange.index - endContext > contextLines * 2) {
-            // Finish current hunk
-            if (currentHunk.length > 0) {
-                const firstLine = currentHunk[0];
-                hunks.push({
-                    oldStart: firstLine.oldLineNumber || 1,
-                    oldLines: currentHunk.filter(l => l.oldLineNumber).length,
-                    newStart: firstLine.newLineNumber || 1,
-                    newLines: currentHunk.filter(l => l.newLineNumber).length,
-                    lines: currentHunk,
-                });
-            }
-            currentHunk = [];
-        }
-    });
-
-    // Add remaining lines to last hunk
-    if (currentHunk.length > 0) {
-        const firstLine = currentHunk[0];
-        hunks.push({
-            oldStart: firstLine.oldLineNumber || 1,
-            oldLines: currentHunk.filter(l => l.oldLineNumber).length,
-            newStart: firstLine.newLineNumber || 1,
-            newLines: currentHunk.filter(l => l.newLineNumber).length,
-            lines: currentHunk,
-        });
+        lastIncludedIndex = Math.max(lastIncludedIndex, endContext);
     }
+
+    finishHunk(currentHunk);
 
     return hunks;
 }

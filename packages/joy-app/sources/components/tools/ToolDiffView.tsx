@@ -5,6 +5,8 @@ import { useUnistyles } from 'react-native-unistyles';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { useSetting } from '@/sync/storage';
 import { t } from '@/text';
+import { countUnifiedDiffChanges } from '@/utils/codexUnifiedDiff';
+import { getDiffStats } from '@/components/diff/calculateDiff';
 
 interface ToolDiffViewProps {
     /** Pre-built unified-diff patch string. Preferred when available. */
@@ -22,19 +24,19 @@ interface ToolDiffViewProps {
 }
 
 /** +N −M counts for the collapse toggle — from the patch when present,
- *  otherwise a cheap line-count delta of the old/new pair. */
-function diffCounts(patch?: string, oldText?: string, newText?: string): { added: number; removed: number } {
+ *  otherwise from a real line diff of the old/new pair.
+ *
+ *  The patch count goes through the unified-diff parser's state machine: a
+ *  prefix test took every "+++"/"---" for a file header, so an edit replacing
+ *  "--before" with "++after" read +0 −0 (#274). The pair count was a length
+ *  delta (`newLines - oldLines || newLines`) that printed "+5 −0" for a
+ *  one-line change in a five-line file (#21). */
+export function diffCounts(patch?: string, oldText?: string, newText?: string): { added: number; removed: number } {
     if (patch) {
-        let added = 0, removed = 0;
-        for (const line of patch.split('\n')) {
-            if (line.startsWith('+') && !line.startsWith('+++')) added++;
-            else if (line.startsWith('-') && !line.startsWith('---')) removed++;
-        }
-        return { added, removed };
+        return countUnifiedDiffChanges(patch);
     }
-    const oldLines = oldText ? oldText.split('\n').length : 0;
-    const newLines = newText ? newText.split('\n').length : 0;
-    return { added: Math.max(0, newLines - oldLines) || newLines, removed: Math.max(0, oldLines - newLines) };
+    const stats = getDiffStats(oldText ?? '', newText ?? '');
+    return { added: stats.additions, removed: stats.deletions };
 }
 
 export const ToolDiffView = React.memo<ToolDiffViewProps>(({

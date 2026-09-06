@@ -3,11 +3,33 @@ import { parseMarkdownSpans } from "./parseMarkdownSpans";
 
 // Split a pipe-delimited table row into cells, stripping only the leading/trailing
 // empty strings caused by outer pipes while preserving interior empty cells.
+// Only an UNESCAPED pipe delimits: `a\|b` is one cell reading "a|b" (#262) —
+// the split used to shear it into "a\" and "b" and shift every later column.
 function splitTableRow(line: string): string[] {
-    let cells = line.trim().split('|').map(cell => cell.trim());
-    if (cells.length > 0 && cells[0] === '') cells = cells.slice(1);
-    if (cells.length > 0 && cells[cells.length - 1] === '') cells = cells.slice(0, -1);
+    const cells: string[] = [];
+    let cell = '';
+    const trimmed = line.trim();
+    for (let i = 0; i < trimmed.length; i++) {
+        const c = trimmed[i];
+        if (c === '\\' && trimmed[i + 1] === '|') {
+            cell += '|';
+            i++;
+        } else if (c === '|') {
+            cells.push(cell.trim());
+            cell = '';
+        } else {
+            cell += c;
+        }
+    }
+    cells.push(cell.trim());
+    if (cells.length > 0 && cells[0] === '') cells.shift();
+    if (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
     return cells;
+}
+
+function isTableSeparatorLine(line: string): boolean {
+    const trimmed = line.trim();
+    return /^[|\s\-:=]*$/.test(trimmed) && trimmed.includes('-');
 }
 
 function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock | null; nextIndex: number } {
@@ -15,12 +37,25 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
     const tableLines: string[] = [];
 
     // Collect consecutive lines that contain pipe characters, skipping blank lines
-    // that LLMs often insert between table rows
+    // that LLMs often insert between table rows. A blank gap followed by a NEW
+    // header/separator pair starts a second table, not more rows of this one —
+    // otherwise its cells landed under the first table's headers (#265).
     while (index < lines.length) {
         if (lines[index].includes('|')) {
             tableLines.push(lines[index]);
             index++;
         } else if (lines[index].trim() === '') {
+            let next = index;
+            while (next < lines.length && lines[next].trim() === '') next++;
+            if (
+                tableLines.length >= 2
+                && next + 1 < lines.length
+                && lines[next].includes('|')
+                && isTableSeparatorLine(lines[next + 1])
+            ) {
+                index = next;
+                break;
+            }
             index++;
         } else {
             break;
@@ -32,10 +67,7 @@ function parseTable(lines: string[], startIndex: number): { table: MarkdownBlock
     }
 
     // Validate that the second line is a separator containing dashes, which distinguishes tables from plain text
-    const separatorLine = tableLines[1].trim();
-    const isSeparator = /^[|\s\-:=]*$/.test(separatorLine) && separatorLine.includes('-');
-
-    if (!isSeparator) {
+    if (!isTableSeparatorLine(tableLines[1])) {
         return { table: null, nextIndex: startIndex };
     }
 
@@ -89,19 +121,37 @@ export function parseMarkdownBlock(markdown: string) {
         // stripper first the opener was dropped and every `<joy-option>…` line
         // fell through as raw text (regression 2026-07-01, e91c3587).
         if (trimmed.startsWith('<joy-options>')) {
-            let items: string[] = [];
-            while (index < lines.length) {
+            // The block may be written inline (`<joy-options><joy-option>Yes
+            // </joy-option></joy-options> explanation…`) or one tag per line.
+            // Collect from the opener through the line holding the closer;
+            // text AFTER the closer on that line is handed back to the loop as
+            // its own line. Looking only at the FOLLOWING lines for options and
+            // a standalone closer swallowed the whole rest of the message (#264).
+            // No closer yet (mid-stream) → the remainder is only option lines,
+            // consume them as before.
+            const collected: string[] = [trimmed];
+            let closerFound = trimmed.includes('</joy-options>');
+            while (!closerFound && index < lines.length) {
                 const nextLine = lines[index];
-                if (nextLine.trim() === '</joy-options>') {
-                    index++;
-                    break;
-                }
-                // Extract content from <joy-option> tags
-                const optionMatch = nextLine.match(/<joy-option>(.*?)<\/joy-option>/);
-                if (optionMatch) {
-                    items.push(optionMatch[1]);
-                }
                 index++;
+                collected.push(nextLine);
+                if (nextLine.includes('</joy-options>')) closerFound = true;
+            }
+            let body = collected.join('\n');
+            if (closerFound) {
+                const closeAt = body.indexOf('</joy-options>');
+                const after = body.slice(closeAt + '</joy-options>'.length);
+                body = body.slice(0, closeAt);
+                if (after.trim()) {
+                    // Re-inject the trailing text so it is parsed like any line.
+                    lines.splice(index, 0, after.trim());
+                }
+            }
+            const items: string[] = [];
+            const optionRe = /<joy-option>([\s\S]*?)<\/joy-option>/g;
+            let optionMatch: RegExpExecArray | null;
+            while ((optionMatch = optionRe.exec(body)) !== null) {
+                items.push(optionMatch[1]);
             }
             if (items.length > 0) {
                 blocks.push({ type: 'options', items });
@@ -119,11 +169,17 @@ export function parseMarkdownBlock(markdown: string) {
 
         // Code block
         if (trimmed.startsWith('```')) {
-            const language = trimmed.slice(3).trim() || null;
+            // A fence closes only on a backtick run at least as long as the
+            // one that opened it, so a ```` block can quote a ``` example
+            // (#263) — the old exact-``` check ended the outer block at the
+            // inner fence and turned the real closer into a second block.
+            const fenceSize = trimmed.match(/^`+/)![0].length;
+            const language = trimmed.slice(fenceSize).trim() || null;
             let content = [];
             while (index < lines.length) {
                 const nextLine = lines[index];
-                if (nextLine.trim() === '```') {
+                const closer = nextLine.trim().match(/^`+$/);
+                if (closer && closer[0].length >= fenceSize) {
                     index++;
                     break;
                 }

@@ -1062,6 +1062,10 @@ export const ja: TranslationStructure = {
         codeCopied: 'コードをコピーしました',
         copyFailed: 'コピーに失敗しました',
         mermaidRenderFailed: 'Mermaidダイアグラムのレンダリングに失敗しました',
+        // Remote markdown images load on tap only (#94)
+        loadImage: ({ host }: { host: string }) => `${host} から画像を読み込む`,
+        // A task notification sharing a message with a real prompt renders as a line (#269)
+        taskNotificationLine: ({ status, summary }: { status: string; summary: string }) => `バックグラウンドタスク ${status}: ${summary}`,
     },
 
 
