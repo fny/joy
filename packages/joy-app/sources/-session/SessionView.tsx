@@ -69,6 +69,7 @@ import { GoalBar } from './GoalBar';
 import { HandoffBar } from './HandoffBar';
 import { LoginBar } from './LoginBar';
 import { DialogBar } from './DialogBar';
+import { EventBudgetBar } from './EventBudgetBar';
 import { CodexApprovalBar } from './CodexApprovalBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
@@ -1092,6 +1093,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         <>
             <LoginBar sessionId={sessionId} />
             <DisconnectedBanner />
+            <EventBudgetBar sessionId={sessionId} />
             <DialogBar sessionId={sessionId} />
             <CodexApprovalBar sessionId={sessionId} />
             <GoalBar sessionId={sessionId} />

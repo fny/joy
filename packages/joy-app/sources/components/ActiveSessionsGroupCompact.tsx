@@ -5,6 +5,7 @@ import { Text } from '@/components/StyledText';
 import { Machine } from '@/sync/storageTypes';
 import { SessionRowData } from '@/sync/storage';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { DROPPED_COLOR } from '@/-session/EventBudgetBar';
 import Octicons from '@expo/vector-icons/Octicons';
 import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLastSeen, STATUS_PALETTE } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
@@ -418,6 +419,16 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
             <View style={styles.sessionContent}>
                 <View style={styles.sessionTitleRow}>
                     {renderLeadingIndicator()}
+                    {session.outputDropped && (
+                        <Ionicons
+                            name="warning"
+                            size={12}
+                            color={DROPPED_COLOR}
+                            style={{ marginRight: 4 }}
+                            accessibilityLabel={t('status.outputDropped')}
+                            testID="session-output-dropped"
+                        />
+                    )}
 
                     <Text
                         style={[
