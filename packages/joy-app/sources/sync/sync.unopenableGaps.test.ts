@@ -223,6 +223,65 @@ describe('a replay that runs out of budget keeps a continuation cursor (#128 a)'
     });
 });
 
+describe('a replay settles only the rows inside its range (#128 F5)', () => {
+    /** Under K2 seq 1 opens and seq 2 (past the range) is sealed; K3 opens both. */
+    const relay = (key: Uint8Array | null, afterSeq: number): Page => {
+        const rows = [1, 2].filter((seq) => seq > afterSeq);
+        const opened = rows.filter((seq) => key === K3 || (key === K2 && seq === 1));
+        const failed = rows.filter((seq) => !opened.includes(seq));
+        return { messages: opened.map((seq) => ({ seq, id: `m${seq}` })), lifecycle: [], cursor: rows.at(-1) ?? afterSeq, hasMore: false, unopenable: failed.length, unopenableSeqs: failed };
+    };
+
+    it('gap (0,1]: K2 opens seq 1 but fails seq 2 → (0,1] is gone and (1,2] is its own range, not a K2 re-stamp of the recovered gap', async () => {
+        const { x, calls, applied, gaps, published, sync, setKey } = build(relay);
+        x.recordUnopenableGap('A', 0, 1, K1, 1);
+        setKey(K2);
+        await sync(2); // head is 2: the forward read stepped over seq 2 already
+        expect(calls.map((c) => c.afterSeq)).toEqual([0, 2]);
+        expect(applied.map((m) => m.seq)).toEqual([1]);
+        expect(gaps()).toEqual([{ fromSeq: 1, toSeq: 2, keyId: id(K2), count: 1 }]);
+        expect(published.at(-1)).toEqual([{ fromSeq: 1, toSeq: 2, count: 1 }]);
+
+        calls.length = 0;
+        await sync(2);
+        expect(calls.map((c) => c.afterSeq)).toEqual([2]); // seq 1 is history; (1,2] waits for another key
+
+        setKey(K3);
+        calls.length = 0;
+        await sync(2);
+        expect(calls.map((c) => c.afterSeq)).toEqual([1, 2]);
+        expect(applied.map((m) => m.seq)).toEqual([1, 2]);
+        expect(gaps()).toEqual([]);
+    });
+
+    it('a failure past the head is left to the forward read, which retries it and records it after the budget', async () => {
+        const { x, applied, gaps, sync, setKey } = build(relay);
+        x.recordUnopenableGap('A', 0, 1, K1, 1);
+        setKey(K2);
+        const gen = x.fetchGen.current('A');
+        // Head is 1: the replay recovers seq 1, then the forward page after
+        // 1 meets seq 2 sealed — that is the forward path's retry budget.
+        for (let i = 0; i < 5; i++) {
+            await expect(x.fetchForwardSince('A', {}, 1, gen)).rejects.toThrow(/could not be opened/);
+            expect(gaps()).toEqual([]);
+        }
+        await sync(1);
+        expect(applied.map((m) => m.seq)).toEqual([1]);
+        expect(x.sessionLastSeq.get('A')).toBe(2);
+        expect(gaps()).toEqual([{ fromSeq: 1, toSeq: 2, keyId: id(K2), count: 1 }]);
+    });
+
+    it('a failure past the range that another recorded range holds is left to that range', async () => {
+        const { x, calls, gaps, sync, setKey } = build(relay);
+        x.recordUnopenableGap('A', 0, 1, K1, 1);
+        x.recordUnopenableGap('A', 1, 2, K3, 1); // seq 2 already waits for a key other than K3
+        setKey(K2);
+        await sync(2);
+        expect(calls.map((c) => c.afterSeq)).toEqual([0, 1, 2]); // both ranges replay under K2
+        expect(gaps()).toEqual([{ fromSeq: 1, toSeq: 2, keyId: id(K2), count: 1 }]);
+    });
+});
+
 describe('older pages that could not be opened record a gap (#128 b)', () => {
     it('loadOlderMessages advancing past an unopenable page records its span and pulls the card', async () => {
         const older = (_key: Uint8Array | null, beforeSeq: number): Page =>
