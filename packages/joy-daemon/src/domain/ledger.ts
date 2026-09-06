@@ -633,6 +633,11 @@ export class Ledger {
     const r = this.#get("SELECT * FROM attempts WHERE session_id=? AND runtime_ref=? ORDER BY submitted_at DESC, attempt_no DESC LIMIT 1", sessionId, runtimeRef);
     return r ? rowAttempt(r) : null;
   }
+  /** Every attempt of this session that rode the runtime's turn (a steered
+   *  message joins the running turn; all of them end with it). */
+  attemptsByRuntimeTurnId(sessionId: string, runtimeTurnId: string): AttemptRow[] {
+    return this.#all("SELECT * FROM attempts WHERE session_id=? AND runtime_turn_id=? ORDER BY submitted_at, attempt_no", sessionId, runtimeTurnId).map(rowAttempt);
+  }
   /** The attempt the runtime named by its turn id (a turn_ended correlates here). */
   attemptByRuntimeTurnId(sessionId: string, runtimeTurnId: string): AttemptRow | null {
     const r = this.#get("SELECT * FROM attempts WHERE session_id=? AND runtime_turn_id=? ORDER BY submitted_at DESC, attempt_no DESC LIMIT 1", sessionId, runtimeTurnId);

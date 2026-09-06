@@ -166,15 +166,43 @@ test("R7/#584: a turn the runtime ended as failed terminalizes failed; a late du
   expect(stateOf(c.id)).toBe("failed");
 });
 
-test("R16/#40: a turn_ended with no ids applies to the sole executing command; with two candidates it is foreign", async () => {
+test("R16/#40: a turn_ended with no ids applies to every executing command (an id-less runtime's run ended); one naming a turn ends every command that rode it", async () => {
   const d = session("s1", OPENCODE_LIKE, "opencode");
-  const a = accept("s1", "A");
+  const a = accept("s1", "A"); const b = accept("s1", "B");
   await settle();
   d.lastSubmit.settle.resolve({ kind: "accepted" });
   await settle();
   d.emit({ kind: "echo", runtimeRef: a.id });
+  await settle();
+  d.lastSubmit.settle.resolve({ kind: "accepted" }); // B went out while A ran (concurrentSubmit)
+  await settle();
+  d.emit({ kind: "echo", runtimeRef: b.id });
   d.emit({ kind: "turn_ended", status: "completed" });
   expect(stateOf(a.id)).toBe("completed");
+  expect(stateOf(b.id)).toBe("completed");
+  // Shared turn ids: a steer joined the running turn.
+  const c = accept("s1", "C"); const s2 = accept("s1", "S");
+  await settle();
+  d.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T-shared" });
+  await settle();
+  d.emit({ kind: "echo", runtimeRef: c.id, runtimeTurnId: "T-shared" });
+  await settle();
+  d.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T-shared" });
+  await settle();
+  d.emit({ kind: "echo", runtimeRef: s2.id, runtimeTurnId: "T-shared" });
+  d.emit({ kind: "turn_ended", runtimeTurnId: "T-shared", status: "failed" });
+  expect(stateOf(c.id)).toBe("failed");
+  expect(stateOf(s2.id)).toBe("failed");
+});
+
+test("a driver may choose the runtime ref: an idempotent id is reused across resends", async () => {
+  const d = session("s1");
+  (d as unknown as { runtimeRef: (cmd: { id: string }) => string }).runtimeRef = (cmd) => `msg_${cmd.id}`;
+  d.onSubmit = () => ({ kind: "rejected", permanent: false, detail: "nope" });
+  const c = accept("s1", "x");
+  await settle();
+  await clock.advance(2_000);
+  expect(d.submits.map((x) => x.attempt.runtimeRef)).toEqual([`msg_${c.id}`, `msg_${c.id}`]);
 });
 
 // ── R14: rejections ─────────────────────────────────────────────────────────
@@ -352,6 +380,32 @@ test("abortRunning cancels every command in flight and returns the driver's verd
   d.onInterrupt = () => ({ kind: "failed", error: "no" });
   expect(await coord.abortRunning("s1")).toEqual({ ok: false, error: "no" });
   expect(d.lastInterrupt.attempt).toBeNull();
+});
+
+test("an untargeted interrupt (opencode/pi) is refused while uncancelled work runs (collateral) and is surfaced as unresolved; abortRunning sends it ONCE for everything", async () => {
+  const d = session("s1", OPENCODE_LIKE, "opencode");
+  d.onInterrupt = () => ({ kind: "sent" });
+  const a = accept("s1", "A"); const b = accept("s1", "B");
+  await settle();
+  d.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T" }); await settle();
+  d.emit({ kind: "echo", runtimeRef: a.id, runtimeTurnId: "T" }); await settle();
+  d.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T" }); await settle();
+  d.emit({ kind: "echo", runtimeRef: b.id, runtimeTurnId: "T" });
+  // Cancel only A while B (same turn) is still wanted: no session-wide
+  // interrupt, no budget spent — the cancel resolves with the turn's end.
+  coord.cancel(a.id);
+  for (let i = 0; i < 8; i++) await clock.advance(30_000);
+  expect(d.interrupts).toHaveLength(0);
+  expect(stateOf(a.id)).toBe("cancelling");
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([]);
+  // Stop everything: one interrupt, both confirmed by the turn's end.
+  expect(await coord.abortRunning("s1")).toEqual({ ok: true });
+  expect(d.interrupts).toHaveLength(1);
+  d.emit({ kind: "turn_ended", runtimeTurnId: "T", status: "cancelled" });
+  expect(stateOf(a.id)).toBe("cancelled");
+  expect(stateOf(b.id)).toBe("cancelled");
+  await clock.advance(60_000);
+  expect(d.interrupts).toHaveLength(1);
 });
 
 // ── R8 / R16 / R18: attribution ─────────────────────────────────────────────

@@ -118,6 +118,11 @@ export interface RuntimeDriver {
   handleCommand?(text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }): HandledCommand | null;
   /** Post-commit hook for a freshly accepted command (mirror its user row). */
   accepted?(cmd: CommandView): void;
+  /** The runtime ref a submission carries. Default: the command id, then
+   *  `<id>#a<n>` per resend so two submissions stay distinguishable. A
+   *  runtime whose ids are idempotent server-side (opencode messageID)
+   *  returns the SAME ref for every attempt. */
+  runtimeRef?(cmd: CommandView, attemptNo: number): string;
 }
 
 // ── the pure state machine ───────────────────────────────────────────────────
@@ -305,6 +310,8 @@ interface Actor {
   unresolved: Set<string>;
   cancelTimers: Map<string, () => void>;
   cancelOps: Map<string, string>;
+  /** A session-wide interrupt in flight (untargeted drivers). */
+  sessionInterrupt: Promise<void> | null;
   drafts: string[];
   reconciling: boolean;
 }
@@ -369,7 +376,7 @@ export class SessionCoordinator {
       sessionId, driver, generation: driver.generation, ready: false, retired: false, paused: false,
       unsubscribe: () => {}, pumping: false, pumpAgain: false, holdUntil: 0, holdTimer: null,
       abort: new AbortController(), foreignTurn: null, unresolved: new Set(), cancelTimers: new Map(), cancelOps: new Map(),
-      drafts: [], reconciling: false,
+      sessionInterrupt: null, drafts: [], reconciling: false,
     };
     actor.unsubscribe = driver.observe((o) => this.#observe(actor, o));
     this.#actors.set(sessionId, actor);
@@ -514,19 +521,29 @@ export class SessionCoordinator {
   }
 
   /** Stop whatever is executing: every command in flight is cancelled
-   *  (durably), and a foreign turn — or a runtime with nothing attributable —
-   *  gets a session-wide interrupt. `ok:false` when the interrupt was
-   *  refused; the app's Stop must not read success while the agent runs. */
+   *  (durably) and its FIRST interrupt is driven here so the caller gets the
+   *  runtime's verdict (retries stay in the background); a foreign turn — or
+   *  a runtime with nothing attributable — gets a session-wide interrupt.
+   *  `ok:false` when an interrupt was refused; the app's Stop must not read
+   *  success while the agent runs (#8). */
   async abortRunning(sessionId: string): Promise<{ ok: boolean; error?: string }> {
     const actor = this.#actors.get(sessionId);
     if (!actor) return { ok: false, error: "no runtime" };
     const inFlight = this.ledger.listPending(sessionId).filter((r) => r.state !== "queued");
+    const errors: string[] = [];
     for (const r of inFlight) this.cancel(r.id);
-    if (inFlight.length && !actor.foreignTurn) return { ok: true };
+    // A session-wide interrupt stops everything at once: one op covers them all.
+    const ops = actor.driver.capabilities.targetedInterrupt ? inFlight : inFlight.slice(0, 1);
+    for (const r of ops) {
+      actor.cancelTimers.get(r.id)?.(); actor.cancelTimers.delete(r.id);
+      const res = await this.#interruptOp(actor, r.id);
+      if (res?.kind === "failed") errors.push(res.error ?? "interrupt failed");
+    }
+    if (inFlight.length && !actor.foreignTurn) return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
     try {
       const r = await actor.driver.interrupt({ attempt: null });
       if (r.kind === "failed") return { ok: false, error: r.error ?? "interrupt failed" };
-      return { ok: true };
+      return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
     } catch (e) {
       return { ok: false, error: `interrupt failed: ${e instanceof Error ? e.message : e}` };
     }
@@ -654,7 +671,8 @@ export class SessionCoordinator {
     const token = randomUUID();
     try {
       const attemptNo = this.ledger.attemptsForCommand(cmd.id).length + 1;
-      attempt = this.ledger.recordAttempt(cmd.id, actor.generation, SessionCoordinator.runtimeRef(cmd.id, attemptNo), token);
+      const ref = driver.runtimeRef ? driver.runtimeRef(this.#view(cmd), attemptNo) : SessionCoordinator.runtimeRef(cmd.id, attemptNo);
+      attempt = this.ledger.recordAttempt(cmd.id, actor.generation, ref, token);
     } catch (e) {
       if (e instanceof StaleGenerationError) { this.#log(`${sessionId}: generation ${actor.generation} is no longer current — pump stopped`); actor.retired = true; return; }
       if (e instanceof StaleCommandError) { this.#emitCommand(cmd.id); return; } // cancelled before dispatch (R9): the loop takes the next head
@@ -775,34 +793,44 @@ export class SessionCoordinator {
     actor.cancelTimers.set(commandId, this.#schedule(() => { actor.cancelTimers.delete(commandId); void this.#interruptOp(actor, commandId); }, ms));
   }
 
-  async #interruptOp(actor: Actor, commandId: string): Promise<void> {
-    if (actor.retired) return;
+  async #interruptOp(actor: Actor, commandId: string): Promise<InterruptResult | null> {
+    if (actor.retired) return null;
     const row = this.ledger.getCommand(commandId);
-    if (!row || row.state !== "cancelling") return;
+    if (!row || row.state !== "cancelling") return null;
     const attempt = this.ledger.latestAttempt(commandId);
     // The submit is still in flight: its completion consults the cancel flag
     // and schedules the interrupt with the turn identity it learns (#35).
-    if (attempt?.state === "submitting") return;
-    const tries = this.ledger.noteCancelAttempt(commandId);
-    if (tries > this.#o.maxCancelAttempts) {
-      if (!actor.unresolved.has(commandId)) {
-        actor.unresolved.add(commandId);
-        try { this.ledger.recordObservation({ sessionId: actor.sessionId, generation: actor.generation, attemptId: attempt?.id ?? null, kind: "cancel_unresolved", ref: commandId, payload: { tries: tries - 1 } }); } catch { /* informational */ }
-        this.#log(`${actor.sessionId}: cancel of ${commandId} unresolved after ${tries - 1} interrupt attempts — the runtime never confirmed`);
-        this.#emit({ type: "cancel_unresolved", sessionId: actor.sessionId, commandId });
-        this.#emit({ type: "session", sessionId: actor.sessionId });
+    if (attempt?.state === "submitting") return null;
+    // A session-wide interrupt (opencode, pi) would also stop commands nobody
+    // cancelled: refuse it while such work runs — the cancel keeps retrying
+    // and is surfaced as unresolved rather than stopping the wrong turn
+    // (Astra on af76c787, #77). A second session-wide op in flight already
+    // covers this one: wait for its verdict instead of doubling it.
+    if (!actor.driver.capabilities.targetedInterrupt) {
+      if (actor.sessionInterrupt) { await actor.sessionInterrupt; if (this.ledger.getCommand(commandId)?.state !== "cancelling") return null; }
+      const collateral = this.ledger.listPending(actor.sessionId).filter((r) => (r.state === "running" || r.state === "accepted") && r.id !== commandId);
+      if (collateral.length) {
+        // Not an interrupt attempt (the budget is untouched): the cancel
+        // stays pending and resolves with the turn's own end, or once the
+        // other work is cancelled too (abortRunning).
+        this.#scheduleInterrupt(actor, commandId, Math.min(30_000, this.#o.interruptConfirmMs * 4));
+        return { kind: "failed", error: `a session-wide interrupt would also stop ${collateral.map((c) => c.id).join(", ")}` };
       }
-      return;
     }
+    const tries = this.ledger.noteCancelAttempt(commandId);
+    if (tries > this.#o.maxCancelAttempts) { this.#markUnresolved(actor, commandId, attempt?.id ?? null, tries - 1); return { kind: "failed", error: "unresolved" }; }
     const token = randomUUID();
     actor.cancelOps.set(commandId, token);
-    let r: InterruptResult;
-    try { r = await actor.driver.interrupt({ attempt: attempt ? this.#ref(attempt) : null }); }
-    catch (e) { r = { kind: "failed", error: e instanceof Error ? e.message : String(e) }; }
-    if (actor.retired || actor.cancelOps.get(commandId) !== token) return;
+    const call = (async (): Promise<InterruptResult> => {
+      try { return await actor.driver.interrupt({ attempt: attempt ? this.#ref(attempt) : null }); }
+      catch (e) { return { kind: "failed", error: e instanceof Error ? e.message : String(e) }; }
+    })();
+    if (!actor.driver.capabilities.targetedInterrupt) actor.sessionInterrupt = call.then(() => {}, () => {}).finally(() => { actor.sessionInterrupt = null; });
+    const r = await call;
+    if (actor.retired || actor.cancelOps.get(commandId) !== token) return r;
     actor.cancelOps.delete(commandId);
     const now = this.ledger.getCommand(commandId);
-    if (!now || now.state !== "cancelling") return; // confirmed meanwhile by an observation
+    if (!now || now.state !== "cancelling") return r; // confirmed meanwhile by an observation
     if (r.kind === "noop" && (!attempt || attempt.state === "rejected" || attempt.state === "superseded" || attempt.runtimeTurnId == null && attempt.state !== "accepted" && attempt.state !== "done")) {
       // Nothing is running and nothing is known to have landed: the cancel
       // holds. Should the submission surface later, its evidence meets a
@@ -815,13 +843,23 @@ export class SessionCoordinator {
       } catch (e) { this.#log(`${actor.sessionId}: cancel commit for ${commandId} failed: ${e instanceof Error ? e.message : e}`); }
       this.#emitCommand(commandId);
       this.#pump(actor.sessionId);
-      return;
+      return r;
     }
     // sent (await the runtime's confirmation), failed, or a noop against a
     // turn we know landed: try again after a backoff.
     const backoff = Math.min(30_000, this.#o.cancelBackoffMs * Math.pow(2, Math.max(0, tries - 1)));
     this.#scheduleInterrupt(actor, commandId, r.kind === "sent" ? Math.max(backoff, this.#o.interruptConfirmMs) : backoff);
     if (r.kind === "failed") this.#log(`${actor.sessionId}: interrupt for ${commandId} failed (${r.error ?? "?"}) — retry ${tries}/${this.#o.maxCancelAttempts} in ${backoff}ms`);
+    return r;
+  }
+
+  #markUnresolved(actor: Actor, commandId: string, attemptId: string | null, tries: number): void {
+    if (actor.unresolved.has(commandId)) return;
+    actor.unresolved.add(commandId);
+    try { this.ledger.recordObservation({ sessionId: actor.sessionId, generation: actor.generation, attemptId, kind: "cancel_unresolved", ref: commandId, payload: { tries } }); } catch { /* informational */ }
+    this.#log(`${actor.sessionId}: cancel of ${commandId} unresolved after ${tries} interrupt attempts — the runtime never confirmed`);
+    this.#emit({ type: "cancel_unresolved", sessionId: actor.sessionId, commandId });
+    this.#emit({ type: "session", sessionId: actor.sessionId });
   }
 
   // ── observations ──
@@ -883,10 +921,13 @@ export class SessionCoordinator {
         return;
       }
       case "turn_ended": {
-        const attempt = (o.runtimeTurnId ? this.ledger.attemptByRuntimeTurnId(sid, o.runtimeTurnId) : null)
-          ?? (o.runtimeRef ? this.ledger.attemptByRef(sid, o.runtimeRef) : null)
-          ?? (o.runtimeTurnId == null && o.runtimeRef == null ? this.#soleExecutingAttempt(sid) : null);
-        if (!attempt) {
+        // Every command that rode this turn ends with it: a steered message
+        // shares the running turn (opencode, pi), and an id-less runtime's
+        // "the run ended" applies to everything executing.
+        const attempts = o.runtimeTurnId ? this.ledger.attemptsByRuntimeTurnId(sid, o.runtimeTurnId)
+          : o.runtimeRef ? [this.ledger.attemptByRef(sid, o.runtimeRef)].filter((a): a is AttemptRow => !!a)
+          : this.#executingAttempts(sid);
+        if (!attempts.length) {
           if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId || actor.foreignTurn.runtimeTurnId == null)) actor.foreignTurn = null;
           this.#recordFree(actor, "turn_ended", o.runtimeTurnId ?? null, { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status });
           this.#emit({ type: "foreign_turn", sessionId: sid, runtimeTurnId: o.runtimeTurnId ?? null, phase: "ended" });
@@ -895,13 +936,15 @@ export class SessionCoordinator {
           this.#pump(sid);
           return;
         }
-        const cmd = this.ledger.getCommand(attempt.commandId);
-        const t = cmd ? nextState(cmd.state, { type: "turn_ended", status: o.status }) : null;
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_ended", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status, detail: o.detail ?? null } }, {
-          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason }, attempt: { id: attempt.id, outcome: t.to === "completed" ? "done" : "superseded" } } : {}),
-        });
-        if (actor.foreignTurn && o.runtimeTurnId && actor.foreignTurn.runtimeTurnId === o.runtimeTurnId) actor.foreignTurn = null;
-        if (cmd) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); this.#emitCommand(cmd.id); }
+        for (const attempt of attempts) {
+          const cmd = this.ledger.getCommand(attempt.commandId);
+          const t = cmd ? nextState(cmd.state, { type: "turn_ended", status: o.status }) : null;
+          this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_ended", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status, detail: o.detail ?? null } }, {
+            ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason }, attempt: { id: attempt.id, outcome: t.to === "completed" ? "done" : "superseded" } } : {}),
+          });
+          if (cmd) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); this.#emitCommand(cmd.id); }
+        }
+        if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId)) actor.foreignTurn = null;
         actor.holdUntil = 0; // the runtime is free again: a busy-refused head may go now
         this.#pump(sid);
         return;
@@ -969,10 +1012,17 @@ export class SessionCoordinator {
     }
   }
 
+  /** The latest attempt of every command executing (accepted | running |
+   *  cancelling) — what an id-less turn signal applies to. */
+  #executingAttempts(sessionId: string): AttemptRow[] {
+    return this.ledger.listPending(sessionId)
+      .filter((r) => r.state === "running" || r.state === "cancelling" || r.state === "accepted")
+      .map((r) => this.ledger.latestAttempt(r.id))
+      .filter((a): a is AttemptRow => !!a);
+  }
   #soleExecutingAttempt(sessionId: string): AttemptRow | null {
-    const rows = this.ledger.listPending(sessionId).filter((r) => r.state === "running" || r.state === "cancelling" || r.state === "accepted");
-    if (rows.length !== 1) return null;
-    return this.ledger.latestAttempt(rows[0].id);
+    const all = this.#executingAttempts(sessionId);
+    return all.length === 1 ? all[0] : null;
   }
 
   #recordFree(actor: Actor, kind: string, ref: string | null, payload: unknown): void {
