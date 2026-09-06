@@ -373,6 +373,20 @@ describe('parseMarkdownBlock - pipe runs that are not tables (#622)', () => {
         expect(blocks.every((b) => b.type === 'text')).toBe(true);
     });
 
+    it('a blank run inside a table is stepped over once and charged, not re-scanned from every line', () => {
+        // Advancing one line at a time re-walked the whole blank run per
+        // line: header + separator + 40k blank lines + a row took ~12s.
+        const expected = parseMarkdown('a|b\n---|---\n\nc|d\n');
+        const input = 'a|b\n---|---\n' + '\n'.repeat(40_000) + 'c|d\n';
+        const t0 = performance.now();
+        const blocks = parseMarkdown(input);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+        expect(blocks).toEqual(expected);
+        expect(blocks).toEqual([
+            { type: 'table', headers: [spans('a'), spans('b')], rows: [[spans('c'), spans('d')]] },
+        ]);
+    });
+
     it('a table preceded by a stray pipe line still parses, blank line between header and separator included', () => {
         expect(parseMarkdown('x|y\nh1|h2\n---|---\nc1|c2')).toEqual([
             { type: 'text', content: spans('x|y') },
