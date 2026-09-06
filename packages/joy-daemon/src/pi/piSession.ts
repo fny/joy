@@ -8,7 +8,11 @@
 // - No pane (opencode-style stubs), no permission modes (pi default policy),
 //   no effort wiring, no per-session model switching.
 // - Queue: pi owns steer/follow-up queues natively; `queue_update` events are
-//   mirrored into queueState(). Send path: busy → steer, idle → prompt.
+//   mirrored into queueState(). Send path: busy → steer, idle → prompt. Every
+//   prompt is a ledger command first (accepted = committed), the stdin write
+//   is a ledger attempt, and pi's RPC `response` settles it — so a daemon
+//   restart re-sends what pi never confirmed instead of losing it with pi's
+//   in-process queue.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
@@ -26,6 +30,7 @@ import type { AgentSession } from "../domain/agentSession";
 import type { DeliverySource } from "../domain/agentSession";
 import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, SessionDeps } from "../claude/session";
 import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
+import { ledgerFor, type Ledger, LedgerWriteError, StaleCommandError, StaleGenerationError } from "../domain/ledger";
 import { titleFromPrompt } from "../opencode/opencodeSession";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 
@@ -104,8 +109,11 @@ export class PiSession implements AgentSession {
   #turn: string | null = null;
   // prompt/steer commands awaiting pi's `response` row, by request id (#577):
   // a `success:false` used to be ignored along with every non-get_state
-  // response, so a rejected prompt vanished without a trace.
-  #pending = new Map<string, { kind: "prompt" | "steer"; text: string }>();
+  // response, so a rejected prompt vanished without a trace. Each carries
+  // the ledger command + attempt the response settles (#456).
+  #pending = new Map<string, { kind: "prompt" | "steer"; text: string; commandId: string; attemptId: string }>();
+  #ledger: Ledger;
+  #generation: number;
   // pi-owned queues, mirrored from queue_update events.
   #queuedInHarness = 0;
   #titled = false;
@@ -121,7 +129,15 @@ export class PiSession implements AgentSession {
     this.#startedAt = init.startedAt;
     this.#deps = deps;
     this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
+    // A new generation: whatever the previous process had in flight is an
+    // explicit unknown, re-sent by #resendPending once pi is up (pi's own
+    // queue died with it; the conversation is resumed by --session-id).
+    this.#ledger = deps.ledger ?? ledgerFor();
+    this.#generation = this.#ledger.openGeneration(init.id, "pi");
   }
+
+  /** Test/diagnostic access to the session's ledger generation. */
+  get ledgerGeneration(): number { return this.#generation; }
 
   get relayAttached(): boolean { return this.#relay !== null; }
   /** pi's own session id (the session file's id) — what a fork copies. */
@@ -196,6 +212,7 @@ export class PiSession implements AgentSession {
       this.#persistRecord();
       if (this.status === "starting") this.status = "active";
       this.#deps.broadcast("session_update", this.toJSON());
+      this.#resendPending();
     } catch (e) {
       process.stderr.write(`[pi ${this.id}] start failed: ${e}\n`);
       this.end("process_exited");
@@ -205,6 +222,17 @@ export class PiSession implements AgentSession {
   #persistRecord(): void {
     if (this.status === "ended") return; // a retired/killed generation must not recreate a deleted record (#52)
     saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model, sessionId: this.#piSessionId } });
+  }
+
+  /** Hand every command the ledger still holds for this session to pi: rows
+   *  queued before the process was up, and rows a previous generation left
+   *  unconfirmed (unknown → at-least-once; the process that had them died). */
+  #resendPending(): void {
+    if (this.status === "ended" || !this.#proc) return;
+    for (const row of this.#ledger.listPending(this.id, ["queued", "unknown"])) {
+      if (row.state === "unknown" && !this.#ledger.requeueCommand(row.id)) continue;
+      this.#dispatch(this.#thinking ? "steer" : "prompt", row.text, row.id);
+    }
   }
 
   /** True when the command was handed to pi's stdin. */
@@ -225,7 +253,15 @@ export class PiSession implements AgentSession {
         const pending = reqId ? this.#pending.get(reqId) : undefined;
         if (pending && reqId) {
           this.#pending.delete(reqId);
-          if (!e.success) { this.#rejected(pending.kind, pending.text, String((e as { error?: unknown }).error ?? "unknown error")); break; }
+          if (!e.success) {
+            const error = String((e as { error?: unknown }).error ?? "unknown error");
+            this.#settleRejected(pending.commandId, pending.attemptId, error);
+            this.#rejected(pending.kind, pending.text, error);
+            break;
+          }
+          // pi took it: the command is delivered (#456 — the response carries the request id).
+          try { this.#ledger.confirmDelivery(pending.commandId, [], { attemptId: pending.attemptId }); }
+          catch (err) { process.stderr.write(`[pi ${this.id}] ledger confirm for ${pending.commandId} failed: ${err instanceof Error ? err.message : err}\n`); }
         }
         if (e.command === "get_state" && e.success) {
           const data = e.data as { model?: { id?: string }; sessionId?: string } | undefined;
@@ -324,14 +360,36 @@ export class PiSession implements AgentSession {
 
   #turnId(n: number): string { return `pi:${this.id}:${this.#boot}:t${n}`; }
 
-  /** Hand a prompt/steer to pi and track it until pi answers (#577). */
-  #dispatch(kind: "prompt" | "steer", text: string): void {
+  /** Hand a prompt/steer to pi and track it until pi answers (#577). The
+   *  attempt is committed BEFORE the stdin write: a crash between the write
+   *  and pi's response is an explicit unknown the next generation re-sends. */
+  #dispatch(kind: "prompt" | "steer", text: string, commandId: string): void {
+    if (!this.#proc) return; // not up yet: #resendPending sends it once pi is
     const id = randomUUID().slice(0, 8);
-    this.#pending.set(id, { kind, text });
+    let attemptId: string;
+    try {
+      attemptId = this.#ledger.recordAttempt(commandId, this.#generation, id, kind).id;
+    } catch (e) {
+      if (e instanceof StaleGenerationError || e instanceof StaleCommandError) return; // retired, or cancelled/delivered meanwhile
+      if (e instanceof LedgerWriteError) {
+        // Not sent: the row stays queued and is retried once the ledger accepts writes.
+        process.stderr.write(`[pi ${this.id}] could not commit the ${kind} attempt for ${commandId}: ${e.message} — holding\n`);
+        setTimeout(() => this.#resendPending(), 2_000).unref();
+        return;
+      }
+      throw e;
+    }
+    this.#pending.set(id, { kind, text, commandId, attemptId });
     if (!this.#send({ id, type: kind, message: text })) {
       this.#pending.delete(id);
+      this.#settleRejected(commandId, attemptId, "pi stdin is not writable");
       this.#rejected(kind, text, "pi stdin is not writable");
     }
+  }
+
+  #settleRejected(commandId: string, attemptId: string, error: string): void {
+    try { this.#ledger.settleAttempt(attemptId, "rejected", { detail: error.slice(0, 200) }); }
+    catch (e) { process.stderr.write(`[pi ${this.id}] ledger settle for ${commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
   }
 
   /** Surface a prompt/steer pi refused (or never received) instead of
@@ -387,13 +445,33 @@ export class PiSession implements AgentSession {
       this.enqueue(joyPromptReinjection(), { mirrorToRelay: false });
       return { id: String(opts?.seq ?? at), text, createdAt: at, handled: "command" }; // (#115)
     }
+    // Acceptance = the ledger commit (throws when it cannot commit, or when
+    // the session has ended — #553); a redelivered seq dedupes there.
+    const accepted = this.#ledger.acceptCommand({
+      sessionId: this.id, id: opts?.seq != null ? `pi-in:${this.id}:${opts.seq}` : undefined, text,
+      origin: opts?.seq != null ? "relay" : "local", source: opts?.source ?? "rpc", seq: opts?.seq,
+      visible: opts?.visible ?? false, mirrorToRelay: opts?.mirrorToRelay ?? true, createdAt: at,
+    });
+    if (accepted.deduped !== "none") return { id: accepted.id, text, createdAt: accepted.row?.createdAt ?? at };
     // Mirror the user row FIRST (positional turn pairing needs user-before-
     // turn-start; see the codex CH7 lesson), then hand pi the message: its
     // native queue handles busy — steer mid-turn, prompt when idle.
     if ((opts?.mirrorToRelay ?? true) && this.#relay) this.#relay.send(encodeUserMessage(text, at), `pi:in:${this.id}:${opts?.seq ?? at}`);
-    this.#dispatch(this.#thinking ? "steer" : "prompt", text);
+    this.#dispatch(this.#thinking ? "steer" : "prompt", text, accepted.id);
     this.#maybeTitle(text);
-    return { id: String(opts?.seq ?? at), text, createdAt: at };
+    return { id: accepted.id, text, createdAt: at };
+  }
+
+  /** Delivery state of one command: pi's `response` is the proof (#456). */
+  queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
+    const row = this.#ledger.getCommand(id);
+    if (!row || row.sessionId !== this.id) return "unknown";
+    switch (row.state) {
+      case "completed": return "delivered";
+      case "failed": return "failed";
+      case "cancelled": case "interrupted": return "cancelled";
+      default: return "pending";
+    }
   }
 
   #maybeTitle(text: string): void {
@@ -407,12 +485,20 @@ export class PiSession implements AgentSession {
   }
 
   queueState(): QueueState {
-    return { queue: [], pendingCount: this.#queuedInHarness, hidden: [], inFlight: this.#turn, paused: false };
+    // pi's own steer/follow-up queues, plus commands not yet handed to it
+    // (accepted before the process was up).
+    const notYetSent = this.#ledger.listPending(this.id, ["queued"]).length;
+    return { queue: [], pendingCount: this.#queuedInHarness + notYetSent, hidden: [], inFlight: this.#turn, paused: false };
   }
 
-  resumeQueue(): void { /* pi drains its own queues */ }
+  resumeQueue(): void { this.#resendPending(); }
   editQueued(): boolean { return false; }
-  cancelQueued(): boolean { return false; }
+  /** Only a command pi has not been handed yet can be plucked. */
+  cancelQueued(id: string): boolean {
+    const row = this.#ledger.getCommand(id);
+    if (!row || row.sessionId !== this.id || row.state !== "queued") return false;
+    try { return this.#ledger.requestCancel(id)?.state === "cancelled"; } catch { return false; }
+  }
   reorderQueued(): boolean { return false; }
 
   async abort(): Promise<{ ok: boolean; error?: string }> {
@@ -472,6 +558,10 @@ export class PiSession implements AgentSession {
     }
     this.#proc = null;
     this.#pending.clear(); // the process that would have answered is gone (#577)
+    // Its unanswered attempts become explicit unknowns for the next generation
+    // to re-send; queued rows survive a restart / process exit, never a kill.
+    try { this.#ledger.closeGeneration(this.id, this.#generation, reason, { keepQueued: reason !== "killed" }); }
+    catch (e) { process.stderr.write(`[pi ${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
     if (this.#turn) {
       this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn }), `${this.#turn}:end`);
       this.#turn = null;
@@ -505,6 +595,7 @@ export class PiSession implements AgentSession {
       if (this.#relay) { this.#archivePromise = this.#relay.archive(); this.#relay.stop(); this.#relay = null; }
       this.endReason = "killed";
       this.#recordTerminated = deleteWindowRecord(this.id);
+      try { this.#ledger.closeGeneration(this.id, this.#generation, "killed"); } catch { /* logged by end() paths */ }
       this.#deps.broadcast("session_update", this.toJSON());
       return true;
     }
