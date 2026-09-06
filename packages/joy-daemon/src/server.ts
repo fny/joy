@@ -163,9 +163,14 @@ const registry = new SessionRegistry({
 // once) and create({ id }) refuses it.
 if (importReport.quarantine.length) registry.quarantine(importReport.quarantine, "legacy import failed");
 
+// The port the local surface ACTUALLY bound. With PORT=0 the kernel picks
+// one and only onListening knows it — everything that dials the local
+// surface must read it from here rather than capture PORT (#588).
+let boundPort = PORT;
 startHttpServer({
   registry, port: PORT, publicDir: PUBLIC_DIR, token: SERVER_TOKEN,
   onListening: (port) => {
+    boundPort = port;
     if (port !== PORT) writeDaemonState(port);
     process.stderr.write(`webchat server running on http://127.0.0.1:${port} (relay ${joyRelayUrl()})\n`);
   },
@@ -222,7 +227,11 @@ if (process.env.JOY_V2_LANE !== "0") {
       // Borrow the lane's lease: acquiring a second one for the same machine
       // would release the lane's and the two would evict each other forever.
       borrowLease: () => nucleusLane?.currentLease() ?? null,
-      targetBase: `http://127.0.0.1:${PORT}`,
+      // Resolved per request from the BOUND port (#588): with PORT=0 the
+      // executor used to hold http://127.0.0.1:0 forever, so every tunneled
+      // files / git / terminal / usage request failed with a sealed 502
+      // while the local HTTP server was healthy.
+      targetBase: () => `http://127.0.0.1:${boundPort}`,
       targetHeaders: { "X-Joy-Token": SERVER_TOKEN },
       log: (line) => process.stderr.write(line + "\n"),
     });
