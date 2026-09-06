@@ -311,6 +311,16 @@ app.
   inbound + checkpoints, window-record execution fields + spawn intents +
   handoff jobs, pi/agy queues, one-time import).
 
+- 2026-09-08 (C1) — The durable acceptance ledger merged (95c4781e):
+  `src/domain/ledger.ts` (SQLite WAL+FULL, transactional API), the relay
+  outbox (`src/relay/outbox.ts`, one sender per session), Codex/OpenCode
+  inbound + checkpoints, window-record execution fields, spawn intents,
+  handoff jobs and pi/agy queues on the ledger; queueStore, receipts,
+  outboundSpool and the codex stores deleted; one-time import of the legacy
+  files at boot. Daemon 812 tests. Left for C2: real running/terminal
+  outcomes, cancelling/unresolved surfacing, idle-without-terminal →
+  interrupted, relay_turn_id plumbing, `/steer`.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
