@@ -323,6 +323,8 @@ export const zhHant: TranslationStructure = {
         switchMachinesHint: '• 點擊上方的裝置來切換裝置',
         createDirectoryTitle: '建立目錄？',
         createDirectoryMessage: ({ path }: { path: string }) => `目錄 '${path}' 在該機器上不存在。是否建立？`,
+        creationUncertainTitle: '工作階段未確認',
+        creationUncertainMessage: '中繼未確認新的工作階段。重試會再次送出同一個請求，因此最多只會啟動一個工作階段。',
     },
 
     sessionHistory: {

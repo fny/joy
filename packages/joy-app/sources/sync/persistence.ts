@@ -4,12 +4,14 @@ import { LocalSettings, localSettingsDefaults, localSettingsParse } from './loca
 import { Profile, profileDefaults, profileParse } from './profile';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { Machine } from './storageTypes';
+import type { UncertainCreation } from './v2/spawn';
 
 const mmkv = relayScopedMMKV();
 const CACHED_MACHINES_KEY = 'cached-machines-v1';
 const MAX_CACHED_MACHINES = 50;
 const NEW_SESSION_DRAFT_KEY = 'new-session-draft-v1';
 const REGISTERED_PUSH_TOKEN_KEY = 'registered-push-token-v1';
+const UNCERTAIN_CREATIONS_KEY = 'uncertain-creations-v1';
 
 export type NewSessionAgentType = 'claude' | 'codex' | 'gemini' | 'openclaw' | 'opencode' | 'pi' | 'agy';
 export type NewSessionSessionType = 'simple' | 'worktree';
@@ -211,6 +213,45 @@ export function saveRegisteredPushToken(token: string) {
 
 export function clearRegisteredPushToken() {
     mmkv.delete(REGISTERED_PUSH_TOKEN_KEY);
+}
+
+// Spawn creations whose acceptance is unresolved (#417), keyed by the
+// action's fingerprint (sync/v2/spawn creationFingerprint). Persisted so an
+// app restart keeps replaying the SAME creation intent for the same action
+// instead of accepting a second session; the entries live until the relay
+// answers under the intent. Relay-scoped like everything else here — an
+// intent is only meaningful to the relay that may hold it.
+export function loadUncertainCreations(): Record<string, UncertainCreation> {
+    const raw = mmkv.getString(UNCERTAIN_CREATIONS_KEY);
+    if (!raw) return {};
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+        const out: Record<string, UncertainCreation> = {};
+        for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+            const v = value as Partial<UncertainCreation> | null;
+            if (!v || typeof v.creationIntentId !== 'string' || typeof v.machineId !== 'string') continue;
+            out[key] = {
+                creationIntentId: v.creationIntentId,
+                machineId: v.machineId,
+                since: typeof v.since === 'number' ? v.since : 0,
+                ...(typeof v.spawnSpecWire === 'string' ? { spawnSpecWire: v.spawnSpecWire } : {}),
+            };
+        }
+        return out;
+    } catch (e) {
+        console.error('Failed to parse uncertain creations', e);
+        return {};
+    }
+}
+
+export function saveUncertainCreations(entries: Record<string, UncertainCreation>): void {
+    try {
+        if (Object.keys(entries).length === 0) mmkv.delete(UNCERTAIN_CREATIONS_KEY);
+        else mmkv.set(UNCERTAIN_CREATIONS_KEY, JSON.stringify(entries));
+    } catch (e) {
+        console.error('Failed to save uncertain creations', e);
+    }
 }
 
 export function loadSessionPermissionModes(): Record<string, string> {

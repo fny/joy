@@ -321,6 +321,8 @@ export const it: TranslationStructure = {
         switchMachinesHint: '• Cambia macchina cliccando sulla macchina sopra',
         createDirectoryTitle: 'Creare la directory?',
         createDirectoryMessage: ({ path }: { path: string }) => `La directory '${path}' non esiste sulla macchina. Vuoi crearla?`,
+        creationUncertainTitle: 'Sessione non confermata',
+        creationUncertainMessage: 'Il relay non ha confermato la nuova sessione. Riprova invia di nuovo la stessa richiesta, quindi verrà avviata al massimo una sessione.',
     },
 
     sessionHistory: {
