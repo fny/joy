@@ -41,3 +41,45 @@ describe('findCodeRanges', () => {
         expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
     });
 });
+
+import { replaceOutsideCode } from './codeRanges';
+
+describe('findCodeRanges — closing fence whitespace (#436 residual)', () => {
+    it('a closing fence followed by a CR or trailing spaces still closes the block', () => {
+        for (const close of ['```\r', '```  ', '```\t \r']) {
+            const text = '```xml\n<x/>\n' + close + '\nafter';
+            expect(slices(text)).toEqual(['```xml\n<x/>\n' + close]);
+        }
+    });
+
+    it('a closing fence with other trailing text is content, as in the block parser', () => {
+        expect(slices('```\ninner\n``` x\n```\nout')).toEqual(['```\ninner\n``` x\n```']);
+    });
+});
+
+describe('findCodeRanges — bounded inline scan', () => {
+    it('one line of successively longer backtick runs is linear', () => {
+        const text = 'prefix ' + Array.from({ length: 1200 }, (_, i) => '`'.repeat(i + 1)).join(' ');
+        expect(text.length).toBeGreaterThan(700_000);
+        const t0 = performance.now();
+        expect(findCodeRanges(text)).toEqual([]);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+    });
+
+    it('pairs each opener with the next run of equal length, skipping other lengths', () => {
+        expect(slices('` `` ` ``` `` x')).toEqual(['` `` `']);
+        expect(slices('`` ` `` ``` x ``` `y`')).toEqual(['`` ` ``', '``` x ```', '`y`']);
+    });
+});
+
+describe('replaceOutsideCode', () => {
+    it('rewrites matches outside code and leaves quoted ones alone', () => {
+        const out = replaceOutsideCode('a <t>1</t> `<t>2</t>` b\n```\n<t>3</t>\n```\n<t>4</t>', /<t>(\d)<\/t>/g, m => `[${m[1]}]`);
+        expect(out).toBe('a [1] `<t>2</t>` b\n```\n<t>3</t>\n```\n[4]');
+    });
+
+    it('returns the input untouched when nothing matches', () => {
+        const text = 'no tags `here`';
+        expect(replaceOutsideCode(text, /<t>/g, () => 'x')).toBe(text);
+    });
+});

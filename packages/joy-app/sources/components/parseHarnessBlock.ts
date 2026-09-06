@@ -16,7 +16,8 @@
 // Anything else passes through untouched as { kind: 'none', text }.
 
 import { t } from '@/text';
-import { findCodeRanges, isInsideCode } from './markdown/codeRanges';
+import { exceedsInputBudget } from '@/utils/parseBudget';
+import { replaceOutsideCode } from './markdown/codeRanges';
 
 export type HarnessBlock =
     | { kind: 'task-notification'; status: string; summary: string; outputFile?: string }
@@ -44,21 +45,11 @@ const TASK_NOTIFICATION_RE = /<task-notification>([\s\S]*?)<\/task-notification>
  * Remove every complete noise block that is NOT inside markdown code. A user
  * asking to "explain this fenced <system-reminder> example" had the example's
  * body deleted, leaving an empty fence (#270): quoted content is the user's,
- * only the harness's own top-level blocks are machine context.
+ * only the harness's own top-level blocks are machine context. The same
+ * rule guards EVERY rewrite below (replaceOutsideCode), not just this one.
  */
 function stripNoiseBlocks(raw: string): string {
-    const codeRanges = findCodeRanges(raw);
-    if (codeRanges.length === 0) return raw.replace(NOISE_BLOCK_RE, '');
-    let out = '';
-    let last = 0;
-    NOISE_BLOCK_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = NOISE_BLOCK_RE.exec(raw)) !== null) {
-        if (isInsideCode(codeRanges, m.index)) continue;
-        out += raw.slice(last, m.index);
-        last = m.index + m[0].length;
-    }
-    return out + raw.slice(last);
+    return replaceOutsideCode(raw, NOISE_BLOCK_RE, () => '');
 }
 
 function parseTaskNotification(body: string): { status: string; summary: string; outputFile?: string } {
@@ -70,6 +61,13 @@ function parseTaskNotification(body: string): { status: string; summary: string;
 }
 
 export function parseHarnessBlock(raw: string): HarnessBlock {
+    // Past the shared input cap the message is shown verbatim, like every
+    // other decorating parser (utils/parseBudget): the rewrites below are
+    // linear, but the cap keeps their cost bounded by one policy.
+    if (exceedsInputBudget(raw)) {
+        return { kind: 'none', text: raw };
+    }
+
     // Strip machine-only blocks (often prepended to a real prompt).
     const text = stripNoiseBlocks(raw).trim();
 
@@ -81,9 +79,11 @@ export function parseHarnessBlock(raw: string): HarnessBlock {
             return { kind: 'task-notification', ...parseTaskNotification(first[1]) };
         }
         // Mixed: several notifications, or a notification plus a real prompt.
-        // Each block becomes one line; the rest of the message is kept verbatim.
-        const lines = text.replace(TASK_NOTIFICATION_RE, (_whole, body: string) => {
-            const n = parseTaskNotification(body);
+        // Each block becomes one line; the rest of the message is kept
+        // verbatim — including a fenced <task-notification> example, which
+        // a global replace rewrote along with the real one (#270).
+        const lines = replaceOutsideCode(text, TASK_NOTIFICATION_RE, (m) => {
+            const n = parseTaskNotification(m[1]);
             return `${t('markdown.taskNotificationLine', { status: n.status, summary: n.summary })}\n`;
         }).trim();
         return { kind: 'none', text: lines };

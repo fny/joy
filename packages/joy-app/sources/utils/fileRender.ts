@@ -88,8 +88,10 @@ export function parseDelimited(text: string, delimiter: ',' | '\t', maxRows = 50
         }
     }
     if (rows.length >= maxRows) {
-        // Anything but blank line endings after the cap is an unread record.
-        truncated = /[^\r\n]/.test(text.slice(i));
+        // Any unread input is a further record — a lone line ending is an
+        // empty record the reader would not see (#433). The loop leaves `i`
+        // just past the separator that completed the last permitted row.
+        truncated = i < text.length;
     } else if (started || inQuotes) {
         pushRow();
     }

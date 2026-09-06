@@ -1,13 +1,46 @@
 import type { MarkdownSpan } from "./parseMarkdown";
 import { exceedsInputBudget, parseBudget } from "@/utils/parseBudget";
 
-// Inline pattern: bold, italic, link, code. Every bracketed class is LINEAR:
-//  - the link text is `[^\[\]]+`, not `[^\]]+`: with the latter, a run of
-//    unclosed "[" made each "[" rescan to the end of the input (quadratic —
-//    50k brackets froze the app);
-//  - the link URL allows one level of balanced parentheses and stops at an
-//    unbalanced "(" or a newline, so "[x](" repeated cannot rescan either.
-const pattern = /(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\[\]]+)\](?:\(((?:[^()\n]|\([^()\n]*\))+)\))?)|(`(.*?)(?:`|$))/g;
+// Inline pattern: bold, italic, link text, code. Every bracketed class is
+// LINEAR: the link text is `[^\[\]]+`, not `[^\]]+` — with the latter, a run
+// of unclosed "[" made each "[" rescan to the end of the input (quadratic —
+// 50k brackets froze the app). The link DESTINATION is not in the pattern:
+// scanLinkDestination reads it from the "(" that follows the "]".
+const pattern = /(\*\*(.*?)(?:\*\*|$))|(\*(.*?)(?:\*|$))|(\[([^\[\]]+)\])|(`(.*?)(?:`|$))/g;
+
+// A link destination is "(" … ")" with parentheses balanced to ANY depth and
+// backslash escapes ("[x](https://a/b\)c)" keeps its ")"): a fixed-depth
+// regex truncated "a_(b_(c))" and took an escaped ")" for the closer (#266).
+// Stops at a newline. Bounded: past MAX_DESTINATION_DEPTH open parentheses
+// the scan gives up, so "[x](" repeated cannot rescan the line from every
+// fragment (each attempt reads at most a few hundred characters).
+const MAX_DESTINATION_DEPTH = 32;
+
+function scanLinkDestination(text: string, openAt: number): { url: string; end: number } | null {
+    if (text.charCodeAt(openAt) !== 40 /* ( */) return null;
+    let depth = 0;
+    let i = openAt + 1;
+    while (i < text.length) {
+        const c = text[i];
+        if (c === '\\' && i + 1 < text.length && text[i + 1] !== '\n') {
+            i += 2;
+            continue;
+        }
+        if (c === '\n') return null;
+        if (c === '(') {
+            depth++;
+            if (depth > MAX_DESTINATION_DEPTH) return null;
+        } else if (c === ')') {
+            if (depth === 0) {
+                // "[x]()" has no destination: the brackets stay text, as before.
+                return i > openAt + 1 ? { url: text.slice(openAt + 1, i), end: i + 1 } : null;
+            }
+            depth--;
+        }
+        i++;
+    }
+    return null;
+}
 
 function countChar(text: string, ch: string): number {
     let n = 0;
@@ -62,17 +95,20 @@ function pushTextWithAutoLinks(spans: MarkdownSpan[], text: string, styles: Mark
 // only auto-linked — a markdown link inside bold rendered as raw "[text](url)"
 // (seen live with "**[ENG-5297 — …](linear.app/…)**"). Re-parse links here;
 // everything between them still gets the bare-URL auto-linking.
-const nestedLinkPattern = /\[([^\[\]]+)\]\(((?:[^()\n]|\([^()\n]*\))+)\)/g;
+const nestedLinkTextPattern = /\[([^\[\]]+)\]/g;
 function pushStyledContent(spans: MarkdownSpan[], text: string, styles: MarkdownSpan['styles']) {
     let last = 0;
     let m: RegExpExecArray | null;
-    nestedLinkPattern.lastIndex = 0;
-    while ((m = nestedLinkPattern.exec(text)) !== null) {
+    nestedLinkTextPattern.lastIndex = 0;
+    while ((m = nestedLinkTextPattern.exec(text)) !== null) {
+        const dest = scanLinkDestination(text, m.index + m[0].length);
+        if (!dest) continue; // "[text]" without a destination stays plain text
         if (m.index > last) {
             pushTextWithAutoLinks(spans, text.slice(last, m.index), styles);
         }
-        spans.push({ styles, text: m[1], url: unescapeLinkDestination(m[2]) });
-        last = m.index + m[0].length;
+        spans.push({ styles, text: m[1], url: unescapeLinkDestination(dest.url) });
+        last = dest.end;
+        nestedLinkTextPattern.lastIndex = dest.end;
     }
     if (last < text.length) {
         pushTextWithAutoLinks(spans, text.slice(last), styles);
@@ -111,15 +147,17 @@ export function parseMarkdownSpans(markdown: string, header: boolean) {
             pushStyledContent(spans, match[4], header ? [] : ['italic']);
         } else if (match[5]) {
             // Link - handle incomplete links (no URL part)
-            if (match[7]) {
-                spans.push({ styles: [], text: match[6], url: unescapeLinkDestination(match[7]) });
+            const dest = scanLinkDestination(markdown, pattern.lastIndex);
+            if (dest) {
+                spans.push({ styles: [], text: match[6], url: unescapeLinkDestination(dest.url) });
+                pattern.lastIndex = dest.end;
             } else {
                 // If no URL part, treat as plain text with brackets
                 pushTextWithAutoLinks(spans, `[${match[6]}]`, []);
             }
-        } else if (match[8]) {
+        } else if (match[7]) {
             // Inline code
-            spans.push({ styles: ['code'], text: match[9], url: null });
+            spans.push({ styles: ['code'], text: match[8], url: null });
         }
 
         lastIndex = pattern.lastIndex;

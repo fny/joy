@@ -63,7 +63,8 @@ describe('parseDelimited — record boundaries', () => {
     it('a complete table exactly at the row limit is not truncated (#433)', () => {
         expect(parseDelimited('one\ntwo\n', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: false });
         expect(parseDelimited('one\ntwo', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: false });
-        expect(parseDelimited('one\ntwo\n\n', ',', 2).truncated).toBe(false);
+        // A blank line after the cap is a third (empty) record left unread — truncated (reviewer residual).
+        expect(parseDelimited('one\ntwo\n\n', ',', 2).truncated).toBe(true);
         expect(parseDelimited('one\ntwo\nthree', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: true });
         expect(parseDelimited('one\ntwo\n"three"\n', ',', 2).truncated).toBe(true);
     });
@@ -79,5 +80,21 @@ describe('fileRenderKind — extensionless names (#422)', () => {
         expect(fileRenderKind('dir/md')).toBeNull();
         expect(isRasterImagePath('png')).toBe(false);
         expect(imageDataUri('png', { base64: 'AAAA' })).toBeNull();
+    });
+});
+
+describe('parseDelimited — truncation means a further record exists (#433 residual)', () => {
+    it('an omitted empty record beyond the cap is a truncation', () => {
+        expect(parseDelimited('one\ntwo\n\n', ',', 2)).toEqual({ rows: [['one'], ['two']], truncated: true });
+        expect(parseDelimited('one\r\ntwo\r\n\r\n', ',', 2).truncated).toBe(true);
+    });
+
+    it('a table that ends exactly at the cap is still complete', () => {
+        expect(parseDelimited('one\ntwo\n', ',', 2).truncated).toBe(false);
+        expect(parseDelimited('one\ntwo', ',', 2).truncated).toBe(false);
+    });
+
+    it('the omitted record is the one the uncapped parse would have returned', () => {
+        expect(parseDelimited('one\ntwo\n\n', ',').rows).toEqual([['one'], ['two'], ['']]);
     });
 });

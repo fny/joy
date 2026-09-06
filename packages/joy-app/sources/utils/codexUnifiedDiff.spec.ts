@@ -148,3 +148,50 @@ describe('countUnifiedDiffChanges (#274)', () => {
         expect(countUnifiedDiffChanges('@@ -1 +1,2 @@\n a\n+b\n')).toEqual({ added: 1, removed: 0 });
     });
 });
+
+describe('parseUnifiedDiff — header-shaped content inside a hunk (#108 residual)', () => {
+    const patch = '--- a/x\n+++ b/x\n@@ -1 +1 @@\n--- a/literal\n+++ b/literal\n';
+
+    it('a removed "-- a/literal" and added "++ b/literal" are content while the hunk owes lines', () => {
+        expect(parseUnifiedDiff(patch)).toEqual({ oldText: '-- a/literal', newText: '++ b/literal', fileName: 'x' });
+    });
+
+    it('countUnifiedDiffChanges agrees (#274)', () => {
+        expect(countUnifiedDiffChanges(patch)).toEqual({ added: 1, removed: 1 });
+    });
+
+    it('once the hunk is spent, a/ b/ headers start the next file again', () => {
+        const parsed = parseUnifiedDiff('--- a/one.ts\n+++ b/one.ts\n@@ -1 +1 @@\n--- a/literal\n+++ b/literal\n--- a/two.ts\n+++ b/two.ts\n@@ -1 +1 @@\n-c\n+d\n');
+        expect(parsed.fileName).toBe('two.ts');
+        expect(parsed.oldText).toBe('-- a/literal\nc');
+        expect(parsed.newText).toBe('++ b/literal\nd');
+    });
+
+    it('a fragment without an @@ header still recognises an unmistakable header shape', () => {
+        expect(parseUnifiedDiff('-a\n+b\n--- a/two.ts\n+++ b/two.ts\n@@ -1 +1 @@\n-c\n+d\n').fileName).toBe('two.ts');
+    });
+});
+
+describe('parseUnifiedDiff — terminated hunk lines (#423 residual)', () => {
+    it('a new file of exactly one newline reconstructs as a newline, not as a no-op', () => {
+        expect(parseUnifiedDiff('--- /dev/null\n+++ b/blank\n@@ -0,0 +1 @@\n+\n')).toEqual({
+            oldText: '', newText: '\n', fileName: 'blank',
+        });
+    });
+
+    it('removing the only (empty) line of a file is an edit too', () => {
+        expect(parseUnifiedDiff('--- a/blank\n+++ /dev/null\n@@ -1 +0,0 @@\n-\n')).toEqual({
+            oldText: '\n', newText: '', fileName: 'blank',
+        });
+    });
+
+    it('an empty line replaced by text keeps both sides terminated', () => {
+        expect(parseUnifiedDiff('@@ -1 +1 @@\n-\n+x\n')).toEqual({ oldText: '\n', newText: 'x\n', fileName: undefined });
+    });
+
+    it('the final-newline-only edit still survives with no marker asymmetry trick', () => {
+        expect(parseUnifiedDiff('--- a/x\n+++ b/x\n@@ -1 +1 @@\n-hello\n\\ No newline at end of file\n+hello\n')).toEqual({
+            oldText: 'hello', newText: 'hello\n', fileName: 'x',
+        });
+    });
+});

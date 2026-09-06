@@ -31,3 +31,14 @@ describe('markdownImageHost (#94)', () => {
         expect(markdownImageHost('https://')).toBeNull();
     });
 });
+
+import { isApprovedImageUrl } from './linkUtils';
+
+describe('isApprovedImageUrl (#94 residual)', () => {
+    it('an approval names one URL; another URL in the same component is not approved', () => {
+        const approved = 'https://a.test/a.png';
+        expect(isApprovedImageUrl(null, approved)).toBe(false);
+        expect(isApprovedImageUrl(approved, approved)).toBe(true);
+        expect(isApprovedImageUrl(approved, 'https://b.test/b.png')).toBe(false);
+    });
+});

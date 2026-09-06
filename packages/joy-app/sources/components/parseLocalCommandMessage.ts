@@ -61,10 +61,14 @@ export function parseLocalCommandMessage(text: string): LocalCommandMessage {
         // instruction survives in place. Deleting the bodies hid the args of
         // a "/review <instruction>\nBase commit: …" message and left only the
         // trailing line (#271). The human-readable <command-message> is dropped.
+        // Callbacks, not replacement strings: a literal "$&" in the user's
+        // arguments expanded to the matched <command-args> XML (#271).
+        const commandLine = `/${nameMatch[1]}`;
+        const argsText = args && args.length > 0 ? ` ${args}` : '';
         const readable = text
             .replace(COMMAND_MESSAGE_RE, '')
-            .replace(COMMAND_NAME_TAG_RE, `/${nameMatch[1]}`)
-            .replace(COMMAND_ARGS_TAG_RE, args && args.length > 0 ? ` ${args}` : '')
+            .replace(COMMAND_NAME_TAG_RE, () => commandLine)
+            .replace(COMMAND_ARGS_TAG_RE, () => argsText)
             .replace(/[ \t]+\n/g, '\n')
             .trim();
         return { kind: 'text', text: readable };

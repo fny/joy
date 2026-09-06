@@ -78,3 +78,25 @@ describe('parseHarnessBlock — noise stripping spares code examples (#270)', ()
     expect(r).toEqual({ kind: 'none', text: 'See:\n```\n<system-reminder>quoted</system-reminder>\n```' });
   });
 });
+
+describe('parseHarnessBlock — every rewrite spares code examples (#270 residual)', () => {
+  it('a real notification followed by a fenced notification example rewrites only the real one', () => {
+    const literal = '<task-notification><status>failed</status><summary>literal example</summary></task-notification>';
+    const mixed = `${notification('done', 'first')}\n\`\`\`xml\n${literal}\n\`\`\``;
+    const parsed = parseHarnessBlock(mixed);
+    expect(parsed.kind).toBe('none');
+    if (parsed.kind !== 'none') return;
+    expect(parsed.text).toBe(`Background task done: first\n\`\`\`xml\n${literal}\n\`\`\``);
+  });
+
+  it('an inline-code notification example survives the mixed rewrite as well', () => {
+    const mixed = `${notification('done', 'first')}\nSee \`<task-notification>x</task-notification>\` for the shape.`;
+    const parsed = parseHarnessBlock(mixed);
+    expect(parsed.kind === 'none' && parsed.text).toBe('Background task done: first\nSee `<task-notification>x</task-notification>` for the shape.');
+  });
+
+  it('past the shared input cap the message is returned verbatim', () => {
+    const huge = '<system-reminder>x</system-reminder>' + 'a'.repeat(200_001);
+    expect(parseHarnessBlock(huge)).toEqual({ kind: 'none', text: huge });
+  });
+});
