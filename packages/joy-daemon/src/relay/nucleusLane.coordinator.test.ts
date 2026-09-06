@@ -316,9 +316,11 @@ describe("nucleusLane on the coordinator", () => {
       }
     }
   }, 40_000);
+
   // ── e8f8b2cc review residual: a REAL daemon replacement — fresh coordinator,
   // new generation, new driver over the same ledger — with the /start
   // acknowledgement as the durable fact, not the local running state.
+
   /** The daemon "restarts": the process-wide coordinator is forgotten, the
    *  session's next generation opens over the same ledger (running rows →
    *  unknown), and a NEW driver is adopted whose reconcile finds the turn
@@ -340,6 +342,7 @@ describe("nucleusLane on the coordinator", () => {
     };
     return { s, driver, coordinator, ledger, generation: gen };
   }
+
   it("driver replacement, crash after the echo but BEFORE /start: the new generation reconciles the turn running and the resumed loop posts /start exactly once, then one terminal", async () => {
     const relay = makeFakeRelay();
     const url = await relay.listen(); srv = relay.server;
@@ -349,6 +352,7 @@ describe("nucleusLane on the coordinator", () => {
     const c = first.coordinator.accept({ sessionId: "cs000007", text: "survive a real restart", source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: "t8", relayCommandId: "c8" });
     await settle();
     first.driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T8" });
+    await settle();
     first.driver.emit({ kind: "echo", runtimeRef: c.id, runtimeTurnId: "T8" });
     expect(first.ledger.getCommand(c.id)?.state).toBe("running");
     expect(first.ledger.hasReceipt("cs000007", "relay_start_intent", "t8")).toBe(false);
@@ -375,7 +379,10 @@ describe("nucleusLane on the coordinator", () => {
     expect(first.driver.submits).toHaveLength(1);
     expect(next.driver.submits).toHaveLength(0);
   }, 30_000);
+
   it("driver replacement, crash AFTER /start: the acknowledged start is never re-posted by the new generation's loop; one terminal", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
     const first = coordinatedSession("cs000008");
     const registry1: any = { get: (i: string) => (i === "cs000008" ? first.s : undefined), list: () => [first.s], create: async () => first.s, chatHistory: () => [], listRecords: () => [{ id: "cs000008", v2SessionId: "v2s8" }], saveRecord: () => {} };
     let lane1: NucleusLaneHandle | null = startNucleusLane({ registry: registry1, relayUrl: url, token: "tok", machineId: "m8", log: () => {} });
@@ -385,6 +392,7 @@ describe("nucleusLane on the coordinator", () => {
     await until(() => first.driver.submits.length === 1);
     const row = first.ledger.commandForRelayTurn("t9")!;
     first.driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "T9" });
+    await settle();
     first.driver.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "T9" });
     await until(() => relay.count("/turns/t9/start") === 1);
     await until(() => first.ledger.hasReceipt("cs000008", "relay_start", "t9"));
@@ -400,7 +408,9 @@ describe("nucleusLane on the coordinator", () => {
     expect(relay.terminal("t9")).toBeUndefined();
     next.driver.emit({ kind: "turn_ended", runtimeTurnId: "T9", status: "failed" });
     await until(() => relay.terminals("t9").length > 0, 10_000);
+    await sleep(500);
     expect(relay.terminals("t9")).toHaveLength(1);
     expect(relay.terminals("t9")[0]).toMatchObject({ terminalState: "failed", meta: { reason: "agent_reported_failed" } });
     expect(relay.count("/turns/t9/start")).toBe(1);
+  }, 30_000);
 });
