@@ -720,6 +720,25 @@ test("observation fencing (e8f8b2cc): a late echo of the pre-edit attempt does n
   expect(stateOf(plain.id)).toBe("queued");
   d.emit({ kind: "echo", runtimeRef: second.attempt.runtimeRef });
   expect(stateOf(plain.id)).toBe("running"); // same payload, newest attempt: it landed after all
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(plain.id)).toBe("completed");
+  // Same payload, OLDER attempt (a resend already went out): its late turn end is
+  // still this command's delivery — at-least-once, the codex resend contract.
+  const twice = accept("s1", "sent twice");
+  await settle();
+  const a1 = d.lastSubmit;
+  a1.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 10 });
+  await settle();
+  await clock.advance(10);
+  const a2 = d.lastSubmit;
+  expect(a2.attempt.attemptId).not.toBe(a1.attempt.attemptId);
+  a2.settle.resolve({ kind: "accepted" });
+  await settle();
+  expect(stateOf(twice.id)).toBe("accepted");
+  d.emit({ kind: "echo", runtimeRef: a1.attempt.runtimeRef });
+  expect(stateOf(twice.id)).toBe("running");
+  d.emit({ kind: "turn_ended", runtimeRef: a1.attempt.runtimeRef, status: "completed" });
+  expect(stateOf(twice.id)).toBe("completed");
 });
 
 test("tombstone (e8f8b2cc): late evidence of a cancelled timed-out prompt never issues an untargeted interrupt while the current command runs — deferred through the scheduler, dropped when the run ends", async () => {
