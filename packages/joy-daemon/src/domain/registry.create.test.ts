@@ -12,8 +12,9 @@ import { tmpdir } from "node:os";
 
 const ok = { ok: true, out: "" };
 
-/** What the fake driver saw at the launch boundary. */
-const seen: { launchCmd: string | null; recordsAtLaunch: unknown[] } = { launchCmd: null, recordsAtLaunch: [] };
+/** What the fake driver saw at the launch boundary; `atLaunch` runs there
+ *  (a test's probe of the state a concurrent import would find). */
+const seen: { launchCmd: string | null; recordsAtLaunch: unknown[]; atLaunch: (() => void) | null } = { launchCmd: null, recordsAtLaunch: [], atLaunch: null };
 
 vi.mock("../tmux/driver", async () => {
   const wr = await import("./windowRecord");
@@ -23,11 +24,12 @@ vi.mock("../tmux/driver", async () => {
     commandOnce: async () => ok,
     key: async () => ok,
     literal: async (_target: string, text: string) => {
-      if (/\bclaude\b/.test(text) && /--session-id|--resume/.test(text)) {
+      if (/\bclaude\b/.test(text) && /--session-id|--resume|--continue/.test(text)) {
         // The launch boundary: what is on disk RIGHT NOW is what a crash here
         // would leave for recovery.
         seen.launchCmd = text;
         seen.recordsAtLaunch = wr.listWindowRecords();
+        seen.atLaunch?.();
         return { ok: false, out: "", error: "test: launch refused at the boundary" };
       }
       return ok;
@@ -44,7 +46,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "joy-registry-create-"));
   cwd = join(home, "project"); fs.mkdirSync(cwd);
   process.env.JOY_HOME_DIR = home;
-  seen.launchCmd = null; seen.recordsAtLaunch = [];
+  seen.launchCmd = null; seen.recordsAtLaunch = []; seen.atLaunch = null;
   vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 });
 afterEach(() => { vi.restoreAllMocks(); if (realHome === undefined) delete process.env.JOY_HOME_DIR; else process.env.JOY_HOME_DIR = realHome; rmSync(home, { recursive: true, force: true }); });
@@ -111,6 +113,82 @@ test("a launch binding a transcript a teleport import is replacing is refused be
     seen.launchCmd = null;
     await expect(reg.create({ cwd, resume_id: sid, forkSession: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
     expect(seen.launchCmd).toMatch(/--resume abc-5507-0000/);
+    expect(transcriptClaims(target)).toEqual([]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);
+
+test("a --continue launch whose newest project transcript a teleport import is replacing is refused before anything is spawned (#550 residual)", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { claimTranscript, transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir } = await import("../claude/transcript");
+  const { listWindowRecords } = await import("./windowRecord");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true });
+  // The only transcript in the project: what `claude --continue` would pick up.
+  const target = join(dir, "abc-5508-0000.jsonl"); fs.writeFileSync(target, "{}\n");
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    const importing = claimTranscript(target, "teleport-import:abc-5508", "replace")!;
+    // Old code: no resume id → no pin → no claim → `claude --continue` reached the pane under the import's exclusive claim.
+    await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/being replaced by a teleport import/);
+    expect(seen.launchCmd).toBeNull();                 // refused before the tmux setup, never typed
+    expect(listWindowRecords()).toEqual([]);           // and before the launch record
+    expect(transcriptClaims(target)).toEqual([importing]);
+    importing.release();
+    // Released: the continuation launches, holding the selected transcript at the
+    // launch boundary so an import of it is refused meanwhile; the aborted launch
+    // takes its reservation with it.
+    let importAtLaunch: unknown = "unset";
+    seen.atLaunch = () => { importAtLaunch = claimTranscript(target, "teleport-import:abc-5508", "replace"); };
+    await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(seen.launchCmd).toMatch(/--continue/);
+    expect(importAtLaunch).toBeNull();
+    expect(transcriptClaims(target)).toEqual([]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);
+
+test("a --continue launch with nothing to select reserves the whole project dir for the launch window; an import of any transcript there is refused until it settles (#550 residual)", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { claimTranscript, transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir } = await import("../claude/transcript");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true }); // no transcripts yet
+  const incoming = join(dir, "abc-5509-0000.jsonl");
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    // An import already replacing a transcript in the dir refuses the continuation outright.
+    const importing = claimTranscript(incoming, "teleport-import:abc-5509", "replace")!;
+    await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/being replaced by a teleport import/);
+    expect(seen.launchCmd).toBeNull();
+    importing.release();
+    // With none in flight the continuation launches; at the launch boundary the
+    // project dir is reserved, so an import landing ANY transcript there is refused.
+    let importAtLaunch: unknown = "unset";
+    seen.atLaunch = () => {
+      importAtLaunch = claimTranscript(incoming, "teleport-import:abc-5509", "replace");
+      expect(transcriptClaims(incoming).map((c) => [c.path, c.mode])).toEqual([[dir, "bind"]]);
+    };
+    await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(seen.launchCmd).toMatch(/--continue/);
+    expect(importAtLaunch).toBeNull();
+    // The aborted launch released the project reservation: the import proceeds.
+    expect(transcriptClaims(incoming)).toEqual([]);
+    expect(claimTranscript(incoming, "teleport-import:abc-5509", "replace")).not.toBeNull();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}, 20_000);
+
+test("a plain --continue create with no import in flight still launches (#550 residual)", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir } = await import("../claude/transcript");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true });
+  const target = join(dir, "abc-5510-0000.jsonl"); fs.writeFileSync(target, "{}\n");
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    seen.atLaunch = () => { expect(transcriptClaims(target).map((c) => c.mode)).toEqual(["bind"]); };
+    await expect(reg.create({ cwd, continue: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(seen.launchCmd).toMatch(/claude .*--continue/);
     expect(transcriptClaims(target)).toEqual([]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }, 20_000);
