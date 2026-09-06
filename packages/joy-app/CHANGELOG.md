@@ -1,3 +1,12 @@
+# Sep 8 (2) — Review follow-ups
+
+- **Voice**: the idle listener rotates its recording every five minutes instead of growing one file; a session that finishes while voice is still connecting is reported once connected; ending a call while it is connecting always wins.
+- **Markdown and files**: an unfinished options block no longer swallows the text after it, links with nested or escaped parentheses open correctly, a capped Mermaid diagram stays scrollable, a remote image is loaded only for the URL you tapped, quoted paths with spaces link as one file, and CSV previews report truncation only when rows were actually left out.
+- **Sending and history**: resetting a chat during a fetch, forgetting a session deleted elsewhere, or sending into an evicted session can no longer let an in-flight page write stale rows; a session created after a lost response is reused on retry instead of duplicated; removing a queued draft cancels exactly the send it belongs to, and an edited draft is never removed by the old send.
+- **Composer**: dismissing suggestions with Escape is tied to where you were typing, search reveals matches inside nested work groups and scrolls to the hit itself, and the phone return key applies a suggestion without a stray newline.
+- **Tool cards**: results that arrive before their call settle into the right nested row, Task details show the subagent's conversation and every answer part, Codex read/write details show partial output and warnings, and a running edit is no longer summarised as done.
+- **Settings and sign-in**: push registration attempts are bounded, config drafts belong to one file, offline machines drop off the list when their lease ends, logging out fully stops the previous account's sync, relay slots keep the right owner's credentials, and browser Back/Forward track the router's own entries.
+
 # Sep 8 — Files and git, one source of truth
 
 - **Git status, file contents, diffs, machine environment keys, session lists and the new-session pickers now come from one shared cache per resource.** A late or cancelled request can no longer overwrite a newer answer, a failed refresh keeps the last good data instead of blanking the screen, and the same file or repository is never fetched twice in parallel.
