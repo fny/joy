@@ -1414,7 +1414,11 @@ export class SessionRegistry {
     // anything else attaching here is running.
     const state = session.status === "ended" ? "detached" : "running";
     try {
-      const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${session.id}`, cwd: session.cwd, id: session.id, state });
+      // The flavor rides along as on every create path (#562): a recovered
+      // codex/opencode/pi/agy card was published without one and the app
+      // rendered it — controls included — as Claude.
+      const flavor = session.agentFlavor === "claude" ? undefined : session.agentFlavor;
+      const rs = createRelaySession(this.relayClient, { tag: `joy-daemon-${session.id}`, cwd: session.cwd, id: session.id, state, flavor });
       // Recovery contexts have no kill-race, so allow ended sessions to attach
       // (their file/git RPCs stay live; messages won't touch the pane).
       session.attachRelay(rs, true);

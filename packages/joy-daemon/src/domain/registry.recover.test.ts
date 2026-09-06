@@ -100,6 +100,23 @@ test("#55 a fresh per-session server is stamped with this daemon's state dir bef
   expect(tmuxOwnerStamp().startsWith(home)).toBe(true);
 }, 20_000);
 
+// ── #562 ────────────────────────────────────────────────────────────────────
+
+test("#562 a recovered non-Claude session's relay card carries its agent flavor", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { saveWindowRecord } = await import("./windowRecord");
+  const id = "a9e00562";
+  saveWindowRecord(id, { launchCwd: cwd, agent: "agy", agySettings: { model: "gemini", conversationId: "conv-1" } });
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: { creds: { machineId: "m" } } as never });
+  await reg.recover();
+  const s = reg.get(id)!;
+  expect(s.agentFlavor).toBe("agy");
+  const card = relayCards.find((c) => c.id === id);
+  expect(card).toBeTruthy();
+  expect(card!.flavor).toBe("agy");                      // old code: undefined → the app rendered it as Claude
+  s.end("killed");
+}, 20_000);
+
 // ── #564 ────────────────────────────────────────────────────────────────────
 
 test("#564 a non-canonical cwd (`/.`, `..`, a symlink) is canonicalised before the launch record is written", async () => {
