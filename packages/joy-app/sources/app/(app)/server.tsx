@@ -13,7 +13,7 @@ import { sync } from '@/sync/sync';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
 import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey } from '@/sync/serverConfig';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
 import { TokenStorage } from '@/auth/tokenStorage';
 import { normalizeSecretKey } from '@/auth/secretKeyBackup';
@@ -100,7 +100,7 @@ export default function ServerConfigScreen() {
     const handleCopyDerivedKey = React.useCallback(async () => {
         const k = getDerivedRelayPerimeterKey();
         if (!k) return;
-        await Clipboard.setStringAsync(k);
+        if (!(await copyToClipboard(k))) return;
         Modal.alert(t('server.relayCopyDerivedKey'), k.slice(0, 12) + '…', [{ text: t('common.ok') }]);
     }, []);
     const handleSaveRelayKey = React.useCallback(() => {

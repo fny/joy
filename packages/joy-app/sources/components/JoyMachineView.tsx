@@ -23,7 +23,7 @@ import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machin
 import { Modal } from '@/modal';
 import { alertError, errorMessage, guarded } from '@/utils/guardAsync';
 import { t } from '@/text';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly, machineSlashCommandsAll } from '@/sync/v2/machine';
@@ -63,10 +63,10 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         return all.filter((c) => !plugins.has(c)).length;
     }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands]);
 
-    const copyMachineId = React.useCallback(async () => {
-        await Clipboard.setStringAsync(machineId);
+    const copyMachineId = React.useCallback(guarded(async () => {
+        if (!(await copyToClipboard(machineId))) return;
         Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: t('machine.machineId') }));
-    }, [machineId]);
+    }), [machineId]);
 
     // Tap the command count to see the full list the daemon reported — plugins
     // marked "(plugin — hidden)". Diagnoses the two failure modes directly: if a

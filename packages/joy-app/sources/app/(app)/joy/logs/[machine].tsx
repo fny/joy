@@ -3,7 +3,9 @@ import { ActivityIndicator, View } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { router, useLocalSearchParams } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { t } from '@/text';
+import { guarded } from '@/utils/guardAsync';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
@@ -38,10 +40,10 @@ export default React.memo(function JoyLogsListScreen() {
         return () => { cancelled = true; };
     }, [machine, dir]);
 
-    const copyId = React.useCallback(async (id: string) => {
-        await Clipboard.setStringAsync(id);
-        Modal.alert('Copied', 'Session ID copied to clipboard');
-    }, []);
+    const copyId = React.useCallback(guarded(async (id: string) => {
+        if (!(await copyToClipboard(id))) return;
+        Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: 'Session ID' }));
+    }), []);
 
     const openLog = React.useCallback((sessionId: string) => {
         router.push({ pathname: '/joy/logs/view', params: { machine: machine!, dir: dir!, sessionId } });

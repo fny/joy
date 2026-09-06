@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { retrieveTempText } from '@/sync/persistence';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { Modal } from '@/modal';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { insertIntoComposer } from '@/-session/composerBridge';
@@ -27,11 +27,8 @@ export default function TextSelectionScreen() {
             return;
         }
 
-        try {
-            await Clipboard.setStringAsync(fullText);
+        if (await copyToClipboard(fullText, { failureMessage: t('textSelection.failedToCopy') })) {
             Modal.alert(t('textSelection.textCopied'));
-        } catch (error) {
-            Modal.alert(t('common.error'), t('textSelection.failedToCopy'));
         }
     }, [fullText]);
 

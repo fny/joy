@@ -3,7 +3,9 @@ import { View, Pressable, ActivityIndicator, Platform } from 'react-native';
 import { Text } from '@/components/StyledText';
 import { router } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
+import { t } from '@/text';
+import { guarded } from '@/utils/guardAsync';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Modal } from '@/modal';
 import { machineListLogs, machineReadLog, type JoyLogEntry } from '@/sync/ops';
@@ -118,10 +120,10 @@ const SessionRow = React.memo(function SessionRow({
         return () => { cancelled = true; };
     }, [machineId, dir, log.sessionId]);
 
-    const copyId = React.useCallback(async () => {
-        await Clipboard.setStringAsync(log.sessionId);
-        Modal.alert('Copied', 'Session ID copied to clipboard');
-    }, [log.sessionId]);
+    const copyId = React.useCallback(guarded(async () => {
+        if (!(await copyToClipboard(log.sessionId))) return;
+        Modal.alert(t('common.copied'), t('items.copiedToClipboard', { label: 'Session ID' }));
+    }), [log.sessionId]);
 
     const open = React.useCallback(() => {
         router.push({ pathname: '/joy/logs/view', params: { machine: machineId, dir, sessionId: log.sessionId } });

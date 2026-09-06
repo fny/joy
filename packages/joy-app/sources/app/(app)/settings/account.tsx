@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, Pressable, Platform } from 'react-native';
 import { useAuth } from '@/auth/AuthContext';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Clipboard from 'expo-clipboard';
+import { copyToClipboard } from '@/utils/clipboard';
 import { useFocusEffect } from '@react-navigation/native';
 import { Typography } from '@/constants/Typography';
 import { formatSecretKeyForBackup } from '@/auth/secretKeyBackup';
@@ -239,14 +239,10 @@ export default React.memo(() => {
     };
 
     const handleCopySecret = async () => {
-        try {
-            await Clipboard.setStringAsync(formattedSecret);
-            setCopiedRecently(true);
-            setTimeout(() => setCopiedRecently(false), 2000);
-            Modal.alert(t('common.success'), t('settingsAccount.secretKeyCopied'));
-        } catch (error) {
-            Modal.alert(t('common.error'), t('settingsAccount.secretKeyCopyFailed'));
-        }
+        if (!(await copyToClipboard(formattedSecret, { failureMessage: t('settingsAccount.secretKeyCopyFailed') }))) return;
+        setCopiedRecently(true);
+        setTimeout(() => setCopiedRecently(false), 2000);
+        Modal.alert(t('common.success'), t('settingsAccount.secretKeyCopied'));
     };
 
     const handleLogout = async () => {
