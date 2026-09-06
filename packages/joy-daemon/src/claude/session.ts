@@ -36,7 +36,7 @@ import { coordinatorFor, type SessionCoordinator, type CommandView, type Attempt
 import { ClaudeDriver } from "./claudeDriver";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
-import { saveWindowRecord, loadWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
+import { saveWindowRecord, loadWindowRecord, deleteWindowRecord, WindowRecordWriteError } from "../domain/windowRecord";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
@@ -2903,22 +2903,36 @@ export class Session {
    * text and pushes it the same way — relay summary + a local session_update broadcast —
    * so the app shows it instead of "New Chat". A later ai-title entry can still overwrite
    * it (same as renaming in Claude). Bare `/title` (no text) is a no-op.
+   *
+   * A user's title (and a bare-`/title` unlock) is DURABLE FIRST (#474
+   * residual): the record write used to be fire-and-forget, so on a full
+   * or read-only state dir the command was acknowledged and the live
+   * summary changed while the record kept the old title+lock — the next
+   * replacement restored that, and the user's title silently vanished.
+   * Now nothing in memory changes and nothing is published until the
+   * title+lock commit lands; a failed write throws WindowRecordWriteError
+   * out of the command handler, which the coordinator has not recorded
+   * yet, so the caller sees a refusal (joy-send → `not_durable`, a relay
+   * turn → failed) and the previous title and lock stand. The patch carries
+   * launchCwd (as the pi/opencode title paths do) so a session that has no
+   * record yet — a legacy window recovered without one — gets one rather
+   * than a refusal.
    */
   #setTitle(title: string, opts?: { byUser?: boolean }): void {
     const t = title.trim();
     if (!t) {
       // Bare /title from the user = UNLOCK + revert to Claude's latest ai-title.
       if (opts?.byUser && this.#titleLocked) {
+        if (!saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false, userTitle: null })) throw new WindowRecordWriteError(this.id, "title unlock");
         this.#titleLocked = false;
-        saveWindowRecord(this.id, { titleLockedByUser: false, userTitle: null });
         const ai = this.#readLatestAiTitle();
         if (ai) { this.summary = ai; void this.#relay?.updateSummary(ai); this.#deps.broadcast("session_update", this.toJSON()); }
       }
       return;
     }
     if (opts?.byUser) {
+      if (!saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true, userTitle: t })) throw new WindowRecordWriteError(this.id, "title");
       this.#titleLocked = true;
-      saveWindowRecord(this.id, { titleLockedByUser: true, userTitle: t });
     }
     this.summary = t;
     void this.#relay?.updateSummary(t);

@@ -302,6 +302,53 @@ test("#474 the user's /title survives a restart: the replacement restores it wit
   b.end("killed");
 });
 
+test("#474 residual: a /title (and an unlock) whose record write fails is REFUSED — nothing changes, nothing is published, and the replacement keeps the committed title", async () => {
+  const fs = (await import("node:fs")).default;
+  const { machineOps } = await import("../domain/operations");
+  const id = uid("title-disk");
+  saveWindowRecord(id, { launchCwd: join(home, "cwd") });
+  const { driver } = fakeTmux({ pane: READY });
+  const a = mkSession(id, driver);
+  const summaries: string[] = [];
+  const { rs } = relayStub("rs-" + id);
+  rs.updateSummary = async (t: string) => { summaries.push(t); };
+  a.attachRelay(rs, true);
+  expect(queueFor(a).accept("/title First title", { source: "rpc" })).toMatchObject({ handled: "command" });
+  expect(summaries).toEqual(["First title"]);
+  // ENOSPC at the record's atomic rename: the durable write cannot land.
+  const realRename = fs.renameSync;
+  const failing = vi.spyOn(fs, "renameSync").mockImplementation((src, dst) => {
+    if (String(dst).endsWith(`window-${id}.json`)) throw Object.assign(new Error("ENOSPC injected"), { code: "ENOSPC" });
+    return realRename(src, dst);
+  });
+  try {
+    expect(() => queueFor(a).accept("/title Accepted but lost", { source: "rpc" })).toThrow(/title not persisted/);   // old code: handled, summary changed
+    expect(a.summary).toBe("First title");
+    expect(summaries).toEqual(["First title"]);                                   // no publish before the commit
+    expect(loadWindowRecord(id)).toMatchObject({ titleLockedByUser: true, userTitle: "First title" });
+    expect(queueFor(a).state().pendingCount).toBe(0);                             // nothing queued, nothing recorded
+    // The unlock follows the same rule: the lock stands until its commit lands.
+    expect(() => queueFor(a).accept("/title", { source: "rpc" })).toThrow(/title unlock not persisted/);
+    expect(loadWindowRecord(id)).toMatchObject({ titleLockedByUser: true, userTitle: "First title" });
+    expect(a.summary).toBe("First title");
+    a.onTranscriptEntry({ type: "ai-title", aiTitle: "Old project" } as any);      // still locked
+    expect(a.summary).toBe("First title");
+    // Through the op the refusal is the durable-acceptance contract (#551): not_durable, nothing acknowledged.
+    const send = machineOps.find((o) => o.rpcName === "joy-send")!;
+    const reg = { get: () => a, nextChatId: () => 1, addChatMessage: () => {} } as never;
+    expect(await send.handler(reg, { session_id: id, text: "/title Via op" }, { via: "rpc" })).toMatchObject({ error: "not_durable", detail: expect.stringMatching(/title not persisted/) });
+    expect(a.summary).toBe("First title");
+  } finally { failing.mockRestore(); }
+  // The disk is back: the same command now commits, then applies and publishes.
+  expect(queueFor(a).accept("/title Second title", { source: "rpc" })).toMatchObject({ handled: "command" });
+  expect(loadWindowRecord(id)).toMatchObject({ titleLockedByUser: true, userTitle: "Second title" });
+  expect(summaries).toEqual(["First title", "Second title"]);
+  a.end("restart");
+  const b = mkSession(id, fakeTmux({ pane: READY }).driver);
+  expect(b.summary).toBe("Second title");
+  b.end("killed");
+});
+
 // ── #483 ─────────────────────────────────────────────────────────────────────
 
 test("#483 a UserPromptSubmit hook that confirms before the Enter write resolves still yields exactly one mirrored bubble", async () => {
