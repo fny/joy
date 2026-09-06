@@ -68,6 +68,26 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
+// ── #51 ─────────────────────────────────────────────────────────────────────
+
+test("#51 restart relaunches with the CURRENT effort, not the launch-time one", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { saveWindowRecord } = await import("./windowRecord");
+  const id = "c1a00051";
+  saveWindowRecord(id, { launchCwd: cwd });
+  seen.windows = [`j-${id}`];
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+  await reg.recover();
+  const existing = reg.get(id)!;
+  expect(existing).toBeTruthy();
+  // A mid-session /effort: the adapters track it beside the launch value.
+  (existing as unknown as { effort?: string }).effort = "low";
+  (existing as unknown as { currentEffort?: string }).currentEffort = "high";
+  await expect(reg.restart({ id })).rejects.toThrow(/session create failed: launch-claude/);
+  expect(seen.launchCmd).toContain("CLAUDE_EFFORT=high");   // old code: CLAUDE_EFFORT=low
+  expect(seen.launchCmd).not.toContain("CLAUDE_EFFORT=low");
+}, 20_000);
+
 // ── #564 ────────────────────────────────────────────────────────────────────
 
 test("#564 a non-canonical cwd (`/.`, `..`, a symlink) is canonicalised before the launch record is written", async () => {

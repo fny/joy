@@ -943,6 +943,10 @@ export class SessionRegistry {
 
     const cwd = canonicalCwd(existing?.cwd ?? rec?.launchCwd ?? opts.cwd!);
 
+    // The CURRENT effort, not the launch one (#51): a mid-session /effort is
+    // tracked by the adapters as currentEffort and is what the card shows —
+    // the replacement used to revert it silently.
+    const currentEffort = (existing as { currentEffort?: string } | undefined)?.currentEffort ?? existing?.effort;
     // Codex restart (review #5): restarting a codex session must NOT fall
     // through to the claude create path. Rebuild a codex session resuming its
     // thread. (A live `existing` codex session provides no claude id anyway.)
@@ -996,7 +1000,7 @@ export class SessionRegistry {
         cwd,
         resume_id: codexThreadId,
         model: existing?.currentModel ?? existing?.model ?? codexRec?.codexSettings?.model,
-        effort: existing?.effort ?? codexRec?.codexSettings?.effort,
+        effort: currentEffort ?? codexRec?.codexSettings?.effort,
         permissionMode: codexMode && PERMISSION_MODES.has(codexMode) ? codexMode : undefined,
       }));
     }
@@ -1049,7 +1053,7 @@ export class SessionRegistry {
       cwd,
       resume_id: resumeId,
       model: existing?.currentModel ?? existing?.model,
-      effort: existing?.effort,
+      effort: currentEffort,
       permissionMode: claudeMode && PERMISSION_MODES.has(claudeMode) ? claudeMode : undefined,
     }));
   }
