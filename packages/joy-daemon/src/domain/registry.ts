@@ -575,6 +575,7 @@ export class SessionRegistry {
     // discovery / relay attach on a window that may not hold a live shell. (A relay
     // session isn't created until after these succeed, so a failure here can't orphan
     // one.)
+    let launchRecordSaved = false;
     const abortCreate = (why: string): never => {
       if (sockLabel) {
         drv.runSync("kill-server"); // half-made per-session server: the whole thing goes
@@ -582,6 +583,9 @@ export class SessionRegistry {
       } else {
         void tmux.command(["kill-window", "-t", tmuxWindow]); // idempotent cleanup of any half-made window
       }
+      // A record written for a launch that never happened would be recovered
+      // as a session on the next boot (#563).
+      if (launchRecordSaved) deleteWindowRecord(id);
       throw new Error(`session create failed: ${why}`);
     };
     if (names) {
@@ -603,6 +607,23 @@ export class SessionRegistry {
     const shell = process.env.SHELL || "/bin/bash";
     if (!(await drv.literal(tmuxWindow, `exec ${shell} -l`)).ok) abortCreate("exec-shell");
     if (!(await drv.key(tmuxWindow, "Enter")).ok) abortCreate("exec-shell-enter");
+
+    // Persist the launch record — the window→launch-cwd binding (recover()/
+    // restart() prefer it over the newest-mtime / pane-current-path heuristics,
+    // BUG-6/13/15) and, for a FRESH launch, the Claude id pinned with
+    // --session-id — BEFORE the launch command is typed (#563 residual). It was
+    // written after the Enter: a daemon death in between left a Claude running
+    // under an id no record knew, and recovery could still bind the window to
+    // an unrelated project transcript. With the id on record, recovery waits
+    // for exactly this session's file. A record that cannot be written is a
+    // launch that cannot be recovered, so it is refused up front rather than
+    // started blind. (A resume/continue launch leaves claudeSessionId alone:
+    // Claude writes a NEW file under a new id on --resume, learned from the
+    // transcript.)
+    if (!saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default", claudeSessionId: freshClaudeId })) {
+      abortCreate("could not persist the launch record (is the joy state directory writable?)");
+    }
+    launchRecordSaved = true;
 
     // Give the login shell time to source the profile, then launch claude. (Skipped
     // for a detached create — the window stays at the shell prompt and the session is
@@ -669,16 +690,8 @@ export class SessionRegistry {
     }, this.#sessionDeps());
 
     this.#sessions.set(id, session);
-    // Persist the window→launch-cwd binding now. recover()/restart() prefer
-    // this over the newest-mtime / pane-current-path heuristics (BUG-6/13/15).
-    // A FRESH launch also persists the Claude id it pinned with --session-id
-    // (#563): a daemon restart before Claude's first transcript write used to
-    // find a record with no identity and fall back to the newest unclaimed
-    // transcript in the project — an unrelated conversation. With the id on
-    // record, recovery waits for exactly this session's file instead. A
-    // resume/continue launch leaves the field alone: the id is learned from
-    // the transcript (Claude writes a NEW file under a new id on --resume).
-    saveWindowRecord(id, { launchCwd: cwd, socket: sockLabel, claudePermissionMode: mode ?? "default", claudeSessionId: freshClaudeId });
+    // (The window record — launch cwd, socket, permission mode and the pinned
+    // Claude id — was persisted and confirmed BEFORE the launch, above.)
     this.broadcast("session_update", session.toJSON());
 
     if (relaySession) session.attachRelay(relaySession); // no-ops (and stops rs) if kill raced the create

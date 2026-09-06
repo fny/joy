@@ -41,6 +41,10 @@ export interface AgentSession {
   end(reason: "killed" | "process_exited" | "restart"): boolean;
   awaitArchive(): Promise<boolean>;
   forceKill(): boolean;
+  /** After an intentional kill: is a termination marker durably on disk (the
+   *  window record deleted or tombstoned)? false = only this process's memory
+   *  hides the record, so the kill must NOT be reported as done (#567). */
+  recordTerminated?(): boolean;
   attachRelay(rs: RelaySession, allowEnded?: boolean): boolean;
   beginWatching(): void;
 
