@@ -400,11 +400,35 @@ export function jailedToolEnv(extraEnv?: Record<string, string>): NodeJS.Process
   return extraEnv ? { ...env, ...extraEnv } : env;
 }
 
+export interface ToolRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** The deadline fired: the run was abandoned and its process group signalled. */
+  timedOut: boolean;
+  /**
+   * Set with `timedOut` when the group kill could NOT confirm the tool and its
+   * descendants are gone — the helper reported survivors after SIGKILL, or
+   * threw. Absent (false) on a normal timeout, where the group is known dead.
+   */
+  terminationUnconfirmed: boolean;
+}
+
+/** The error a handler reports for a timed-out run: "terminated" only when
+ *  the group kill confirmed it; otherwise the descendants may still be
+ *  running and the caller must not be told they are gone. */
+function toolTimeoutError(tool: string, result: ToolRunResult): string {
+  const limit = `${tool} exceeded ${TOOL_TIMEOUT_MS / 1000}s`;
+  return result.terminationUnconfirmed
+    ? `${limit}; termination unconfirmed — descendants may still be running`
+    : `${limit} and was terminated`;
+}
+
 // Spawn an external tool, capture stdout/stderr, return result. Used by
 // ripgrep and difftastic. ANY exit code counts
 // as success — the app inspects exitCode itself. Only spawn errors (ENOENT,
 // permission denied) cause success=false. Exported for its test only.
-export function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>, timeoutMs = TOOL_TIMEOUT_MS): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+export function runTool(binary: string, args: string[], cwd?: string, extraEnv?: Record<string, string>, timeoutMs = TOOL_TIMEOUT_MS): Promise<ToolRunResult> {
   return new Promise((resolveResult, rejectResult) => {
     // `detached`: the tool leads its own process group, so the deadline can
     // terminate everything it spawned (a shell's background job, a helper
@@ -434,16 +458,20 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
     // shell can leave a grandchild holding them open indefinitely), the whole
     // process group is terminated — SIGTERM, a bounded grace, SIGKILL — and
     // the request settles when that kill has run its course: `timedOut`
-    // means the tool AND its descendants are gone, not merely signalled.
+    // means the tool AND its descendants are gone, not merely signalled —
+    // unless the kill helper reported survivors (false) or threw, in which
+    // case the result says so (`terminationUnconfirmed`) instead of claiming
+    // a termination nobody confirmed (#538 residual, Wave F9).
     // A run that finishes in time clears the deadline, so no escalation
     // timer outlives the result (the grace ticks live inside the kill).
     let settled = false;
     let timedOut = false;
+    let terminationUnconfirmed = false;
     const settle = (exitCode: number) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
-      resolveResult({ exitCode, stdout: stdout.end(), stderr: stderr.end(), timedOut });
+      resolveResult({ exitCode, stdout: stdout.end(), stderr: stderr.end(), timedOut, terminationUnconfirmed });
     };
     const deadline = setTimeout(() => {
       if (settled) return;
@@ -456,7 +484,18 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       const done = () => settle(-1);
       if (!child.pid) { done(); return; }
       const tag = `[tool] ${basename(binary)}`;
-      killProcessGroup(child.pid, { graceMs: 2_000, log: (line) => process.stderr.write(`${line.replace(/^\[kill-group\]/, tag)}\n`) }).then(done, done);
+      const log = (line: string) => process.stderr.write(`${line.replace(/^\[kill-group\]/, tag)}\n`);
+      // Keep the helper's verdict: `false` (members outlived SIGKILL) and a
+      // throw both mean the group may still be running — say so, never
+      // settle as if the kill had succeeded.
+      killProcessGroup(child.pid, { graceMs: 2_000, log }).then(
+        (gone) => { if (!gone) terminationUnconfirmed = true; done(); },
+        (err: unknown) => {
+          terminationUnconfirmed = true;
+          log(`${tag} group ${child.pid}: kill failed (${err instanceof Error ? err.message : String(err)}) — termination unconfirmed`);
+          done();
+        },
+      );
     }, timeoutMs);
     deadline.unref?.();
     child.stdout.on("data", (d: Buffer) => { stdout.push(d); });
@@ -645,7 +684,7 @@ export async function handleRipgrep(workingDirectory: string, data: RipgrepReque
     const needsDefaultPath = jailed.mode === "search" && jailed.pathOperands.length === 0;
     const argv = [...RG_FORCED_ARGS, ...jailed.args, ...(needsDefaultPath ? ["."] : [])];
     const result = await runTool(RG_BIN, argv, cwd ?? workingDirectory);
-    if (result.timedOut) return { success: false, error: `ripgrep exceeded ${TOOL_TIMEOUT_MS / 1000}s and was terminated` };
+    if (result.timedOut) return { success: false, error: toolTimeoutError("ripgrep", result) };
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };
@@ -663,7 +702,7 @@ export async function handleDifftastic(workingDirectory: string, data: Difftasti
   if (!jailed.ok) return { success: false, error: jailed.error };
   try {
     const result = await runTool(DIFFT_BIN, jailed.args, cwd ?? workingDirectory, { FORCE_COLOR: "1" });
-    if (result.timedOut) return { success: false, error: `difftastic exceeded ${TOOL_TIMEOUT_MS / 1000}s and was terminated` };
+    if (result.timedOut) return { success: false, error: toolTimeoutError("difftastic", result) };
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run difftastic" };
