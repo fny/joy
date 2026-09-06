@@ -253,6 +253,7 @@ export const ca: TranslationStructure = {
 
     errors: {
         sendFailedTitle: 'Missatge no enviat',
+        spawnFailed: ({ reason }: { reason: string }) => `No s'ha pogut iniciar la sessió: ${reason}`,
         sendFailedMessage: 'No s\'ha pogut enviar el missatge. S\'ha tornat al quadre de text perquè ho puguis tornar a provar.',
         networkError: 'Error de connexió',
         serverError: 'Error del servidor',
@@ -280,6 +281,7 @@ export const ca: TranslationStructure = {
         userNotFound: 'Usuari no trobat',
         sessionDeleted: 'La sessió s\'ha eliminat',
         sessionDeletedDescription: 'Aquesta sessió s\'ha eliminat permanentment',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `El mode de permisos no s'ha canviat: ${error}. L'agent manté el mode actual.`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>

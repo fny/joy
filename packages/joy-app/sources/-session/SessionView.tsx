@@ -786,19 +786,58 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             .catch(() => { /* keystroke best-effort; stored state still updates */ });
     }, [machineId, joySessionId]);
 
-    // Function to update permission mode
+    // Function to update permission mode. For joy sessions the change is only
+    // REAL once the daemon confirms it: it used to be persisted before (and
+    // regardless of) the daemon's answer, so a failed change showed "Plan"
+    // while prompts kept running under bypass — across refreshes and restarts,
+    // because the local override outranks daemon metadata (#123).
+    const modeChangeSeq = React.useRef(0);
     const updatePermissionMode = React.useCallback((mode: PermissionMode) => {
-        if (isJoyDaemon && machineId && joySessionId) {
-            // Absolute set, server-side: joy-tmux reads the CURRENT mode off
-            // the pane footer, walks Shift+Tab the right number of steps in
-            // the real cycle (bypass → auto → default → acceptEdits → plan),
-            // and verifies the footer afterwards. No client-side guessing.
-            const mctx = sync.machineCtxFor(machineId, joySessionId);
-            if (!mctx) { console.error('[v2] set-mode dropped: no machine context'); return; }
-            void machineSetMode(mctx, mode.key)
-                .catch(() => { /* best-effort; stored state still updates */ });
+        if (!(isJoyDaemon && machineId && joySessionId)) {
+            storage.getState().updateSessionPermissionMode(sessionId, mode.key);
+            return;
         }
-        storage.getState().updateSessionPermissionMode(sessionId, mode.key);
+        // Absolute set, server-side: joy-tmux reads the CURRENT mode off
+        // the pane footer, walks Shift+Tab the right number of steps in
+        // the real cycle (bypass → auto → default → acceptEdits → plan),
+        // and verifies the footer afterwards. No client-side guessing.
+        const mctx = sync.machineCtxFor(machineId, joySessionId);
+        if (!mctx) {
+            console.error('[v2] set-mode dropped: no machine context');
+            Modal.alert(t('common.error'), t('errors.permissionModeChangeFailed', { error: 'no machine context' }));
+            return;
+        }
+        const seq = ++modeChangeSeq.current;
+        void (async () => {
+            // PATCH /v2/sessions/:id → { ok, applied: { permissionMode: { ok, mode?, error? } } }
+            type SetModeReply = { ok?: boolean; error?: string; applied?: { permissionMode?: { ok?: boolean; mode?: string; error?: string } } };
+            let confirmed: string | null = null;
+            let landed: string | null = null;
+            let error = '';
+            try {
+                const r = await machineSetMode(mctx, mode.key);
+                const data = r.data as SetModeReply | null;
+                const applied = data?.applied?.permissionMode;
+                if (r.status >= 200 && r.status < 300 && data?.ok === true && applied?.ok === true) {
+                    confirmed = applied.mode ?? mode.key;
+                } else {
+                    landed = typeof applied?.mode === 'string' ? applied.mode : null;
+                    error = applied?.error ?? data?.error ?? `HTTP ${r.status}`;
+                }
+            } catch (e) {
+                error = e instanceof Error ? e.message : String(e);
+            }
+            if (seq !== modeChangeSeq.current) return; // a newer change superseded this one
+            if (confirmed) {
+                storage.getState().updateSessionPermissionMode(sessionId, confirmed);
+                return;
+            }
+            // Reconcile with what the daemon actually observed: the mode it
+            // landed on if it said, else drop the local override so the
+            // composer falls back to the daemon's currentOperatingModeCode.
+            storage.getState().updateSessionPermissionMode(sessionId, landed);
+            Modal.alert(t('common.error'), t('errors.permissionModeChangeFailed', { error }));
+        })();
     }, [sessionId, isJoyDaemon, machineId, joySessionId]);
 
     const updateModelMode = React.useCallback((mode: ModelMode) => {

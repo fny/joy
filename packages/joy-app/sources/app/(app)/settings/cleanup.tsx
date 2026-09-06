@@ -18,7 +18,10 @@ import { formatLastSeen } from '@/utils/sessionUtils';
 import type { Machine } from '@/sync/storageTypes';
 import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { Modal } from '@/modal';
+import { sync } from '@/sync/sync';
+import { machineSessionInfo } from '@/sync/v2/machine';
 import { joyKillAllSessions, sessionKill, sessionDelete, machineDelete } from '@/sync/ops';
+import { planFolderDeletion, recheckDetached, describeFolderDeletion } from '@/utils/cleanupPlan';
 
 function folderName(path: string): string {
     const segs = path.split(/[\\/]/).filter(Boolean);
@@ -32,6 +35,31 @@ async function deleteSessionRecords(ids: string[]): Promise<number> {
         if (r.success) n++;
     }
     return n;
+}
+
+const joyStateOf = (id: string) => storage.getState().sessions[id]?.metadata?.joy__state;
+
+/** The daemon's own word, asked right before a kill: is this session's agent
+ *  still gone (status "ended" = detached)? False on any doubt — offline
+ *  machine, no context, 404, a live status — so the caller skips it. The
+ *  daemon has no conditional kill, so this is the narrowest window we can
+ *  get from the app side (#174). */
+async function daemonSaysDetached(sessionId: string): Promise<boolean> {
+    const s = storage.getState().sessions[sessionId];
+    const machineId = s?.metadata?.machineId;
+    const localId = s?.metadata?.joy__sessionId;
+    if (!machineId || !localId) return false;
+    const ctx = sync.machineCtxFor(machineId, localId);
+    if (!ctx) return false;
+    try {
+        const r = await Promise.race([
+            machineSessionInfo(ctx),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+        ]);
+        return r.status === 200 && (r.data as { status?: string } | null)?.status === 'ended';
+    } catch {
+        return false;
+    }
 }
 
 export default React.memo(function CleanupScreen() {
@@ -67,25 +95,53 @@ export default React.memo(function CleanupScreen() {
     const onCleanDetached = React.useCallback((machineId: string, ids: string[]) => {
         Modal.confirm(
             'Clean up detached sessions?',
-            `Ends ${ids.length} detached session${ids.length === 1 ? '' : 's'} (Claude already exited) and closes their lingering tmux panes. Records stay in history.`,
+            `Ends ${ids.length} detached session${ids.length === 1 ? '' : 's'} (Claude already exited) and closes their lingering tmux panes. Records stay in history. Sessions that have started again since are left alone.`,
             { confirmText: 'Clean up', destructive: true },
         ).then(async (ok) => {
             if (!ok) return;
-            let n = 0;
-            for (const id of ids) { const r = await sessionKill(id); if (r.success) n++; }
-            Modal.alert('Cleaned up', `Closed ${n} detached pane${n === 1 ? '' : 's'}.`, [{ text: 'OK' }]);
+            // The list was captured before the dialog; a session restarted from
+            // another client meanwhile keeps its id. Re-read the cards, then ask
+            // the daemon about each one right before its kill (#174).
+            await sync.refreshSessions().catch(() => { /* fall back to the cards we have */ });
+            const rechecked = recheckDetached(ids, joyStateOf);
+            let closed = 0;
+            let skipped = rechecked.skip.length;
+            let failed = 0;
+            for (const id of rechecked.kill) {
+                if (!(await daemonSaysDetached(id))) { skipped++; continue; }
+                const r = await sessionKill(id);
+                if (r.success) closed++; else failed++;
+            }
+            const parts = [`Closed ${closed} detached pane${closed === 1 ? '' : 's'}.`];
+            if (skipped) parts.push(`Skipped ${skipped} that ${skipped === 1 ? 'is' : 'are'} no longer detached.`);
+            if (failed) parts.push(`${failed} could not be closed.`);
+            Modal.alert('Cleaned up', parts.join(' '), [{ text: 'OK' }]);
         });
     }, []);
 
     const onDeleteFolder = React.useCallback((folder: string, ids: string[]) => {
+        // Running sessions must be stopped — and confirmed stopped by the
+        // daemon — before their record may go; deleting the record alone left
+        // the agent working with no history behind it (#173).
+        const plan = planFolderDeletion(ids.map((id) => ({ id, state: joyStateOf(id) })));
         Modal.confirm(
-            'Delete folder sessions?',
-            `Permanently deletes ${ids.length} session record${ids.length === 1 ? '' : 's'} for "${folderName(folder)}". Cannot be undone.`,
-            { confirmText: 'Delete', destructive: true },
+            plan.stopFirst.length ? 'Stop and delete folder sessions?' : 'Delete folder sessions?',
+            describeFolderDeletion(plan, folderName(folder)),
+            { confirmText: plan.stopFirst.length ? 'Stop and delete' : 'Delete', destructive: true },
         ).then(async (ok) => {
             if (!ok) return;
-            const n = await deleteSessionRecords(ids);
-            Modal.alert('Deleted', `Removed ${n} session record${n === 1 ? '' : 's'}.`, [{ text: 'OK' }]);
+            const deletable = [...plan.deleteNow];
+            const kept: string[] = [];
+            for (const id of plan.stopFirst) {
+                // sessionKill succeeds only once the daemon has archived the
+                // session — that IS the shutdown confirmation.
+                const r = await sessionKill(id);
+                if (r.success) deletable.push(id); else kept.push(id);
+            }
+            const n = await deleteSessionRecords(deletable);
+            const parts = [`Removed ${n} of ${ids.length} session record${ids.length === 1 ? '' : 's'}.`];
+            if (kept.length) parts.push(`${kept.length} running session${kept.length === 1 ? '' : 's'} could not be stopped; ${kept.length === 1 ? 'its record was' : 'their records were'} kept.`);
+            Modal.alert(kept.length ? 'Partly deleted' : 'Deleted', parts.join(' '), [{ text: 'OK' }]);
         });
     }, []);
 

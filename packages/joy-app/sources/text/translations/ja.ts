@@ -254,6 +254,7 @@ export const ja: TranslationStructure = {
 
     errors: {
         sendFailedTitle: 'メッセージを送信できませんでした',
+        spawnFailed: ({ reason }: { reason: string }) => `セッションを開始できませんでした: ${reason}`,
         sendFailedMessage: 'メッセージを送信できませんでした。再試行できるよう入力欄に戻しました。',
         networkError: 'ネットワークエラーが発生しました',
         serverError: 'サーバーエラーが発生しました',
@@ -281,6 +282,7 @@ export const ja: TranslationStructure = {
         userNotFound: 'ユーザーが見つかりません',
         sessionDeleted: 'セッションは削除されました',
         sessionDeletedDescription: 'このセッションは完全に削除されました',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `権限モードは変更されませんでした: ${error}。エージェントは現在のモードのままです。`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>

@@ -25,6 +25,7 @@ import { sync } from '@/sync/sync';
 import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
 import { paneSizeFor, paneSizeChanged, type PaneSize } from '@/utils/paneSize';
 import { describePaneError } from '@/utils/paneError';
+import { createInFlightGuard } from '@/utils/inFlightGuard';
 
 const POLL_MS = 1500;
 
@@ -78,6 +79,14 @@ export default React.memo(function JoyPaneScreen() {
     const failure = React.useMemo(() => describePaneError(paneError), [paneError]);
     const scrollRef = React.useRef<ScrollView>(null);
     const mountedRef = React.useRef(true);
+    // ONE in-flight guard for every terminal operation — keyboard submit, the
+    // send button and the quick keys all go through it, and text mode holds it
+    // across BOTH steps (type text, then Enter). `sending` is the rendered
+    // shadow of it; the guard itself is synchronous so a keyboard Enter that
+    // fires while a send is landing is refused instead of interleaving (#154:
+    // A-text, B-text, A-Enter submitted "AB", then B's Enter answered the next
+    // prompt).
+    const guardRef = React.useRef(createInFlightGuard());
 
     React.useEffect(() => {
         mountedRef.current = true;
@@ -133,10 +142,10 @@ export default React.memo(function JoyPaneScreen() {
     // Returns true only when the keys actually landed — callers that chain a
     // follow-up (text mode's submit Enter) must gate on it: an unconditional
     // Enter after a FAILED text send would submit whatever already sits in
-    // Claude's input box, or answer a TUI prompt.
-    const sendScript = React.useCallback(async (script: string, literal = false): Promise<boolean> => {
+    // Claude's input box, or answer a TUI prompt. UNGUARDED: only call from
+    // inside runExclusive.
+    const sendKeysRaw = React.useCallback(async (script: string, literal = false): Promise<boolean> => {
         if (!script) return false;
-        setSending(true);
         try {
             const kctx = sync.machineCtxFor(machineId, sessionId);
             if (!kctx) { Modal.alert('Error', `Machine encryption not found for ${machineId}`); return false; }
@@ -154,28 +163,44 @@ export default React.memo(function JoyPaneScreen() {
         } catch (e) {
             Modal.alert('Error', e instanceof Error ? e.message : String(e));
             return false;
-        } finally {
-            if (mountedRef.current) setSending(false);
         }
     }, [machineId, sessionId, refresh]);
 
+    // Run one whole terminal operation under the guard. Resolves false when
+    // another operation is still in flight (op never starts).
+    const runExclusive = React.useCallback(async (op: () => Promise<boolean>): Promise<boolean> => {
+        const r = await guardRef.current.run(async () => {
+            setSending(true);
+            try { return await op(); } finally { if (mountedRef.current) setSending(false); }
+        });
+        return r ?? false;
+    }, []);
+
+    /** One script (quick key, raw tokens) as a complete operation. */
+    const sendScript = React.useCallback((script: string, literal = false): Promise<boolean> =>
+        runExclusive(() => sendKeysRaw(script, literal)), [runExclusive, sendKeysRaw]);
+
     const handleSend = React.useCallback(() => {
         if (!input.trim()) return;
+        // Refused while a send is landing: the text STAYS in the box (it is
+        // only cleared once the operation owns the guard), so nothing is lost
+        // and nothing interleaves — press Send again when the spinner stops.
+        if (guardRef.current.busy) return;
         const script = input;
-        setInput('');
         if (rawMode) {
             // raw keys mode: parse <Enter>/<C-c>/… tokens and send as-is.
-            void sendScript(script, false);
+            void runExclusive(async () => { setInput(''); return sendKeysRaw(script, false); });
         } else {
             // text mode (default): type the message verbatim, then submit with a
             // real Enter key (in literal mode "<Enter>" would type as characters).
-            void (async () => {
-                if (await sendScript(script, true)) {
-                    await sendScript('<Enter>', false);
-                }
-            })();
+            // Both steps run under ONE hold of the guard.
+            void runExclusive(async () => {
+                setInput('');
+                if (!(await sendKeysRaw(script, true))) return false;
+                return sendKeysRaw('<Enter>', false);
+            });
         }
-    }, [input, sendScript, rawMode]);
+    }, [input, rawMode, runExclusive, sendKeysRaw]);
 
     // The header is hidden (full-height terminal), so on iOS the keyboard would
     // overlay the quick-keys + input row. Lift the whole column above it with the

@@ -7,7 +7,14 @@
  *   stream       : streamId(16) ‖ frames[ len(u32 BE) ‖ secretbox(plain) ]
  *   frame plain  : tagByte(0=MSG,1=FINAL) ‖ chunk           (chunk ≤ 128KB)
  *   request      : frame0 = JSON { m, p, h }, then body frames
- *   response     : frame0 = JSON { s, h }, then body frames
+ *   response     : frame0 = JSON { s, h, r }, then body frames
+ *   binding (r)  : hex of the REQUEST's streamId. The relay controls which
+ *                  recorded stream it hands back, and the response key was
+ *                  derived from the response's own streamId — so without r a
+ *                  recorded success for request A opened cleanly as the
+ *                  answer to request B (#418). r rides inside the sealed
+ *                  head; openResponse refuses a head whose r is not OUR
+ *                  streamId before surfacing any status or body.
  *   AEAD         : libsodium secretbox (XSalsa20-Poly1305, 24-byte nonce =
  *                  counter u64 BE in the low 8 bytes) under a per-stream
  *                  subkey HMAC-SHA512(tunnelKey, "stream" ‖ streamId)[0..32].
@@ -53,6 +60,17 @@ function nonceFor(counter: bigint): Uint8Array {
     return n;
 }
 
+function toHex(bytes: Uint8Array): string {
+    let out = '';
+    for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+    return out;
+}
+
+/** The binding a response to this request wire must carry: hex(streamId). */
+export function requestBinding(requestWire: Uint8Array): string {
+    return toHex(requestWire.subarray(0, 16));
+}
+
 function concat(parts: Uint8Array[]): Uint8Array {
     let len = 0; for (const p of parts) len += p.length;
     const out = new Uint8Array(len);
@@ -88,8 +106,10 @@ async function sealRequest(tunnelKey: Uint8Array, head: unknown, body: Uint8Arra
     return concat(parts);
 }
 
-/** Open a complete response stream: returns the head JSON and the body. */
-async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise<{ head: T; body: Uint8Array }> {
+/** Open a complete response stream: returns the head JSON and the body. The
+ *  head must be bound to `expectBinding` (our request's streamId) — checked
+ *  on frame0, before any body frame is opened or any status is returned. */
+async function openResponse<T extends { s: number; r?: string }>(tunnelKey: Uint8Array, wire: Uint8Array, expectBinding: string): Promise<{ head: T; body: Uint8Array }> {
     if (wire.length < 16) throw new TunnelError(502, 'short_stream');
     // .slice(), never .subarray(): the native libsodium module hands each
     // argument's WHOLE underlying ArrayBuffer to JSI, so a view into the wire
@@ -117,8 +137,15 @@ async function openResponse<T>(tunnelKey: Uint8Array, wire: Uint8Array): Promise
         counter += 1n;
         const final = plain[0] === TAG_FINAL;
         const chunk = plain.subarray(1);
-        if (head === null) head = JSON.parse(new TextDecoder().decode(chunk)) as T;
-        else bodyParts.push(chunk);
+        if (head === null) {
+            const parsed = JSON.parse(new TextDecoder().decode(chunk)) as Partial<T> | null;
+            // A reflected request stream has no numeric status; a recorded
+            // response to another request carries that request's binding; a
+            // daemon too old to bind carries none. All three fail closed.
+            if (!parsed || typeof parsed !== 'object' || typeof parsed.s !== 'number') throw new TunnelError(502, 'bad_response_head');
+            if (parsed.r !== expectBinding) throw new TunnelError(502, 'unbound_response');
+            head = parsed as T;
+        } else bodyParts.push(chunk);
         if (final) { sawFinal = true; break; }
     }
     // No FINAL tag ⇒ the stream was cut; never treat a truncation as success.
@@ -158,7 +185,7 @@ export async function tunnelFetch(opts: TunnelFetchOpts): Promise<TunnelResponse
     }
     if (!res.ok) throw new TunnelError(res.status, 'relay_error');
     const buf = new Uint8Array(await res.arrayBuffer());
-    const { head, body } = await openResponse<{ s: number; h: Record<string, string> }>(key, buf);
+    const { head, body } = await openResponse<{ s: number; h: Record<string, string>; r?: string }>(key, buf, requestBinding(wire));
     return { status: head.s, headers: head.h, body };
 }
 

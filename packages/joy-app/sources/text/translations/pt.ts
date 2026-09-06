@@ -252,6 +252,7 @@ export const pt: TranslationStructure = {
 
     errors: {
         sendFailedTitle: 'Mensagem não enviada',
+        spawnFailed: ({ reason }: { reason: string }) => `Não foi possível iniciar a sessão: ${reason}`,
         sendFailedMessage: 'Não foi possível enviar a mensagem. Ela voltou para a caixa de texto para que você possa tentar novamente.',
         networkError: 'Ocorreu um erro de rede',
         serverError: 'Ocorreu um erro do servidor',
@@ -279,6 +280,7 @@ export const pt: TranslationStructure = {
         userNotFound: 'Usuário não encontrado',
         sessionDeleted: 'A sessão foi excluída',
         sessionDeletedDescription: 'Esta sessão foi removida permanentemente',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `O modo de permissões não foi alterado: ${error}. O agente mantém o modo atual.`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>

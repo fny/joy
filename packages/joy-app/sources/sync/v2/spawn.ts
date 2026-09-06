@@ -58,6 +58,12 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec): Prom
             promptedForDir = false; // allow a fresh prompt if it fails again for another reason
             continue;
         }
+        // Any other spawn failure (clone_failed, agent missing, …) is final:
+        // surfacing it now instead of after the 2-minute deadline (#151).
+        if (st?.spawnFailure && !st.spawnFailure.startsWith('dir_missing:')) {
+            await v2.deleteSession(v2id).catch(() => { });
+            throw new Error(t('errors.spawnFailed', { reason: st.spawnFailure }));
+        }
 
         await sync.refreshSessions();
         const all = storage.getState().sessions;

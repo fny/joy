@@ -254,6 +254,7 @@ export const zhHans: TranslationStructure = {
 
     errors: {
         sendFailedTitle: '消息未发送',
+        spawnFailed: ({ reason }: { reason: string }) => `无法启动会话：${reason}`,
         sendFailedMessage: '无法发送消息。已将其放回输入框，您可以重试。',
         networkError: '发生网络错误',
         serverError: '发生服务器错误',
@@ -281,6 +282,7 @@ export const zhHans: TranslationStructure = {
         userNotFound: '未找到用户',
         sessionDeleted: '会话已被删除',
         sessionDeletedDescription: '此会话已被永久删除',
+        permissionModeChangeFailed: ({ error }: { error: string }) => `权限模式未更改：${error}。代理保持当前模式。`,
 
         // Error functions with context
         fieldError: ({ field, reason }: { field: string; reason: string }) =>
