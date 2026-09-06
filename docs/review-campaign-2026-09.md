@@ -463,6 +463,22 @@ app.
   #501), handoff guard lockout (#53), session/registry (#474 #549 #564
   #550). **60 open.**
 
+- 2026-09-08 (residual rounds, night) — pushed and queued for Astra: #53
+  handoff guard lockout (8ed25e44: durable accept before the reservation,
+  ended-target refusal), session/registry residuals (79bf4a34:
+  symlink-aware `canonicalCwd`, canonical relay spawn cwd, teleport
+  ownership by transcript path with set-aside writes, durable-first
+  `/title`), CLI residuals (15feb368: three-valued supervisor detection,
+  shell-quoted retry advice, high-water tracking, `GET
+  /sessions/:id/queue/:qid` + durable command binding, one deadline per
+  wait; #538 parsed rg mode + process-group kill), lane/io residuals
+  (4ea74930: versioned OpenCode replay backfill, spawn-failed abandons only
+  on `applied:true`). Verified fixed and closed since the last entry: #50
+  #51 #55 #165 #441 #525 #552 #562 #584 #588 #622. In flight: ledger
+  (#560 receipt pruning boundary, import quarantine holes, relay-turn
+  dedupe ownership), #130 app banner + persisted budget loss, #128 round
+  three. **55 open.**
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
