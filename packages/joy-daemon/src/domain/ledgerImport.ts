@@ -420,7 +420,7 @@ function parseRecordFields(raw: Record<string, unknown>): RecordFields {
 
 function importRecordFields(ledger: Ledger, sessionId: string, fields: RecordFields, report: ImportReport): void {
   const cp = fields.transcriptCheckpoint;
-  if (cp && !ledger.getCheckpoint(sessionId, "claude_transcript")) { ledger.setCheckpoint(sessionId, "claude_transcript", cp.path, cp.offset); report.checkpoints++; }
+  if (cp && !ledger.getCheckpoint(sessionId, "claude_transcript")) { ledger.setCheckpoint(sessionId, "claude_transcript", cp.path, cp.offset, { coversReceipts: false }); report.checkpoints++; }
   const oc = fields.opencodeDeliveredThrough;
   if (oc && !ledger.getCheckpoint(sessionId, "opencode_msg")) { ledger.setCheckpoint(sessionId, "opencode_msg", oc, 0); report.checkpoints++; }
   const job = fields.handoffJob;
