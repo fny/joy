@@ -344,8 +344,12 @@ export function createCore(db, notify) {
         // late while attempt 2 is in flight; applying it would fail the
         // retry's session (#612). Ack without applying instead — a live
         // attempt that really failed will say so again, with its id.
-        const { rows: ds } = await t.query(`SELECT disposition FROM deliveries WHERE command_id = $1`, [spawn.id]);
-        if (ds.length > 1 || (ds.length === 1 && ds[0].disposition !== null)) {
+        // Exactly ONE delivery, live, and issued under the CURRENT lease epoch:
+        // zero deliveries means no attempt ever executed (nothing to fail),
+        // and a sole old-epoch row is a dead attempt whose bare report must
+        // not fail the session either (Astra on 5b50d0df).
+        const { rows: ds } = await t.query(`SELECT disposition, lease_epoch FROM deliveries WHERE command_id = $1`, [spawn.id]);
+        if (ds.length !== 1 || ds[0].disposition !== null || String(ds[0].lease_epoch) !== String(lease.epoch)) {
           return { ok: true, applied: false, reason: 'ambiguous_attempt' };
         }
       }

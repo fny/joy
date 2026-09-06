@@ -272,14 +272,23 @@ export async function openDb(dataDir) {
   let pg;
   try { pg = dataDir === ':memory:' ? new PGlite() : new PGlite(dataDir); }
   catch (e) { release(); throw e; }
-  await pg.query(`CREATE TABLE IF NOT EXISTS _migrations (idx INT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
-  const { rows } = await pg.query(`SELECT max(idx) AS n FROM _migrations`);
-  const applied = Number(rows[0].n ?? -1);
-  for (let i = applied + 1; i < MIGRATIONS.length; i++) {
-    await pg.transaction(async (t) => {
-      await t.exec(MIGRATIONS[i]);
-      await t.query(`INSERT INTO _migrations (idx) VALUES ($1)`, [i]);
-    });
+  // Initialization and migrations are inside the cleanup too: a rejected
+  // migration used to leave the PGlite handle open and the directory lock
+  // held, refusing every later open in the process (Astra on 7c973766).
+  try {
+    await pg.query(`CREATE TABLE IF NOT EXISTS _migrations (idx INT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+    const { rows } = await pg.query(`SELECT max(idx) AS n FROM _migrations`);
+    const applied = Number(rows[0].n ?? -1);
+    for (let i = applied + 1; i < MIGRATIONS.length; i++) {
+      await pg.transaction(async (t) => {
+        await t.exec(MIGRATIONS[i]);
+        await t.query(`INSERT INTO _migrations (idx) VALUES ($1)`, [i]);
+      });
+    }
+  } catch (e) {
+    try { await pg.close(); } catch { /* best effort */ }
+    release();
+    throw e;
   }
   return {
     query: (sql, params) => pg.query(sql, params),
