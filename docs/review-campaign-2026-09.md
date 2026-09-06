@@ -479,6 +479,19 @@ app.
   dedupe ownership), #130 app banner + persisted budget loss, #128 round
   three. **55 open.**
 
+- 2026-09-09 (early) — pushed and queued: #130 app banner + persisted
+  budget loss (73be2b84), #128 round three (7f84500a: empty-chat gap
+  placeholder, range-bounded replay stamping, failure-span reader identity),
+  ledger residuals (ff8b84d7: ordinal-bounded receipt pruning under the
+  committed cursor with insertion-time cap, fail-closed window-record and
+  handoff-job imports, relay-turn ownership on every dedupe path), #519
+  occurrence identity (8c2afb85: client frame barrier, reserved exact-id
+  binds, raw-field signatures). Verified fixed and closed: #131 #513; three
+  of five Claude-driver residuals verified. In flight: coordinator
+  collateral (tombstone interrupts vs submitting rows / foreign turns), lane
+  restart reconciliation against a real relay (orphan cleanup vs surviving
+  commands). New low: #626 flaky CLI stream test. **53 open.**
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
