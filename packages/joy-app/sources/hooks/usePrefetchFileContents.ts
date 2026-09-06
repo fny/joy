@@ -13,6 +13,7 @@ import * as React from 'react';
 import {sessionReadFile, sessionGitDiff } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
+import { isLatest, nextGen } from '@/utils/latest';
 import type { GitFileStatus, GitStatusFiles } from '@/sync/gitStatusFiles';
 
 const BINARY_EXTENSIONS = new Set([
@@ -42,9 +43,11 @@ function decodeBase64ToBytes(base64: string): Uint8Array {
 
 /**
  * Prefetch a single file's content + diff into the Zustand cache.
- * Silently swallows errors — prefetch is best-effort.
+ * Silently swallows errors — prefetch is best-effort. `isCurrent` is checked
+ * before every cache write: a prefetch cancelled by a newer file list must not
+ * land an older version over the replacement's read (#325).
  */
-async function prefetchFile(sessionId: string, sessionPath: string, file: GitFileStatus): Promise<void> {
+async function prefetchFile(sessionId: string, sessionPath: string, file: GitFileStatus, isCurrent: () => boolean): Promise<void> {
     const resolved = resolveSessionFilePath(file.fullPath, sessionPath);
     const filePath = resolved?.absolutePath ?? file.fullPath;
     const gitDiffPath = resolved?.withinSessionRoot ? resolved.relativePath : null;
@@ -66,6 +69,7 @@ async function prefetchFile(sessionId: string, sessionPath: string, file: GitFil
     // Fetch file content
     try {
         const response = await sessionReadFile(sessionId, filePath);
+        if (!isCurrent()) return;
         if (response.success && response.content != null) {
             let rawBytes: Uint8Array;
             let decodedContent: string;
@@ -132,15 +136,21 @@ export function usePrefetchFileContents(sessionId: string, gitStatusFiles: GitSt
         if (filesToPrefetch.length === 0) return;
 
         let cancelled = false;
+        // One generation per session: a newer file list (this or another
+        // instance for the same session) retires every earlier prefetch's
+        // right to write the shared cache.
+        const key = `prefetch:${sessionId}`;
+        const gen = nextGen(key);
+        const isCurrent = () => !cancelled && isLatest(key, gen);
 
         // Run prefetch with limited concurrency
-        (async () => {
+        void (async () => {
             let i = 0;
             async function next(): Promise<void> {
-                while (!cancelled) {
+                while (isCurrent()) {
                     const idx = i++;
                     if (idx >= filesToPrefetch.length) return;
-                    await prefetchFile(sessionId, sessionPath, filesToPrefetch[idx]);
+                    await prefetchFile(sessionId, sessionPath, filesToPrefetch[idx], isCurrent);
                 }
             }
 

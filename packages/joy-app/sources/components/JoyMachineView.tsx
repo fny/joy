@@ -22,6 +22,7 @@ import { useJoyAction } from '@/hooks/useJoyAction';
 import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
 import { alertError, errorMessage, guarded } from '@/utils/guardAsync';
+import { isLatest, nextGen, useLatestKey } from '@/utils/latest';
 import { t } from '@/text';
 import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
@@ -397,20 +398,30 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
 const EnvironmentSection = React.memo(({ machineId, online }: { machineId: string; online: boolean }) => {
     const [names, setNames] = React.useState<string[] | null>(null);
     const [error, setError] = React.useState<string | null>(null);
+    // Names are cleared on a machine change and every response is fenced to
+    // the request that asked: machine A's late list can no longer be shown
+    // (and its delete rows aimed) at machine B (#226).
+    const envKey = useLatestKey('machine-env');
     const reload = React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) { setError('no_ctx'); return; }
+        const gen = nextGen(envKey);
         try {
             const r = await machineEnvList(ctx);
+            if (!isLatest(envKey, gen)) return;
             if (r.data?.ok) { setNames(r.data.names ?? []); setError(null); }
             else setError(r.data?.error ?? `http_${r.status}`);
         } catch (e) {
             // A timed-out or failed tunnel request is an error state, not an
             // unhandled rejection; the Add row doubles as the retry.
-            setError(errorMessage(e));
+            if (isLatest(envKey, gen)) setError(errorMessage(e));
         }
-    }, [machineId]);
-    React.useEffect(() => { if (online) guarded(reload)(); }, [online, reload]);
+    }, [machineId, envKey]);
+    React.useEffect(() => {
+        setNames(null);
+        setError(null);
+        if (online) guarded(reload)();
+    }, [online, reload]);
     const [adding, doAdd] = useJoyAction(React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) return;

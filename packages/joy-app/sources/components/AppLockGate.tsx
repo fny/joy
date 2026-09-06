@@ -6,6 +6,7 @@ import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSetting } from '@/sync/storage';
 import { JoyLogoType } from '@/components/JoyLogotype';
 import { t } from '@/text';
+import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
 
 // Native-only app lock (the appLock local setting): an opaque cover blocks the
 // UI on cold start and whenever the app returns from BACKGROUND, until Face
@@ -19,6 +20,10 @@ export const AppLockGate = React.memo(function AppLockGate() {
     const native = Platform.OS !== 'web';
     const [locked, setLocked] = React.useState(() => native && enabled);
     const authInFlight = React.useRef(false);
+    // Each lock has a generation: an authentication that began before the
+    // app went to the background again must not unlock the NEW lock when its
+    // success arrives late (#201).
+    const lockKey = useLatestKey('appLock');
 
     // Turning the setting on arms the NEXT lock; it doesn't lock you out of
     // the settings screen you're standing on.
@@ -29,24 +34,25 @@ export const AppLockGate = React.memo(function AppLockGate() {
     React.useEffect(() => {
         if (!native || !enabled) return;
         const sub = AppState.addEventListener('change', (state) => {
-            if (state === 'background') setLocked(true);
+            if (state === 'background') { retire(lockKey); setLocked(true); }
         });
         return () => sub.remove();
-    }, [native, enabled]);
+    }, [native, enabled, lockKey]);
 
     const unlock = React.useCallback(async () => {
         if (authInFlight.current) return;
         authInFlight.current = true;
+        const gen = nextGen(lockKey);
         try {
             const res = await LocalAuthentication.authenticateAsync({
                 promptMessage: t('appLock.prompt'),
                 disableDeviceFallback: false,
                 cancelLabel: t('common.cancel'),
             });
-            if (res.success) setLocked(false);
+            if (res.success && isLatest(lockKey, gen)) setLocked(false);
         } catch { /* stay locked; the button retries */ }
         finally { authInFlight.current = false; }
-    }, []);
+    }, [lockKey]);
 
     // Auto-prompt when the cover appears AND the app is foregrounded (a
     // prompt fired while still backgrounded silently fails on iOS).

@@ -1,5 +1,7 @@
 // Web/desktop variant of the idle sound detector: an AnalyserNode on the mic
 // stream, RMS level, same floor-relative heuristic as native.
+import { isLatest, nextGen, retire } from '@/utils/latest';
+
 const SAMPLE_MS = 100;
 const SPEECH_DB_ABOVE_FLOOR = 12;
 const MIN_SPEECH_DB = -40;
@@ -7,14 +9,33 @@ const SPEECH_SAMPLES_NEEDED = 4;
 const WINDOW_SAMPLES = 10;
 const FLOOR_ADAPT = 0.05;
 
+// One generation per start: a stop retires it, so a microphone acquisition
+// that resolves after the stop releases its tracks instead of listening on
+// (#348), and a stop's async context close only touches the context it
+// captured, never a replacement detector's (#349).
+const KEY = 'soundWake.web';
+
 let stream: MediaStream | null = null;
 let ctx: AudioContext | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
 export async function startSoundWake(onSpeech: () => void): Promise<void> {
     if (stream || timer) return;
+    const gen = nextGen(KEY);
+    let acquired: MediaStream;
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        acquired = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+        if (isLatest(KEY, gen)) console.warn('[voice] sound wake unavailable:', e);
+        return;
+    }
+    if (!isLatest(KEY, gen) || stream || timer) {
+        // Stopped (or restarted) while the browser was asking for the mic.
+        acquired.getTracks().forEach(t => t.stop());
+        return;
+    }
+    try {
+        stream = acquired;
         ctx = new AudioContext();
         const source = ctx.createMediaStreamSource(stream);
         const analyser = ctx.createAnalyser();
@@ -45,9 +66,14 @@ export async function startSoundWake(onSpeech: () => void): Promise<void> {
 }
 
 export async function stopSoundWake(): Promise<void> {
+    retire(KEY); // a start still waiting on getUserMedia must not take the mic
     if (timer) { clearInterval(timer); timer = null; }
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-    if (ctx) { try { await ctx.close(); } catch { /* closed */ } ctx = null; }
+    // Detach BEFORE awaiting the close: a restart during the await stores a
+    // new context in `ctx`, which this stop must leave alone.
+    const closing = ctx;
+    ctx = null;
+    if (closing) { try { await closing.close(); } catch { /* closed */ } }
 }
 
 export function isSoundWakeListening(): boolean {
