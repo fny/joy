@@ -1,13 +1,105 @@
 // CLI helpers that decide WHAT to launch and WHAT to signal. Pure functions
 // exported from cli.ts; the module's main() is gated off under vitest.
-import { test, expect, describe } from "vitest";
-import { mkdtempSync } from "fs";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import * as http from "node:http";
 
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit } = await import("./cli");
+delete process.env.JOY_SESSION_ID;
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, cmdStop } = await import("./cli");
+const { joyStateDir } = await import("./paths");
+
+// ── a fake daemon: the CLI finds it through daemon.json in the (isolated) state dir ──
+type Handler = (req: http.IncomingMessage, res: http.ServerResponse, url: URL, body: string) => void | Promise<void>;
+const routes = new Map<string, Handler>();
+const hanging = new Set<http.ServerResponse>();
+let daemon: http.Server; let daemonPort = 0;
+const json = (res: http.ServerResponse, status: number, body: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+/** A handler that never answers (a stalled daemon); torn down with the server. */
+const stall: Handler = (_req, res) => { hanging.add(res); };
+const route = (key: string, h: Handler) => routes.set(key, h);
+const log = { out: [] as string[], err: [] as string[] };
+
+beforeAll(async () => {
+  daemon = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const h = routes.get(`${req.method} ${url.pathname}`);
+      if (!h) return json(res, 404, { error: "no_route", route: `${req.method} ${url.pathname}` });
+      void h(req, res, url, body);
+    });
+  });
+  await new Promise<void>((r) => daemon.listen(0, "127.0.0.1", () => { daemonPort = (daemon.address() as { port: number }).port; r(); }));
+  mkdirSync(joyStateDir(), { recursive: true });
+  writeFileSync(join(joyStateDir(), "daemon.json"), JSON.stringify({ token: "tok", pid: 4242, port: daemonPort, startedAt: Date.now(), version: "test" }));
+  vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { log.out.push(a.map(String).join(" ")); });
+  vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { log.err.push(a.map(String).join(" ")); });
+});
+afterEach(() => {
+  routes.clear();
+  for (const r of hanging) r.destroy();
+  hanging.clear();
+  log.out.length = 0; log.err.length = 0;
+  // cmdStop removes daemon.json on success; put it back for the next test
+  writeFileSync(join(joyStateDir(), "daemon.json"), JSON.stringify({ token: "tok", pid: 4242, port: daemonPort, startedAt: Date.now(), version: "test" }));
+});
+afterAll(async () => {
+  vi.restoreAllMocks();
+  daemon.closeAllConnections();
+  await new Promise<void>((r) => daemon.close(() => r()));
+});
+
+describe("joy stop under a supervisor (#502)", () => {
+  const fakeRun = (mainPid: string, onStop: () => void) => (cmd: string, args: string[]) => {
+    if (cmd === "systemctl" && args.includes("show")) return { status: 0, stdout: `${mainPid}\n` };
+    if (cmd === "systemctl" && args.includes("stop")) { onStop(); return { status: 0, stdout: "" }; }
+    return { status: 1, stdout: "" };
+  };
+
+  test("detectSupervisor: systemd owns the pid only when the unit's MainPID IS the daemon; launchd via its job PID", () => {
+    expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("4242", () => {}) })).toEqual({ kind: "systemd", unit: "joy-daemon.service" });
+    expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("0", () => {}) })).toBeNull();     // unit inactive / not installed
+    expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("999", () => {}) })).toBeNull();   // some other daemon under the unit
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toBeNull(); // no systemctl
+    const launchd = (out: string, status = 0) => ({ platform: "darwin", run: () => ({ status, stdout: out }) });
+    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))?.kind).toBe("launchd");
+    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running
+    expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded
+  });
+
+  test("a systemd-supervised daemon is stopped through systemctl, never signalled directly", async () => {
+    let alive = true; const killed: number[] = [];
+    route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+    const code = await cmdStop({ platform: "linux", run: fakeRun("4242", () => { alive = false; }), kill: (pid) => { killed.push(pid); } });
+    expect(code).toBe(0);
+    expect(killed).toEqual([]);
+    expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+  });
+
+  test("systemctl stop failing is reported as failure — no fallback signal that the unit would undo", async () => {
+    route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
+    const killed: number[] = [];
+    const run = (cmd: string, args: string[]) => args.includes("show") ? { status: 0, stdout: "4242\n" } : { status: 5, stdout: "" };
+    expect(await cmdStop({ platform: "linux", run, kill: (pid) => { killed.push(pid); } })).toBe(1);
+    expect(killed).toEqual([]);
+    expect(log.out.join("\n")).toMatch(/systemctl --user stop joy-daemon.service failed/);
+  });
+
+  test("a detached daemon (unit inactive) still gets SIGTERM directly", async () => {
+    let alive = true;
+    route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+    const killed: [number, string][] = [];
+    const code = await cmdStop({ platform: "linux", run: fakeRun("0", () => {}), kill: (pid, sig) => { killed.push([pid, sig]); alive = false; } });
+    expect(code).toBe(0);
+    expect(killed).toEqual([[4242, "SIGTERM"]]);
+    expect(log.out.join("\n")).toContain("stopped (pid 4242)");
+  });
+});
 
 describe("systemdUnit (#499)", () => {
   const unit = systemdUnit({ node: "/usr/bin/node", serverTs: "/opt/joy/src/server.ts", pkgDir: "/opt/joy/src", path: "/usr/bin:/bin", relayUrl: "https://relay.example:4997", homeDir: "/isolated/joy home" });

@@ -330,7 +330,39 @@ export function verifyDaemonPid(
   return { ok: true };
 }
 
-async function cmdStop(): Promise<number> {
+/** The installed service that OWNS the daemon process `pid`, if any: the
+ *  systemd user unit whose MainPID it is, or the launchd agent whose job
+ *  runs it. A daemon `joy start` spawned detached has no supervisor even
+ *  when a unit file exists on disk (inactive), and is signalled directly. */
+export type Supervisor = { kind: "systemd"; unit: string } | { kind: "launchd"; label: string; plist: string };
+export interface StopDeps {
+  platform: string;
+  run: (cmd: string, args: string[]) => { status: number | null; stdout: string };
+  kill: (pid: number, signal: NodeJS.Signals) => void;
+}
+const defaultStopDeps: StopDeps = {
+  platform: osPlatform(),
+  run: (cmd, args) => { const r = spawnSync(cmd, args, { encoding: "utf8" }); return { status: r.status, stdout: r.stdout ?? "" }; },
+  kill: (pid, signal) => process.kill(pid, signal),
+};
+export function detectSupervisor(pid: number, deps: Pick<StopDeps, "platform" | "run">): Supervisor | null {
+  if (deps.platform === "linux") {
+    const unit = `${serviceName()}.service`;
+    // MainPID is "0" for an inactive unit and for a unit that is not installed.
+    const r = deps.run("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit]);
+    return r.status === 0 && Number(r.stdout.trim()) === pid ? { kind: "systemd", unit } : null;
+  }
+  if (deps.platform === "darwin") {
+    const label = launchdLabel();
+    // `launchctl list <label>` prints the job's dictionary, `"PID" = <n>;` while it runs.
+    const r = deps.run("launchctl", ["list", label]);
+    const m = r.status === 0 ? /"PID"\s*=\s*(\d+)/.exec(r.stdout) : null;
+    return m && Number(m[1]) === pid ? { kind: "launchd", label, plist: launchdPlistPath() } : null;
+  }
+  return null;
+}
+
+export async function cmdStop(deps: StopDeps = defaultStopDeps): Promise<number> {
   const s = await probe();
   const st = readState();
   // A daemon that answered the token-authenticated /status IS the daemon:
@@ -347,12 +379,33 @@ async function cmdStop(): Promise<number> {
     }
     pid = st.pid;
   }
-  try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  // A supervised daemon is stopped THROUGH its supervisor. The unit is
+  // Restart=always (the plist KeepAlive=true) by design, so a direct SIGTERM
+  // "stopped" it for three seconds and then it was back — `joy stop` reported
+  // success while the service restarted the daemon (#502). systemctl stop /
+  // launchctl unload leave the service installed: it returns at the next
+  // login/boot, and `joy install` re-arms it now.
+  const sup = detectSupervisor(pid, deps);
+  const via = sup ? (sup.kind === "systemd" ? `systemctl --user stop ${sup.unit}` : `launchctl unload ${sup.plist}`) : null;
+  if (sup) {
+    const r = sup.kind === "systemd" ? deps.run("systemctl", ["--user", "stop", sup.unit]) : deps.run("launchctl", ["unload", sup.plist]);
+    if (r.status !== 0) {
+      console.log(`${bad} ${via} failed (exit ${r.status ?? "?"}) — not signalling pid ${pid} directly, the service would restart it`);
+      return 1;
+    }
+  } else {
+    try { deps.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  }
   for (let i = 0; i < 25; i++) {
     await new Promise(r => setTimeout(r, 200));
-    if (!(await probe())) { try { rmSync(STATE_FILE); } catch {} console.log(`${ok} stopped (pid ${pid})`); return 0; }
+    if (!(await probe())) {
+      try { rmSync(STATE_FILE); } catch {}
+      console.log(`${ok} stopped (pid ${pid}${via ? `, via ${via}` : ""})`);
+      if (sup) console.log(`  ${c.dim("the service stays installed: it returns at the next login/boot; `joy install` re-arms it now, `joy start` runs the daemon unsupervised")}`);
+      return 0;
+    }
   }
-  console.log(`${warn} sent SIGTERM to ${pid} but it's still answering`);
+  console.log(`${warn} ${via ?? `sent SIGTERM to ${pid}`} but it's still answering`);
   return 1;
 }
 
@@ -1354,7 +1407,7 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.dim("side by side — own state, own tmux server, own service unit.")}
 
   ${c.b("start")}        Start the daemon (detached)
-  ${c.b("stop")}         Stop the daemon (tmux sessions stay alive)
+  ${c.b("stop")}         Stop the daemon (tmux sessions stay alive; an installed service is stopped via systemctl/launchctl)
   ${c.b("restart")}      Restart the daemon (re-exec; running sessions survive)
   ${c.b("status")}       Show daemon status
   ${c.b("ls")}           List sessions: id, agent, state (idle / busy / needs input), title, cwd
