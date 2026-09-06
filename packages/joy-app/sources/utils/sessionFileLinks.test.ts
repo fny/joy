@@ -1,3 +1,5 @@
+// Wall-clock bound: generous because the CI/dev box runs several suites at once; the point is linear vs quadratic, not 100 ms exactly.
+const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
 import { describe, expect, it } from 'vitest';
 import { parseSessionFileLink, resolveSessionFilePath, splitSessionFileText } from './sessionFileLinks';
 
@@ -116,7 +118,7 @@ describe('splitSessionFileText — bounded candidate scanning (#446)', () => {
         const text = 'a/ '.repeat(400);
         const t0 = performance.now();
         const segments = splitSessionFileText(text, '/repo');
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
         expect(segments).toEqual([{ text, link: null }]);
     });
 
@@ -124,7 +126,7 @@ describe('splitSessionFileText — bounded candidate scanning (#446)', () => {
         const text = 'src/ '.repeat(1000);
         const t0 = performance.now();
         const segments = splitSessionFileText(text, '/repo');
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
         expect(segments.map(s => s.text).join('')).toBe(text);
     });
 

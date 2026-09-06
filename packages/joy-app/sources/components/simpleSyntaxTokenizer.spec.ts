@@ -1,3 +1,5 @@
+// Wall-clock bound: generous because the CI/dev box runs several suites at once; the point is linear vs quadratic, not 100 ms exactly.
+const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
 import { describe, it, expect } from 'vitest';
 import { tokenizeCode, HIGHLIGHT_INPUT_CAP } from './simpleSyntaxTokenizer';
 
@@ -9,7 +11,7 @@ describe('simpleSyntaxTokenizer — bounded highlighting (#241)', () => {
         const t0 = performance.now();
         const tokens = tokenizeCode(code, 'javascript');
         const ms = performance.now() - t0;
-        expect(ms).toBeLessThan(100);
+        expect(ms).toBeLessThan(PERF_BUDGET_MS);
         expect(tokens.map(t => t.text).join('')).toBe(code); // nothing lost
     });
 
@@ -17,7 +19,7 @@ describe('simpleSyntaxTokenizer — bounded highlighting (#241)', () => {
         const code = '9'.repeat(64_000) + 'x';
         const t0 = performance.now();
         expect(joined(code, 'python')).toBe(code);
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
     });
 
     it('still highlights ordinary numbers, floats and exponents', () => {

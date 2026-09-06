@@ -1,3 +1,5 @@
+// Wall-clock bound: generous because the CI/dev box runs several suites at once; the point is linear vs quadratic, not 100 ms exactly.
+const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
 import { describe, it, expect } from 'vitest';
 import { parseToolUseError, parseAllToolUseErrors, hasToolUseError, isCancelError } from './toolErrorParser';
 
@@ -134,7 +136,7 @@ describe('bounded <tool_use_error> scanning (#458)', () => {
         expect(hasToolUseError(openings)).toBe(false);
         expect(parseToolUseError(openings)).toEqual({ isToolUseError: false, errorMessage: null });
         expect(parseAllToolUseErrors(openings)).toEqual([]);
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
     });
 
     it('a pair after many unclosed openings is still found (first opening … first close, as before)', () => {

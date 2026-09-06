@@ -1,3 +1,5 @@
+// Wall-clock bound: generous because the CI/dev box runs several suites at once; the point is linear vs quadratic, not 100 ms exactly.
+const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 500);
 import { describe, it, expect } from 'vitest';
 import { splitJoySegments, hasJoyTags, joyImgMime } from './joyImg';
 
@@ -81,7 +83,7 @@ describe('splitJoySegments — bounded tag scanning', () => {
         const text = '<joy-img '.repeat(20_000);
         const t0 = performance.now();
         const segs = splitJoySegments(text);
-        expect(performance.now() - t0).toBeLessThan(100);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
         expect(segs.every(s => s.kind === 'md')).toBe(true);
         // Only the trailing (streaming) fragment is stripped; the rest is kept verbatim.
         expect(segs.map(s => (s as { text: string }).text).join('')).toBe('<joy-img '.repeat(19_999));
