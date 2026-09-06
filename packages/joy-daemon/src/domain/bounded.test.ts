@@ -3,7 +3,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, PGROUP_MARKER_ENV } from "./bounded";
+import v8 from "node:v8";
+import vm from "node:vm";
+import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, BoundedTail, PGROUP_MARKER_ENV } from "./bounded";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitExit = async (p: ChildProcess) => { for (let i = 0; i < 100 && p.exitCode === null && p.signalCode === null; i++) await sleep(20); };
@@ -260,5 +262,45 @@ describe("boundedWriter", () => {
     const sink = { writableLength: 0, write: () => true, destroy: () => { throw new Error("must not destroy"); } };
     const write = boundedWriter(sink, 10, () => { throw new Error("must not overflow"); });
     for (let i = 0; i < 1000; i++) expect(write("12345")).toBe(true);
+  });
+});
+
+describe("BoundedTail", () => {
+  // `gc` without --expose-gc on the worker: turn the flag on at runtime and
+  // pull the function out of a fresh context (the flag applies to contexts
+  // created after it is set).
+  v8.setFlagsFromString("--expose-gc");
+  const gc = vm.runInNewContext("gc") as () => void;
+  const collect = async () => { for (let i = 0; i < 4; i++) { await new Promise((r) => setImmediate(r)); gc(); } };
+  const MiB = 1024 * 1024;
+
+  test("keeps the last maxBytes across chunks and accounts for every byte that fell out", () => {
+    const t = new BoundedTail(8);
+    t.push("abcdef");
+    t.push("ghij"); // 10 bytes total: 2 fall out
+    expect(t.text()).toBe("cdefghij");
+    expect(t.droppedBytes).toBe(2);
+    t.push("0123456789ab"); // a chunk larger than the window: everything retained so far falls out too
+    expect(t.text()).toBe("456789ab");
+    expect(t.droppedBytes).toBe(2 + 8 + 4);
+    expect(t.byteLength).toBe(8);
+  });
+
+  test("a chunk larger than the window is never retained as a view: backing memory stays at the cap (#69)", async () => {
+    await collect();
+    const before = process.memoryUsage().arrayBuffers;
+    const t = new BoundedTail(16384);
+    (function pushOneHugeChunk() { t.push(Buffer.alloc(48 * MiB, 0x78)); })();
+    await collect();
+    const held = process.memoryUsage().arrayBuffers - before;
+    expect(t.byteLength).toBe(16384);
+    expect(t.text()).toBe("x".repeat(16384));
+    expect(held).toBeLessThan(1 * MiB); // the 48 MiB chunk is gone; only the ≤16 KiB tail (plus pool slack) remains
+    // and a view handed in by the caller (a slice of a large pipe read) is copied too
+    const big = Buffer.alloc(8 * MiB, 0x79);
+    t.push(big.subarray(big.length - 10));
+    expect(t.text().endsWith("y".repeat(10))).toBe(true);
+    big.fill(0); // mutating the caller's buffer must not reach the retained tail
+    expect(t.text().endsWith("y".repeat(10))).toBe(true);
   });
 });
