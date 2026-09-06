@@ -34,10 +34,16 @@ every relay; machines register per account.
 
 ## Messaging path
 
-- **Durable dispatch queue** per claude session: verified typing into the pane,
-  queue survives restarts, seq-dedupe against relay redelivery; queued rows
-  render app-side in a drafts-style collapsible strip (`QUEUED · N`) with
-  per-item edit/cancel/**steer** (arrow = cancel + `/steer` immediate send).
+- **Durable dispatch queue** per session, for every harness (claude, codex,
+  opencode, pi, agy): the daemon's acceptance ledger (`domain/ledger.ts`,
+  SQLite) holds the queue, the dispatch attempts, the delivery receipts and
+  the outbound records — a send is acknowledged only once its row committed,
+  the queue survives restarts, a redelivered relay seq dedupes against the
+  pending row or the retained receipt, and a crash between a submit and its
+  echo is an explicit unknown reconciled before any resend. Claude adds
+  verified typing into the pane. Queued rows render app-side in a
+  drafts-style collapsible strip (`QUEUED · N`) with per-item
+  edit/cancel/**steer** (arrow = cancel + `/steer` immediate send).
 - **Steer**: `/steer` bypasses the queue mid-turn (claude); codex/opencode/pi
   route through their native steer/queue semantics.
 - **Drafts**: composer stash button; drafts sit at the chat bottom.
@@ -344,9 +350,18 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   request `404 request_gone` — all terminal for the executor, which releases
   its local stream). A cut stream after a verified head reads as
   "connection too slow" (`connection_slow`), not tamper; a GET is re-asked once.
-- Local acceptance is durable: `send`, `queueAdd` and handoff notes are
-  acknowledged only after the queue spool is persisted, else `not_durable`
-  (#551, #542); queue and window-record writes are atomic (#555, #567).
+- Local acceptance is durable and transactional: `send`, `queueAdd`, relay
+  prompts and handoff notes are acknowledged only after the ledger commit
+  (`domain/ledger.ts`: WAL + `synchronous=FULL`, one transaction per write,
+  no boolean "saved"), else `not_durable`; a session whose generation has
+  closed answers `session_ended` (#551, #542, #553). Command id, payload
+  version, session generation, runtime attempt id and outbox sequence are
+  distinct identities; a confirmed delivery stays in the receipt table after
+  its pending row is gone (#516); a write from a superseded generation is
+  refused (#481); a checkpoint commits only once the outbound rows it covers
+  are acked (#67); terminals are posted after their session's outputs by
+  one sender per session (#74). Window records (identity/config only) and
+  user files still use atomic replacement (#567).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.
