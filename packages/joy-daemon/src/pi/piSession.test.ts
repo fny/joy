@@ -104,8 +104,9 @@ test("#576: continueLast records the pi session id the get_state response names"
 test("#577: a rejected prompt is surfaced instead of silently dropped", async () => {
   H.procs.length = 0;
   const { s, p, sent, chat } = harness("pi-577");
-  s.enqueue("do the thing", { mirrorToRelay: false });
+  const item = s.enqueue("do the thing", { mirrorToRelay: false });
   await vi.waitFor(() => expect(p.commands.some((c: any) => c.type === "prompt")).toBe(true));
+  expect(s.queueItemState(item.id)).toBe("pending"); // tracked from acceptance: the lane polls this, not chat activity
   const cmd = p.commands.find((c: any) => c.type === "prompt");
   expect(cmd.message).toBe("do the thing");
   expect(typeof cmd.id).toBe("string"); // correlatable
@@ -114,6 +115,13 @@ test("#577: a rejected prompt is surfaced instead of silently dropped", async ()
   const note = sent.find((e) => e.role === "user" && /rejected/.test(e.text ?? ""))!;
   expect(note.text).toContain("no model configured");
   expect(chat).toEqual([expect.objectContaining({ role: "event", event_status: "error", content: expect.stringContaining("no model configured") })]);
+  // #577 residual: the rejection is a per-item FAILED outcome (ledger attempt
+  // rejected → command failed) — the nucleus lane's tracked path terminalizes
+  // the relay turn on it (prompt_rejected_by_agent) instead of waiting out
+  // the 180s no_agent_activity deadline; busy/pendingCount stay clean.
+  expect(s.queueItemState(item.id)).toBe("failed");
+  expect(s.busy()).toBe(false);
+  expect(s.queueState().pendingCount).toBe(0);
   // A success response for a later prompt produces no note.
   s.enqueue("again", { mirrorToRelay: false });
   await vi.waitFor(() => expect(p.commands.filter((c: any) => c.type === "prompt")).toHaveLength(2));

@@ -7,9 +7,16 @@ import { test, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { Session, HOOK_SESSION_END_GRACE_MS } from "./session";
+import { Session, HOOK_SESSION_END_GRACE_MS, HOOK_NEEDS_INPUT_STALE_MS } from "./session";
 import { loadWindowRecord, saveWindowRecord } from "../domain/windowRecord";
+import * as windowRecords from "../domain/windowRecord";
+import { ensureHookSettings } from "./hooks";
 import type { TmuxDriver } from "../tmux/driver";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { dirname } from "node:path";
+import { writeFileSync } from "fs";
 
 let home: string;
 beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-hook-authority-")); process.env.JOY_HOME_DIR = home; });
@@ -348,5 +355,189 @@ test("an unknown hook event still flips the latch (a newer hook set is proof the
   expect(s.onHookEvent({ event: "PostToolBatch", permission_mode: "auto" })).toEqual({ ok: false });
   expect(s.hookState().live).toBe(true);
   expect(s.onHookEvent({})).toEqual({ ok: false });
+  s.end("killed");
+});
+
+// ── 617dc734 review: ingress fence, wire contract, live-process end, subagents, turn authority ──
+
+test("ingress fence: a stale process's hooks (another conversation id) flip no latch, persist no mode, close no turn and confirm no dispatch", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const id = uid("fence");
+  const s = mkSession(id, driver, { claudeSessionId: "new" });
+  expect(s.onHookEvent({ event: "SessionEnd", session_id: "old", end_reason: "other", permission_mode: "bypassPermissions" })).toEqual({ ok: false });
+  expect(s.hookState().live).toBe(false);                 // old code: latch flipped before the sid check
+  expect(s.hookState().sessionEnd).toBeNull();
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBeUndefined(); // old code: overwritten
+  // The live process opens a turn; the predecessor's Stop cannot close it.
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "new", prompt: "live new turn" });
+  expect(s.busy()).toBe(true);
+  s.onHookEvent({ event: "Stop", session_id: "old" });
+  expect(s.busy()).toBe(true);                            // old code: false
+  s.onHookEvent({ event: "Stop", session_id: "new" });
+  expect(s.busy()).toBe(false);
+  // Nor can its text-matching UserPromptSubmit confirm the replacement's dispatch.
+  const item = s.enqueue("same prompt", { mirrorToRelay: false });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "old", prompt: "same prompt" });
+  expect(s.queueItemState(item.id)).toBe("pending");      // old code: delivered
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "new", prompt: "same prompt" });
+  expect(s.queueItemState(item.id)).toBe("delivered");
+  s.end("killed");
+});
+
+test("SessionEnd wire contract: the generated forwarder ships Claude's `reason` as end_reason (a /clear is a rotation, not an exit) plus the subagent identity", async () => {
+  const settings = ensureHookSettings();
+  expect(settings).not.toBe("");
+  const script = join(dirname(settings), "joy-hook.mjs");
+  const bodies: any[] = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    res.end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = (server.address() as any).port;
+  const file = join(home, "daemon-wire.json");
+  writeFileSync(file, JSON.stringify({ port, token: "test-only" }));
+  try {
+    for (const payload of [
+      { hook_event_name: "SessionEnd", session_id: "sid", reason: "clear" },
+      { hook_event_name: "PostToolUse", session_id: "sid", agent_id: "bg-id", agent_type: "Explore", permission_mode: "plan", tool_name: "Read" },
+    ]) {
+      const child = spawn(process.execPath, [script], { env: { ...process.env, JOY_SESSION_ID: "test-session", JOY_DAEMON_FILE: file }, stdio: ["pipe", "pipe", "pipe"] });
+      child.stdin.end(JSON.stringify(payload));
+      const [code] = await once(child, "exit");
+      expect(code).toBe(0);
+    }
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual({ event: "SessionEnd", session_id: "sid", end_reason: "clear" }); // old script: reason dropped → "other"
+    expect(bodies[1]).toMatchObject({ event: "PostToolUse", agent_id: "bg-id", agent_type: "Explore", permission_mode: "plan" });
+    // Fed to a session exactly as received: a rotation keeps the session. The raw wire name is accepted too.
+    vi.useFakeTimers();
+    const { driver } = fakeTmux({ pane: READY });
+    const s = mkSession(uid("real-clear"), driver, { claudeSessionId: "sid" });
+    expect(s.onHookEvent(bodies[0])).toEqual({ ok: true });
+    expect(s.hookState().sessionEnd).toBeNull();
+    const t = mkSession(uid("raw-resume"), driver, { claudeSessionId: "sid" });
+    t.onHookEvent({ event: "SessionEnd", session_id: "sid", reason: "resume" });
+    expect(t.hookState().sessionEnd).toBeNull();
+    await vi.advanceTimersByTimeAsync(HOOK_SESSION_END_GRACE_MS + 10);
+    expect(s.status).toBe("active");
+    expect(t.status).toBe("active");
+    s.end("killed"); t.end("killed");
+  } finally {
+    vi.useRealTimers();
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test("SessionEnd: an unresolved pid is re-resolved to the pane shell's LIVE child before ending — a live claude outranks a late hook", async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"]);
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  (driver as any).runSync = () => ({ ok: true, out: String(process.pid) }); // the pane shell is this process; the child is its live claude
+  const s = mkSession(uid("pid-unresolved"), driver, { claudeSessionId: "resumed-sid" });
+  try {
+    s.onHookEvent({ event: "SessionEnd", session_id: "resumed-sid", end_reason: "other" });
+    await vi.advanceTimersByTimeAsync(HOOK_SESSION_END_GRACE_MS + 10);
+    expect(s.status).toBe("active");                      // old code: ended without looking for a child
+    expect(s.hookState().sessionEnd).toBeNull();
+    expect(s.pid).toBeDefined();
+    expect(s.pid).not.toBe(process.pid);
+  } finally { child.kill("SIGKILL"); s.end("killed"); }
+});
+
+test("subagent events: a background agent's PostToolUse neither answers the main permission wait, nor revives the main turn, nor persists its mode; SubagentStop persists no mode either", () => {
+  const { driver } = fakeTmux({ pane: PERMISSION_DIALOG });
+  const id = uid("subagent");
+  const s = mkSession(id, driver, { claudeSessionId: "sid" });
+  const { rs, thinking } = relayStub("rs-sub");
+  s.attachRelay(rs, true);
+  s.onTranscriptEntry({ type: "assistant", uuid: "open-turn", message: { role: "assistant", content: [{ type: "tool_use", id: "main-tool", name: "Bash", input: { command: "rm build" } }] } } as any);
+  s.onHookEvent({ event: "PermissionRequest", session_id: "sid", tool_name: "Bash", permission_mode: "default" });
+  expect(s.needsInput()?.kind).toBe("permission");
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBe("default");
+  const before = thinking.length;
+  s.onHookEvent({ event: "PostToolUse", session_id: "sid", agent_id: "background-agent", tool_name: "Read", permission_mode: "bypassPermissions" });
+  expect(s.needsInput()?.kind).toBe("permission");        // old code: null
+  expect(thinking.slice(before)).toEqual([]);             // old code: thinking re-asserted inside the main turn
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBe("default"); // old code: bypassPermissions
+  s.onHookEvent({ event: "SubagentStop", session_id: "sid", agent_id: "background-agent", permission_mode: "bypassPermissions" });
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBe("default");
+  // The main agent's own tool completion answers the main wait.
+  s.onHookEvent({ event: "PostToolUse", session_id: "sid", tool_name: "Bash" });
+  expect(s.needsInput()).toBeNull();
+  // A subagent's permission wait is tagged with its actor and answered only by that actor's tool.
+  s.onHookEvent({ event: "PermissionRequest", session_id: "sid", agent_id: "background-agent", tool_name: "Write" });
+  expect(s.needsInput()?.kind).toBe("permission");
+  s.onHookEvent({ event: "PostToolUse", session_id: "sid", tool_name: "Bash" });
+  expect(s.needsInput()?.kind).toBe("permission");
+  s.onHookEvent({ event: "PostToolUse", session_id: "sid", agent_id: "background-agent", tool_name: "Write" });
+  expect(s.needsInput()).toBeNull();
+  s.end("killed");
+});
+
+test("a hook permission wait survives ONE contradictory (mid-repaint) capture — only a dialog ABSENT for the stale window clears it", async () => {
+  vi.useFakeTimers();
+  const { st, driver } = fakeTmux({ pane: PERMISSION_DIALOG });
+  const s = mkSession(uid("permission-flicker"), driver, { claudeSessionId: "sid", pid: process.pid });
+  const { rs } = relayStub("rs-permission");
+  s.attachRelay(rs, true);
+  s.beginWatching();
+  s.onHookEvent({ event: "PermissionRequest", session_id: "sid", tool_name: "Bash" });
+  await vi.advanceTimersByTimeAsync(12_000);
+  expect(s.needsInput()?.kind).toBe("permission");
+  st.pane = READY; await vi.advanceTimersByTimeAsync(3_000);            // one contradictory poll
+  st.pane = PERMISSION_DIALOG; await vi.advanceTimersByTimeAsync(3_000); // the dialog is back
+  expect(s.needsInput()?.kind).toBe("permission");                       // old code: erased for good at the first READY read
+  st.pane = READY; await vi.advanceTimersByTimeAsync(HOOK_NEEDS_INPUT_STALE_MS + 6_000);
+  expect(s.needsInput()).toBeNull();                                     // absent long enough → stale, as intended
+  s.end("killed");
+});
+
+test("a failed permission-mode record write is not cached as done — the next identical hook retries it", () => {
+  const { driver } = fakeTmux({ pane: READY });
+  const id = uid("persist-mode");
+  const s = mkSession(id, driver, { claudeSessionId: "sid" });
+  const spy = vi.spyOn(windowRecords, "saveWindowRecord").mockReturnValue(false);
+  try {
+    s.onHookEvent({ event: "PostToolUse", session_id: "sid", permission_mode: "plan" });
+    expect(spy).toHaveBeenCalledTimes(1);
+  } finally { spy.mockRestore(); }
+  expect(loadWindowRecord(id)?.claudePermissionMode).not.toBe("plan");
+  s.onHookEvent({ event: "Stop", session_id: "sid", permission_mode: "plan" });
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBe("plan");       // old code: cached as persisted, never retried
+  s.end("killed");
+});
+
+test("hook authority owns readiness: after Stop a queued prompt dispatches against a stale generating footer, an open transcript turn no longer holds busy(), and a background PostToolUse does not revive it", async () => {
+  vi.useFakeTimers();
+  const { st, driver } = fakeTmux({ pane: GENERATING });                // the frame never repaints
+  const s = mkSession(uid("stop-authority"), driver, { claudeSessionId: "sid" });
+  const { rs, thinking } = relayStub("rs-stop");
+  s.attachRelay(rs, true);
+  // The transcript's turn is open (its turn_duration is still being tailed) when Stop fires.
+  s.onTranscriptEntry({ type: "assistant", uuid: "partial", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "done" }] } } as any);
+  s.onHookEvent({ event: "Stop", session_id: "sid" });
+  expect(s.busy()).toBe(false);                                          // old code: true — the transcript #turn held it
+  const before = thinking.length;
+  s.onHookEvent({ event: "PostToolUse", session_id: "sid", agent_id: "background-agent", tool_name: "Read" });
+  expect(thinking.slice(before)).toEqual([]);                            // old code: thinking re-asserted
+  expect(s.busy()).toBe(false);
+  const item = s.enqueue("next prompt", { mirrorToRelay: false });
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(st.typed).toContain("next prompt");                             // old code: vetoed by the stale footer for the whole retry loop
+  expect(st.keys).toContain("Enter");
+  // The transcript's late turn_duration for the OLD turn changes nothing…
+  s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 5 } as any);
+  expect(s.queueItemState(item.id)).toBe("pending");
+  // …and the main agent's UserPromptSubmit is the real next-turn edge.
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "next prompt" });
+  expect(s.queueItemState(item.id)).toBe("delivered");
+  expect(s.busy()).toBe(true);
   s.end("killed");
 });
