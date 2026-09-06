@@ -1062,6 +1062,7 @@ async function checkState(id: string, opts: { signal?: AbortSignal } = {}): Prom
 async function headSeq(id: string, signal?: AbortSignal): Promise<number | null> {
   const ctl = new AbortController();
   const onAbort = () => ctl.abort();
+  if (signal?.aborted) return null; // a spent budget: a listener on it would never fire
   signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const r = await api("GET", `/sessions/${id}/events?last=0`, undefined, { signal: ctl.signal });
@@ -1204,17 +1205,21 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
     if (state !== "timeout") await wait(Math.min(FINISH_GRACE_MS, remaining()), life.signal);
     controller.abort();
     await pump.catch(() => {});
-    if (!timedOut() && (state === "answered" || state === "needs_input")) {
+    if (state === "answered" || state === "needs_input") {
       // Completeness (#497): the reply is what the daemon's log holds through
       // its head NOW — asked for directly (`?last=0`), and never below the
       // seq any hello frame advertised. Anything between the last consumed
       // record and that head is fetched once, bounded by what is left of the
-      // deadline (a timed-out wait starts NO catch-up, #501). When the head
-      // cannot be asked for, the fetch itself establishes it (its hello
-      // names the head; EOF means everything through it was read). A tail
-      // that cannot be obtained makes the outcome an `error`: the state of
-      // the follow socket — open, or long dead without the client noticing
-      // — is never taken as proof the rows arrived.
+      // deadline. When the head cannot be asked for, the fetch itself
+      // establishes it (its hello names the head; EOF means everything
+      // through it was read). A tail that cannot be obtained never yields
+      // success: the state of the follow socket — open, or long dead without
+      // the client noticing — is never taken as proof the rows arrived.
+      // The check is NOT waived for a deadline that trips during the grace
+      // or the catch-up (#497 residual): it runs on whatever is left (nothing,
+      // once the clock is out), and a reply it could not verify is reported
+      // as `timeout` — the deadline is what stopped the verification — never
+      // as the `answered` selected before it.
       const budget = () => either(life.signal, AbortSignal.timeout(Math.min(CATCHUP_MS, remaining())));
       const head = await headSeq(id, budget());
       let highWater = Math.max(advertised, head ?? 0);
@@ -1230,10 +1235,11 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
         }
       }
       if (lastSeq < highWater || (head === null && fetchError)) {
-        state = "error";
         const why = fetchError ?? lastStreamError ?? "the daemon did not answer";
         const held = lastSeq < highWater ? `the daemon holds records through seq ${highWater}` : "the log's head could not be read and the tail could not be fetched";
-        reason = `output stream lost after seq ${lastSeq} — ${held} (${why}) — the reply is incomplete; \`joy events ${id} --json\` has the records`;
+        const incomplete = `output stream lost after seq ${lastSeq} — ${held} (${why}) — the reply is incomplete; \`joy events ${id} --json\` has the records`;
+        if (timedOut()) { state = "timeout"; reason = `the deadline expired before the reply could be verified complete: ${incomplete}`; }
+        else { state = "error"; reason = incomplete; }
       } else if (state === "answered" && opts.queuedId && turnId && !records.some((r) => turnOf(r) === turnId && evOf(r)?.t === "turn-end")) {
         // The daemon says the command completed, so its turn's end record
         // precedes that verdict in the log — and the log has been read
