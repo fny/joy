@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { InvalidateSync } from '@/utils/sync';
+import { createScope } from '@/utils/scope';
 
 // Types
 export interface AutocompleteResult {
@@ -23,41 +24,54 @@ const emptyArray: AutocompleteResult[] = [];
 export function useAutocomplete(query: string | null, resolver: (text: string) => Promise<AutocompleteResult[]>) {
 
     const [results, setResults] = React.useState<AutocompleteResult[]>([]);
+    const resolverRef = React.useRef(resolver);
+    resolverRef.current = resolver;
+    const queryRef = React.useRef(query);
+    queryRef.current = query;
 
-    const sync = React.useMemo(() => {
+    // The retry worker is owned by an effect scope: leaving the screen stops
+    // it (its backoff used to keep calling a failing resolver forever, #309)
+    // and a request already in flight publishes nothing after cleanup. An
+    // effect replay creates a fresh, usable worker.
+    const workerRef = React.useRef<{ onSearchQueryChange: (text: string | null) => void } | null>(null);
+    React.useEffect(() => {
+        const scope = createScope();
+        const state = { query: queryRef.current };
+        const cache = new Map<string, AutocompleteResult[]>();
 
-        const state = { query };
-        let cache = new Map<string, AutocompleteResult[]>();
-
-        let sync = new InvalidateSync(async () => {
-            let t = state.query;
+        const sync = new InvalidateSync(async () => {
+            const t = state.query;
             if (t === null) {
-                setResults(emptyArray);
+                if (!scope.cancelled) setResults(emptyArray);
                 return;
             }
-            let results = cache.get(t);
-            if (results === undefined) {
-                results = await resolver(t);
-                cache.set(t, results);
+            let found = cache.get(t);
+            if (found === undefined) {
+                found = await resolverRef.current(t);
+                cache.set(t, found);
             }
-            if (state.query === t) {
-                setResults(results);
+            if (!scope.cancelled && state.query === t) {
+                setResults(found);
             }
         });
+        scope.defer(() => sync.stop());
 
-        return {
-            sync,
-            state,
-            onSearchQueryChange: (text: string | null) => {
+        workerRef.current = {
+            onSearchQueryChange: (text) => {
                 state.query = text;
                 sync.invalidate();
             },
+        };
+        sync.invalidate();
+        return () => {
+            scope.cancel();
+            workerRef.current = null;
         };
     }, []);
 
     // Trigger sync
     React.useEffect(() => {
-        sync.onSearchQueryChange(query);
+        workerRef.current?.onSearchQueryChange(query);
     }, [query]);
 
     // Return empty array if no query

@@ -4,6 +4,7 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Modal } from '@/modal';
+import { useScope } from '@/utils/scope';
 import { Typography } from '@/constants/Typography';
 import { RoundButton } from '@/components/RoundButton';
 
@@ -26,6 +27,8 @@ function CustomContentModal({ onClose, title, message }: { onClose: () => void; 
 
 export default function ModalDemoScreen() {
     const [lastResult, setLastResult] = React.useState<string>('No action taken yet');
+    // Delayed demo alerts die with the screen (#143).
+    const scope = useScope();
 
     const showSimpleAlert = () => {
         Modal.alert('Simple Alert', 'This is a simple alert modal.');
@@ -84,13 +87,15 @@ export default function ModalDemoScreen() {
         setLastResult('Showed custom modal');
     };
 
-    const showMultipleModals = async () => {
+    const pendingSecond = React.useRef<() => void>(() => {});
+    const showMultipleModals = () => {
         Modal.alert('First Modal', 'This is the first modal');
-        
-        setTimeout(() => {
+
+        pendingSecond.current(); // an earlier pending sequence is dropped
+        pendingSecond.current = scope.timeout(() => {
             Modal.alert('Second Modal', 'This modal appeared after the first one');
         }, 1500);
-        
+
         setLastResult('Showed multiple modals');
     };
 
