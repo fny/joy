@@ -11,7 +11,6 @@ import { machineKeyOpensStore } from "../domain/envStore";
 import { mkdirSync, writeFileSync, existsSync, renameSync , readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import tweetnacl from "tweetnacl";
-import { joyRelayAccessKey } from "../paths";
 
 // App's backup format (secretKeyBackup.ts): RFC 4648 base32, dash-grouped,
 // with the same typo forgiveness (0→O, 1→I, 8→B, 9→G, junk stripped).
@@ -22,7 +21,17 @@ const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 export function parseBackupCode(input: string): Uint8Array {
   const trimmed = input.trim();
   // Bare base64url form (the on-device representation) — accepted for parity
-  // with the app's normalizeSecretKey.
+  // with the app's normalizeSecretKey. Recognised by its FULL alphabet and
+  // encoded length first (#64): 32 bytes are exactly 43 base64url characters,
+  // and that alphabet includes '-' and '_'. The old "any hyphen means dashed
+  // base32" test sent a valid key containing '-' down the base32 path, which
+  // stripped/reinterpreted it and threw an invalid-length error. No collision
+  // with the app's dashed base32 backup: that is 52 letters in 11 dash-joined
+  // groups (62 chars) and never 43.
+  if (/^[A-Za-z0-9_-]{43}=?$/.test(trimmed)) {
+    const bytes = new Uint8Array(Buffer.from(trimmed, "base64url"));
+    if (bytes.length === 32) return bytes;
+  }
   if (!/[-\s]/.test(trimmed) && trimmed.length <= 50) {
     const bytes = new Uint8Array(Buffer.from(trimmed, "base64url"));
     if (bytes.length === 32) return bytes;
@@ -102,9 +111,8 @@ function decryptBox(bundle: Uint8Array, recipientSecret: Uint8Array): Uint8Array
   return tweetnacl.box.open(bundle.slice(56), bundle.slice(32, 56), bundle.slice(0, 32), recipientSecret);
 }
 
-async function post(relayUrl: string, path: string, body: unknown, token?: string): Promise<Record<string, unknown>> {
+async function post(relayUrl: string, path: string, body: unknown, relayKey: string, token?: string): Promise<Record<string, unknown>> {
   const headers: Record<string, string> = { "Content-Type": "application/json", "X-Joy-Client": "cli/joy-auth" };
-  const relayKey = joyRelayAccessKey();
   if (relayKey) headers["X-Joy-Relay-Key"] = relayKey;
   if (token) headers.Authorization = `Bearer ${token}`;
   const r = await fetch(relayUrl + path, { method: "POST", headers, body: JSON.stringify(body) });
@@ -117,11 +125,19 @@ async function post(relayUrl: string, path: string, body: unknown, token?: strin
  *  keypair, and write access.key + settings.json into credsDir. Any existing
  *  pair is backed up as *.replaced. Returns the new machineId. */
 export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array, credsDir: string): Promise<string> {
+  // 0. the perimeter key, BEFORE the first request (#586). A relay gated with
+  // the account's derived key 401'd the very first auth POST of a fresh pair:
+  // the key was only written to perimeter.key after every gated request had
+  // already succeeded, and joyRelayAccessKey() had nothing to read. The
+  // pasted secret derives the exact key the gate expects; an explicit
+  // JOY_RELAY_ACCESS_KEY stays the override (a relay gated with a static key).
+  const perimeterKey = process.env.JOY_RELAY_ACCESS_KEY?.trim() || deriveRelayPerimeterKey(accountSecret);
+  const send = (path: string, body: unknown, token?: string) => post(relayUrl, path, body, perimeterKey, token);
   // 1. account login — signature over a self-chosen challenge
   const signKp = tweetnacl.sign.keyPair.fromSeed(accountSecret);
   const challenge = new Uint8Array(randomBytes(32));
   const signature = tweetnacl.sign.detached(challenge, signKp.secretKey);
-  const auth = await post(relayUrl, "/joy/v2/auth", {
+  const auth = await send("/joy/v2/auth", {
     publicKey: b64(signKp.publicKey), challenge: b64(challenge), signature: b64(signature),
   });
   const accountToken = String(auth.token ?? "");
@@ -129,14 +145,14 @@ export async function pairWithRelay(relayUrl: string, accountSecret: Uint8Array,
 
   // 2. terminal request + self-approval
   const termKp = tweetnacl.box.keyPair();
-  await post(relayUrl, "/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  await send("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
   const contentPub = boxSeedKeypair(deriveContentSeed(accountSecret)).publicKey;
   const bundle = new Uint8Array([0x00, ...contentPub]);
-  await post(relayUrl, "/joy/v2/auth/response",
+  await send("/joy/v2/auth/response",
     { publicKey: b64(termKp.publicKey), response: b64(encryptBox(bundle, termKp.publicKey)) }, accountToken);
 
   // 3. pick up the approval
-  const resp = await post(relayUrl, "/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
+  const resp = await send("/joy/v2/auth/request", { publicKey: b64(termKp.publicKey), supportsV2: true });
   if (resp.state === "consumed") {
     // One-shot by design (#607/#70): the answer was already handed out — to an
     // earlier poll of ours whose reply was lost, or to someone who saw the

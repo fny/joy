@@ -9,6 +9,20 @@ describe("parsePathExpr", () => {
     expect(parsePathExpr("examples[0].title")).toEqual(["examples", 0, "title"]);
     expect(parsePathExpr("model")).toEqual(["model"]);
     expect(parsePathExpr("permissions.allow[2]")).toEqual(["permissions", "allow", 2]);
+    expect(parsePathExpr("a[0][1].b")).toEqual(["a", 0, 1, "b"]);
+  });
+  // #525: the grammar is anchored — anything the old scanner silently skipped
+  // is now an error, so the op cannot report a write that never happened.
+  it("rejects negative indices, unmatched brackets, empty segments and stray separators (#525)", () => {
+    for (const bad of ["examples[-1].title", "a[", "a]", "a[b]", "a..b", ".a", "a.", "a[1]x", "", "a[ 1 ]"]) {
+      expect(() => parsePathExpr(bad), bad).toThrow(/bad path/);
+    }
+  });
+  // #54: prototype-walking segments never reach the document.
+  it("refuses __proto__ / constructor / prototype segments (#54)", () => {
+    expect(() => parsePathExpr("__proto__.polluted")).toThrow(/not an allowed key/);
+    expect(() => parsePathExpr("constructor.prototype.polluted")).toThrow(/not an allowed key/);
+    expect(() => parsePathExpr("a.prototype")).toThrow(/not an allowed key/);
   });
 });
 
@@ -80,6 +94,52 @@ describe("agent config file round-trip", () => {
   it("writeAgentConfigRaw validates format", () => {
     expect(writeAgentConfigRaw("claude", "not json").ok).toBe(false);
     expect(writeAgentConfigRaw("claude", '{"model":"fable"}').ok).toBe(true);
+  });
+
+  // #526: deleting a MISSING descendant used to auto-vivify its way there,
+  // replacing the scalar parent with {} before deleting nothing.
+  it("deleting a missing descendant leaves an existing scalar parent untouched (#526)", () => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "settings.json");
+    writeFileSync(file, JSON.stringify({ important: "original", env: { A: "1" } }));
+    const r = applyAgentConfigAssignments("claude", ["important.missing = null", "nope.deeper.key = null", "env.B = null"]);
+    expect(r.ok).toBe(true);
+    expect((r as any).applied).toBe(0); // nothing changed
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual({ important: "original", env: { A: "1" } });
+    // A real delete still works and is counted.
+    const r2 = applyAgentConfigAssignments("claude", ["env.A = null"]);
+    expect((r2 as any).applied).toBe(1);
+    expect(JSON.parse(readFileSync(file, "utf-8"))).toEqual({ important: "original", env: {} });
+  });
+
+  // #525: a malformed path is an error for the whole op; the file is unchanged.
+  it("a malformed path fails the op and leaves the file unchanged (#525)", () => {
+    const dir = join(home, ".claude");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "settings.json");
+    const before = JSON.stringify({ examples: [{ title: "a" }] });
+    writeFileSync(file, before);
+    const r = applyAgentConfigAssignments("claude", ['examples[-1].title = "change"']);
+    expect(r.ok).toBe(false);
+    expect((r as any).error).toMatch(/bad path/);
+    expect(readFileSync(file, "utf-8")).toBe(before);
+    // Type mismatch against the real document is an error too, not a stringly write.
+    const r2 = applyAgentConfigAssignments("claude", ['examples.title = "x"']);
+    expect(r2.ok).toBe(false);
+    expect((r2 as any).error).toMatch(/type mismatch/);
+    expect(readFileSync(file, "utf-8")).toBe(before);
+  });
+
+  // #54: the op is meant to be exposed to an editor UI — it must not be able
+  // to touch Object.prototype.
+  it("cannot pollute Object.prototype through a path expression (#54)", () => {
+    const r = applyAgentConfigAssignments("claude", ["__proto__.polluted = 1"]);
+    expect(r.ok).toBe(false);
+    expect(({} as any).polluted).toBeUndefined();
+    const r2 = applyAgentConfigAssignments("claude", ["constructor.prototype.polluted2 = 1"]);
+    expect(r2.ok).toBe(false);
+    expect(({} as any).polluted2).toBeUndefined();
   });
 
   it("unknown agent is rejected", () => {

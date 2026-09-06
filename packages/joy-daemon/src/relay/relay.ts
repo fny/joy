@@ -88,11 +88,12 @@ function decryptDataKey(buf: Uint8Array, key: Uint8Array): unknown | null {
 
 /** Machine-blob sealing (metadata + daemonState). The app opens it with the
  *  machine key it unwraps from `dataEncryptionKey`. */
-function encryptWire(key: Uint8Array, data: unknown): Uint8Array {
+/** Exported for tests (machine metadata round-trips). */
+export function encryptWire(key: Uint8Array, data: unknown): Uint8Array {
   return encryptDataKey(data, key);
 }
 
-function decryptWire(key: Uint8Array, buf: Uint8Array): unknown | null {
+export function decryptWire(key: Uint8Array, buf: Uint8Array): unknown | null {
   return decryptDataKey(buf, key);
 }
 
@@ -304,97 +305,131 @@ export class RelayClient {
     }
   }
 
-  // Last known app-set machine displayName (null = confirmed absent) — see
-  // getOrCreateMachine for the TTL rationale.
-  #displayNameCache: { name: string | null; at: number } | null = null;
-
-  /** GET this machine's current (decrypted) metadata, so a re-upsert can carry
-   *  forward app-owned fields instead of clobbering them. Best-effort → null. */
-  private async fetchOwnMachineMetadata(): Promise<Record<string, unknown> | null> {
+  /** GET this machine's row: its current (decrypted) metadata, the CAS
+   *  version and whether it carries a data key. `missing` = 404 (never
+   *  created); null = the read FAILED (network, 5xx) — which says nothing
+   *  about the row, and must never be taken as "no displayName" (#61). */
+  private async fetchOwnMachine(): Promise<{ metadata: Record<string, unknown> | null; version: number; hasDataKey: boolean } | "missing" | null> {
     try {
       const res = await fetch(this.url(`/machines/${encodeURIComponent(this.creds.machineId)}`), { headers: this.headers() });
+      if (res.status === 404) return "missing";
       if (!res.ok) return null;
-      const body = await res.json() as { machine?: { metadata?: string } };
-      if (!body?.machine?.metadata) return null;
-      const key = this.machineKey();
-      return decryptWire(key, b64decode(body.machine.metadata)) as Record<string, unknown> | null;
+      const body = await res.json() as { machine?: { metadata?: string; metadataVersion?: number; dataEncryptionKey?: string | null } };
+      if (!body?.machine) return "missing";
+      let metadata: Record<string, unknown> | null = null;
+      if (body.machine.metadata) {
+        try { metadata = decryptWire(this.machineKey(), b64decode(body.machine.metadata)) as Record<string, unknown> | null; } catch { metadata = null; }
+      }
+      return { metadata, version: Number(body.machine.metadataVersion ?? 0), hasDataKey: !!body.machine.dataEncryptionKey };
     } catch { return null; }
   }
 
+  // Machine upserts are single-flight (#61): a boot attaches many sessions and
+  // each used to race its own read+write; serializing them means every write
+  // reads the row as the previous one left it.
+  #machineUpsert: Promise<boolean> = Promise.resolve(true);
+
   /**
-   * Upsert the machine row's sealed metadata (`POST /machines`). The app's
-   * path picker uses `machine.metadata.homeDir` to format paths as `~/foo`,
-   * and the machine header shows host/version — so the daemon owns this blob
-   * and re-pushes it whenever the command scan changes (commands.ts).
+   * Publish the machine row's sealed metadata. The app's path picker uses
+   * `machine.metadata.homeDir` to format paths as `~/foo`, and the machine
+   * header shows host/version — so the daemon owns this blob and re-pushes it
+   * whenever the command scan changes (commands.ts).
    *
-   * The POST replaces the full metadata blob; the relay bumps
-   * metadataVersion only when the blob actually changed.
+   * App-owned fields (displayName — a rename the app made on the relay,
+   * invisibly to us) are carried forward from a FRESH read and written with a
+   * version-checked PATCH (#61). The old shape cached the name for 60s and
+   * did a full-blob POST: a command-scan push inside that minute overwrote a
+   * rename with the stale name, and once the cache expired the daemon read
+   * its own overwrite back — the rename never returned. A failed GET was
+   * cached as "no name" and removed an existing one the same way. Now a
+   * version mismatch re-reads and retries; a failed read skips the write.
+   * The full POST (which also sets dataEncryptionKey) is used only to CREATE
+   * the row, or to repair one with no data key.
    */
   async getOrCreateMachine(metadata: Record<string, unknown>): Promise<boolean> {
-    // Always report the LIVE hostname (an OS rename shouldn't need a daemon
-    // restart), and never clobber an app-set displayName: this is a full-blob
-    // upsert, so carry the current displayName forward when the caller didn't
-    // supply one (the daemon's base blob never has it → it would otherwise wipe
-    // a rename on every command-scan push).
-    const blob: Record<string, unknown> = { ...metadata, host: hostname() };
-    if (blob.displayName === undefined) {
-      // Short-TTL cache: boot attaches many sessions and each push landed here,
-      // re-fetching the machine row per push just to carry one string forward.
-      // 60s is long enough to dedup a burst, short enough that an app-side
-      // rename (which happens on the server, invisibly to us) isn't clobbered
-      // by a stale value for more than a minute.
-      const now = Date.now();
-      if (!this.#displayNameCache || now - this.#displayNameCache.at > 60_000) {
-        const current = await this.fetchOwnMachineMetadata();
-        const dn = current?.displayName;
-        this.#displayNameCache = { name: typeof dn === 'string' && dn.length > 0 ? dn : null, at: now };
-      }
-      if (this.#displayNameCache.name) blob.displayName = this.#displayNameCache.name;
-    }
-    try {
-      const encryptionKey = this.creds.encryption.machineKey;
-      // Envelope [0x00][box(machineKey → account publicKey)] so the relay can
-      // hand the machine key to authorized clients.
-      const encryptedKey = libsodiumEncryptForPublicKey(encryptionKey, this.creds.encryption.publicKey);
-      const bundle = new Uint8Array(1 + encryptedKey.length);
-      bundle.set([0], 0);
-      bundle.set(encryptedKey, 1);
-      const dataEncryptionKeyB64 = b64encode(bundle);
+    const run = this.#machineUpsert.then(() => this.#upsertMachine(metadata), () => this.#upsertMachine(metadata));
+    this.#machineUpsert = run.then(() => true, () => true);
+    return run;
+  }
 
-      const r = await fetch(this.url('/machines'), {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({
-          id: this.creds.machineId,
-          metadata: b64encode(encryptWire(encryptionKey, blob)),
-          dataEncryptionKey: dataEncryptionKeyB64,
-        }),
-      });
-      if (r.status === 403) {
-        // Another account already owns this machine id: the pairing is wrong
-        // (creds copied between accounts). Nothing here can fix it — say so
-        // once, loudly, and stop retrying quietly every push.
-        const body = await r.json().catch(() => null) as { error?: string } | null;
-        if (!this.ownedElsewhereLogged) {
-          this.ownedElsewhereLogged = true;
-          log(`getOrCreateMachine: HTTP 403 ${body?.error ?? ''} — machine ${this.creds.machineId} belongs to another account; re-run \`joy auth\` to re-pair`);
+  async #upsertMachine(metadata: Record<string, unknown>): Promise<boolean> {
+    // Always report the LIVE hostname (an OS rename shouldn't need a daemon restart).
+    const base: Record<string, unknown> = { ...metadata, host: hostname() };
+    try {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const current = await this.fetchOwnMachine();
+        if (current === null) {
+          // Unknown state: writing now could only clobber. The next scan
+          // push / heartbeat retries.
+          log('getOrCreateMachine: could not read the machine row — skipping this publish (nothing overwritten)');
+          return false;
         }
-        return false;
+        const blob = { ...base };
+        if (blob.displayName === undefined && current !== "missing") {
+          const dn = current.metadata?.displayName;
+          if (typeof dn === 'string' && dn.length > 0) blob.displayName = dn;
+        }
+        const encryptionKey = this.creds.encryption.machineKey;
+        const sealed = b64encode(encryptWire(encryptionKey, blob));
+        if (current === "missing" || !current.hasDataKey) {
+          return await this.#createMachine(sealed);
+        }
+        const r = await fetch(this.url(`/machines/${encodeURIComponent(this.creds.machineId)}`), {
+          method: 'PATCH',
+          headers: this.headers(),
+          body: JSON.stringify({ metadata: sealed, expectedMetadataVersion: current.version }),
+        });
+        if (r.status === 404) return await this.#createMachine(sealed); // vanished between read and write
+        if (r.status === 403) return this.#ownedElsewhere(await r.json().catch(() => null) as { error?: string } | null);
+        if (!r.ok) { log(`getOrCreateMachine: PATCH HTTP ${r.status}`); return false; }
+        const a = await r.json().catch(() => null) as { result?: string; daemonStateVersion?: number } | null;
+        if (a?.result === 'version-mismatch') continue; // someone (the app) wrote meanwhile: re-read, carry theirs forward
+        if (typeof a?.daemonStateVersion === 'number') this.daemonStateVersion = a.daemonStateVersion;
+        return true;
       }
-      if (!r.ok) { log(`getOrCreateMachine: HTTP ${r.status}`); return false; }
-      // Seed the daemonState CAS version from the row so the first
-      // daemonState beat lands without a version-mismatch round-trip.
-      try {
-        const body = await r.json() as { machine?: { daemonStateVersion?: number } };
-        if (typeof body?.machine?.daemonStateVersion === 'number') {
-          this.daemonStateVersion = body.machine.daemonStateVersion;
-        }
-      } catch { /* version self-syncs from the first reply */ }
-      return true;
+      log('getOrCreateMachine: metadata kept changing under us — giving up this round');
+      return false;
     } catch (e) {
       log(`getOrCreateMachine failed: ${e}`);
       return false;
     }
+  }
+
+  /** Full-blob upsert (`POST /machines`) — creates the row and hands the
+   *  relay the enveloped machine key so it can serve it to authorized clients. */
+  async #createMachine(sealedMetadata: string): Promise<boolean> {
+    const encryptionKey = this.creds.encryption.machineKey;
+    // Envelope [0x00][box(machineKey → account publicKey)] so the relay can
+    // hand the machine key to authorized clients.
+    const encryptedKey = libsodiumEncryptForPublicKey(encryptionKey, this.creds.encryption.publicKey);
+    const bundle = new Uint8Array(1 + encryptedKey.length);
+    bundle.set([0], 0);
+    bundle.set(encryptedKey, 1);
+    const r = await fetch(this.url('/machines'), {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({ id: this.creds.machineId, metadata: sealedMetadata, dataEncryptionKey: b64encode(bundle) }),
+    });
+    if (r.status === 403) return this.#ownedElsewhere(await r.json().catch(() => null) as { error?: string } | null);
+    if (!r.ok) { log(`getOrCreateMachine: HTTP ${r.status}`); return false; }
+    // Seed the daemonState CAS version from the row so the first
+    // daemonState beat lands without a version-mismatch round-trip.
+    try {
+      const body = await r.json() as { machine?: { daemonStateVersion?: number } };
+      if (typeof body?.machine?.daemonStateVersion === 'number') this.daemonStateVersion = body.machine.daemonStateVersion;
+    } catch { /* version self-syncs from the first reply */ }
+    return true;
+  }
+
+  /** Another account already owns this machine id: the pairing is wrong
+   *  (creds copied between accounts). Nothing here can fix it — say so once,
+   *  loudly, and stop retrying quietly every push. */
+  #ownedElsewhere(body: { error?: string } | null): false {
+    if (!this.ownedElsewhereLogged) {
+      this.ownedElsewhereLogged = true;
+      log(`getOrCreateMachine: HTTP 403 ${body?.error ?? ''} — machine ${this.creds.machineId} belongs to another account; re-run \`joy auth\` to re-pair`);
+    }
+    return false;
   }
 
   /**
@@ -590,6 +625,26 @@ export class RelaySession {
     return run;
   }
 
+  /**
+   * Merge ONE key unless it is redundant — judged INSIDE the serialized chain,
+   * against the card as every earlier queued write leaves it (#587). The
+   * helpers below used to compare against `this.metadata` before queueing:
+   * with a publish pending, updateCompacting(info) then updateCompacting(null)
+   * saw joy__compacting still empty at call time and dropped the clear, so
+   * the banner stayed set for good; a model set to B and back to A the same
+   * way stayed B. Default redundancy: both empty, or deep-equal JSON.
+   */
+  private mergeKey(key: string, value: unknown, redundant: (cur: unknown) => boolean = (cur) =>
+    (value == null && cur == null) || (cur !== undefined && JSON.stringify(cur) === JSON.stringify(value)),
+  ): Promise<boolean> {
+    const run = this.metadataChain.then(() => {
+      if (redundant(this.metadata[key])) return false;
+      return this.doMergeMetadata({ [key]: value });
+    });
+    this.metadataChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   /** Whether the LAST card publish reached the relay (false: not v2-bound
    *  yet, lane down, or the PATCH failed). */
   lastPublishOk = false;
@@ -608,9 +663,7 @@ export class RelaySession {
    * shows the real conversation title instead of "New Chat".
    */
   async updateSummary(title: string): Promise<void> {
-    const current = this.metadata?.summary as { text?: string } | undefined;
-    if (current?.text === title) return; // unchanged
-    await this.mergeMetadata({ summary: { text: title, updatedAt: Date.now() } });
+    await this.mergeKey('summary', { text: title, updatedAt: Date.now() }, (cur) => (cur as { text?: string } | undefined)?.text === title);
   }
 
   /**
@@ -619,8 +672,7 @@ export class RelaySession {
    * switches the user makes interactively in the tmux pane (/model …).
    */
   async updateModelCode(code: string): Promise<void> {
-    if ((this.metadata?.currentModelCode as string | undefined) === code) return;
-    await this.mergeMetadata({ currentModelCode: code });
+    await this.mergeKey('currentModelCode', code, (cur) => cur === code);
   }
 
   /**
@@ -630,9 +682,10 @@ export class RelaySession {
    * defaults. Caller passes a sorted list; skip the write when unchanged.
    */
   async updateSlashCommands(commands: string[]): Promise<void> {
-    const current = this.metadata?.slashCommands as string[] | undefined;
-    if (current && current.length === commands.length && current.every((c, i) => c === commands[i])) return;
-    await this.mergeMetadata({ slashCommands: commands });
+    await this.mergeKey('slashCommands', commands, (cur) => {
+      const current = cur as string[] | undefined;
+      return !!current && current.length === commands.length && current.every((c, i) => c === commands[i]);
+    });
   }
 
   /**
@@ -641,8 +694,7 @@ export class RelaySession {
    * 'archived' (killed/cleaned up). Drives the red detached indicator.
    */
   async updateJoyState(state: JoyLifecycleState): Promise<void> {
-    if ((this.metadata?.joy__state as string | undefined) === state) return;
-    await this.mergeMetadata({ joy__state: state });
+    await this.mergeKey('joy__state', state, (cur) => cur === state);
   }
 
   /**
@@ -665,8 +717,7 @@ export class RelaySession {
   async updateRetry(info: JoyRetryInfo | null): Promise<void> {
     // Idempotent clear: skip the write when there's nothing set, so a recovered
     // session with no active retry can reconcile its banner without churn.
-    if (info == null && this.metadata?.joy__retry == null) return;
-    await this.mergeMetadata({ joy__retry: info });
+    await this.mergeKey('joy__retry', info);
   }
 
   /** Push the finishing-task N/M and the long-running-process count together in a
@@ -682,33 +733,27 @@ export class RelaySession {
    *  from the transcript's cumulative usage). The app owns the window/threshold —
    *  we only report the raw count. null clears it. */
   async updateContext(tokens: number | null): Promise<void> {
-    if (tokens == null && this.metadata?.joy__context == null) return;
-    await this.mergeMetadata({ joy__context: tokens });
+    await this.mergeKey('joy__context', tokens);
   }
 
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__compacting == null) return;
-    await this.mergeMetadata({ joy__compacting: info });
+    await this.mergeKey('joy__compacting', info);
   }
 
   async updateHandoff(info: JoyHandoffInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__handoff == null) return;
-    await this.mergeMetadata({ joy__handoff: info });
+    await this.mergeKey('joy__handoff', info);
   }
 
   async updateGoal(info: JoyGoalInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__goal == null) return;
-    await this.mergeMetadata({ joy__goal: info });
+    await this.mergeKey('joy__goal', info);
   }
 
   async updateLogin(info: JoyLoginInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__login == null) return;
-    await this.mergeMetadata({ joy__login: info });
+    await this.mergeKey('joy__login', info);
   }
 
   async updateCodexApproval(info: JoyCodexApprovalInfo | null): Promise<void> {
-    if (info == null && this.metadata?.joy__codexApproval == null) return;
-    await this.mergeMetadata({ joy__codexApproval: info });
+    await this.mergeKey('joy__codexApproval', info);
   }
 
   /** Single-flight latest-desired-value reconciler. Callers assert the desired
@@ -755,10 +800,7 @@ export class RelaySession {
     // 2026-07-11, finding 5).
     const empty = info.queue.length === 0 && !info.inFlight && !info.paused
       && (info.pendingCount ?? 0) === 0 && (info.hidden?.length ?? 0) === 0;
-    const cur = this.metadata?.joy__queue as JoyQueueInfo | null | undefined;
-    if (empty && cur == null) return;
-    if (cur && JSON.stringify(cur) === JSON.stringify(info)) return;
-    await this.mergeMetadata({ joy__queue: info });
+    await this.mergeKey('joy__queue', info, (cur) => (empty && cur == null) || (!!cur && JSON.stringify(cur) === JSON.stringify(info)));
   }
 
   /** Publish the current card (attach / restart rebind). Idempotent. */
@@ -876,11 +918,15 @@ export class RelaySession {
    *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
    *  WHICH session at a glance; body is the reply snippet (or the per-kind reason). */
   notify(kind: 'done' | 'permission' | 'question', snippet?: string): void {
-    const summary = (this.metadata?.summary as { text?: string } | undefined)?.text?.trim();
-    // Prefer the caller's snippet (the reply's first line) — the session
-    // summary alone read as project-name noise, telling the user nothing
-    // about what actually happened.
-    const body = kind === 'done' ? (snippet || summary || 'Finished')
+    // Push title/body travel UNSEALED through the relay and Expo. The reply
+    // snippet — and the AI title, which is conversation-derived too — are
+    // E2E-sealed content everywhere else; putting them in the body leaked a
+    // slice of every turn to the relay operator and to Expo (#118). Bodies
+    // are content-free by default (the title already says host/folder);
+    // JOY_PUSH_SNIPPETS=1 opts back into the richer, less private bodies.
+    const richBodies = process.env.JOY_PUSH_SNIPPETS === '1';
+    const summary = richBodies ? (this.metadata?.summary as { text?: string } | undefined)?.text?.trim() : undefined;
+    const body = kind === 'done' ? ((richBodies && snippet) || summary || 'Finished')
       : kind === 'permission' ? (summary ? `Permission needed · ${summary}` : 'Permission needed')
       : (summary ? `Clarification needed · ${summary}` : 'Clarification needed');
     void this.client.sendSessionPushEvent(this.relaySessionId, kind, this.#notifyLocation(), body);

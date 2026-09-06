@@ -1,8 +1,9 @@
-import { writeFileSync, mkdirSync } from "fs";
+import { readFileSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { tmpdir } from "os";
 import { joyStateDir } from "../paths";
 import { shellQuote } from "../domain/quote";
+import { writeFileAtomic } from "../domain/atomicWrite";
 
 // Mirrors joy-app's sources/sync/prompt/systemPrompt.ts. The joy app injects
 // this per-message via the SDK so Claude emits <joy-options>…</joy-options> blocks that
@@ -42,16 +43,33 @@ export const OPTIONS_SYSTEM_PROMPT = [
 
 // Persist the prompt and return a shell token that reads it at launch time —
 // avoids escaping a multi-line, quote-laden prompt on the command line.
-export function optionsPromptArg(baseDir = joyStateDir()): string {
-  const path = join(baseDir, "options-system-prompt.txt");
-  try {
-    mkdirSync(baseDir, { recursive: true });
-    writeFileSync(path, OPTIONS_SYSTEM_PROMPT);
-  } catch (e) {
-    process.stderr.write(`[options-prompt] failed to write: ${e}\n`);
+//
+// The write is ATOMIC and VERIFIED, and a failure is never swallowed (#473):
+// the old shape logged a failed mkdir/write and returned the `cat` token
+// anyway, and because `$(cat …)` expands an unreadable or truncated file to
+// an empty/partial string without failing the command, Claude launched with
+// no <joy-options> instructions and no AskUserQuestion ban — a silently
+// degraded session. Now: stage+rename in the state dir; if that dir refuses
+// (EACCES, ENOSPC, a file where the dir should be) fall back to a per-user
+// file under tmpdir; only a token whose file reads back as the complete
+// prompt is returned. When neither location can hold it, throw — the caller
+// (registry.create) surfaces the error instead of starting a crippled agent.
+export function optionsPromptArg(baseDir = joyStateDir(), fallbackDir = join(tmpdir(), `joy-${process.getuid?.() ?? "u"}`)): string {
+  const errors: string[] = [];
+  for (const dir of [baseDir, fallbackDir]) {
+    const path = join(dir, "options-system-prompt.txt");
+    try {
+      writeFileAtomic(path, OPTIONS_SYSTEM_PROMPT, { mode: 0o600 });
+      // Read back: the token is only usable if `cat` will see the whole prompt.
+      if (readFileSync(path, "utf8") !== OPTIONS_SYSTEM_PROMPT) throw new Error("read-back mismatch");
+      // The path is a shell word inside the substitution: an apostrophe in the
+      // state dir (/tmp/Jane's joy) used to leave the quote unterminated and
+      // Claude never launched (#472).
+      return `"$(cat ${shellQuote(path)})"`;
+    } catch (e) {
+      errors.push(`${path}: ${e instanceof Error ? e.message : String(e)}`);
+      process.stderr.write(`[options-prompt] failed to write ${path}: ${e}\n`);
+    }
   }
-  // The path is a shell word inside the substitution: an apostrophe in the
-  // state dir (/tmp/Jane's joy) used to leave the quote unterminated and
-  // Claude never launched (#472).
-  return `"$(cat ${shellQuote(path)})"`;
+  throw new Error(`cannot persist the joy system prompt (${errors.join("; ")}) — refusing to launch Claude without its instructions (#473)`);
 }

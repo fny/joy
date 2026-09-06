@@ -5,11 +5,36 @@
 // thread/resume accepts. Newest-mtime-first, capped so a huge history can't
 // stall session creation.
 
-import { readdirSync, readFileSync, statSync } from "fs";
+import { readdirSync, statSync } from "fs";
 import { join } from "path";
 import { codexHome as resolveCodexHome, codexSessionsDir as sessionsDirUnder } from "./codexHome";
+import { withFd } from "../domain/bounded";
+import fs from "fs";
 
 const SCAN_CAP = 200;
+// The session_meta line is a few hundred bytes; anything past this is not a
+// rollout head we can use.
+const FIRST_LINE_MAX = 64 * 1024;
+
+/** The rollout's first line, read through a descriptor with a hard byte
+ *  bound — never the whole file (#521). readFileSync decoded the ENTIRE
+ *  transcript just to split off line one: a rollout past Node's string /
+ *  2 GiB read limits threw, the catch skipped it, and "continue" resumed an
+ *  OLDER conversation (or none) although the newest one was right there;
+ *  smaller multi-hundred-MB histories blocked the daemon for the full read.
+ *  Returns null when no complete line fits in the bound. */
+function readFirstLine(path: string): string | null {
+  return withFd(path, "r", (fd) => {
+    const buf = Buffer.alloc(FIRST_LINE_MAX);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const chunk = buf.subarray(0, n);
+    const nl = chunk.indexOf(0x0a);
+    if (nl >= 0) return chunk.subarray(0, nl).toString("utf8");
+    // No newline in the bound: a one-line file (n < cap) is that line; a
+    // longer head is not a session_meta line.
+    return n < buf.length ? chunk.toString("utf8") : null;
+  });
+}
 
 /** The rollout store — the shared resolver (#524 #541 #546) unless a home is given. */
 export function codexSessionsDir(codexHome?: string): string {
@@ -35,7 +60,8 @@ export function findLatestCodexThreadForCwd(cwd: string, codexHome?: string): st
   files.sort((a, b) => b.mtimeMs - a.mtimeMs);
   for (const f of files.slice(0, SCAN_CAP)) {
     try {
-      const firstLine = readFileSync(f.path, "utf8").split("\n", 1)[0];
+      const firstLine = readFirstLine(f.path);
+      if (firstLine === null) continue;
       const meta = JSON.parse(firstLine) as { payload?: { cwd?: string; id?: string } };
       const p = meta.payload ?? (meta as { cwd?: string; id?: string });
       if (p.cwd === cwd && typeof p.id === "string" && p.id) return p.id;

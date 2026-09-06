@@ -105,7 +105,17 @@ export function loadReceipts(relaySessionId: string, baseDir = defaultStateDir()
 // Under vitest writes stay synchronous — tests read the file right back
 // (same precedent as ENABLE_CONTROL in tmux/driver.ts).
 const SAVE_DEBOUNCE_MS = 300;
-const IMMEDIATE_SAVES = process.env.VITEST === "true";
+// Debounce ceiling (#556): every save re-armed the 300ms timer, so a session
+// forwarding an entry every 200ms for a minute wrote NOTHING for a minute —
+// the "≤300ms can be lost" claim above held only for bursts with gaps. The
+// timer is now clamped so a dirty log is on disk within this bound of the
+// first unsaved change, however busy the stream is.
+const SAVE_MAX_DELAY_MS = 2_000;
+// Timing knobs — a test hook. Under vitest writes stay synchronous by default
+// (tests read the file right back); the debounce tests switch to timers.
+const saveTiming = { immediate: process.env.VITEST === "true", debounceMs: SAVE_DEBOUNCE_MS, maxDelayMs: SAVE_MAX_DELAY_MS };
+/** Tests only: switch between immediate and debounced persistence. */
+export function configureReceiptSaves(o: Partial<typeof saveTiming>): void { Object.assign(saveTiming, o); }
 // Retry backoff for a save that FAILED (#557). The old flush dropped the
 // pending entry before writing; a transient EIO/ENOSPC then left the log
 // dirty with nothing scheduled to write it — and because forwardedUuids
@@ -114,7 +124,7 @@ const IMMEDIATE_SAVES = process.env.VITEST === "true";
 // bounded backoff, until a write succeeds (or the process exits, where the
 // exit flush makes one last attempt).
 const RETRY_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
-interface PendingSave { log: ReceiptLog; baseDir: string; timer: ReturnType<typeof setTimeout> | null; failures: number }
+interface PendingSave { log: ReceiptLog; baseDir: string; timer: ReturnType<typeof setTimeout> | null; failures: number; dirtySince: number }
 const pendingSaves = new Map<string, PendingSave>();
 let exitFlushInstalled = false;
 
@@ -184,19 +194,25 @@ export function saveReceipts(relaySessionId: string, log: ReceiptLog, baseDir = 
   // write time, so coalesced entries are all captured. A pending entry for
   // the same session is reused (same object) unless the caller handed us a
   // different log object, which supersedes it.
+  const now = Date.now();
   const entry: PendingSave = existing && existing.log === log && existing.baseDir === baseDir
     ? existing
-    : { log, baseDir, timer: null, failures: existing?.failures ?? 0 };
+    : { log, baseDir, timer: null, failures: existing?.failures ?? 0, dirtySince: existing?.dirtySince ?? now };
   if (existing && existing !== entry && existing.timer) clearTimeout(existing.timer);
   pendingSaves.set(relaySessionId, entry);
-  if (IMMEDIATE_SAVES) {
+  if (saveTiming.immediate) {
     // Under vitest writes stay synchronous — tests read the file right back.
     // A failed immediate write still follows the retry contract above.
     attemptSave(relaySessionId, entry);
     return;
   }
   installExitFlush();
-  scheduleSave(relaySessionId, entry, SAVE_DEBOUNCE_MS);
+  // A failed write's backoff timer stands (#557): the attempt it fires
+  // serializes the live log, so this change rides along.
+  if (entry.failures > 0 && entry.timer) return;
+  // Debounce, clamped by the age of the oldest unsaved change (#556).
+  const remaining = Math.max(0, saveTiming.maxDelayMs - (now - entry.dirtySince));
+  scheduleSave(relaySessionId, entry, Math.min(saveTiming.debounceMs, remaining));
 }
 
 export function initDeliveryState(relaySessionId: string, baseDir = defaultStateDir()): DeliveryState {
@@ -235,13 +251,19 @@ export function matchPendingForUserEntry(state: DeliveryState, text: string): Pe
 // caused duplicate pushes: recovery replayed whole files relying on
 // forwardedUuids). With checkpoints, a replay covers at most the ~5s window
 // since the last checkpoint save; 2000 entries is orders of magnitude more
-// than that overlap. The in-memory forwardedUuids set keeps everything seen
-// this process (broader dedupe is harmless); the pruned log only shapes what
-// a RESTART rebuilds — which only needs the checkpoint overlap.
+// than that overlap. forwardedUuids follows the SAME bound (#560): it used to
+// keep every uuid seen in-process while only the arrays were pruned, so a
+// long-lived agent grew it without limit (20k events → 2k receipts on disk,
+// 20k uuids in memory, per session, for the daemon's lifetime). The set only
+// has to cover the replay window the log covers; a uuid pruned from the log
+// is dropped from the set unless the OTHER log still carries it.
 const RECEIPT_LOG_MAX = 2000;
 const RECEIPT_LOG_TRIM = 500;
-function pruneReceiptLog<T>(log: T[]): void {
-  if (log.length > RECEIPT_LOG_MAX) log.splice(0, RECEIPT_LOG_TRIM);
+function pruneReceiptLog<T extends { uuid: string }>(log: T[], state: DeliveryState, other: { uuid: string }[]): void {
+  if (log.length <= RECEIPT_LOG_MAX) return;
+  const removed = log.splice(0, RECEIPT_LOG_TRIM);
+  const keep = new Set(other.map((r) => r.uuid));
+  for (const r of removed) if (!keep.has(r.uuid)) state.forwardedUuids.delete(r.uuid);
 }
 
 export function recordInboundReceipt(
@@ -254,7 +276,7 @@ export function recordInboundReceipt(
   // Mark as handled so a re-tail (in-run or after restart) won't re-mirror it.
   state.forwardedUuids.add(receipt.uuid);
   state.receipts.inbound.push(receipt);
-  pruneReceiptLog(state.receipts.inbound);
+  pruneReceiptLog(state.receipts.inbound, state, state.receipts.outbound);
   saveReceipts(relaySessionId, state.receipts, baseDir);
 }
 
@@ -268,7 +290,7 @@ export function recordOutboundReceipt(
   if (state.forwardedUuids.has(receipt.uuid)) return;
   state.forwardedUuids.add(receipt.uuid);
   state.receipts.outbound.push(receipt);
-  pruneReceiptLog(state.receipts.outbound);
+  pruneReceiptLog(state.receipts.outbound, state, state.receipts.inbound);
   saveReceipts(relaySessionId, state.receipts, baseDir);
 }
 
@@ -292,12 +314,17 @@ export function recordReceived(state: DeliveryState, relaySessionId: string, tex
 
 /**
  * If `text` was recently received from the app, consume one matching entry and
- * return true (an echo to suppress). Newest-first so repeated identical sends
- * each pair with one transcript entry.
+ * return true (an echo to suppress). OLDEST unexpired match first (#558):
+ * echoes arrive in send order, and consuming the newest entry left an older
+ * identical one to expire before ITS echo came — two identical sends at
+ * minute 0 and 14 whose echoes landed at 14:10 and 15:10 had the second echo
+ * miss (the minute-0 entry was consumed late and gone) and mirrored as a
+ * duplicate. Oldest-first pairs each echo with the entry that will expire
+ * soonest, so repeated identical sends each still get exactly one match.
  */
 export function consumeReceived(state: DeliveryState, relaySessionId: string, text: string, now: number, baseDir = defaultStateDir()): boolean {
   const cutoff = now - RECEIVED_WINDOW_MS;
-  for (let i = state.receipts.received.length - 1; i >= 0; i--) {
+  for (let i = 0; i < state.receipts.received.length; i++) {
     const r = state.receipts.received[i];
     if (r.at >= cutoff && r.text === text) {
       state.receipts.received.splice(i, 1);
