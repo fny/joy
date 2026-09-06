@@ -296,6 +296,14 @@ app.
   (70090dd2); sync/encryption and components rounds in flight; E4 query
   slice and the C1 ledger in worktrees.
 
+- 2026-09-08 (later) — Wave E4 merged (cb3d1e95): a thin in-repo resource
+  layer (`sync/resource.ts`, `hooks/useResource.ts`) owns git status, file
+  contents/diffs, machine env, session lists and pickers; the reviewer's
+  go/no-go for wider adoption is GO with two conditions (passive entries
+  outside screens; the conversation reducer and drafts stay out). The four
+  app residual rounds landed (475e5976 70090dd2 5d816672). C3 residuals on
+  claude/session.ts wait for the C1 ledger merge.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
