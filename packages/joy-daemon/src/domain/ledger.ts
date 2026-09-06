@@ -75,6 +75,18 @@ export class StaleCommandError extends LedgerWriteError {
     this.name = "StaleCommandError";
   }
 }
+/** A caller-chosen command id already names another session's command.
+ *  Command ids are global (one `commands` row per id): the same id may be
+ *  re-accepted only by the session that owns it (that is the dedupe), never
+ *  claimed by a second session (review 7652e686). */
+export class CommandIdConflictError extends LedgerWriteError {
+  commandId: string; ownerSessionId: string;
+  constructor(commandId: string, ownerSessionId: string, sessionId: string) {
+    super("accept", `${commandId}: owned by session ${ownerSessionId}, not ${sessionId}`);
+    this.name = "CommandIdConflictError";
+    this.commandId = commandId; this.ownerSessionId = ownerSessionId;
+  }
+}
 
 // ── rows ─────────────────────────────────────────────────────────────────────
 
@@ -454,7 +466,9 @@ export class Ledger {
    *  the row and how it was deduped: `pending` = a non-terminal row for this
    *  seq / id already exists (same id back, no second row); `receipt` = the
    *  seq was already delivered (the retained receipt or the terminal row
-   *  says so) — the caller acks the redelivery without dispatching (#516). */
+   *  says so) — the caller acks the redelivery without dispatching (#516).
+   *  A caller-chosen id that another session already owns is refused
+   *  (CommandIdConflictError): ids are global, dedupe is per owner. */
   acceptCommand(c: NewCommand): { id: string; deduped: "none" | "pending" | "receipt"; row: CommandRow | null } {
     return this.tx(() => {
       const gen = this.currentGeneration(c.sessionId);
@@ -463,6 +477,7 @@ export class Ledger {
       const now = c.createdAt ?? this.#now();
       if (c.id) {
         const existing = this.getCommand(c.id);
+        if (existing && existing.sessionId !== c.sessionId) throw new CommandIdConflictError(c.id, existing.sessionId, c.sessionId);
         if (existing) return { id: existing.id, deduped: isTerminalState(existing.state) ? "receipt" : "pending", row: existing };
       }
       if (c.seq != null) {

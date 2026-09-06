@@ -44,10 +44,15 @@ export function itemStateOf(state: CommandState | null): QueueItemState {
 }
 
 /** The queue of a session (live or ended — an ended one refuses with
- *  SessionEndedError), by its id. */
+ *  SessionEndedError), by its id. Command ids are global in the ledger, so
+ *  every per-command method first checks that the id belongs to THIS
+ *  session: another session's command is "unknown" here — not readable,
+ *  not editable, not cancellable, not movable (review 7652e686). A row
+ *  never changes session, so the check cannot go stale. */
 export function queueFor(session: Pick<AgentSession, "id">, coordinator: SessionCoordinator = coordinatorFor()): QueueFacade {
   {
     const id = session.id;
+    const owned = (cid: string): boolean => coordinator.command(cid)?.sessionId === id;
     return {
       accept: (text, opts = {}) => {
         const a = coordinator.accept({
@@ -57,13 +62,14 @@ export function queueFor(session: Pick<AgentSession, "id">, coordinator: Session
         return { id: a.id, text, createdAt: a.createdAt, ...(a.handled ? { handled: a.handled } : {}), ...(a.reinjectionId ? { reinjectionId: a.reinjectionId } : {}) };
       },
       state: () => coordinator.snapshot(id),
-      itemState: (cid) => itemStateOf(coordinator.state(cid)),
-      cancel: (cid) => { const r = coordinator.cancel(cid); return r.kind === "cancelled" || r.kind === "cancelling"; },
-      edit: (cid, text) => coordinator.edit(cid, text),
-      reorder: (cid, to) => coordinator.reorder(cid, to),
+      itemState: (cid) => itemStateOf(owned(cid) ? coordinator.state(cid) : null),
+      cancel: (cid) => { if (!owned(cid)) return false; const r = coordinator.cancel(cid); return r.kind === "cancelled" || r.kind === "cancelling"; },
+      edit: (cid, text) => owned(cid) && coordinator.edit(cid, text),
+      reorder: (cid, to) => owned(cid) && coordinator.reorder(cid, to),
       resume: () => coordinator.resume(id),
       busy: () => { const s = coordinator.snapshot(id); return s.busy || s.pendingCount > 0; },
       waitFor: async (cid, states, opts) => {
+        if (!owned(cid)) return { state: null };
         const state = await coordinator.waitFor(cid, states, { timeoutMs: opts.timeoutMs, signal: opts.signal });
         const row = coordinator.command(cid);
         return { state, ...(row?.terminalReason ? { reason: row.terminalReason } : {}) };

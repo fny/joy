@@ -487,7 +487,12 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   its own attempt (late-echo ownership kept) and never fails the command or
   supersedes the newer attempt. `transition`/`setCheckpoint`/`acceptCommand`
   take the owner's generation (+ expected attempt) and refuse when stale
-  (review 95c4781e).
+  (review 95c4781e). Command ids are global and owned: `acceptCommand`
+  dedupes a caller-chosen id only for the session that owns it and throws
+  `CommandIdConflictError` when another session presents it (the import
+  fails that file), and the session queue facade (`domain/queueFacade.ts`
+  — every `queueFor(session)` lookup / edit / cancel / reorder / waitFor)
+  treats another session's command id as unknown (review 7652e686).
 - tsx runs untyped — `pnpm typecheck && pnpm test` before shipping daemon
   changes; e2e suite (`.claude/skills/e2e-tests`) covers the tmux
   control-mode path unit tests can't.
