@@ -237,6 +237,9 @@ export class CodexSession implements AgentSession {
   /** The codex thread id, once known — used by registry.restart to resume the
    *  SAME thread even when the persisted record is absent (finding #7). */
   get codexThreadId(): string | undefined { return this.#threadId ?? this.#resumeThreadId; }
+  /** The `-c key=value` overrides this app-server was launched with — a
+   *  restart's replacement launches with the same ones (#561). */
+  get codexConfig(): Record<string, string> | undefined { return this.#config && Object.keys(this.#config).length > 0 ? { ...this.#config } : undefined; }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
