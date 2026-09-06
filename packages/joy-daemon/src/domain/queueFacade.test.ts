@@ -107,6 +107,8 @@ test("command(id): the durable row with its terminal reason and the runtime turn
   expect(qa.cancel(queued.id)).toBe(true);
   await settle();
   expect(qa.command(queued.id)).toMatchObject({ state: "cancelled", terminalReason: "cancelled" });
+});
+
 test("a relay turn session a's row carries is refused for session b under a DIFFERENT command id (RelayTurnConflictError): b owns nothing, a's row is untouched, b's facade never sees a's id (review 11cf51b5)", async () => {
   const mine = qa.accept("mine", { id: "a-id", relayTurnId: "shared-turn" });
   expect(mine.id).toBe("a-id");
