@@ -198,6 +198,7 @@ test("#32 hooks live: a slash command keeps the turn-start confirm (UserPromptSu
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   s.onTranscriptEntry({ type: "assistant", uuid: "u-cmd", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "compacting" }] } } as any);
+  await vi.advanceTimersByTimeAsync(10); // the confirm awaits a FRESH box read (empty here)
   expect(s.queueState().inFlight).toBeNull();
   expect(s.queueItemState(item.id)).toBe("delivered");
   s.end("killed");
@@ -219,6 +220,7 @@ test("no hook seen: the pane rules stay in force — turn start confirms on an e
   await vi.advanceTimersByTimeAsync(400);
   expect(st.keys).toContain("Enter");
   s.onTranscriptEntry({ type: "assistant", uuid: "u-1", message: { role: "assistant", model: "claude-x", content: [{ type: "text", text: "on it" }] } } as any);
+  await vi.advanceTimersByTimeAsync(10); // the confirm awaits a FRESH box read (empty here)
   expect(s.queueItemState(item.id)).toBe("delivered");
   s.onTranscriptEntry({ type: "system", subtype: "turn_duration", durationMs: 10 } as any);
   expect(s.busy()).toBe(false);
@@ -407,20 +409,36 @@ test("SessionEnd wire contract: the generated forwarder ships Claude's `reason` 
       { hook_event_name: "SessionEnd", session_id: "sid", reason: "clear" },
       { hook_event_name: "PostToolUse", session_id: "sid", agent_id: "bg-id", agent_type: "Explore", permission_mode: "plan", tool_name: "Read" },
     ]) {
-      const child = spawn(process.execPath, [script], { env: { ...process.env, JOY_SESSION_ID: "test-session", JOY_DAEMON_FILE: file }, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(process.execPath, [script], { env: { ...process.env, JOY_SESSION_ID: "test-session", JOY_DAEMON_FILE: file, JOY_LAUNCH_ID: "launch-abc" }, stdio: ["pipe", "pipe", "pipe"] });
       child.stdin.end(JSON.stringify(payload));
       const [code] = await once(child, "exit");
       expect(code).toBe(0);
     }
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toEqual({ event: "SessionEnd", session_id: "sid", end_reason: "clear" }); // old script: reason dropped → "other"
-    expect(bodies[1]).toMatchObject({ event: "PostToolUse", agent_id: "bg-id", agent_type: "Explore", permission_mode: "plan" });
+    // A claude launched WITHOUT the env (predates the field) sends no launch_id at all.
+    {
+      const env: NodeJS.ProcessEnv = { ...process.env, JOY_SESSION_ID: "test-session", JOY_DAEMON_FILE: file };
+      delete env.JOY_LAUNCH_ID;
+      const child = spawn(process.execPath, [script], { env, stdio: ["pipe", "pipe", "pipe"] });
+      child.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: "sid" }));
+      const [code] = await once(child, "exit");
+      expect(code).toBe(0);
+    }
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0]).toEqual({ event: "SessionEnd", session_id: "sid", end_reason: "clear", launch_id: "launch-abc" }); // old script: reason dropped → "other"
+    expect(bodies[1]).toMatchObject({ event: "PostToolUse", agent_id: "bg-id", agent_type: "Explore", permission_mode: "plan", launch_id: "launch-abc" });
+    expect(bodies[2]).toEqual({ event: "Stop", session_id: "sid" });
     // Fed to a session exactly as received: a rotation keeps the session. The raw wire name is accepted too.
     vi.useFakeTimers();
     const { driver } = fakeTmux({ pane: READY });
-    const s = mkSession(uid("real-clear"), driver, { claudeSessionId: "sid" });
+    const s = mkSession(uid("real-clear"), driver, { claudeSessionId: "sid", hookLaunchId: "launch-abc" });
     expect(s.onHookEvent(bodies[0])).toEqual({ ok: true });
     expect(s.hookState().sessionEnd).toBeNull();
+    // The same wire body reaching a session of ANOTHER launch (same route id, same sid) is not its process's.
+    const other = mkSession(uid("other-launch"), driver, { claudeSessionId: "sid", hookLaunchId: "launch-xyz" });
+    expect(other.onHookEvent(bodies[1])).toEqual({ ok: false });
+    expect(other.hookState().live).toBe(false);
+    expect(other.onHookEvent(bodies[2])).toEqual({ ok: false }); // no launch_id at all: not ours either
+    other.end("killed");
     const t = mkSession(uid("raw-resume"), driver, { claudeSessionId: "sid" });
     t.onHookEvent({ event: "SessionEnd", session_id: "sid", reason: "resume" });
     expect(t.hookState().sessionEnd).toBeNull();
@@ -540,4 +558,145 @@ test("hook authority owns readiness: after Stop a queued prompt dispatches again
   expect(s.queueItemState(item.id)).toBe("delivered");
   expect(s.busy()).toBe(true);
   s.end("killed");
+});
+
+// ── 617dc734 review residuals: launch identity, fresh turn-start evidence, #480 persistence ──
+
+test("launch fence: a hook that does not echo THIS launch's id — the retired predecessor under the same route id and the same conversation id (a --resume replacement) — flips no latch, persists no mode, arms no end, closes no turn and confirms no dispatch", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const id = uid("launch-fence");
+  const s = mkSession(id, driver, { claudeSessionId: "sid", hookLaunchId: "L2" });
+  expect(s.hookState().launchId).toBe("L2");
+  const stale = { session_id: "sid", launch_id: "L1" }; // the predecessor: same sid (resumed conversation), older launch
+  // SessionEnd from the predecessor: the replacement neither ends nor switches to hook authority.
+  expect(s.onHookEvent({ event: "SessionEnd", end_reason: "other", permission_mode: "bypassPermissions", ...stale })).toEqual({ ok: false });
+  expect(s.hookState().live).toBe(false);
+  expect(s.hookState().sessionEnd).toBeNull();
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(HOOK_SESSION_END_GRACE_MS + 10);
+  expect(s.status).toBe("active");
+  // Our own process's events are honoured; the predecessor's Stop cannot close our turn.
+  expect(s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", launch_id: "L2", prompt: "live turn" })).toEqual({ ok: true });
+  expect(s.hookState().live).toBe(true);
+  expect(s.busy()).toBe(true);
+  s.onHookEvent({ event: "Stop", ...stale });
+  expect(s.busy()).toBe(true);
+  s.onHookEvent({ event: "Stop", session_id: "sid", launch_id: "L2" });
+  expect(s.busy()).toBe(false);
+  // A pending end of OURS is withdrawn only by our own later event, never by the predecessor's.
+  s.onHookEvent({ event: "SessionEnd", end_reason: "other", session_id: "sid", launch_id: "L2" });
+  expect(s.hookState().sessionEnd?.reason).toBe("other");
+  s.onHookEvent({ event: "PostToolUse", tool_name: "Read", ...stale });
+  expect(s.hookState().sessionEnd?.reason).toBe("other");
+  s.onHookEvent({ event: "PostToolUse", tool_name: "Read", session_id: "sid", launch_id: "L2" });
+  expect(s.hookState().sessionEnd).toBeNull();
+  // Nor can the predecessor's text-matching UserPromptSubmit confirm our dispatch.
+  const item = s.enqueue("same prompt", { mirrorToRelay: false });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "same prompt", ...stale });
+  expect(s.queueItemState(item.id)).toBe("pending");
+  // An event with NO launch id is not ours either (a claude launched by hand, or before the env existed).
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "same prompt" });
+  expect(s.queueItemState(item.id)).toBe("pending");
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", launch_id: "L2", prompt: "same prompt" });
+  expect(s.queueItemState(item.id)).toBe("delivered");
+  // A session recorded WITHOUT a launch id (launched before the field, or adopted) has nothing to fence on.
+  const legacy = mkSession(uid("launch-legacy"), driver, { claudeSessionId: "sid" });
+  expect(legacy.hookState().launchId).toBeNull();
+  expect(legacy.onHookEvent({ event: "Stop", session_id: "sid", launch_id: "whatever" })).toEqual({ ok: true });
+  expect(legacy.hookState().live).toBe(true);
+  s.end("killed"); legacy.end("killed");
+});
+
+test("#32 residual: a turn start confirms the hook-less plain prompt and the command only on a FRESH box read — the cached frame's empty box no longer credits a prompt the live pane still holds", async () => {
+  vi.useFakeTimers();
+  for (const [live, prompt] of [[false, "plain P"], [true, "/compact focus"]] as const) {
+    const { st, driver } = fakeTmux({ pane: READY });
+    const s = mkSession(uid("fresh-evidence"), driver, { claudeSessionId: "sid" });
+    const { rs } = relayStub("rs-fresh");
+    s.attachRelay(rs, true); // the turn-start path is the relay's
+    if (live) s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+    const item = s.enqueue(prompt, { mirrorToRelay: false });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(st.keys).toContain("Enter");
+    // Paste-detection absorbed the Enter: the LIVE box still holds the text while the
+    // cached sweep frame (captureCached) still reads the empty box from before the type.
+    let freshReads = 0;
+    (driver as any).captureFresh = async () => { freshReads++; return { ok: true, out: [RULE, `❯ ${prompt}`, RULE, FOOTER_IDLE].join("\n") }; };
+    s.onTranscriptEntry({ type: "assistant", uuid: "foreign", message: { role: "assistant", content: [{ type: "text", text: "a foreign task's response" }] } } as any);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(freshReads).toBe(1);
+    expect(s.queueItemState(item.id)).toBe("pending");      // old code: delivered off the stale cached frame
+    expect(s.queueState().inFlight).toBe(prompt);
+    s.end("killed");
+  }
+  // The positive case: the fresh read shows the box EMPTY → the turn is ours (hook-less plain prompt).
+  {
+    const { st, driver } = fakeTmux({ pane: READY });
+    (driver as any).captureCached = () => ({ ok: true, out: [RULE, "❯ plain Q", RULE, FOOTER_IDLE].join("\n") }); // the STALE side this time
+    const s = mkSession(uid("fresh-empty"), driver, { claudeSessionId: "sid" });
+    const { rs } = relayStub("rs-fresh-empty");
+    s.attachRelay(rs, true);
+    const item = s.enqueue("plain Q", { mirrorToRelay: false });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(st.keys).toContain("Enter");
+    s.onTranscriptEntry({ type: "assistant", uuid: "ours", message: { role: "assistant", content: [{ type: "text", text: "on it" }] } } as any);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(s.queueItemState(item.id)).toBe("delivered");
+    s.end("killed");
+  }
+});
+
+test("#480 residual: setPermissionMode advances its persistence cache only on a successful record write — the next hook carrying the mode retries the lost write", async () => {
+  const PLAN = [RULE, "❯ ", RULE, "  ⏸ plan mode on (shift+tab to cycle)"].join("\n");
+  const { driver } = fakeTmux({ pane: PLAN });
+  const id = uid("mode-write-fail");
+  const s = mkSession(id, driver, { claudeSessionId: "sid" });
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const spy = vi.spyOn(windowRecords, "saveWindowRecord").mockReturnValue(false);
+  let r: Awaited<ReturnType<typeof s.setPermissionMode>>;
+  try {
+    r = await s.setPermissionMode("plan");                  // already in plan: verified fresh, zero keys
+    expect(spy).toHaveBeenCalledTimes(1);
+  } finally { spy.mockRestore(); }
+  expect(r!).toMatchObject({ ok: true, mode: "plan" });     // claude IS in plan — the mode set is true even though the record is not
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBeUndefined();
+  s.onHookEvent({ event: "Stop", session_id: "sid", permission_mode: "plan" });
+  expect(loadWindowRecord(id)?.claudePermissionMode).toBe("plan"); // old code: the cache said "plan" already — never retried
+  s.end("killed");
+});
+
+test("#480 residual: detectPermissionMode lets the NEWER evidence win — a cached footer frame older than the last hook does not override it; a frame repainted after the hook (or of unknown age) does", () => {
+  const { driver } = fakeTmux({ pane: READY }); // footer: auto mode on
+  let at: number | undefined;
+  (driver as any).captureCached = () => ({ ok: true, out: READY, ...(at !== undefined ? { at } : {}) });
+  const s = mkSession(uid("mode-freshness"), driver, { claudeSessionId: "sid" });
+  at = Date.now() - 60_000;                                  // the sweep's frame predates the whole turn
+  s.onHookEvent({ event: "PostToolUse", session_id: "sid", tool_name: "Read", permission_mode: "plan" });
+  expect(s.detectPermissionMode()).toBe("plan");             // old code: "auto" off the stale frame
+  at = Date.now() + 1;                                       // a repaint after the hook (a terminal Shift+Tab fires none)
+  expect(s.detectPermissionMode()).toBe("auto");
+  at = undefined;                                            // unknown age: today's footer-wins rule
+  expect(s.detectPermissionMode()).toBe("auto");
+  s.end("killed");
+});
+
+test("promptReadiness is the one decision the gates consume: it names the holding gate off the runtime turn, not the transcript's tail", () => {
+  const { driver } = fakeTmux({ pane: GENERATING });
+  const s = mkSession(uid("readiness"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-readiness");
+  s.attachRelay(rs, true);
+  expect(s.promptReadiness()).toEqual({ ready: true, reason: "clear to send" });
+  s.onTranscriptEntry({ type: "assistant", uuid: "open", message: { role: "assistant", content: [{ type: "text", text: "working" }] } } as any);
+  expect(s.promptReadiness()).toEqual({ ready: false, reason: "turn running (transcript)" });
+  expect(s.turnOpen()).toBe(true);
+  s.onHookEvent({ event: "Stop", session_id: "sid" });       // hook authority closes it while the tail is still open
+  expect(s.turnOpen()).toBe(false);
+  expect(s.promptReadiness()).toEqual({ ready: true, reason: "clear to send" });
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "next" });
+  s.onTranscriptEntry({ type: "assistant", uuid: "open-2", message: { role: "assistant", content: [{ type: "text", text: "again" }] } } as any);
+  expect(s.promptReadiness()).toEqual({ ready: false, reason: "turn running (hook)" });
+  s.end("killed");
+  expect(s.promptReadiness()).toEqual({ ready: false, reason: "session ended" });
 });
