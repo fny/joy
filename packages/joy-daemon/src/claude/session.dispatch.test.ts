@@ -272,6 +272,36 @@ test("#474 a replacement with a locked title does not publish the transcript's o
   s.end("killed");
 });
 
+test("#474 the user's /title survives a restart: the replacement restores it with the lock and publishes IT, not the old ai-title", () => {
+  const id = uid("title-keep");
+  const dir = join(home, "transcripts"); mkdirSync(dir, { recursive: true });
+  const tp = join(dir, `${id}.jsonl`);
+  writeFileSync(tp, JSON.stringify({ type: "ai-title", aiTitle: "Old project", timestamp: new Date().toISOString() }) + "\n");
+  saveWindowRecord(id, { launchCwd: join(home, "cwd") } as any);
+  const { driver } = fakeTmux({ pane: READY });
+  const a = mkSession(id, driver, { transcriptPath: tp });
+  queueFor(a).accept("/title Release review", { source: "rpc" });
+  expect(a.toJSON().summary).toBe("Release review");
+  expect(loadWindowRecord(id)).toMatchObject({ titleLockedByUser: true, userTitle: "Release review" });
+  a.end("restart");
+
+  const b = mkSession(id, fakeTmux({ pane: READY }).driver, { transcriptPath: tp });
+  expect(b.toJSON().summary).toBe("Release review");   // old code: undefined — the title was lost while the lock stayed
+  const summaries: string[] = [];
+  const { rs } = relayStub("rs-" + id);
+  rs.updateSummary = async (t: string) => { summaries.push(t); };
+  b.attachRelay(rs, true);
+  expect(summaries).toEqual(["Release review"]);
+  // A replayed ai-title still cannot stomp it.
+  b.onTranscriptEntry({ type: "ai-title", aiTitle: "Old project" } as any);
+  expect(b.toJSON().summary).toBe("Release review");
+  // A bare /title unlocks AND forgets the user title.
+  queueFor(b).accept("/title", { source: "rpc" });
+  expect(loadWindowRecord(id)).toMatchObject({ titleLockedByUser: false });
+  expect(loadWindowRecord(id)?.userTitle).toBeUndefined();
+  b.end("killed");
+});
+
 // ── #483 ─────────────────────────────────────────────────────────────────────
 
 test("#483 a UserPromptSubmit hook that confirms before the Enter write resolves still yields exactly one mirrored bubble", async () => {
