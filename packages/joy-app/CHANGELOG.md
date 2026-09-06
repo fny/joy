@@ -4,6 +4,7 @@
 - **Starting sessions**: a session whose creation the relay never confirmed is remembered until it is confirmed or refused, across app restarts and however long later; retrying offers to re-send the same request so at most one session starts. The new-session machine picker re-probes when the machine list changes during discovery instead of leaving nothing selected.
 - **Terminal**: a send whose reply was lost is treated as possibly landed, so a retry clears the input line first instead of typing the text twice.
 - **File viewer**: the file screen shows what is in the shared file cache, so a save made in the file panel appears there at once, a file the daemon reports as unchanged loses its stale diff, and a refresh that fails keeps the last loaded version on screen with a notice instead of an error. Inline chat images read through the same cache as the file viewer.
+- **Tool cards**: a command previews the same way everywhere — the card header, the group row, the Task child row and the detail header — whether it is running or done: a compound Codex command stays whole, a Gemini shell condition keeps its brackets, a heredoc shows its opening line, and a very long command is cut with an ellipsis instead of overflowing. Opening a tool card from a group row or a notification finds it after a restart too, including cards nested inside a Task.
 
 # Sep 8 (2) — Review follow-ups
 

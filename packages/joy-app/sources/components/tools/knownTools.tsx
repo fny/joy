@@ -1,7 +1,7 @@
 import { Metadata, TodoItemsSchema } from '@/sync/storageTypes';
 import { ToolCall, Message } from '@/sync/typesMessage';
 import { resolvePath } from '@/utils/pathUtils';
-import { stringifyToolCommand } from '@/utils/toolCommand';
+import { commandPreviewOf, getToolModel } from '@/sync/toolModel';
 import * as z from 'zod';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Octicons from '@expo/vector-icons/Octicons';
@@ -78,24 +78,21 @@ export const knownTools = {
             stdout: z.string(),
         }).partial().passthrough(),
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input?.command === 'string') {
-                const cmd = opts.tool.input?.command;
+            // The canonical one-line preview — the same text the card header
+            // shows — for the Task child row, not a 20-character cut of it.
+            const cmd = commandPreviewOf(getToolModel(opts.tool));
+            if (cmd !== null) {
                 // Extract just the command name for common commands
                 const firstWord = cmd.split(' ')[0];
                 if (['cd', 'ls', 'pwd', 'mkdir', 'rm', 'cp', 'mv', 'npm', 'yarn', 'git'].includes(firstWord)) {
                     return t('tools.desc.terminalCmd', { cmd: firstWord });
                 }
-                // For other commands, show truncated version
-                const truncated = cmd.length > 20 ? cmd.substring(0, 20) + '...' : cmd;
-                return t('tools.desc.terminalCmd', { cmd: truncated });
+                return t('tools.desc.terminalCmd', { cmd });
             }
             return t('tools.names.terminal');
         },
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            if (typeof opts.tool.input?.command === 'string') {
-                return opts.tool.input?.command;
-            }
-            return null;
+            return commandPreviewOf(getToolModel(opts.tool));
         }
     },
     'Glob': {
@@ -463,26 +460,9 @@ export const knownTools = {
             }).passthrough()).optional().describe('Parsed command information')
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            // For single read commands, show the actual command
-            if (opts.tool.input?.parsed_cmd && 
-                Array.isArray(opts.tool.input?.parsed_cmd) && 
-                opts.tool.input?.parsed_cmd.length === 1 &&
-                opts.tool.input?.parsed_cmd[0].type === 'read') {
-                const parsedCmd = opts.tool.input?.parsed_cmd[0];
-                if (parsedCmd.cmd) {
-                    // Show the command but truncate if too long
-                    const cmd = parsedCmd.cmd;
-                    return cmd.length > 50 ? cmd.substring(0, 50) + '...' : cmd;
-                }
-            }
-            // Show the actual command being executed for other cases
-            if (opts.tool.input?.parsed_cmd && Array.isArray(opts.tool.input?.parsed_cmd) && opts.tool.input?.parsed_cmd.length > 0) {
-                const parsedCmd = opts.tool.input?.parsed_cmd[0];
-                if (parsedCmd.cmd) {
-                    return parsedCmd.cmd;
-                }
-            }
-            return stringifyToolCommand(opts.tool.input?.command);
+            // The canonical bounded preview: a compound command keeps its
+            // whole text, a single parsed read shows that command.
+            return commandPreviewOf(getToolModel(opts.tool));
         },
         extractDescription: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
             // Provide a description based on the parsed command type
@@ -646,18 +626,11 @@ export const knownTools = {
     },
     'execute': {
         title: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            // Gemini sends nice title in toolCall.title
-            if (opts.tool.input?.toolCall?.title) {
-                // Title is like "rm file.txt [cwd /path] (description)"
-                // Extract just the command part before [
-                const fullTitle = opts.tool.input?.toolCall.title;
-                const bracketIdx = fullTitle.indexOf(' [');
-                if (bracketIdx > 0) {
-                    return fullTitle.substring(0, bracketIdx);
-                }
-                return fullTitle;
-            }
-            return t('tools.names.terminal');
+            // Gemini sends the command inside toolCall.title, shaped
+            // "rm file.txt [current working directory /path] (description)".
+            // The canonical model strips only that recognized trailing
+            // metadata, so `if [ -f x ]; then …` keeps its brackets (#295).
+            return commandPreviewOf(getToolModel(opts.tool)) ?? t('tools.names.terminal');
         },
         icon: ICON_TERMINAL,
         isMutable: true,
@@ -760,7 +733,22 @@ export const knownTools = {
             cwd: z.string().optional().describe('Current working directory')
         }).partial().passthrough(),
         extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
-            return stringifyToolCommand(opts.tool.input?.command);
+            return commandPreviewOf(getToolModel(opts.tool));
+        }
+    },
+    'run_shell_command': {
+        title: t('tools.names.terminal'),
+        icon: ICON_TERMINAL,
+        minimal: true,
+        hideDefaultError: true,
+        isMutable: true,
+        input: z.object({
+            command: z.string().describe('The command to execute'),
+            description: z.string().optional().describe('Why the command runs'),
+            directory: z.string().optional().describe('Working directory'),
+        }).partial().passthrough(),
+        extractSubtitle: (opts: { metadata: Metadata | null, tool: ToolCall }) => {
+            return commandPreviewOf(getToolModel(opts.tool));
         }
     },
     'GeminiPatch': {

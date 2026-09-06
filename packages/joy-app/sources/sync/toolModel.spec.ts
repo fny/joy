@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { normalizeRawMessage, RawRecordSchema } from './typesRaw';
 import {
     buildToolModel,
+    commandPreviewOf,
+    COMMAND_PREVIEW_MAX_LENGTH,
     getToolModel,
+    toolCommandPreview,
     parseGeminiExecuteTitle,
     splitUnifiedDiff,
     toolResultBlocks,
@@ -215,6 +218,63 @@ describe('toolModel — arguments and malformed items', () => {
         expect(multi.fileChanges?.[0].edits?.[1].replaceAll).toBe(true);
         const write = getToolModel(tool({ name: 'Write', input: { file_path: '/n.ts', content: 'hi' } }));
         expect(write.fileChanges?.[0]).toMatchObject({ kind: 'add', newText: 'hi' });
+    });
+});
+
+describe('toolModel — bounded one-line command preview (#413 #392 #394 #388)', () => {
+    const preview = (name: string, input: unknown, state: ToolCallLike['state'] = 'completed') =>
+        commandPreviewOf(getToolModel(tool({ name, input, state, completedAt: state === 'running' ? null : 2 })));
+
+    it('Codex shell arrays: the wrapped script, or the quoted argv line', () => {
+        expect(preview('CodexBash', { command: ['bash', '-lc', 'ls -la'] })).toBe('ls -la');
+        expect(preview('CodexBash', { command: ['/bin/zsh', '-c', 'git status --short'], parsed_cmd: [{ type: 'bash', cmd: 'git status --short' }] })).toBe('git status --short');
+        expect(preview('CodexBash', { command: ['printf', '<%s>', 'hello world'] })).toBe("printf '<%s>' 'hello world'");
+    });
+
+    it('Gemini run_shell_command: the command with its directory and description kept on the model', () => {
+        const model = getToolModel(tool({ name: 'run_shell_command', input: { command: 'npm test', description: 'Run the tests', directory: '/repo' } }));
+        expect(model.family).toBe('terminal');
+        expect(commandPreviewOf(model)).toBe('npm test');
+        expect(model.command?.cwd).toBe('/repo');
+        expect(model.command?.description).toBe('Run the tests');
+    });
+
+    it('Gemini execute: the shell condition survives, only the trailing metadata goes', () => {
+        expect(preview('execute', fixtures.geminiExecuteInput)).toBe('if [ -f package.json ]; then cat package.json; fi');
+    });
+
+    it('compound commands keep every part on one line', () => {
+        expect(preview('Bash', { command: 'a && b | c' })).toBe('a && b | c');
+        expect(preview('CodexBash', fixtures.codexCompoundBashInput)).toBe('cat a && cat b');
+        expect(preview('Bash', { command: 'a && \\\n    b | c' })).toBe('a && b | c');
+        expect(preview('Bash', { command: 'cd /repo\n  pnpm   test' })).toBe('cd /repo pnpm test');
+    });
+
+    it('a heredoc previews as its opening line, never its body', () => {
+        expect(preview('Bash', { command: "cat <<'EOF' > notes.txt\nline one\nline two\nEOF" })).toBe("cat <<'EOF' > notes.txt …");
+        expect(preview('Bash', { command: 'python3 - <<EOF\nprint(1)\nEOF' })).toBe('python3 - <<EOF …');
+    });
+
+    it('is bounded: a pathological command is cut with an ellipsis', () => {
+        const long = `echo ${'x'.repeat(1000)}`;
+        const cut = preview('Bash', { command: long })!;
+        expect(cut.length).toBe(COMMAND_PREVIEW_MAX_LENGTH);
+        expect(cut.endsWith('…')).toBe(true);
+        expect(toolCommandPreview('abcdef', 4)).toBe('abc…');
+        expect(toolCommandPreview('   \n  ')).toBe('');
+    });
+
+    it('a running and a settled call preview identically', () => {
+        const input = { command: 'cat a && cat b', parsed_cmd: [{ type: 'read', name: 'a', cmd: 'cat a' }, { type: 'read', name: 'b', cmd: 'cat b' }] };
+        expect(preview('CodexBash', input, 'running')).toBe('cat a && cat b');
+        expect(preview('CodexBash', input, 'completed')).toBe('cat a && cat b');
+        expect(preview('CodexBash', input, 'error')).toBe('cat a && cat b');
+    });
+
+    it('is null for a non-terminal call or a terminal call without a command', () => {
+        expect(preview('Read', { file_path: '/a' })).toBeNull();
+        expect(preview('Bash', {})).toBeNull();
+        expect(preview('Bash', null)).toBeNull();
     });
 });
 
