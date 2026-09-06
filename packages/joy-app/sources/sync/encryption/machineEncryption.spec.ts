@@ -54,4 +54,22 @@ describe('MachineEncryption — failed opens stay retryable, retired instances s
         expect(await replacement.decryptDaemonState(1, CIPHERTEXT)).toEqual({ host: 'new' });
         expect(cache.getCachedDaemonState('mach', 1)).toEqual({ host: 'new' });
     });
+
+    it('decryptRaw preserves successfully opened falsy values (#354)', async () => {
+        for (const value of [false, 0, '']) {
+            const me = new MachineEncryption('mach', flaky(value, 0), new EncryptionCache());
+            expect(await me.decryptRaw(CIPHERTEXT)).toBe(value);
+        }
+        // …while a failed open is still null.
+        const failing = new MachineEncryption('mach', flaky('never', 99), new EncryptionCache());
+        expect(await failing.decryptRaw(CIPHERTEXT)).toBeNull();
+    });
+
+    it('decryptDaemonState keeps a falsy opened state and caches it (#354)', async () => {
+        const enc = flaky(false, 0);
+        const cache = new EncryptionCache();
+        const me = new MachineEncryption('mach', enc, cache);
+        expect(await me.decryptDaemonState(3, CIPHERTEXT)).toBe(false);
+        expect(cache.getCachedDaemonState('mach', 3)).toBe(false);
+    });
 });

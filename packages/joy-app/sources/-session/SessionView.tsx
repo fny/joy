@@ -369,10 +369,13 @@ export const SessionView = React.memo((props: { id: string }) => {
         </>
     );
 
-    if (!canShowSidebar) {
-        return mainContent;
-    }
-
+    // ONE tree shape at every width. Returning `mainContent` bare below the
+    // sidebar threshold and nested in two Views above it made React unmount
+    // and remount SessionViewLoaded whenever a web window crossed 1100px —
+    // taking the composer's selected attachments (useImagePicker state) and
+    // their unreleased blob URLs with it (#125). The row + column wrappers
+    // are always there; only the sidebar itself is conditional.
+    //
     // Desktop layout: chat + animated sidebar at the same level (full height).
     // When a sidebar file is selected, InlineFileDiff overlays the main content
     // (chat stays mounted underneath so state is preserved).
@@ -430,18 +433,20 @@ export const SessionView = React.memo((props: { id: string }) => {
                     </View>
                 )}
             </View>
-            <Animated.View style={[{ minWidth: 0, alignSelf: 'stretch' }, animatedSidebarStyle]}>
-                <View style={{ width: sidebarWidth, flex: 1 }}>
-                    <FilesSidebar
-                        sessionId={sessionId}
-                        selectedPath={sidebarMode === 'changes' ? scrollToFile : fileViewPath}
-                        onFilePress={handleSidebarFilePress}
-                        mode={sidebarMode}
-                        onModeChange={setSidebarMode}
-                        onAllFilesFilePress={handleAllFilesFilePress}
-                    />
-                </View>
-            </Animated.View>
+            {canShowSidebar && (
+                <Animated.View style={[{ minWidth: 0, alignSelf: 'stretch' }, animatedSidebarStyle]}>
+                    <View style={{ width: sidebarWidth, flex: 1 }}>
+                        <FilesSidebar
+                            sessionId={sessionId}
+                            selectedPath={sidebarMode === 'changes' ? scrollToFile : fileViewPath}
+                            onFilePress={handleSidebarFilePress}
+                            mode={sidebarMode}
+                            onModeChange={setSidebarMode}
+                            onAllFilesFilePress={handleAllFilesFilePress}
+                        />
+                    </View>
+                </Animated.View>
+            )}
         </View>
     );
 });
@@ -848,7 +853,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         })();
     }, [sessionId, isJoyDaemon, machineId, joySessionId]);
 
+    // Only claude (via /model in the pane) and opencode (daemon RPC) can switch
+    // models; codex/pi/agy show a single display-only row.
+    const canSwitchModel = !isJoyDaemon || flavor === 'claude' || flavor === 'opencode';
     const updateModelMode = React.useCallback((mode: ModelMode) => {
+        // Display-only catalogs (codex/pi/agy) used to fall into the /model
+        // branch below: on codex that opened its interactive model picker in
+        // the pane (the daemon reported joy__dialog and the queue stalled),
+        // on pi/agy the keys errored silently — and the never-applied model
+        // was persisted as a local override either way (#13).
+        if (!canSwitchModel) return;
         if (isJoyDaemon && flavor === 'opencode') {
             // No pane: the daemon switches the opencode session server-side.
             if (machineId && joySessionId) {
@@ -864,7 +878,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             sendJoyKeys(`/model ${mode.key}<Enter>`);
         }
         storage.getState().updateSessionModelMode(sessionId, mode.key);
-    }, [sessionId, isJoyDaemon, flavor, machineId, joySessionId, sendJoyKeys]);
+    }, [sessionId, isJoyDaemon, flavor, machineId, joySessionId, sendJoyKeys, canSwitchModel]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
         const flavor = storage.getState().sessions[sessionId]?.metadata?.flavor ?? 'claude';
@@ -1156,7 +1170,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             availableModes={availableModes}
             modelMode={modelMode}
             availableModels={availableModels}
-            onModelModeChange={updateModelMode}
+            onModelModeChange={canSwitchModel ? updateModelMode : undefined}
             effortLevel={effortLevel}
             availableEffortLevels={availableEffortLevels}
             onEffortLevelChange={updateEffortLevel}

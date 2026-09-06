@@ -70,4 +70,24 @@ describe('aes.web', () => {
         const decoded = Uint8Array.from(atob(encrypted), (c) => c.charCodeAt(0));
         expect(decoded.length).toBe(12 + 1 + 16);
     });
+
+    it('#303: the bytes API round-trips invalid UTF-8 and a BOM exactly', async () => {
+        const key = randomKeyB64();
+        for (const bytes of [[255, 128, 0, 65], [0xef, 0xbb, 0xbf, 0x41]]) {
+            const sealed = await encryptAESGCM(new Uint8Array(bytes), key);
+            expect(Array.from((await decryptAESGCM(sealed, key))!)).toEqual(bytes);
+        }
+    });
+
+    it('#304: an empty plaintext decrypts to an empty Uint8Array, not null', async () => {
+        const key = randomKeyB64();
+        const opened = await decryptAESGCM(await encryptAESGCM(new Uint8Array(0), key), key);
+        expect(opened).toBeInstanceOf(Uint8Array);
+        expect(opened!.length).toBe(0);
+    });
+
+    it('#302: plaintext whitespace is preserved', async () => {
+        const key = randomKeyB64();
+        expect(await decryptAESGCMString(await encryptAESGCMString('  x\n', key), key)).toBe('  x\n');
+    });
 });

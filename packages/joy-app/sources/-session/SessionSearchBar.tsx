@@ -5,6 +5,7 @@ import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { useSessionMessages } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { reconcileSearchCursor } from './searchCursor';
 
 export interface SessionSearchBarProps {
     sessionId: string;
@@ -30,6 +31,11 @@ export const SessionSearchBar = React.memo((props: SessionSearchBarProps) => {
     const { theme } = useUnistyles();
     const { messages } = useSessionMessages(props.sessionId);
     const [query, setQuery] = React.useState('');
+    // The selection is a MESSAGE ID, mapped to an index against the current
+    // match list: matches change while the bar is open (a failed optimistic
+    // send vanishes, new messages arrive), and a bare index then pointed past
+    // the end ("3/2") or at a different message than the one scrolled to (#122).
+    const [selectedId, setSelectedId] = React.useState<string | null>(null);
     const [current, setCurrent] = React.useState(0);
     const inputRef = React.useRef<TextInput>(null);
 
@@ -57,13 +63,24 @@ export const SessionSearchBar = React.memo((props: SessionSearchBarProps) => {
     // Reset the cursor + jump to the first hit whenever the query changes.
     React.useEffect(() => {
         setCurrent(0);
+        setSelectedId(matches[0]?.messageId ?? null);
         if (matches.length > 0) props.onScrollToMessage(matches[0].messageId);
     }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Reconcile the selection whenever the match list changes: follow the
+    // selected message to its new index, or clamp and scroll when it is gone.
+    React.useEffect(() => {
+        const next = reconcileSearchCursor(matches, selectedId, current);
+        if (next.index !== current) setCurrent(next.index);
+        if (next.messageId !== selectedId) setSelectedId(next.messageId);
+        if (next.scroll && next.messageId) props.onScrollToMessage(next.messageId);
+    }, [matches]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const go = React.useCallback((dir: 1 | -1) => {
         if (matches.length === 0) return;
         const next = (current + dir + matches.length) % matches.length;
         setCurrent(next);
+        setSelectedId(matches[next].messageId);
         props.onScrollToMessage(matches[next].messageId);
     }, [matches, current, props]);
 

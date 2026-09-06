@@ -24,6 +24,8 @@ import { useRootGutter } from '@/hooks/useRootGutter';
 import { sync } from '@/sync/sync';
 import { machinePane, machineResize, machineSendKeys } from '@/sync/v2/machine';
 import { paneSizeFor, paneSizeChanged, type PaneSize } from '@/utils/paneSize';
+import { planTextSubmit, resizePending, restoreFailedInput } from './paneInputRecovery';
+import { t } from '@/text';
 import { describePaneError } from '@/utils/paneError';
 import { sharedInFlightGuard } from '@/utils/inFlightGuard';
 
@@ -111,6 +113,9 @@ export default React.memo(function JoyPaneScreen() {
             } else {
                 setPane(result.text ?? '');
                 setPaneError(null);
+                // The daemon is reachable and the context resolved: push any
+                // size it has not acknowledged yet (#156).
+                pushPaneSizeRef.current?.();
             }
         } catch (e) {
             if (mountedRef.current) setPaneError(e instanceof Error ? e.message : String(e));
@@ -121,23 +126,49 @@ export default React.memo(function JoyPaneScreen() {
     // pane — "last connector drives the width". Only fires when the column
     // count actually changes (each resize reflows claude's TUI), and is
     // re-asserted on focus so re-opening on a different device re-claims.
-    const lastSizeRef = React.useRef<PaneSize | null>(null);
+    //
+    // Two sizes, kept apart (#156): what we MEASURED and what the daemon has
+    // ACKNOWLEDGED. Recording the measurement as "sent" before the context
+    // lookup and before the request succeeded meant a resize attempted before
+    // the machine key was hydrated, or during a connection blip, was never
+    // retried — the daemon kept its old dimensions and the terminal stayed
+    // wrapped/clipped until the viewport happened to change. Now an
+    // unacknowledged measurement is re-pushed on every successful pane read
+    // and on focus.
+    const measuredSizeRef = React.useRef<PaneSize | null>(null);
+    const ackedSizeRef = React.useRef<PaneSize | null>(null);
+    const resizeInFlightRef = React.useRef(false);
+    const pushPaneSize = React.useCallback(() => {
+        const size = measuredSizeRef.current;
+        if (!size || resizeInFlightRef.current || !resizePending(size, ackedSizeRef.current)) return;
+        const rctx = sync.machineCtxFor(machineId, sessionId);
+        if (!rctx) return; // no machine context yet — retried from the next successful pane read
+        resizeInFlightRef.current = true;
+        void machineResize(rctx, size.cols, size.rows)
+            .then((r) => {
+                if (r.status < 200 || r.status >= 300) return; // left pending; the next poll retries
+                ackedSizeRef.current = size;
+                setTimeout(() => void refresh(), 200);
+            })
+            .catch(() => { /* left pending; the next poll retries */ })
+            .finally(() => { resizeInFlightRef.current = false; });
+    }, [machineId, sessionId, refresh]);
+    const pushPaneSizeRef = React.useRef<(() => void) | null>(null);
+    pushPaneSizeRef.current = pushPaneSize;
     const drivePaneSize = React.useCallback((widthPx: number, heightPx: number) => {
         // Sizing rules (and the breakage behind them) live in @/utils/paneSize.
         const size = paneSizeFor(widthPx, heightPx);
-        if (!size || !paneSizeChanged(size, lastSizeRef.current)) return;
-        lastSizeRef.current = size;
-        const { cols, rows } = size;
-        const rctx = sync.machineCtxFor(machineId, sessionId);
-        if (!rctx) return; // no machine context — the pane read surfaces the error
-        void machineResize(rctx, cols, rows)
-            .then(() => setTimeout(() => void refresh(), 200))
-            .catch(() => { /* best-effort */ });
-    }, [machineId, sessionId, refresh]);
+        if (!size || !paneSizeChanged(size, measuredSizeRef.current)) return;
+        measuredSizeRef.current = size;
+        pushPaneSize();
+    }, [pushPaneSize]);
 
     // Re-claim the size on focus (it may have drifted to another viewer or a
     // real terminal since we last looked).
-    useFocusEffect(React.useCallback(() => { lastSizeRef.current = null; }, []));
+    useFocusEffect(React.useCallback(() => {
+        ackedSizeRef.current = null;
+        pushPaneSize();
+    }, [pushPaneSize]));
     // Poll only while focused AND foregrounded so a locked phone doesn't keep
     // mirroring the pane every 1.5s (battery — see useActiveInterval).
     useActiveInterval(() => void refresh(), POLL_MS);
@@ -151,20 +182,20 @@ export default React.memo(function JoyPaneScreen() {
         if (!script) return false;
         try {
             const kctx = sync.machineCtxFor(machineId, sessionId);
-            if (!kctx) { Modal.alert('Error', `Machine encryption not found for ${machineId}`); return false; }
+            if (!kctx) { Modal.alert(t('common.error'), `Machine encryption not found for ${machineId}`); return false; }
             const result = await Promise.race([
                 machineSendKeys(kctx, script, literal).then(r => (r.data ?? { error: 'no response' }) as { ok?: boolean; error?: string }),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('joy-tmux did not respond')), 10000)),
             ]);
             if (result.error) {
-                Modal.alert('Error', result.error);
+                Modal.alert(t('common.error'), result.error);
                 return false;
             }
             // Tight feedback loop: re-poll right after the keys land.
             setTimeout(() => void refresh(), 250);
             return true;
         } catch (e) {
-            Modal.alert('Error', e instanceof Error ? e.message : String(e));
+            Modal.alert(t('common.error'), e instanceof Error ? e.message : String(e));
             return false;
         }
     }, [machineId, sessionId, refresh]);
@@ -179,9 +210,27 @@ export default React.memo(function JoyPaneScreen() {
         return r ?? false;
     }, []);
 
+    // Text that was typed into the pane's input box but whose Enter FAILED:
+    // it is sitting there unsubmitted, so a retry of the same text sends only
+    // the Enter instead of typing it a second time (#155).
+    const typedPendingRef = React.useRef<string | null>(null);
+
     /** One script (quick key, raw tokens) as a complete operation. */
     const sendScript = React.useCallback((script: string, literal = false): Promise<boolean> =>
-        runExclusive(() => sendKeysRaw(script, literal)), [runExclusive, sendKeysRaw]);
+        runExclusive(async () => {
+            const ok = await sendKeysRaw(script, literal);
+            // Any other keys reaching the pane (C-c, Esc, an Enter from the
+            // key bar) change what its input box holds — stop assuming.
+            if (ok) typedPendingRef.current = null;
+            return ok;
+        }), [runExclusive, sendKeysRaw]);
+
+    // A definite failure puts the submitted text back — into an empty box
+    // only, never over something typed since (#155). The alert from
+    // sendKeysRaw says what went wrong; the text stays retryable.
+    const restoreInput = React.useCallback((submitted: string) => {
+        if (mountedRef.current) setInput((current) => restoreFailedInput(current, submitted));
+    }, []);
 
     const handleSend = React.useCallback(() => {
         if (!input.trim()) return;
@@ -192,18 +241,31 @@ export default React.memo(function JoyPaneScreen() {
         const script = input;
         if (rawMode) {
             // raw keys mode: parse <Enter>/<C-c>/… tokens and send as-is.
-            void runExclusive(async () => { setInput(''); return sendKeysRaw(script, false); });
+            void runExclusive(async () => {
+                setInput('');
+                const ok = await sendKeysRaw(script, false);
+                if (ok) typedPendingRef.current = null;
+                else restoreInput(script);
+                return ok;
+            });
         } else {
             // text mode (default): type the message verbatim, then submit with a
             // real Enter key (in literal mode "<Enter>" would type as characters).
-            // Both steps run under ONE hold of the guard.
+            // Both steps run under ONE hold of the guard. Text delivery and
+            // Enter delivery are tracked separately (#155).
             void runExclusive(async () => {
                 setInput('');
-                if (!(await sendKeysRaw(script, true))) return false;
-                return sendKeysRaw('<Enter>', false);
+                const { typeText } = planTextSubmit(script, typedPendingRef.current);
+                if (typeText) {
+                    if (!(await sendKeysRaw(script, true))) { restoreInput(script); return false; }
+                    typedPendingRef.current = script;
+                }
+                if (!(await sendKeysRaw('<Enter>', false))) { restoreInput(script); return false; }
+                typedPendingRef.current = null;
+                return true;
             });
         }
-    }, [input, rawMode, runExclusive, sendKeysRaw]);
+    }, [input, rawMode, runExclusive, sendKeysRaw, restoreInput]);
 
     // The header is hidden (full-height terminal), so on iOS the keyboard would
     // overlay the quick-keys + input row. Lift the whole column above it with the

@@ -2,17 +2,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-
-interface ChangelogEntry {
-    title: string;
-    summary: string;
-    markdown: string;
-}
-
-interface ChangelogData {
-    entries: ChangelogEntry[];
-    latestTitle: string;
-}
+import { parseChangelogContent, type ChangelogData } from './changelogParse';
 
 function parseChangelog(): ChangelogData {
     const changelogPath = path.join(__dirname, '../../CHANGELOG.md');
@@ -22,45 +12,8 @@ function parseChangelog(): ChangelogData {
         return { entries: [], latestTitle: '' };
     }
 
-    const content = fs.readFileSync(changelogPath, 'utf-8');
-    const entries: ChangelogEntry[] = [];
-
-    // Split on # headers (h1 only)
-    const sections = content.split(/^# /gm).filter(s => s.trim());
-
-    for (const section of sections) {
-        const newlineIndex = section.indexOf('\n');
-        if (newlineIndex === -1) continue;
-
-        const title = section.slice(0, newlineIndex).trim();
-        const body = section.slice(newlineIndex + 1).trim();
-        if (!body) continue;
-
-        // First non-empty line is the summary, rest is markdown
-        const lines = body.split('\n');
-        let summary = '';
-        let markdownStart = 0;
-
-        for (let i = 0; i < lines.length; i++) {
-            const trimmed = lines[i].trim();
-            if (trimmed && !trimmed.startsWith('-')) {
-                summary = trimmed;
-                markdownStart = i + 1;
-                break;
-            } else if (trimmed.startsWith('-')) {
-                // No summary, starts with bullets
-                markdownStart = i;
-                break;
-            }
-        }
-
-        const markdown = lines.slice(markdownStart).join('\n').trim();
-        entries.push({ title, summary, markdown });
-    }
-
-    const latestTitle = entries.length > 0 ? entries[0].title : '';
-
-    return { entries, latestTitle };
+    // Fence-aware parsing lives in changelogParse.ts (#350) so it is unit-testable.
+    return parseChangelogContent(fs.readFileSync(changelogPath, 'utf-8'));
 }
 
 function main() {

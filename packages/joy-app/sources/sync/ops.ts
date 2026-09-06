@@ -14,6 +14,7 @@ import { tunnelJson } from './v2/tunnel';
 import { storage } from './storage';
 import { sync } from './sync';
 import type { MachineMetadata } from './storageTypes';
+import { approvalResponseError, resolveMetadataConflict } from './opsGuards';
 
 // Strict type definitions for all operations
 
@@ -185,16 +186,30 @@ export async function machineUpdateMetadata(
         } else if (result.result === 'version-mismatch') {
             // Merge our change onto the latest record: keep the displayName we
             // are setting, take everything else from the server copy.
-            currentVersion = result.metadataVersion!;
+            const latestVersion = result.metadataVersion!;
             const latestMetadata = result.metadata
-                ? await machineEncryption.decryptMetadata(currentVersion, result.metadata)
+                ? await machineEncryption.decryptMetadata(latestVersion, result.metadata)
                 : null;
-            currentMetadata = {
-                ...(latestMetadata ?? currentMetadata),
+            const decision = resolveMetadataConflict({
+                serverHasMetadata: !!result.metadata,
+                opened: latestMetadata,
+                ours: currentMetadata,
                 displayName: metadata.displayName,
-            };
-
+            });
             retryCount++;
+            if ('retry' in decision) {
+                // The current record exists but did not open: do NOT advance
+                // to its version with our stale fields — that CAS would
+                // overwrite concurrent host/daemon updates (#382). Keep the
+                // old expected version: the next PATCH is a guaranteed
+                // mismatch that hands us the current record again (a re-read).
+                if (retryCount >= maxRetries) {
+                    throw new Error(`Failed to update: the current machine metadata could not be opened after ${maxRetries} attempts — not overwriting it`);
+                }
+                continue;
+            }
+            currentVersion = latestVersion;
+            currentMetadata = decision.write;
             if (retryCount >= maxRetries) {
                 throw new Error(`Failed to update after ${maxRetries} retries due to version conflicts`);
             }
@@ -237,8 +252,13 @@ type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
 async function answerApproval(sessionId: string, body: Record<string, unknown>): Promise<void> {
     const ctx = sync.machineCtx(sessionId);
     if (!ctx) throw noCtx('answer approval');
-    const { data } = await daemonJson<{ ok?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/approvals`, body);
-    if (data?.error) throw new Error(data.error);
+    const { status, data } = await daemonJson<{ ok?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/approvals`, body);
+    // Only an explicit 2xx `{ ok: true }` is a decision the daemon applied. A
+    // 500 with an empty body (status:500, data:null) or an `ok:false` used to
+    // resolve here as success, so the app dismissed an approval the machine
+    // was still holding (#381). Throwing keeps it pending so the user retries.
+    const failure = approvalResponseError(status, data);
+    if (failure) throw new Error(failure);
 }
 
 /**

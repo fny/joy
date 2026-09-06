@@ -64,6 +64,43 @@ describe('settings', () => {
             });
         });
 
+        it('preserves unknown NESTED fields written by a newer client (#400)', () => {
+            const newer = {
+                schemaVersion: 3,
+                voiceAgents: [{ id: 'v1', name: 'Home', agentId: 'agent_1', apiKey: 'sk', voiceId: 'nova', language: 'en' }],
+                dismissedCLIWarnings: {
+                    perMachine: { m1: { claude: true, opencode: true } },
+                    global: { codex: true, opencode: true },
+                    someday: { anything: 1 },
+                },
+                agentDefaultOverrides: { claude: { permissionMode: 'default', futureKnob: 'x' } },
+            };
+            const result = settingsParse(newer) as unknown as Record<string, any>;
+            // Known values validated as before…
+            expect(result.voiceAgents[0].agentId).toBe('agent_1');
+            expect(result.dismissedCLIWarnings.perMachine.m1.claude).toBe(true);
+            // …and what the schema does not know survives at every depth.
+            expect(result.voiceAgents[0].voiceId).toBe('nova');
+            expect(result.voiceAgents[0].language).toBe('en');
+            expect(result.dismissedCLIWarnings.perMachine.m1.opencode).toBe(true);
+            expect(result.dismissedCLIWarnings.global.opencode).toBe(true);
+            expect(result.dismissedCLIWarnings.someday).toEqual({ anything: 1 });
+            expect(result.agentDefaultOverrides.claude.futureKnob).toBe('x');
+            // An unrelated edit does not sync the stripped objects back.
+            const payload = settingsToSyncPayload(applySettings(result as Settings, { viewInline: true })) as Record<string, any>;
+            expect(payload.dismissedCLIWarnings.global.opencode).toBe(true);
+            expect(payload.voiceAgents[0].voiceId).toBe('nova');
+        });
+
+        it('nested preservation never lets an unknown value override a validated one (#400)', () => {
+            const result = settingsParse({
+                dismissedCLIWarnings: { perMachine: 'garbage', global: { claude: true } },
+            });
+            // perMachine failed validation for the whole object → defaults;
+            // the invalid nested value must not be resurrected.
+            expect(result.dismissedCLIWarnings).toEqual(settingsDefaults.dismissedCLIWarnings);
+        });
+
         it('should handle partial settings and merge with defaults', () => {
             const partialSettings = {
                 viewInline: true

@@ -3,6 +3,7 @@ import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { useDraftQueueStore, draftReason } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
 import { randomUUID } from 'expo-crypto';
+import { useCallback, useEffect, useReducer } from 'react';
 
 /**
  * Auto-release for the app-side message queue (draft queue).
@@ -50,6 +51,91 @@ function draftAge(d: { id: string; queuedAt?: number }, now: number): number {
 }
 
 let initialized = false;
+
+// ── Attempt fencing (#133) ──────────────────────────────────────────────────
+// Every release attempt takes a token; the attempt's failure callbacks act
+// only while they still own the draft. Without this, text A's late failure
+// (still pending after the 15s backstop) reverted the draft that by then
+// held text B in ITS OWN release: B went back to 'queued' carrying A's error,
+// and B's acknowledgement — matched on state === 'releasing' — was ignored,
+// leaving an accepted message in the queue for further retries.
+const attemptTokens = new Map<string, number>();
+let nextAttemptToken = 1;
+const draftKey = (sessionId: string, draftId: string) => `${sessionId}\u0000${draftId}`;
+
+/** Does `token` still own draft `draftId`'s release of `releaseLocalId`? */
+export function attemptOwnsDraft(
+    draft: { state?: 'queued' | 'releasing'; releaseLocalId?: string } | undefined,
+    releaseLocalId: string,
+    token: number,
+    currentToken: number | undefined,
+): boolean {
+    return !!draft
+        && currentToken === token
+        && draft.state === 'releasing'
+        && draft.releaseLocalId === releaseLocalId;
+}
+
+function revertIfOwned(sessionId: string, draftId: string, releaseLocalId: string, token: number, error: string): void {
+    const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
+    if (!attemptOwnsDraft(draft, releaseLocalId, token, attemptTokens.get(draftKey(sessionId, draftId)))) return;
+    attemptTokens.delete(draftKey(sessionId, draftId));
+    // The user asked for this item to go while its send was in flight
+    // (#134): a definite failure means nothing reached the relay, so the
+    // removal completes now instead of reverting to 'queued' for a retry.
+    if (pendingCancels.has(draftKey(sessionId, draftId))) {
+        settleCancel(sessionId, draftId);
+        useDraftQueueStore.getState().remove(sessionId, draftId);
+        return;
+    }
+    useDraftQueueStore.getState().revertRelease(sessionId, draftId, error);
+}
+
+// ── Removal during release (#134) ───────────────────────────────────────────
+// An app-held item whose POST is in flight cannot be removed locally: the
+// draft would vanish while the send still lands and the agent runs a message
+// the user believes is gone. Removal is instead RECORDED and settles with the
+// send: failure → removed here (nothing reached the relay); acceptance → the
+// draft leaves the queue as usual and the message is now a daemon queue row,
+// whose × cancels it for real. Subscribers (WaitingStack) render the
+// in-between state.
+const pendingCancels = new Set<string>();
+const pendingCancelListeners = new Set<() => void>();
+function settleCancel(sessionId: string, draftId: string): void {
+    if (!pendingCancels.delete(draftKey(sessionId, draftId))) return;
+    pendingCancelListeners.forEach((l) => l());
+}
+
+export type CancelReleaseOutcome = 'removed' | 'pending';
+
+/** Remove an app-held item, or — while its send is in flight — mark it for
+ *  removal once the send settles. Returns which of the two happened. */
+export function cancelRelease(sessionId: string, draftId: string, now = Date.now()): CancelReleaseOutcome {
+    const draft = (useDraftQueueStore.getState().bySession[sessionId] ?? []).find((d) => d.id === draftId);
+    const inFlight = !!draft && draft.state === 'releasing' && (draft.leaseUntil ?? 0) > now;
+    if (!inFlight) {
+        settleCancel(sessionId, draftId);
+        useDraftQueueStore.getState().remove(sessionId, draftId);
+        return 'removed';
+    }
+    pendingCancels.add(draftKey(sessionId, draftId));
+    pendingCancelListeners.forEach((l) => l());
+    return 'pending';
+}
+
+export function isCancelPending(sessionId: string, draftId: string): boolean {
+    return pendingCancels.has(draftKey(sessionId, draftId));
+}
+
+/** Re-render hook for the pending-removal state of one session's drafts. */
+export function useCancelPending(sessionId: string): (draftId: string) => boolean {
+    const [, bump] = useReducer((n: number) => n + 1, 0);
+    useEffect(() => {
+        pendingCancelListeners.add(bump);
+        return () => { pendingCancelListeners.delete(bump); };
+    }, []);
+    return useCallback((draftId: string) => isCancelPending(sessionId, draftId), [sessionId]);
+}
 
 export function initDraftQueueRelease(send: SendFn): void {
     if (initialized) return;
@@ -106,6 +192,8 @@ export function initDraftQueueRelease(send: SendFn): void {
             // stay stable because markReleasing persists the minted id.
             const releaseLocalId = head.releaseLocalId ?? randomUUID();
             inFlightUntil.set(sessionId, now + RELEASE_BACKSTOP_MS);
+            const token = nextAttemptToken++;
+            attemptTokens.set(draftKey(sessionId, head.id), token);
             useDraftQueueStore.getState().markReleasing(sessionId, head.id, releaseLocalId, now + RELEASE_LEASE_MS);
             void send(sessionId, head.text, releaseLocalId)
                 .then((res) => {
@@ -116,12 +204,13 @@ export function initDraftQueueRelease(send: SendFn): void {
                     // just keep the lease alive while the POST flies. Lease
                     // expiry retries with the SAME localId — the server's
                     // dedupe makes that a plain re-ack if the first landed.
+                    // Failure callbacks are fenced to THIS attempt (#133).
                     if (!res.ok) {
-                        useDraftQueueStore.getState().revertRelease(sessionId, head.id, res.reason);
+                        revertIfOwned(sessionId, head.id, releaseLocalId, token, res.reason);
                     }
                 })
                 .catch((e) => {
-                    useDraftQueueStore.getState().revertRelease(sessionId, head.id, String(e));
+                    revertIfOwned(sessionId, head.id, releaseLocalId, token, String(e));
                 });
         }
     };
@@ -157,7 +246,14 @@ export function notifyOutboxAcked(sessionId: string, localIds: Iterable<string>)
     const acked = new Set(localIds);
     const drafts = useDraftQueueStore.getState().bySession[sessionId] ?? [];
     for (const d of drafts) {
-        if (d.state === 'releasing' && d.releaseLocalId && acked.has(d.releaseLocalId)) {
+        // Matched on the release identity ALONE, not on state: a stale
+        // attempt's failure may already have reverted this draft to 'queued'
+        // while its retry (same releaseLocalId) landed — the relay owns the
+        // message either way, so it must leave the queue (#133). An edit
+        // clears releaseLocalId, which is what keeps a stale ack out.
+        if (d.releaseLocalId && acked.has(d.releaseLocalId)) {
+            attemptTokens.delete(draftKey(sessionId, d.id));
+            settleCancel(sessionId, d.id);
             useDraftQueueStore.getState().remove(sessionId, d.id);
         }
     }

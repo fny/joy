@@ -13,13 +13,13 @@
  * dependency hop on the web bundle and lets Metro resolve a cheaper
  * platform-specific module without a runtime Platform.OS check.
  *
- * NOTE: encryptAESGCM / decryptAESGCM use `decodeUTF8`/`encodeUTF8` to keep
- * binary contract parity with aes.ts. The roundtrip-only property still
- * matches that file (see the comment in encryptor.ts about the
- * UTF-8-via-Uint8Array quirk in the legacy AES path).
+ * NOTE: encryptAESGCM / decryptAESGCM carry the bytes as base64 TEXT inside
+ * the authenticated plaintext, exactly like aes.ts, because the native
+ * rn-encryption surface is UTF-8-string only (#303). Keeping the same
+ * payload encoding here is what makes a bytes blob portable across
+ * platforms; a raw-bytes crypto.subtle call would silently diverge.
  */
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
-import { decodeUTF8, encodeUTF8 } from './text';
 
 const ALGO = 'AES-GCM';
 const IV_LEN = 12;
@@ -67,13 +67,21 @@ export async function decryptAESGCMString(data: string, key64: string): Promise<
 }
 
 export async function encryptAESGCM(data: Uint8Array, key64: string): Promise<Uint8Array> {
-    // Mirror aes.ts: the existing AES path round-trips bytes-as-UTF-8-strings.
-    // Going around that here would diverge the web wire from the native one.
-    const encryptedB64 = (await encryptAESGCMString(decodeUTF8(data), key64)).trim();
+    // Mirror aes.ts (#303): bytes travel as base64 text in the plaintext so
+    // arbitrary/invalid-UTF-8 bytes survive the native side's string API.
+    const encryptedB64 = (await encryptAESGCMString(encodeBase64(data), key64)).trim();
     return decodeBase64(encryptedB64);
 }
 
 export async function decryptAESGCM(data: Uint8Array, key64: string): Promise<Uint8Array | null> {
     const result = await decryptAESGCMString(encodeBase64(data), key64);
-    return result ? encodeUTF8(result) : null;
+    // #304: '' is an authenticated empty plaintext; only null means failure.
+    if (result === null) {
+        return null;
+    }
+    try {
+        return decodeBase64(result);
+    } catch {
+        return null;
+    }
 }
