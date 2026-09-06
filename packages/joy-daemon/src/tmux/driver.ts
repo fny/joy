@@ -14,7 +14,15 @@ import { TmuxControlClient } from "./controlClient";
 import { tmuxCommand } from "./serialize";
 
 /** Shared result shape. `error` carries a %error / disconnect reason (control mode). */
-export interface TmuxResult { ok: boolean; out: string; error?: string }
+export interface TmuxResult {
+  ok: boolean;
+  out: string;
+  error?: string;
+  /** captureCached only: when the returned frame was captured (the snapshot's
+   *  refresh time), so a reader can rank it against other evidence — a hook
+   *  that arrived after this frame is fresher than it. Absent = unknown. */
+  at?: number;
+}
 
 // Control mode is on in production. The only place it's skipped is the unit-test
 // runner (vitest), where there's no tmux server to attach to and we don't want to
@@ -196,9 +204,9 @@ export class TmuxDriver {
     if (this.#client?.connected && !opts?.color) {
       this.#track(target);
       const s = this.#snapshots.get(target);
-      if (s) return { ok: true, out: s.text };
+      if (s) return { ok: true, out: s.text, at: s.ts };
       const r = this.capture(target); // no snapshot yet → spawn once, then refresh takes over
-      if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
+      if (r.ok) { const ts = nowMs(); this.#snapshots.set(target, { text: r.out, ts }); return { ...r, at: ts }; }
       return r;
     }
     return this.capture(target, opts);

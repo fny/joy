@@ -614,6 +614,10 @@ export interface SessionInit {
   /** Cap the --continue backfill to ~this many bytes, applied when the transcript
    *  BINDS (continue's file isn't known at create, unlike --resume). 0 = uncapped. */
   backfillCapBytes?: number;
+  /** The launch identity exported to this claude as JOY_LAUNCH_ID (window
+   *  record `hookLaunchId`): hook events must echo it as launch_id. Absent for
+   *  launches that predate it — those accept events without one. */
+  hookLaunchId?: string;
 }
 
 export class Session {
@@ -791,6 +795,11 @@ export class Session {
   // footer (docs/review-campaign-2026-09-claude-runtime-spike.md §3 A).
   #hooksLive = false;
   #hooksLiveAt = 0;
+  /** The per-launch identity (see SessionInit.hookLaunchId) — THE ingress
+   *  fence: a hook event that does not echo it is another process's (the
+   *  retired predecessor under this route id, whose conversation id a
+   *  --resume replacement even shares) and must change nothing here. */
+  readonly #launchId: string | null;
   /** permission_mode from the most recent hook that carried one. */
   #hookPermissionMode: string | null = null;
   #hookPermissionModeAt = 0;
@@ -952,6 +961,7 @@ export class Session {
     this.transcriptPath = init.transcriptPath;
     this.#transcriptStartOffset = init.transcriptStartOffset ?? 0;
     this.#backfillCapBytes = init.backfillCapBytes ?? 0;
+    this.#launchId = init.hookLaunchId ?? null;
     // Title lock survives restarts via the window record.
     const rec = loadWindowRecord(this.id);
     this.#titleLocked = rec?.titleLockedByUser === true;
@@ -2050,12 +2060,35 @@ export class Session {
     return false; // budget exhausted with text left
   }
 
-  /** True when a drain could proceed by the transcript/queue state alone (pane
-   *  readiness is checked separately, after a fresh capture). */
+  /** True when a drain could proceed by the runtime/queue state alone (the
+   *  pane's box/dialog safety checks come after, on a fresh capture). */
   #canDrain(): boolean {
-    return this.status !== "ended" && !this.#queuePaused && !this.#dispatchInFlight
-      && !this.#turnRunning() && !this.#paneOwner && this.#queue.length > 0;
+    return this.#queue.length > 0 && this.promptReadiness().ready;
   }
+
+  /**
+   * THE readiness decision — the one answer every dispatch and clear gate
+   * consumes (#drainOnce, #clearInputIfDirty, #holdReason, busy()), and the
+   * method a Claude driver on the session coordinator will call. It is the
+   * RUNTIME's state: the turn as the authority sees it (with hooks live, the
+   * Stop/StopFailure/idle edge closes it whatever the transcript's tail or the
+   * pane's footer still show — see #turnRunning), the queue's own pause, the
+   * dispatch in flight and the pane lease. What it deliberately leaves out is
+   * everything only a FRESH pane read can answer — a draft in the box, a
+   * dialog, the login form, a generating footer while no hook has spoken —
+   * which the gates check next, never instead.
+   */
+  promptReadiness(): { ready: boolean; reason: string } {
+    if (this.status === "ended") return { ready: false, reason: "session ended" };
+    if (this.#queuePaused) return { ready: false, reason: `queue paused (${this.#pauseReason ?? "?"})` };
+    if (this.#dispatchInFlight) return { ready: false, reason: `dispatch ${this.#dispatchInFlight.id} still in flight` };
+    if (this.#turnRunning()) return { ready: false, reason: this.#hooksLive && this.#hookTurn?.open ? "turn running (hook)" : "turn running (transcript)" };
+    if (this.#paneOwner) return { ready: false, reason: "pane leased (steer / draft restore)" };
+    return { ready: true, reason: "clear to send" };
+  }
+
+  /** The runtime turn as the authority sees it (busy(), `joy check`). */
+  turnOpen(): boolean { return this.#turnRunning(); }
 
   #armDrainRetry(ms: number): void {
     if (this.#drainRetry) clearTimeout(this.#drainRetry);
@@ -2073,13 +2106,12 @@ export class Session {
     process.stderr.write(`[dispatch] ${this.id} ${msg}\n`);
   }
 
-  /** Which gate is currently holding the queue (for #noteHold). */
+  /** Which gate is currently holding the queue (for #noteHold) — the same
+   *  decision the drain consumes, so the log never names a gate that is not
+   *  the one holding (it used to say "turn running" off the transcript's
+   *  #turn after a hook had already closed it). */
   #holdReason(): string {
-    if (this.status === "ended") return "session ended";
-    if (this.#queuePaused) return `queue paused (${this.#pauseReason ?? "?"})`;
-    if (this.#dispatchInFlight) return `dispatch ${this.#dispatchInFlight.id} still in flight`;
-    if (this.#turn) return "turn running";
-    return "clear to send";
+    return this.promptReadiness().reason;
   }
 
   /** Log a held head item at most every 30s, and only once it has waited 10s —
@@ -2295,7 +2327,10 @@ export class Session {
     this.#broadcastQueue();
   }
 
-  /** Called from onTranscriptEntry when a new turn starts — confirms the dispatch landed. */
+  /** Called from onTranscriptEntry when a new turn starts (byTurnStart) or a
+   *  text-matched user echo lands — confirms the dispatch landed. A turn start
+   *  is only circumstantial: it defers to a FRESH box read (async) before it
+   *  credits anything; the echo is direct evidence and settles at once. */
   #confirmDispatchIfAwaiting(opts?: { byTurnStart?: boolean }): void {
     if (!this.#dispatchInFlight) return;
     // A dispatch whose submit Enter is still PENDING cannot be what started this
@@ -2324,43 +2359,59 @@ export class Session {
         this.#dlog(`turn started but hooks are live and no UserPromptSubmit matched ${this.#dispatchInFlight.id} — foreign turn, not confirming (#32)`);
         return;
       }
-      // A SENT Enter is not a SUBMITTED message: paste-detection can absorb it
-      // as a newline, leaving the prompt in the box. If a foreign turn then
-      // starts (a <task-notification>, a Claude-side queued message, typing in
-      // the terminal), this used to credit it to our dispatch — "delivered" —
-      // while the prompt still sat unsent, later to be C-u'd away as a "human
-      // draft" (#32). The box is the evidence: when the pane positively shows
-      // our text still in it, this turn is not ours — and when there is NO
-      // evidence (capture failed, no live box on screen) there is nothing to
-      // credit either: absence of a box read is not delivery. A turn start is
-      // only proof for a plain prompt when the box is positively seen without
-      // our text; otherwise the text-matched echo, the hook or the timeout
-      // decide (#32 residual — the unknown case used to keep the legacy
-      // confirm, and an unsent prompt vanished as "delivered").
-      const pane = this.#tmux.captureCached(this.tmuxWindow);
-      const box = pane.ok ? paneInputText(pane.out) : null;
-      if (!cmdLike && box === null) {
-        this.#dlog(`turn started but the input box is unknown (${pane.ok ? "no live box" : "capture failed"}) — not confirming ${this.#dispatchInFlight.id} on a turn start (#32)`);
+      void this.#confirmOnTurnStartWithFreshBox(this.#dispatchInFlight, cmdLike);
+      return;
+    }
+    this.#settleDispatchDelivered(this.#dispatchInFlight, "transcript echo");
+  }
+
+  /** The hook-less (and command) turn-start confirmation, against a FRESH box
+   *  read. A SENT Enter is not a SUBMITTED message: paste-detection can absorb
+   *  it as a newline, leaving the prompt in the box. If a foreign turn then
+   *  starts (a <task-notification>, a Claude-side queued message, typing in
+   *  the terminal), this used to credit it to our dispatch — "delivered" —
+   *  while the prompt still sat unsent, later to be C-u'd away as a "human
+   *  draft" (#32). The box is the evidence, and it must be a LIVE read: the
+   *  cached snapshot is a periodic sweep that can predate the type, so it
+   *  showed an empty box while the real one held the unsent text (617dc734
+   *  review). When the pane positively shows our text still in it, this turn
+   *  is not ours; when there is NO evidence (capture failed, no live box) a
+   *  plain prompt is not credited either — absence of a box read is not
+   *  delivery; the text-matched echo, the hook or the timeout decide. A
+   *  command (`/x`, `!x`) with no box on screen is the one case still
+   *  credited: its turn typically hides the box (/compact, a dialog), it never
+   *  echoes as user text, and a requeue would run it twice. */
+  async #confirmOnTurnStartWithFreshBox(item: QueuedItem, cmdLike: boolean): Promise<void> {
+    const pane = await this.#captureBox();
+    // The world may have moved during the read: the echo/hook settled it, a
+    // timeout requeued it, the item was cancelled, or a new submit is pending.
+    if (this.status === "ended" || this.#dispatchInFlight !== item || this.#submitTimer) return;
+    const box = pane.ok ? paneInputText(pane.out) : null;
+    if (!cmdLike && box === null) {
+      this.#dlog(`turn started but the input box is unknown (${pane.ok ? "no live box" : "capture failed"}) — not confirming ${item.id} on a turn start (#32)`);
+      return;
+    }
+    if (box) {
+      const flatBox = flattenForMatch(box);
+      const flatSent = flattenForMatch(item.text);
+      if (flatBox === flatSent || flatBox.startsWith(flatSent) || flatSent.startsWith(flatBox)) {
+        this.#dlog(`turn started but ${item.id} is still in the input box (fresh read) — not confirming (#32)`);
         return;
       }
-      if (box) {
-        const flatBox = flattenForMatch(box);
-        const flatSent = flattenForMatch(this.#dispatchInFlight.text);
-        if (flatBox === flatSent || flatBox.startsWith(flatSent) || flatSent.startsWith(flatBox)) {
-          this.#dlog(`turn started but ${this.#dispatchInFlight.id} is still in the input box — not confirming (#32)`);
-          return;
-        }
-      }
     }
-    this.#dlog(`confirmed ${this.#dispatchInFlight.id} by ${opts?.byTurnStart ? "turn start" : "transcript echo"}`);
-    this.#recordOutcome(this.#dispatchInFlight.id, "delivered");
+    this.#settleDispatchDelivered(item, "turn start");
+  }
+
+  /** The in-flight dispatch is delivered: record it, release the slot, and
+   *  hand back any human draft the dispatch's box-clear captured (types into
+   *  the now-empty box; the new turn's generation just buffers the keys). */
+  #settleDispatchDelivered(item: QueuedItem, how: string): void {
+    this.#dlog(`confirmed ${item.id} by ${how}`);
+    this.#recordOutcome(item.id, "delivered");
     this.#dispatchInFlight = null;
     this.#dispatchExtends = 0;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     this.#broadcastQueue();
-    // Delivery done — if the queue is idle, give back any human draft the
-    // dispatch's box-clear captured (types into the now-empty box; the new
-    // turn's generation just buffers the keys).
     void this.#restoreDraftIfAny();
   }
 
@@ -2448,19 +2499,23 @@ export class Session {
     // located input box. No box (dialog, login form, spinner-only frame,
     // capture failure) means the footer is not on screen, and the parser's
     // "no marker → default" would be a guess; the last hook-reported mode is
-    // the truth there. WITH a box the footer wins even over the hook value: a
-    // Shift+Tab in the terminal fires no hook, so the footer is fresher until
-    // the next event corrects the record.
+    // the truth there. WITH a box the NEWER evidence wins: a Shift+Tab in the
+    // terminal fires no hook, so a footer repainted after the last hook is
+    // fresher than the hook value — but a cached frame captured BEFORE the
+    // last hook is the stale side (the sweep can predate a whole turn), and
+    // then the hook's mode is the truth (#480 residual). A frame of unknown
+    // age (no timestamp) keeps the footer-wins rule.
     const hookMode = this.#hooksLive ? this.#hookPermissionMode : null;
     if (!pane.ok) return hookMode;
     if (hookMode && !paneShowsReadyPrompt(pane.out)) return hookMode;
+    if (hookMode && pane.at !== undefined && pane.at < this.#hookPermissionModeAt) return hookMode;
     return parsePermissionModeFromPane(pane.out);
   }
 
   /** Hook authority snapshot (tests, debug). */
-  hookState(): { live: boolean; since: number; permissionMode: string | null; permissionModeAt: number; needsInput: { kind: string; tool?: string; since: number } | null; authFailure: { errorType: string; since: number } | null; sessionEnd: { reason: string; at: number } | null } {
+  hookState(): { live: boolean; since: number; launchId: string | null; permissionMode: string | null; permissionModeAt: number; needsInput: { kind: string; tool?: string; since: number } | null; authFailure: { errorType: string; since: number } | null; sessionEnd: { reason: string; at: number } | null } {
     return {
-      live: this.#hooksLive, since: this.#hooksLiveAt,
+      live: this.#hooksLive, since: this.#hooksLiveAt, launchId: this.#launchId,
       permissionMode: this.#hookPermissionMode, permissionModeAt: this.#hookPermissionModeAt,
       needsInput: this.#needsInput, authFailure: this.#authFailure, sessionEnd: this.#hookSessionEnd,
     };
@@ -2525,7 +2580,13 @@ export class Session {
     // next hook carrying permission_mode re-verifies (correcting the record if
     // the footer lied — #480's false success can no longer persist).
     if (this.#hooksLive) this.#modeSetTarget = { mode: target, at: Date.now() };
-    if (after === target) { saveWindowRecord(this.id, { claudePermissionMode: after }); this.#persistedPermissionMode = after; }
+    if (after === target) {
+      // The persistence cache advances only on a SUCCESSFUL write (as in
+      // #notePermissionMode): a failed save left behind a cache that said
+      // "done", so the next hook carrying the same mode never retried it.
+      if (saveWindowRecord(this.id, { claudePermissionMode: after })) this.#persistedPermissionMode = after;
+      else process.stderr.write(`[hook] ${this.id} setPermissionMode(${target}) verified but the record write FAILED — the next hook retries it\n`);
+    }
     return after === target
       ? { ok: true, mode: after }
       : { ok: false, mode: after ?? undefined, error: `landed on ${after ?? "unknown"}` };
@@ -3547,15 +3608,30 @@ export class Session {
     // IDENTITY FENCE — before anything below changes authority. The route is
     // the joy session id, which a restart's replacement inherits, so a
     // delayed forwarder request from the PREDECESSOR process can reach this
-    // object. The one identity the wire carries is claude's session id: an
-    // event for a conversation other than the bound one is a stale process's
-    // (or a sibling's) and must flip no latch, persist no mode, withdraw no
-    // pending end, close no turn and confirm no dispatch. SessionStart is the
-    // legitimate rotation (/clear mints a new id; the case below adopts it),
-    // a "starting" session has nothing bound yet, and a staged (hook-proposed,
-    // not yet activity-confirmed) sid is this process's own. A same-
-    // conversation --resume replacement shares the sid: that residual is
-    // closed by the live-process check in #armHookSessionEnd, not here.
+    // object. Two identities ride the wire and both are checked first:
+    //
+    // 1. LAUNCH: the daemon exported a per-launch identity into this claude's
+    //    env and the forwarder echoes it as launch_id. An event that does not
+    //    carry OURS is another process's — the predecessor a restart retired
+    //    under this same route id (a same-conversation --resume replacement
+    //    even shares its sid, which the sid check cannot see), or a claude
+    //    launched by hand without the env. A session recorded WITHOUT a launch
+    //    id (launched before the field existed, or adopted) has nothing to
+    //    fence on and accepts any launch; the live-process check in
+    //    #armHookSessionEnd backstops that case.
+    // 2. CONVERSATION: an event for a conversation other than the bound one is
+    //    a stale process's (or a sibling's). SessionStart is the legitimate
+    //    rotation (/clear mints a new id; the case below adopts it), a
+    //    "starting" session has nothing bound yet, and a staged (hook-
+    //    proposed, not yet activity-confirmed) sid is this process's own.
+    //
+    // A fenced-out event changes nothing: no latch, no mode, no pending end
+    // withdrawn or armed, no turn edge, no confirm.
+    const launch = str("launch_id");
+    if (this.#launchId && launch !== this.#launchId) {
+      process.stderr.write(`[hook] ${this.id} ${name} from launch ${launch ?? "(none)"} ≠ ours ${this.#launchId} — ignored (not this process)\n`);
+      return { ok: false };
+    }
     const sid = str("session_id");
     if (sid && this.claudeSessionId && sid !== this.claudeSessionId && name !== "SessionStart"
         && this.status !== "starting" && this.#pendingHookBinding?.sid !== sid) {
