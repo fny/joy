@@ -449,6 +449,7 @@ export const ru: TranslationStructure = {
         permissionRequired: 'требуется разрешение',
         detached: 'отключён',
         compacting: 'сжатие',
+        outputDropped: 'вывод потерян — сессия заполнена',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} задач`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `агентов: ${done}/${total}`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `повтор ${attempt}/${total}`,
@@ -507,6 +508,13 @@ export const ru: TranslationStructure = {
         label: 'ТРЕБУЕТСЯ ДЕЙСТВИЕ',
         fallbackTitle: 'Claude Code задаёт вопрос',
         openTerminal: 'Откройте терминал, чтобы ответить',
+    },
+    joyEventBudget: {
+        label: 'ВЫВОД ПОТЕРЯН',
+        title: 'Эта сессия заполнена — часть разговора не сохранена',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `Не удалось сохранить ${dropped} ${dropped === 1 ? 'запись' : 'записей'} вывода с ${since}: бюджет relay для этой сессии исчерпан. Он не восстановится; ничего нового, отправленного сюда, не сохранится.`,
+        action: 'Начать новую сессию',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins

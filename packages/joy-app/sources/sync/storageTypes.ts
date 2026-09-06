@@ -109,6 +109,16 @@ export const MetadataSchema = z.object({
         trigger: z.enum(['auto', 'manual']),
         since: z.number(),
     }).nullable().optional(),
+    // joy: the relay refused this session's further output for good (429
+    // session_event_budget_exhausted — 50,000 events per session, never
+    // refilled; #130). The daemon drops that output and counts it here:
+    // `dropped` records lost since `since`. Drives the persistent EventBudgetBar
+    // and the sidebar marker; the only recovery is a new session. Stays set
+    // for the life of the session (the daemon re-asserts it across restarts).
+    joy__eventBudget: z.object({
+        since: z.number(),
+        dropped: z.number(),
+    }).nullable().optional(),
     // Persisted mirror of the ephemeral thinking flag (the ephemeral only
     // reaches connected clients, so a cold app start lost the state until the
     // next 30s keepalive). Only trusted while the session's presence is live.

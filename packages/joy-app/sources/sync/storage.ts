@@ -91,6 +91,9 @@ export interface SessionRowData {
     agentsTotal: number | null;
     retryAttempt: number | null;
     retryTotal: number | null;
+    // The relay refused this session's output for good (joy__eventBudget,
+    // #130): the row carries a warning marker next to its status.
+    outputDropped: boolean;
     hasUnread: boolean;
     isJoyDaemon: boolean;
     joySessionId: string | null;
@@ -161,6 +164,7 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         agentsTotal: session.metadata?.joy__agents?.total ?? null,
         retryAttempt: session.metadata?.joy__retry?.attempt ?? null,
         retryTotal: session.metadata?.joy__retry?.total ?? null,
+        outputDropped: (session.metadata?.joy__eventBudget?.dropped ?? 0) > 0,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
         isJoyDaemon: isJoyDaemonSource(session.metadata?.joy__source),
         joySessionId: session.metadata?.joy__sessionId ?? null,

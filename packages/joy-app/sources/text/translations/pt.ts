@@ -82,6 +82,7 @@ export const pt: TranslationStructure = {
         permissionRequired: 'permissão necessária',
         detached: 'desacoplado',
         compacting: 'compactando',
+        outputDropped: 'saída perdida — sessão cheia',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} tarefas`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `${done}/${total} agentes`,
         retrying: ({ attempt, total }: { attempt: number; total: number }) => `retrying ${attempt}/${total}`,
@@ -378,6 +379,13 @@ export const pt: TranslationStructure = {
         label: 'AÇÃO NECESSÁRIA',
         fallbackTitle: 'O Claude Code está fazendo uma pergunta',
         openTerminal: 'Abra o terminal para responder',
+    },
+    joyEventBudget: {
+        label: 'SAÍDA PERDIDA',
+        title: 'Esta sessão está cheia — parte da conversa não foi salva',
+        body: ({ dropped, since }: { dropped: number; since: string }) =>
+            `${dropped} ${dropped === 1 ? 'registro' : 'registros'} de saída desde ${since} não ${dropped === 1 ? 'pôde' : 'puderam'} ser ${dropped === 1 ? 'salvo' : 'salvos'} porque o orçamento do relay para esta sessão acabou. Isso não se recupera; nada novo enviado aqui será mantido.`,
+        action: 'Iniciar uma nova sessão',
     },
     joyLogin: {
         // LoginBar — pinned sign-in bar for interactive CLI logins
