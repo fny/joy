@@ -339,6 +339,10 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   single SSE event `event: history\ndata: [<records>]\n\n` (byte-identical to
   the whole-array form) and `/sessions/:id/events` still opens with the
   `{ hello, seq }` line followed by one NDJSON line per record.
+- `joy install` bakes the effective `JOY_RELAY_URL` AND `JOY_HOME_DIR` into
+  the systemd unit / launchd plist, so the supervised daemon reads the same
+  credentials and state the installing CLI did (an overridden home used to be
+  dropped and the service started against `~/.joy`, #499).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
   `/status`, or the daemon.json pid whose command line and start time match;
   a stale record is removed without signalling (#495). The single-daemon lock

@@ -69,8 +69,11 @@ describe("launchdPlist (#500)", () => {
       pkgDir: "/Users/A&B/pkg",
       path: "/Users/A&B/bin:/usr/bin",
       relayUrl: "https://relay.example?x=1&y=2",
+      homeDir: "/Users/A&B/.joy",
       logFile: "/Users/A&B/Library/Logs/it's.log",
     });
+    // The Joy home the installing CLI used rides along (#499).
+    expect(plist).toContain("<key>JOY_HOME_DIR</key><string>/Users/A&amp;B/.joy</string>");
     // Every `&` must start an entity; every `<` must open markup.
     for (const m of plist.matchAll(/&/g)) expect(plist.slice(m.index, m.index! + 6)).toMatch(/^&(amp|lt|gt|quot|apos);/);
     expect(plist).not.toMatch(/<string>[^<]*<[^/]/); // no `<` inside a string body

@@ -7,7 +7,24 @@ import { join } from "path";
 
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf } = await import("./cli");
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit } = await import("./cli");
+
+describe("systemdUnit (#499)", () => {
+  const unit = systemdUnit({ node: "/usr/bin/node", serverTs: "/opt/joy/src/server.ts", pkgDir: "/opt/joy/src", path: "/usr/bin:/bin", relayUrl: "https://relay.example:4997", homeDir: "/isolated/joy home" });
+
+  test("bakes the effective Joy home next to the relay, quoted, so the service reads the CLI's credentials and state", () => {
+    expect(unit).toContain('Environment="JOY_RELAY_URL=https://relay.example:4997"');
+    expect(unit).toContain('Environment="JOY_HOME_DIR=/isolated/joy home"');
+    expect(unit).toContain('Environment="PATH=/usr/bin:/bin"');
+    expect(unit).toContain("ExecStart=/usr/bin/node --import tsx /opt/joy/src/server.ts");
+  });
+
+  test("the supervisor semantics are unchanged", () => {
+    expect(unit).toContain("Restart=always");
+    expect(unit).toContain("KillMode=process");
+    expect(unit).toContain("WantedBy=default.target");
+  });
+});
 
 describe("resolvePkgDir (#503)", () => {
   const store = "/home/user/.local/share/pnpm/global/5/node_modules/.pnpm/@fny+joy-daemon@1.0.15/node_modules/@fny/joy-daemon/src";
