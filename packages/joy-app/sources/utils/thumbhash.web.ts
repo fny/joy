@@ -22,6 +22,20 @@ function toBase64(bytes: Uint8Array): string {
     return btoa(binary);
 }
 
+/**
+ * Canvas size for the thumbnail: the longest edge scaled to THUMB_SIZE, the
+ * other edge scaled proportionally but never below one pixel. A 1x1000 image
+ * scaled to 0.1px rounded to a zero-width canvas, getImageData threw, and the
+ * placeholder went missing for every thin image (#455).
+ */
+export function thumbCanvasSize(width: number, height: number, max: number = THUMB_SIZE): { w: number; h: number } {
+    const scale = max / Math.max(width, height);
+    return {
+        w: Math.min(max, Math.max(1, Math.round(width * scale))),
+        h: Math.min(max, Math.max(1, Math.round(height * scale))),
+    };
+}
+
 export async function generateThumbhash(
     uri: string,
     width: number,
@@ -30,10 +44,8 @@ export async function generateThumbhash(
     if (width <= 0 || height <= 0) return undefined;
 
     try {
-        // Scale down to THUMB_SIZE on the longest edge
-        const scale = THUMB_SIZE / Math.max(width, height);
-        const w = Math.round(width * scale);
-        const h = Math.round(height * scale);
+        // Scale down to THUMB_SIZE on the longest edge (each edge >= 1px, #455)
+        const { w, h } = thumbCanvasSize(width, height);
 
         const canvas = document.createElement('canvas');
         canvas.width = w;

@@ -1,5 +1,10 @@
 import * as React from 'react';
 import { Platform, ScrollView, ScrollViewProps } from 'react-native';
+import { normalizeWheelDelta } from './wheelDelta';
+
+// Pixel size of one wheel "line" (deltaMode 1). Browsers that expose line
+// deltas do not tell us the line height; 16px is the common convention.
+const WHEEL_LINE_PX = 16;
 
 // Gesture-locked horizontal wheel scroll.
 //
@@ -28,11 +33,16 @@ function useHorizontalWheelScroll() {
             const maxScroll = el.scrollWidth - el.clientWidth;
             if (maxScroll <= 0) return;
 
+            // Normalize BEFORE axis detection and scrolling: line/page-mode
+            // wheels report lines/pages, not pixels — read raw, a Shift+wheel
+            // notch moved three pixels instead of three lines (#223).
+            const { deltaX, deltaY } = normalizeWheelDelta(e.deltaX, e.deltaY, e.deltaMode, WHEEL_LINE_PX, el.clientWidth || WHEEL_LINE_PX);
+
             // Shift + wheel: convert vertical wheel to horizontal scroll.
-            if (e.shiftKey && e.deltaY !== 0) {
+            if (e.shiftKey && deltaY !== 0) {
                 e.preventDefault();
                 e.stopPropagation();
-                el.scrollLeft += e.deltaY;
+                el.scrollLeft += deltaY;
                 return;
             }
 
@@ -42,21 +52,21 @@ function useHorizontalWheelScroll() {
 
             // Decide axis on the first event of the gesture.
             if (gestureAxis === null) {
-                const absX = Math.abs(e.deltaX);
-                const absY = Math.abs(e.deltaY);
+                const absX = Math.abs(deltaX);
+                const absY = Math.abs(deltaY);
                 gestureAxis = (absX > absY * 2 && absX > 3) ? 'h' : 'v';
             }
 
             if (gestureAxis === 'v') return;
 
             // Horizontal-locked: scroll the element, unless at boundary.
-            const atStart = el.scrollLeft <= 0 && e.deltaX < 0;
-            const atEnd = el.scrollLeft >= maxScroll - 1 && e.deltaX > 0;
+            const atStart = el.scrollLeft <= 0 && deltaX < 0;
+            const atEnd = el.scrollLeft >= maxScroll - 1 && deltaX > 0;
             if (atStart || atEnd) return;
 
             e.preventDefault();
             e.stopPropagation();
-            el.scrollLeft += e.deltaX;
+            el.scrollLeft += deltaX;
         };
         node.addEventListener('wheel', handler, { passive: false });
         return () => {

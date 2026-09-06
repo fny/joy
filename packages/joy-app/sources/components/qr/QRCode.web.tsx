@@ -1,6 +1,7 @@
 import React from 'react';
 import { View } from 'react-native';
 import { createQRMatrix } from './qrMatrix';
+import { finderPath } from './finderPath';
 
 // Check if point is in a locator pattern area
 function isInLocatorPattern(x: number, y: number, matrixSize: number): boolean {
@@ -110,8 +111,6 @@ export const QRCode = React.memo((props: QRCodeProps) => {
         return elements;
     }, [qrMatrix, moduleSize, foregroundColor]);
 
-    const baseRadius = 0.5;
-
     return (
         <View
             style={{
@@ -137,92 +136,14 @@ export const QRCode = React.memo((props: QRCodeProps) => {
                 {/* QR modules with rounded corners */}
                 {modules}
 
-                {/* Top-left locator pattern */}
-                <rect
-                    x={2 * moduleSize}
-                    y={2 * moduleSize}
-                    width={7 * moduleSize}
-                    height={7 * moduleSize}
-                    rx={moduleSize * (baseRadius + 1)}
-                    ry={moduleSize * (baseRadius + 1)}
-                    fill={foregroundColor}
-                />
-                <rect
-                    x={3 * moduleSize}
-                    y={3 * moduleSize}
-                    width={5 * moduleSize}
-                    height={5 * moduleSize}
-                    rx={moduleSize * baseRadius}
-                    ry={moduleSize * baseRadius}
-                    fill={backgroundColor}
-                />
-                <rect
-                    x={4 * moduleSize}
-                    y={4 * moduleSize}
-                    width={3 * moduleSize}
-                    height={3 * moduleSize}
-                    rx={moduleSize}
-                    ry={moduleSize}
-                    fill={foregroundColor}
-                />
-
-                {/* Top-right locator pattern */}
-                <rect
-                    x={(qrMatrix.size - 7 + 2) * moduleSize}
-                    y={2 * moduleSize}
-                    width={7 * moduleSize}
-                    height={7 * moduleSize}
-                    rx={moduleSize * (baseRadius + 1)}
-                    ry={moduleSize * (baseRadius + 1)}
-                    fill={foregroundColor}
-                />
-                <rect
-                    x={(qrMatrix.size - 7 + 1 + 2) * moduleSize}
-                    y={3 * moduleSize}
-                    width={5 * moduleSize}
-                    height={5 * moduleSize}
-                    rx={moduleSize * baseRadius}
-                    ry={moduleSize * baseRadius}
-                    fill={backgroundColor}
-                />
-                <rect
-                    x={(qrMatrix.size - 7 + 2 + 2) * moduleSize}
-                    y={4 * moduleSize}
-                    width={3 * moduleSize}
-                    height={3 * moduleSize}
-                    rx={moduleSize}
-                    ry={moduleSize}
-                    fill={foregroundColor}
-                />
-
-                {/* Bottom-left locator pattern */}
-                <rect
-                    x={2 * moduleSize}
-                    y={(qrMatrix.size - 7 + 2) * moduleSize}
-                    width={7 * moduleSize}
-                    height={7 * moduleSize}
-                    rx={moduleSize * (baseRadius + 1)}
-                    ry={moduleSize * (baseRadius + 1)}
-                    fill={foregroundColor}
-                />
-                <rect
-                    x={3 * moduleSize}
-                    y={(qrMatrix.size - 7 + 1 + 2) * moduleSize}
-                    width={5 * moduleSize}
-                    height={5 * moduleSize}
-                    rx={moduleSize * baseRadius}
-                    ry={moduleSize * baseRadius}
-                    fill={backgroundColor}
-                />
-                <rect
-                    x={4 * moduleSize}
-                    y={(qrMatrix.size - 7 + 2 + 2) * moduleSize}
-                    width={3 * moduleSize}
-                    height={3 * moduleSize}
-                    rx={moduleSize}
-                    ry={moduleSize}
-                    fill={foregroundColor}
-                />
+                {/* Finder patterns: square rings, hole cut out with an even-odd
+                    path so a transparent background stays transparent — the
+                    old background-coloured hole rect turned solid over a
+                    transparent page (#273), and rounded rings did not decode
+                    in OpenCV (#272). */}
+                <path d={finderPath(2 * moduleSize, 2 * moduleSize, moduleSize)} fill={foregroundColor} fillRule="evenodd" />
+                <path d={finderPath((qrMatrix.size - 7 + 2) * moduleSize, 2 * moduleSize, moduleSize)} fill={foregroundColor} fillRule="evenodd" />
+                <path d={finderPath(2 * moduleSize, (qrMatrix.size - 7 + 2) * moduleSize, moduleSize)} fill={foregroundColor} fillRule="evenodd" />
             </svg>
         </View>
     );

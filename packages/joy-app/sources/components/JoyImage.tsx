@@ -9,6 +9,8 @@ import * as Sharing from 'expo-sharing';
 import * as Clipboard from 'expo-clipboard';
 import { Modal as AppModal } from '@/modal';
 import { t } from '@/text';
+import { withTempExport } from '@/utils/shareTempFile';
+import { logError } from '@/utils/guardAsync';
 
 /**
  * Inline chat image for <joy-img/> tags. Bytes come over the session's
@@ -59,10 +61,14 @@ export const JoyImage = React.memo((props: {
 
     React.useEffect(() => {
         let alive = true;
+        // Every image key starts clean — cache hits included. A failed read
+        // followed by a src/session change whose image was already cached set
+        // the new uri but kept failed=true, so the placeholder hid a valid
+        // image (#224).
+        setFailed(false);
         const cached = cacheGet(key);
         if (cached) { setUri(cached); return; }
         setUri(null);
-        setFailed(false);
         // The fetch (and cachePut) completes even if this row unmounts mid-RPC —
         // discarding a few-hundred-KB payload because FlashList recycled the row
         // meant scrolling back refetched the whole image. Only the setState is
@@ -103,12 +109,19 @@ export const JoyImage = React.memo((props: {
 
     const shareImage = React.useCallback(async () => {
         if (!uri) return;
+        const ext = (src.split('.').pop() ?? 'webp').toLowerCase();
+        const file = `${cacheDirectory}joy-img-${Date.now()}.${ext}`;
         try {
-            const ext = (src.split('.').pop() ?? 'webp').toLowerCase();
-            const file = `${cacheDirectory}joy-img-${Date.now()}.${ext}`;
-            await writeAsStringAsync(file, uri.split(',')[1], { encoding: EncodingType.Base64 });
-            await Sharing.shareAsync(file, { mimeType: joyImgMime(src) });
-            void deleteAsync(file, { idempotent: true });
+            // The cache copy is removed in a finally, awaited, and a cleanup
+            // failure is logged rather than escaping — a dismissed share sheet
+            // used to leave a file per attempt and a rejected delete surfaced
+            // as an unhandled rejection (#225).
+            await withTempExport({
+                write: () => writeAsStringAsync(file, uri.split(',')[1], { encoding: EncodingType.Base64 }),
+                share: () => Sharing.shareAsync(file, { mimeType: joyImgMime(src) }),
+                remove: () => deleteAsync(file, { idempotent: true }),
+                onCleanupError: logError,
+            });
         } catch {
             AppModal.alert(t('common.error'), t('errors.operationFailed'));
         }

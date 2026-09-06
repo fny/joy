@@ -15,6 +15,7 @@ import { GitFileStatus } from '@/sync/gitStatusFiles';
 import { layout } from '@/components/layout';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { diffSignature, rowsByPath } from './allFilesDiffSignature';
 
 interface AllFilesDiffViewProps {
     /** Show ONLY this file's diff (one-at-a-time mode). Absent → all files. */
@@ -38,6 +39,29 @@ type FileDiffResult = {
     error: string | null;
 };
 
+/** Same file row (by value — status rows are rebuilt on every refresh) and
+ *  same diff content (or same error). */
+function sameDiffResult(a: FileDiffResult, b: FileDiffResult): boolean {
+    const fa = a.file;
+    const fb = b.file;
+    if (fa.fullPath !== fb.fullPath || fa.displayPath !== fb.displayPath || fa.status !== fb.status
+        || fa.isStaged !== fb.isStaged || fa.binary !== fb.binary || fa.oldPath !== fb.oldPath || fa.conflict !== fb.conflict) return false;
+    const la = fa.lines;
+    const lb = fb.lines;
+    if (la === 'unavailable' || lb === 'unavailable') {
+        if (la !== lb) return false;
+    } else if (la.added !== lb.added || la.removed !== lb.removed) return false;
+    if (a.error !== b.error) return false;
+    if (a.content === null || b.content === null) return a.content === b.content;
+    if (a.content.kind !== b.content.kind) return false;
+    switch (a.content.kind) {
+        case 'patch': return a.content.patch === (b.content as { patch: string }).patch;
+        case 'newFile': return a.content.contents === (b.content as { contents: string }).contents;
+        case 'image': return a.content.path === (b.content as { path: string }).path;
+        case 'binary': return true;
+    }
+}
+
 /**
  * Loads all diffs in parallel, then renders them in a single ScrollView.
  * Shows a global loading spinner until all diffs are fetched to prevent layout jumps.
@@ -55,6 +79,24 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     const [diffStyle, setDiffStyle] = useSettingMutable('diffStyle');
     const scrollRef = React.useRef<ScrollView>(null);
     const fileOffsets = React.useRef<Map<string, number>>(new Map());
+
+    // Every status row per identity path (staged + unstaged): the diff's
+    // identity must see BOTH portions, not just the first-listed row (#199).
+    const statusRowsByPath = React.useMemo(
+        () => rowsByPath(gitStatusFiles ? [...gitStatusFiles.stagedFiles, ...gitStatusFiles.unstagedFiles] : []),
+        [gitStatusFiles],
+    );
+    const statusRowsByPathRef = React.useRef(statusRowsByPath);
+    statusRowsByPathRef.current = statusRowsByPath;
+    // Repository-change revision: the store publishes a status list only when
+    // it differs from the last one, so a new reference is a real change to the
+    // working tree. It is part of every diff signature (#199).
+    const listRevision = React.useRef(0);
+    const lastList = React.useRef(gitStatusFiles);
+    if (lastList.current !== gitStatusFiles) {
+        lastList.current = gitStatusFiles;
+        listRevision.current += 1;
+    }
 
     // Flatten and deduplicate files
     const files = React.useMemo(() => {
@@ -83,10 +125,19 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     );
     const resultsMap = resultsState.session === sessionId ? resultsState.map : EMPTY_RESULTS;
     const hasLoadedOnce = resultsState.session === sessionId && resultsState.loaded;
-    // Signature of the last fetched version per fullPath. If the signature
-    // (status + linesAdded + linesRemoved + isStaged) hasn't changed, the diff
-    // for that file doesn't need to be re-fetched.
+    // Signature of the last SUCCESSFULLY fetched version per fullPath (see
+    // allFilesDiffSignature). If it hasn't changed, the diff for that file
+    // doesn't need to be re-fetched. A failed read records nothing, so the
+    // next effect run (a repository change, or Retry) fetches it again — the
+    // signature used to be saved before the request, which cached the failure
+    // as a fetched version until remount (#200).
     const fetchedSignatures = React.useRef<Map<string, string>>(new Map());
+    // Bumped by the Retry action of a failed section; an effect dependency.
+    const [retryTick, setRetryTick] = React.useState(0);
+    const retryPath = React.useCallback((path: string) => {
+        fetchedSignatures.current.delete(path);
+        setRetryTick((n) => n + 1);
+    }, []);
     const inFlight = React.useRef<Set<string>>(new Set());
     /** The current file list, read when a fetch completes (#91). */
     const filesRef = React.useRef(files);
@@ -128,7 +179,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     }
 
     const fileSignature = (f: GitFileStatus) =>
-        `${f.status}|${f.isStaged ? 1 : 0}|${f.lines === 'unavailable' ? 'u' : `${f.lines.added}/${f.lines.removed}`}`;
+        diffSignature(statusRowsByPathRef.current.get(f.fullPath) ?? [f], listRevision.current);
 
     React.useEffect(() => {
         if (files.length === 0) {
@@ -244,13 +295,22 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
             const current = filesRef.current.find((f) => f.fullPath === path);
             if (!current) return; // removed while fetching
             if (fileSignature(current) !== sig) { void fetchDiffFor(current); return; } // changed while fetching
-            fetchedSignatures.current.set(path, sig);
-            setResultsMap((prev) => { const next = new Map(prev); next.set(path, result); return next; });
+            // Only a successful read is a fetched version (#200).
+            if (result.error === null) fetchedSignatures.current.set(path, sig);
+            setResultsMap((prev) => {
+                // Identical content keeps the previous result object so the
+                // section does not re-render for a no-op refresh.
+                const previous = prev.get(path);
+                if (previous && sameDiffResult(previous, result)) return prev;
+                const next = new Map(prev);
+                next.set(path, result);
+                return next;
+            });
             setHasLoadedOnce(true);
         };
         for (const file of toFetch) void fetchDiffFor(file);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [sessionId, files]);
+    }, [sessionId, files, retryTick]);
 
     // Render in deterministic file order (same sort as `files`).
     const results = React.useMemo<FileDiffResult[]>(() => {
@@ -352,6 +412,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                             diffStyle={diffStyle}
                             isHighlighted={scrollToFile === result.file.fullPath}
                             onLayout={(y) => fileOffsets.current.set(result.file.fullPath, y)}
+                            onRetry={retryPath}
                         />
                     ))}
                 </ScrollView>
@@ -390,12 +451,15 @@ const FileDiffSection = React.memo(function FileDiffSection({
     diffStyle,
     isHighlighted,
     onLayout,
+    onRetry,
 }: {
     sessionId: string;
     result: FileDiffResult;
     diffStyle: 'unified' | 'split';
     isHighlighted: boolean;
     onLayout: (y: number) => void;
+    /** Fetch this file's diff again after a failed read (#200). */
+    onRetry: (path: string) => void;
 }) {
     const { theme } = useUnistyles();
     const { file, content, error } = result;
@@ -465,6 +529,13 @@ const FileDiffSection = React.memo(function FileDiffSection({
                 error ? (
                     <View style={styles.sectionMessage}>
                         <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{error}</Text>
+                        <Pressable
+                            onPress={() => onRetry(file.fullPath)}
+                            accessibilityRole="button"
+                            style={({ pressed }) => [styles.retryButton, { borderColor: theme.colors.divider, opacity: pressed ? 0.7 : 1 }]}
+                        >
+                            <Text style={{ color: theme.colors.textLink, fontSize: 13, ...Typography.default('semiBold') }}>{t('common.retry')}</Text>
+                        </Pressable>
                     </View>
                 ) : isImage && content?.kind === 'image' ? (
                     <View style={{ padding: 12 }}>
@@ -587,5 +658,12 @@ const styles = StyleSheet.create({
         paddingVertical: 24,
         alignItems: 'center',
         justifyContent: 'center',
+        gap: 12,
+    },
+    retryButton: {
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 6,
+        borderWidth: 1,
     },
 });

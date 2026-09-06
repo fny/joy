@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { withTempExport } from './shareTempFile';
 
 /**
  * Save a file the viewer has in memory to the user's device.
@@ -31,15 +32,20 @@ export async function downloadFile(fileName: string, data: { utf8?: string; base
         }
         return;
     }
-    const { cacheDirectory, writeAsStringAsync, EncodingType } = require('expo-file-system/legacy');
+    const { cacheDirectory, writeAsStringAsync, deleteAsync, EncodingType } = require('expo-file-system/legacy');
     const Sharing = require('expo-sharing');
     // Sanitize: the share target sees this name; path separators would break the write.
     const safeName = fileName.replace(/[/\\]/g, '_') || 'file';
     const uri = `${cacheDirectory}${Date.now()}-${safeName}`;
-    if (data.base64 != null) {
-        await writeAsStringAsync(uri, data.base64, { encoding: EncodingType.Base64 });
-    } else {
-        await writeAsStringAsync(uri, data.utf8 ?? '', { encoding: EncodingType.UTF8 });
-    }
-    await Sharing.shareAsync(uri);
+    // The export is a TEMPORARY copy: every download used to leave its
+    // timestamped file in the cache directory forever (#430). withTempExport
+    // removes it once the share sheet closes, whether the share succeeded or not.
+    await withTempExport({
+        write: () => (data.base64 != null
+            ? writeAsStringAsync(uri, data.base64, { encoding: EncodingType.Base64 })
+            : writeAsStringAsync(uri, data.utf8 ?? '', { encoding: EncodingType.UTF8 })),
+        share: () => Sharing.shareAsync(uri),
+        remove: () => deleteAsync(uri, { idempotent: true }),
+        onCleanupError: (e) => console.warn('[downloadFile] temporary export not removed:', e),
+    });
 }

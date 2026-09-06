@@ -139,10 +139,22 @@ export function getHardcodedModelModes(flavor: AgentFlavor, _translate: Translat
     return getClaudeModelModes();
 }
 
+/** `options` plus a bare entry for `key` when no option carries it. */
+function ensureModelOption(options: ModelMode[], key: string | null | undefined): ModelMode[] {
+    if (!key || options.some((option) => option.key === key)) return options;
+    const entry: ModelMode = { key, name: key, description: null };
+    // Right after the 'default' entry when there is one, else first.
+    const defaultIndex = options.findIndex((option) => option.key === 'default');
+    return defaultIndex === -1
+        ? [entry, ...options]
+        : [...options.slice(0, defaultIndex + 1), entry, ...options.slice(defaultIndex + 1)];
+}
+
 export function getAvailableModels(
     flavor: AgentFlavor,
     metadata: Metadata | null | undefined,
     translate: Translate,
+    currentModelKey?: string | null,
 ): ModelMode[] {
     const metadataModels = mapMetadataOptions(metadata?.models);
     if (metadataModels.length > 0) {
@@ -151,7 +163,15 @@ export function getAvailableModels(
         }
         return metadataModels;
     }
-    return getHardcodedModelModes(flavor, translate);
+    // Without a metadata catalog the fallback list must stay consistent with
+    // getCodeAgentDefaults: the configured default ('fable', 'gpt-5.6-sol')
+    // was absent, so resolveCurrentOption returned null for the app's own
+    // default and, once another model was picked, the default could not be
+    // selected again (#267). The current key is kept for the same reason.
+    return ensureModelOption(
+        ensureModelOption(getHardcodedModelModes(flavor, translate), getDefaultModelKey(flavor)),
+        currentModelKey,
+    );
 }
 
 export function getAvailablePermissionModes(

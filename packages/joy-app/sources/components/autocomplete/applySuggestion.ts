@@ -52,7 +52,14 @@ export function applySuggestion(
     }
     
     const newText = beforeWord + suggestionToInsert + afterWord;
-    const newCursorPosition = activeWord.offset + suggestionToInsert.length;
+    let newCursorPosition = activeWord.offset + suggestionToInsert.length;
+    // When the separator already existed ('@fo| rest' → '@foo rest') the
+    // caret must land AFTER it, exactly as it does when a space is inserted:
+    // left before the space, the next keystroke extended the completed token
+    // ('@foox rest') instead of starting new text (#246).
+    if (addSpace && afterWord.length > 0 && afterWord[0] === ' ') {
+        newCursorPosition += 1;
+    }
     
     return {
         text: newText,

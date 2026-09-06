@@ -44,30 +44,47 @@ export async function fileToAttachmentPreview(
     mimeType: string;
     thumbhash?: string;
 } | null> {
+    // The object URL lives OUTSIDE the try so the failure path can revoke it:
+    // a failed/timed-out image load or a rejected thumbhash used to return
+    // null and leave a file-backed blob URL the caller never received and so
+    // could never clean up (#440).
+    let uri: string | null = null;
     try {
-        const uri = URL.createObjectURL(file);
+        uri = URL.createObjectURL(file);
+        const objectUrl = uri;
 
         // Get dimensions by loading as an Image element
         const { width, height } = await new Promise<{ width: number; height: number }>((resolve, reject) => {
             const img = new Image();
-            const timeout = setTimeout(() => reject(new Error('timeout')), 5000);
-            img.onload = () => {
+            // Abandoning a load clears its handlers and timer, so a late
+            // onload/onerror after a timeout cannot fire into a settled promise.
+            const abandon = () => {
                 clearTimeout(timeout);
+                img.onload = null;
+                img.onerror = null;
+            };
+            const timeout = setTimeout(() => {
+                abandon();
+                img.src = '';
+                reject(new Error('timeout'));
+            }, 5000);
+            img.onload = () => {
+                abandon();
                 resolve({ width: img.naturalWidth, height: img.naturalHeight });
             };
             img.onerror = () => {
-                clearTimeout(timeout);
+                abandon();
                 reject(new Error('load error'));
             };
-            img.src = uri;
+            img.src = objectUrl;
         });
 
         const thumbhash = (width > 0 && height > 0)
-            ? await generateThumbhash(uri, width, height)
+            ? await generateThumbhash(objectUrl, width, height)
             : undefined;
 
         return {
-            uri,
+            uri: objectUrl,
             width,
             height,
             size: file.size,
@@ -76,6 +93,9 @@ export async function fileToAttachmentPreview(
             thumbhash,
         };
     } catch {
+        if (uri) {
+            try { URL.revokeObjectURL(uri); } catch { /* already revoked */ }
+        }
         return null;
     }
 }

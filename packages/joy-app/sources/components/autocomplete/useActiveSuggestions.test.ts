@@ -104,3 +104,37 @@ describe('reduceSuggestions', () => {
         expect(reduceSuggestions(prev, [item('y'), item('x')], { clampSelection: false, autoSelectFirst: true }).selected).toBe(0);
     });
 });
+
+// #248: a handler swap (e.g. another session's handler) must re-issue the
+// current query to the NEW handler, and the old handler's late result must not
+// land. The hook does exactly this sequence in its two effects: the worker
+// effect stops the old worker + retires, builds a new one, and the query effect
+// hands it the unchanged query.
+describe('useActiveSuggestions — handler replacement (#248)', () => {
+    it('re-queries the new handler and drops the superseded handler\'s result', async () => {
+        const requestKey = key();
+        const a = deferredHandler();
+        const b = deferredHandler();
+        const commit = vi.fn();
+
+        const workerA = createSuggestionSync(requestKey, a.handler, commit);
+        workerA.setValue('/review');
+        expect(a.calls).toEqual(['/review']);
+
+        // Handler replaced without a query change.
+        workerA.stop();
+        retire(requestKey);
+        const workerB = createSuggestionSync(requestKey, b.handler, commit);
+        retire(requestKey);
+        workerB.setValue('/review');
+        expect(b.calls).toEqual(['/review']);
+
+        a.resolve('/review', [item('from-a')]);
+        await flush();
+        expect(commit).not.toHaveBeenCalled();
+        b.resolve('/review', [item('from-b')]);
+        await flush();
+        expect(commit).toHaveBeenCalledTimes(1);
+        expect(commit).toHaveBeenCalledWith([item('from-b')]);
+    });
+});

@@ -2,6 +2,7 @@ import * as React from 'react';
 import { Text, TextInput, Platform, View, NativeSyntheticEvent, TextInputKeyPressEventData, TextInputSelectionChangeEventData } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
+import { isTextPlusOneNewline } from './newlineSwallow';
 
 export type SupportedKey = 'Enter' | 'Escape' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight' | 'Tab';
 
@@ -127,11 +128,20 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
         }
     }, [editable]);
 
+    // A return key the handler consumed (autocomplete applied a suggestion)
+    // still inserts "\n" natively — preventDefault is a no-op on native — and
+    // the following onChangeText('/co\n') overwrote the applied suggestion
+    // (#27). Remember the text as it was at the key press; a change that is
+    // exactly that text plus one newline, arriving right after, is swallowed
+    // and the handler's text is re-asserted through `value`.
+    const swallowNewlineRef = React.useRef<{ base: string; until: number } | null>(null);
+
     const handleKeyPress = React.useCallback((e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
         if (!editable || !onKeyPress) return;
 
         const nativeEvent = e.nativeEvent;
         const key = nativeEvent.key;
+        const textBeforeKey = latestTextRef.current;
         
         // Map native key names to our normalized format
         let normalizedKey: SupportedKey | null = null;
@@ -173,11 +183,25 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
             const handled = onKeyPress(keyEvent);
             if (handled) {
                 e.preventDefault();
+                if (normalizedKey === 'Enter' && Platform.OS !== 'web') {
+                    swallowNewlineRef.current = { base: textBeforeKey, until: Date.now() + 300 };
+                }
             }
         }
     }, [editable, onKeyPress]);
 
     const handleTextChange = React.useCallback((text: string) => {
+        const swallow = swallowNewlineRef.current;
+        if (swallow) {
+            swallowNewlineRef.current = null;
+            if (Date.now() <= swallow.until && isTextPlusOneNewline(swallow.base, text)) {
+                // The native newline from a handled Enter (#27): keep the
+                // handler's text and push it back down through `value`.
+                pendingSelectionRef.current = selectionRef.current;
+                bumpSelectionTick();
+                return;
+            }
+        }
         latestTextRef.current = text;
         if (!isControlledRef.current) {
             setUncontrolledText(text);
