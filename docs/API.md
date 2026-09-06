@@ -345,7 +345,12 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   dropped and the service started against `~/.joy`, #499).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
   `/status`, or the daemon.json pid whose command line and start time match;
-  a stale record is removed without signalling (#495). The single-daemon lock
+  a stale record is removed without signalling (#495). A daemon the installed
+  service owns (the unit's `MainPID` / the launchd job's PID is that pid) is
+  stopped through `systemctl --user stop` / `launchctl unload` — a direct
+  SIGTERM was undone by `Restart=always` / `KeepAlive` three seconds later
+  while `stop` reported success (#502); a failing supervisor stop is exit 1
+  and nothing is signalled. Only a detached daemon gets the signal directly. The single-daemon lock
   is an SQLite `BEGIN IMMEDIATE` on `daemon.lock.db` — OS-backed, released
   when the process dies, nothing to reclaim; `daemon.lock` is an informational
   pidfile (#589). Node ≥ 22.13.
