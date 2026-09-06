@@ -379,6 +379,23 @@ export async function handleGetDirectoryTree(workingDirectory: string, data: Get
   }
 }
 
+/** The child environment for a jailed tool run: the daemon's env minus every
+ *  variable through which the TOOL reads configuration of its own. The argv
+ *  jail below only sees what the caller passed; rg also honours
+ *  RIPGREP_CONFIG_PATH, and a user config holding `--follow` made a jailed
+ *  `rg pattern .` walk a symlink out of the tree and return an outside file
+ *  (#537 residual). difftastic reads DFT_* the same way. Inherited config is
+ *  therefore dropped for the child (the forced `--no-config` on rg is the
+ *  second belt — see handleRipgrep). */
+export function jailedToolEnv(extraEnv?: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k === "RIPGREP_CONFIG_PATH" || k.startsWith("DFT_")) continue;
+    env[k] = v;
+  }
+  return extraEnv ? { ...env, ...extraEnv } : env;
+}
+
 // Spawn an external tool, capture stdout/stderr, return result. Used by
 // ripgrep and difftastic. ANY exit code counts
 // as success — the app inspects exitCode itself. Only spawn errors (ENOENT,
@@ -389,7 +406,7 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       stdio: ["pipe", "pipe", "pipe"],
       cwd,
       windowsHide: true,
-      env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+      env: jailedToolEnv(extraEnv),
     });
     // Nothing is ever fed to the tool: close stdin so a tool that would read
     // it (rg with no path operand) exits instead of waiting forever.
@@ -452,6 +469,8 @@ const RG_SPEC: ArgvSpec = {
   // supplied it (then every positional is a path). `--files` has no pattern.
   positionals: (ps) => ps.length ? { paths: ps } : { paths: [] },
 };
+/** Prepended to every jailed rg invocation — see handleRipgrep (#537). */
+export const RG_FORCED_ARGS: readonly string[] = ["--no-config", "--no-follow"];
 const DIFFT_SPEC: ArgvSpec = {
   flags: new Set(["--skip-unchanged", "--check-only", "--ignore-comments", "--strip-cr", "--exit-code", "--missing-as-empty", "--sort-paths", "--syntax-highlight", "--no-syntax-highlight"]),
   valued: new Map<string, ((v: string) => boolean) | null>([
@@ -529,7 +548,12 @@ export async function handleRipgrep(workingDirectory: string, data: RipgrepReque
   const jailed = jailToolArgs("rg", data.args, cwd ?? workingDirectory, extraRoots);
   if (!jailed.ok) return { success: false, error: jailed.error };
   try {
-    const result = await runTool(RG_BIN, jailed.args, cwd ?? workingDirectory);
+    // Forced, and FIRST (a caller's `--` ends option parsing, so anything
+    // appended after it would be read as a path): `--no-config` so no
+    // RIPGREP_CONFIG_PATH file can add options the jail refused, `--no-follow`
+    // so no config, alias or default can make the walk cross a symlink out of
+    // the jail (#537 residual). Nothing in RG_SPEC can turn either back on.
+    const result = await runTool(RG_BIN, [...RG_FORCED_ARGS, ...jailed.args], cwd ?? workingDirectory);
     return { success: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "Failed to run ripgrep" };

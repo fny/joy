@@ -26,13 +26,21 @@
 //   - `preserveMode` (default true) carries the existing file's permission
 //     bits onto the replacement, since the new inode would otherwise get the
 //     umask default (an executable script must stay executable).
+//   - A SYMLINKED destination is written THROUGH (#527 residual): the temp file
+//     is created beside the link's real target and renamed over the target, so
+//     the link itself survives and keeps pointing where the user put it. The
+//     first version renamed over `path`: rename(2) replaces the LINK with a
+//     regular file (a `~/.claude/settings.json → dotfiles/…` link was silently
+//     severed), and link(2) on a symlink hard-links the symlink itself, so the
+//     `.joy-bak` became a second link to the now-overwritten target instead of a
+//     copy of the previous contents. Backups of a symlinked file are COPIES.
 //
 // Every fs call goes through the DEFAULT `fs` export object (not named
 // imports) so tests can inject failures with vi.spyOn(fs, "writeSync") etc.
 // Node's ESM named imports of builtins are snapshots and cannot be spied.
 
 import fs from "node:fs";
-import { dirname, basename, join } from "node:path";
+import { dirname, basename, join, resolve } from "node:path";
 
 export type AtomicWritePhase = "mkdir" | "open" | "write" | "fsync" | "backup" | "rename" | "cleanup";
 
@@ -105,6 +113,26 @@ function existingMode(path: string): number | null {
   try { return fs.statSync(path).mode & 0o7777; } catch { return null; }
 }
 
+/** Where the bytes must land when `path` is (a chain of) symlink(s): the
+ *  final non-link path, resolved link by link so a DANGLING link still
+ *  resolves to the place it points at (writing there creates the target and
+ *  makes the link valid — the semantics of writing through a link). A plain
+ *  file or a missing path resolves to itself. Bounded so a link loop cannot
+ *  spin forever (the kernel's own limit is 40). Returns whether any hop was
+ *  a symlink, which decides copy-vs-link for the backup (#527). */
+export function resolveWriteTarget(path: string): { target: string; viaSymlink: boolean } {
+  let cur = path;
+  let viaSymlink = false;
+  for (let hop = 0; hop < 40; hop++) {
+    let st: fs.Stats;
+    try { st = fs.lstatSync(cur); } catch { return { target: cur, viaSymlink }; }
+    if (!st.isSymbolicLink()) return { target: cur, viaSymlink };
+    viaSymlink = true;
+    cur = resolve(dirname(cur), fs.readlinkSync(cur));
+  }
+  return { target: cur, viaSymlink };
+}
+
 /**
  * Synchronous atomic replace. Throws AtomicWriteError (destination untouched,
  * temp removed) on failure; returns whether the backup rotated.
@@ -114,11 +142,13 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, opts: A
   const backupPath = backupPathFor(path, opts.backup);
   const preserveMode = opts.preserveMode ?? true;
 
-  try { fs.mkdirSync(dirname(path), { recursive: true }); }
+  // The path the rename must hit: the real file behind a symlinked `path`.
+  const { target, viaSymlink } = resolveWriteTarget(path);
+  try { fs.mkdirSync(dirname(path), { recursive: true }); if (target !== path) fs.mkdirSync(dirname(target), { recursive: true }); }
   catch (e) { throw new AtomicWriteError("mkdir", path, e); }
 
-  const prevMode = preserveMode ? existingMode(path) : null;
-  const tmp = tmpNameFor(path, "tmp");
+  const prevMode = preserveMode ? existingMode(target) : null;
+  const tmp = tmpNameFor(target, "tmp");
   let fd: number | null = null;
   // Phase 1 — the new contents, complete and durable, beside the destination.
   try {
@@ -142,28 +172,35 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, opts: A
   }
 
   // Phase 2 — stage the previous generation for the backup. Hard link first
-  // (zero copy, shares the inode the rename is about to unlink from `path`),
-  // copy when the filesystem refuses links. The source is `path` as it stands
-  // — always a complete file, because nothing here ever truncates it.
+  // (zero copy, shares the inode the rename is about to unlink from the
+  // target), copy when the filesystem refuses links. The source is the target
+  // as it stands — always a complete file, because nothing here ever
+  // truncates it. A symlinked destination is always COPIED: link(2) does not
+  // follow symlinks, so linking `path` produced a backup that was itself a
+  // link to the file about to change, i.e. no backup at all (#527).
   let stagedBackup: string | null = null;
-  if (backupPath && fs.existsSync(path)) {
-    stagedBackup = tmpNameFor(path, "bak");
+  if (backupPath && fs.existsSync(target)) {
+    stagedBackup = tmpNameFor(backupPath, "bak");
     try {
-      try { fs.linkSync(path, stagedBackup); }
-      catch { fs.copyFileSync(path, stagedBackup); }
+      if (viaSymlink) fs.copyFileSync(target, stagedBackup);
+      else {
+        try { fs.linkSync(target, stagedBackup); }
+        catch { fs.copyFileSync(target, stagedBackup); }
+      }
     } catch (e) {
       rmQuiet(tmp); rmQuiet(stagedBackup);
       throw new AtomicWriteError("backup", path, e);
     }
   }
 
-  // Phase 3 — the single step that touches the destination.
-  try { fs.renameSync(tmp, path); }
+  // Phase 3 — the single step that touches the destination (the REAL target:
+  // renaming over a symlink would replace the link, not the file it names).
+  try { fs.renameSync(tmp, target); }
   catch (e) {
     rmQuiet(tmp); rmQuiet(stagedBackup);
     throw new AtomicWriteError("rename", path, e);
   }
-  fsyncDirQuiet(path);
+  fsyncDirQuiet(target);
 
   // Phase 4 — rotate the staged previous generation into place. The
   // replacement has already succeeded; a failure here leaves the OLDER backup
@@ -190,11 +227,12 @@ export async function writeFileAtomicAsync(path: string, data: string | Uint8Arr
   const backupPath = backupPathFor(path, opts.backup);
   const preserveMode = opts.preserveMode ?? true;
 
-  try { await fsp.mkdir(dirname(path), { recursive: true }); }
+  const { target, viaSymlink } = resolveWriteTarget(path); // write THROUGH a symlink (#527)
+  try { await fsp.mkdir(dirname(path), { recursive: true }); if (target !== path) await fsp.mkdir(dirname(target), { recursive: true }); }
   catch (e) { throw new AtomicWriteError("mkdir", path, e); }
 
-  const prevMode = preserveMode ? existingMode(path) : null;
-  const tmp = tmpNameFor(path, "tmp");
+  const prevMode = preserveMode ? existingMode(target) : null;
+  const tmp = tmpNameFor(target, "tmp");
   let fh = null as fs.promises.FileHandle | null;
   try {
     try { fh = await fsp.open(tmp, "wx", prevMode ?? opts.mode ?? 0o666); }
@@ -213,23 +251,26 @@ export async function writeFileAtomicAsync(path: string, data: string | Uint8Arr
   }
 
   let stagedBackup: string | null = null;
-  if (backupPath && fs.existsSync(path)) {
-    stagedBackup = tmpNameFor(path, "bak");
+  if (backupPath && fs.existsSync(target)) {
+    stagedBackup = tmpNameFor(backupPath, "bak");
     try {
-      try { await fsp.link(path, stagedBackup); }
-      catch { await fsp.copyFile(path, stagedBackup); }
+      if (viaSymlink) await fsp.copyFile(target, stagedBackup); // a link's backup is a copy (#527)
+      else {
+        try { await fsp.link(target, stagedBackup); }
+        catch { await fsp.copyFile(target, stagedBackup); }
+      }
     } catch (e) {
       rmQuiet(tmp); rmQuiet(stagedBackup);
       throw new AtomicWriteError("backup", path, e);
     }
   }
 
-  try { await fsp.rename(tmp, path); }
+  try { await fsp.rename(tmp, target); }
   catch (e) {
     rmQuiet(tmp); rmQuiet(stagedBackup);
     throw new AtomicWriteError("rename", path, e);
   }
-  fsyncDirQuiet(path);
+  fsyncDirQuiet(target);
 
   let backupRotated = false;
   if (stagedBackup && backupPath) {
