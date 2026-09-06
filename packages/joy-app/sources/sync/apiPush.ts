@@ -33,6 +33,21 @@ export class PushApiTimeoutError extends Error {
     }
 }
 
+/** The caller's own signal fired: the call stops at once and is not retried. */
+export class PushApiAbortedError extends Error {
+    constructor(readonly reason?: unknown) {
+        super('Push token request aborted by the caller');
+        this.name = 'AbortError';
+    }
+}
+
+/** Optional cancellation for one push-token call (a screen unmounting, logout,
+ *  the sync engine shutting down). The per-attempt deadline applies whether or
+ *  not a signal is given: it is created inside the helper, never supplied. */
+export interface PushApiOptions {
+    signal?: AbortSignal;
+}
+
 /** How many times one push-token call is tried before it gives up. */
 export const PUSH_API_MAX_ATTEMPTS = 4;
 
@@ -54,25 +69,44 @@ const pushBackoff = createBackoff({
     maxDelay: 4000,
     maxFailureCount: PUSH_API_MAX_ATTEMPTS,
     maxAttempts: PUSH_API_MAX_ATTEMPTS,
-    shouldRetry: (e) => !(e instanceof PushApiError) || e.status === 408 || e.status === 429 || e.status >= 500,
+    shouldRetry: (e) => !(e instanceof PushApiAbortedError)
+        && (!(e instanceof PushApiError) || e.status === 408 || e.status === 429 || e.status >= 500),
     onError: (e) => { console.warn('[push] request failed:', e); },
 });
 
 /**
- * Run one attempt under a deadline. The signal is handed to fetch so the
- * request (and, in browsers, the body read) is actually cancelled; the race
- * guarantees the attempt settles even where the platform ignores the signal.
+ * Run one attempt under a deadline. The deadline signal is created HERE, on a
+ * timer the helper owns, so the bound holds for every caller — a caller that
+ * passes no signal is still cut off at PUSH_API_TIMEOUT_MS. A caller-supplied
+ * signal is combined with it: the moment it fires the attempt is cancelled
+ * and the whole call rejects with PushApiAbortedError (never retried). The
+ * combined signal is handed to fetch so the request (and, in browsers, the
+ * body read) is actually cancelled; the race guarantees the attempt settles
+ * even where the platform ignores the signal.
  */
-async function withDeadline<T>(attempt: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function withDeadline<T>(attempt: (signal: AbortSignal) => Promise<T>, caller?: AbortSignal): Promise<T> {
+    if (caller?.aborted) {
+        throw new PushApiAbortedError(caller.reason);
+    }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), PUSH_API_TIMEOUT_MS);
-    const timedOut = new Promise<never>((_, reject) => {
-        controller.signal.addEventListener('abort', () => reject(new PushApiTimeoutError()), { once: true });
+    let failure: Error | null = null;
+    const timer = setTimeout(() => {
+        failure = new PushApiTimeoutError();
+        controller.abort(failure);
+    }, PUSH_API_TIMEOUT_MS);
+    const onCallerAbort = () => {
+        failure = new PushApiAbortedError(caller?.reason);
+        controller.abort(failure);
+    };
+    caller?.addEventListener('abort', onCallerAbort, { once: true });
+    const cutOff = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener('abort', () => reject(failure ?? new PushApiTimeoutError()), { once: true });
     });
     try {
-        return await Promise.race([attempt(controller.signal), timedOut]);
+        return await Promise.race([attempt(controller.signal), cutOff]);
     } finally {
         clearTimeout(timer);
+        caller?.removeEventListener('abort', onCallerAbort);
         // Nothing may keep reading after the attempt is over.
         controller.abort();
     }
@@ -86,7 +120,7 @@ function headers(credentials: AuthCredentials): Record<string, string> {
     };
 }
 
-export async function registerPushToken(credentials: AuthCredentials, token: string): Promise<void> {
+export async function registerPushToken(credentials: AuthCredentials, token: string, options?: PushApiOptions): Promise<void> {
     const API_ENDPOINT = getServerUrl();
     await pushBackoff(() => withDeadline(async (signal) => {
         const response = await fetch(`${API_ENDPOINT}/joy/v2/push-tokens`, {
@@ -104,10 +138,10 @@ export async function registerPushToken(credentials: AuthCredentials, token: str
         if (!data.success) {
             throw new Error('Failed to register push token');
         }
-    }));
+    }, options?.signal));
 }
 
-export async function fetchPushTokens(credentials: AuthCredentials): Promise<PushToken[]> {
+export async function fetchPushTokens(credentials: AuthCredentials, options?: PushApiOptions): Promise<PushToken[]> {
     const API_ENDPOINT = getServerUrl();
     return pushBackoff(() => withDeadline(async (signal) => {
         const response = await fetch(`${API_ENDPOINT}/joy/v2/push-tokens`, {
@@ -122,10 +156,10 @@ export async function fetchPushTokens(credentials: AuthCredentials): Promise<Pus
 
         const data = await response.json();
         return PushTokenListResponseSchema.parse(data).tokens;
-    }));
+    }, options?.signal));
 }
 
-export async function unregisterPushToken(credentials: AuthCredentials, token: string): Promise<void> {
+export async function unregisterPushToken(credentials: AuthCredentials, token: string, options?: PushApiOptions): Promise<void> {
     const API_ENDPOINT = getServerUrl();
     await pushBackoff(() => withDeadline(async (signal) => {
         const response = await fetch(`${API_ENDPOINT}/joy/v2/push-tokens/${encodeURIComponent(token)}`, {
@@ -148,5 +182,5 @@ export async function unregisterPushToken(credentials: AuthCredentials, token: s
         if (!data.success) {
             throw new Error('Failed to unregister push token');
         }
-    }));
+    }, options?.signal));
 }
