@@ -564,6 +564,13 @@ app.
   in three shards. In flight: #130 round three (archive repair, unknown
   budget reads). **13 open.**
 
+- 2026-09-10 (early) — pushed 54fc0e1d: #130 round three (archived-card
+  repair on boot, unknown budget reads defer publication), #560 insertion-cap
+  cache counts covered inserts, #128 round five (runs recorded in one
+  sorted-merge pass with one publication; stored rows never recorded as
+  gaps). Closed #519. In flight: #495 legacy records unverifiable, #625
+  foreign prompts on fresh cards. **12 open.**
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
