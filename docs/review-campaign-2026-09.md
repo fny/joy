@@ -304,6 +304,13 @@ app.
   app residual rounds landed (475e5976 70090dd2 5d816672). C3 residuals on
   claude/session.ts wait for the C1 ledger merge.
 
+- 2026-09-08 (status) — 374 issues open (from 605). Astra's C3 review: 39
+  fixed, 18 residuals; the non-session ones landed (bf92eb57), the
+  session-file ones wait for the ledger. C1 ledger branch at 7 phase
+  commits (store, Claude queue + receipts, outbox scheduler, Codex/OpenCode
+  inbound + checkpoints, window-record execution fields + spawn intents +
+  handoff jobs, pi/agy queues, one-time import).
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
