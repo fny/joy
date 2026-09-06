@@ -2,6 +2,7 @@ import { test, expect, afterEach, vi } from "vitest";
 import tweetnacl from "tweetnacl";
 import { RelaySession, RelayClient, encodeToolCallEnd, joyMessageFrom, joyMessageFromLabel, encryptWire, decryptWire } from "./relay";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, v2SessionIdFor } from "./v2Card";
+import { CommandRegistry } from "../domain/commands";
 
 // RelaySession is a local card holder: every metadata write merges into its
 // snapshot and publishes the WHOLE card through the v2 publisher the nucleus
@@ -439,5 +440,66 @@ test("a machine with no row yet is created with the full POST (control)", async 
     expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(true);
     expect(relay.writes.map((w) => w.method)).toEqual(["POST"]);
     expect(relay.row.metadata.displayName).toBeUndefined();
+  } finally { vi.unstubAllGlobals(); }
+});
+
+// #107 follow-up: `capabilities.spawnSpecSealed` told the app to seal spawn
+// specs regardless of whether the nucleus lane held the machine key to open
+// them — a keyless lane then failed every spawn `bad_spawn_spec`. The
+// advertisement now follows the lane's key state (setSpawnSpecSealed), and a
+// change in it republishes the record exactly once via the dirty-tracked push.
+test("machine record advertises NO sealed capability while the lane has no machine key (a stale caller flag is dropped too)", async () => {
+  const key = new Uint8Array(32).fill(9);
+  const relay = fakeMachineRelay(key);
+  vi.stubGlobal("fetch", relay.fetchImpl);
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(client.capabilities()).toEqual({});
+    expect(await client.getOrCreateMachine({ homeDir: "/h", capabilities: { spawnSpecSealed: true, other: 1 } })).toBe(true);
+    expect(relay.row.metadata.capabilities).toEqual({ other: 1 });
+    expect((relay.row.metadata.capabilities as Record<string, unknown>).spawnSpecSealed).toBeUndefined();
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("machine record advertises spawnSpecSealed: true once the lane reports it holds the machine key", async () => {
+  const key = new Uint8Array(32).fill(9);
+  const relay = fakeMachineRelay(key);
+  vi.stubGlobal("fetch", relay.fetchImpl);
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(client.setSpawnSpecSealed(true)).toBe(true);
+    expect(client.capabilities()).toEqual({ spawnSpecSealed: true });
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(true);
+    expect(relay.row.metadata.capabilities).toEqual({ spawnSpecSealed: true });
+    // …and losing it again publishes the field absent, not a lingering true.
+    expect(client.setSpawnSpecSealed(false)).toBe(true);
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(true);
+    expect(relay.row.metadata.capabilities).toEqual({});
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("a machine key arriving after the first publish republishes the record exactly once, with spawnSpecSealed: true", async () => {
+  const key = new Uint8Array(32).fill(9);
+  const relay = fakeMachineRelay(key);
+  vi.stubGlobal("fetch", relay.fetchImpl);
+  try {
+    const client = new RelayClient(relay.creds as any);
+    const registry = new CommandRegistry({ relayClient: client, baseMachineMetadata: { homeDir: "/h" }, homeDir: "/nonexistent-home-107" });
+    await registry.pushMachineIfChanged();
+    expect(relay.writes).toHaveLength(1);
+    expect(relay.row.metadata.capabilities).toEqual({});
+    await registry.pushMachineIfChanged(); // nothing changed → no write
+    expect(relay.writes).toHaveLength(1);
+
+    expect(client.setSpawnSpecSealed(true)).toBe(true);
+    await registry.pushMachineIfChanged();
+    expect(relay.writes).toHaveLength(2);
+    expect(relay.row.metadata.capabilities).toEqual({ spawnSpecSealed: true });
+    expect(relay.row.metadata.homeDir).toBe("/h");
+
+    // A repeat report of the same state is not a change and pushes nothing.
+    expect(client.setSpawnSpecSealed(true)).toBe(false);
+    await registry.pushMachineIfChanged();
+    expect(relay.writes).toHaveLength(2);
   } finally { vi.unstubAllGlobals(); }
 });
