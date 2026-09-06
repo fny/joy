@@ -665,6 +665,63 @@ test("pane gate (e8f8b2cc): a reorder while the head waits at prepare re-plans �
   expect(prepared[prepared.length - 1]).toBe("second");
 });
 
+test("observation fencing (e8f8b2cc): a timed-out attempt's late echo and turn end are history on THAT attempt — the edited, re-submitted replacement moves only on its own evidence", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const row = accept("s1", "old");
+  await settle();
+  const old = d.lastSubmit;
+  old.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  expect(stateOf(row.id)).toBe("queued");
+  expect(coord.edit(row.id, "replacement")).toBe(true);
+  await clock.advance(100);
+  const next = d.lastSubmit;
+  expect(next.attempt.attemptId).not.toBe(old.attempt.attemptId);
+  expect(next.cmd).toMatchObject({ text: "replacement", payloadVersion: 2 });
+  expect(stateOf(row.id)).toBe("submitting");
+  // Attempt 1's evidence arrives while attempt 2 awaits its verdict.
+  d.emit({ kind: "echo", runtimeRef: old.attempt.runtimeRef });
+  expect(stateOf(row.id)).toBe("submitting");
+  d.emit({ kind: "turn_ended", runtimeRef: old.attempt.runtimeRef, status: "completed" });
+  expect(stateOf(row.id)).toBe("submitting");
+  expect(ledger.getAttempt(next.attempt.attemptId)?.state).toBe("submitting");
+  // …and is retained on attempt 1 as history.
+  const history = ledger.listObservations("s1").filter((o) => o.attemptId === old.attempt.attemptId).map((o) => o.kind);
+  expect(history).toEqual(expect.arrayContaining(["echo", "turn_ended"]));
+  // The replacement runs and completes on ITS evidence only.
+  next.settle.resolve({ kind: "accepted" });
+  await settle();
+  expect(stateOf(row.id)).toBe("accepted");
+  d.emit({ kind: "echo", runtimeRef: next.attempt.runtimeRef });
+  expect(stateOf(row.id)).toBe("running");
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(row.id)).toBe("completed");
+  expect(ledger.getAttempt(next.attempt.attemptId)?.state).toBe("done");
+});
+
+test("observation fencing (e8f8b2cc): a late echo of the pre-edit attempt does not run the edited queued row; without an edit the same late echo still runs it (the timed-out submission landed)", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const edited = accept("s1", "old text");
+  await settle();
+  const first = d.lastSubmit;
+  first.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 60_000 });
+  await settle();
+  expect(coord.edit(edited.id, "new text")).toBe(true);
+  d.emit({ kind: "echo", runtimeRef: first.attempt.runtimeRef });
+  expect(stateOf(edited.id)).toBe("queued"); // the runtime ran the OLD text: not this payload's delivery
+  expect(ledger.getAttempt(first.attempt.attemptId)?.payloadVersion).toBe(1);
+  coord.cancel(edited.id);
+  const plain = accept("s1", "unchanged");
+  await clock.advance(60_000);
+  const second = d.lastSubmit;
+  expect(second.cmd.id).toBe(plain.id);
+  second.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 60_000 });
+  await settle();
+  expect(stateOf(plain.id)).toBe("queued");
+  d.emit({ kind: "echo", runtimeRef: second.attempt.runtimeRef });
+  expect(stateOf(plain.id)).toBe("running"); // same payload, newest attempt: it landed after all
+});
+
 test("waitFor resolves on the named state, immediately when already there, and with the current state on timeout", async () => {
   const d = session("s1");
   const c = accept("s1", "x");

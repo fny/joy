@@ -962,14 +962,16 @@ export class SessionCoordinator {
         const attempt = this.ledger.matchAttemptByRef(sid, o.runtimeRef) ?? this.ledger.attemptByRef(sid, o.runtimeRef);
         if (!attempt) { this.#recordFree(actor, "echo", o.runtimeRef, { runtimeTurnId: o.runtimeTurnId ?? null }); return; }
         const cmd = this.ledger.getCommand(attempt.commandId);
+        const owns = !!cmd && this.#ownsCommand(cmd, attempt);
         const receipts: NewReceipt[] = [];
         if (o.receiptKind) receipts.push({ kind: o.receiptKind, ref: o.runtimeRef, commandId: attempt.commandId, attemptId: attempt.id });
         if (cmd?.seq != null) receipts.push({ kind: "seq", ref: String(cmd.seq), commandId: attempt.commandId, attemptId: attempt.id });
-        const t = cmd ? nextState(cmd.state, { type: "evidence" }) : null;
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "echo", ref: o.runtimeRef, payload: { runtimeTurnId: o.runtimeTurnId ?? null } }, {
+        const t = cmd && owns ? nextState(cmd.state, { type: "evidence" }) : null;
+        if (cmd && !owns) this.#logLateEvidence(sid, "echo", cmd, attempt);
+        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "echo", ref: o.runtimeRef, payload: { runtimeTurnId: o.runtimeTurnId ?? null, ...(owns ? {} : { late: true }) } }, {
           receipts,
           ...(attempt.state === "submitting" || attempt.state === "accepted" || attempt.state === "unknown" ? { attempt: { id: attempt.id, outcome: "done", runtimeTurnId: o.runtimeTurnId ?? undefined } } : {}),
-          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason } } : {}),
+          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: attempt.id } } : {}),
         });
         if (o.runtimeTurnId && attempt.runtimeTurnId !== o.runtimeTurnId) this.ledger.setAttemptTurn(attempt.id, o.runtimeTurnId);
         if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId)) actor.foreignTurn = null;
@@ -992,9 +994,11 @@ export class SessionCoordinator {
           return;
         }
         const cmd = this.ledger.getCommand(attempt.commandId);
-        const t = cmd ? nextState(cmd.state, { type: "evidence" }) : null;
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_started", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null } }, {
-          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason } } : {}),
+        const owns = !!cmd && this.#ownsCommand(cmd, attempt);
+        const t = cmd && owns ? nextState(cmd.state, { type: "evidence" }) : null;
+        if (cmd && !owns) this.#logLateEvidence(sid, "turn_started", cmd, attempt);
+        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_started", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, ...(owns ? {} : { late: true }) } }, {
+          ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: attempt.id } } : {}),
         });
         if (o.runtimeTurnId && attempt.runtimeTurnId !== o.runtimeTurnId) this.ledger.setAttemptTurn(attempt.id, o.runtimeTurnId);
         const after = cmd ? this.#emitCommand(cmd.id) : null;
@@ -1019,11 +1023,19 @@ export class SessionCoordinator {
         }
         for (const attempt of attempts) {
           const cmd = this.ledger.getCommand(attempt.commandId);
-          const t = cmd ? nextState(cmd.state, { type: "turn_ended", status: o.status }) : null;
-          this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_ended", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status, detail: o.detail ?? null } }, {
-            ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason }, attempt: { id: attempt.id, outcome: t.to === "completed" ? "done" : "superseded" } } : {}),
+          const owns = !!cmd && this.#ownsCommand(cmd, attempt);
+          const t = cmd && owns ? nextState(cmd.state, { type: "turn_ended", status: o.status }) : null;
+          if (cmd && !owns) this.#logLateEvidence(sid, "turn_ended", cmd, attempt);
+          this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt.id, kind: "turn_ended", ref: o.runtimeTurnId ?? null, payload: { runtimeTurnId: o.runtimeTurnId ?? null, status: o.status, detail: o.detail ?? null, ...(owns ? {} : { late: true }) } }, {
+            ...(t && cmd ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: attempt.id }, attempt: { id: attempt.id, outcome: t.to === "completed" ? "done" : "superseded" } }
+              // An older attempt's turn ended: settled on ITS row (the ledger's
+              // stale rule keeps it history), the command untouched.
+              : cmd && !owns ? { attempt: { id: attempt.id, outcome: o.status === "completed" ? "done" : "superseded" } } : {}),
           });
-          if (cmd) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); this.#emitCommand(cmd.id); }
+          if (cmd) {
+            if (owns) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); }
+            this.#emitCommand(cmd.id);
+          }
         }
         if (actor.foreignTurn && (o.runtimeTurnId == null || actor.foreignTurn.runtimeTurnId === o.runtimeTurnId)) actor.foreignTurn = null;
         actor.holdUntil = 0; // the runtime is free again: a busy-refused head may go now
@@ -1051,11 +1063,14 @@ export class SessionCoordinator {
         const attempt = (o.runtimeTurnId ? this.ledger.attemptByRuntimeTurnId(sid, o.runtimeTurnId) : null) ?? this.#soleExecutingAttempt(sid);
         const cmd = attempt ? this.ledger.getCommand(attempt.commandId) : null;
         if (!cmd) { actor.foreignTurn = null; this.#recordFree(actor, "interrupted", o.runtimeTurnId ?? null, {}); this.#emit({ type: "session", sessionId: sid }); this.#pump(sid); return; }
-        const t = nextState(cmd.state, cmd.state === "cancelling" ? { type: "interrupt_confirmed" } : { type: "turn_ended", status: "interrupted" });
-        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt!.id, kind: "interrupted", ref: o.runtimeTurnId ?? null }, {
-          ...(t ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason }, attempt: { id: attempt!.id, outcome: "superseded" } } : {}),
+        const owns = this.#ownsCommand(cmd, attempt!);
+        const t = owns ? nextState(cmd.state, cmd.state === "cancelling" ? { type: "interrupt_confirmed" } : { type: "turn_ended", status: "interrupted" }) : null;
+        if (!owns) this.#logLateEvidence(sid, "interrupted", cmd, attempt!);
+        this.ledger.recordObservation({ sessionId: sid, generation: actor.generation, attemptId: attempt!.id, kind: "interrupted", ref: o.runtimeTurnId ?? null, payload: owns ? undefined : { late: true } }, {
+          ...(t ? { command: { id: cmd.id, from: [cmd.state], to: t.to, terminalReason: t.terminalReason, expectedAttemptId: attempt!.id }, attempt: { id: attempt!.id, outcome: "superseded" } }
+            : !owns ? { attempt: { id: attempt!.id, outcome: "superseded" } } : {}),
         });
-        actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id);
+        if (owns) { actor.unresolved.delete(cmd.id); actor.cancelTimers.get(cmd.id)?.(); actor.cancelTimers.delete(cmd.id); }
         this.#emitCommand(cmd.id);
         this.#pump(sid);
         return;
@@ -1091,6 +1106,20 @@ export class SessionCoordinator {
       this.#log(`${actor.sessionId}: ${row.id} was cancelled — interrupting its late turn ${a.runtimeTurnId ?? "(unnamed)"}`);
       void actor.driver.interrupt({ attempt: this.#ref(a) }).catch(() => {});
     }
+  }
+
+  /** The current-owner rule for an observation's COMMAND effect (Astra on
+   *  e8f8b2cc): the attempt it names must be the command's newest AND made
+   *  for the command's current payload. Late evidence of an older attempt —
+   *  a timed-out submission that landed after all, the row since edited
+   *  and re-submitted — is history on that attempt (the ledger's stale
+   *  rule keeps it) and never advances the newer payload or attempt. */
+  #ownsCommand(cmd: CommandRow, attempt: AttemptRow): boolean {
+    const latest = this.ledger.latestAttempt(cmd.id);
+    return !!latest && latest.id === attempt.id && attempt.payloadVersion === cmd.payloadVersion;
+  }
+  #logLateEvidence(sid: string, kind: string, cmd: CommandRow, attempt: AttemptRow): void {
+    this.#log(`${sid}: late ${kind} for attempt ${attempt.attemptNo} of ${cmd.id} (payload v${attempt.payloadVersion}, row v${cmd.payloadVersion}) — recorded on that attempt; the command stays ${cmd.state}`);
   }
 
   /** The latest attempt of every command executing (accepted | running |
