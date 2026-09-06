@@ -331,7 +331,7 @@ export class OpencodeSession implements AgentSession {
         // (admittedSeq is the server's own ordering receipt).
         if (this.#isEnded()) return; // retired mid-request: do not touch the (cleared) spool (#43)
         // A cancel that raced the reply wins: never overwrite its outcome.
-        if (r.messageID) this.#lastAdmitted = item.clientId;
+        if (r.messageID) this.#noteAdmitted(item.clientId);
         if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
         // The HTTP ack is admission evidence too: a prompt cancelled while
         // this request was in flight (tombstoned by cancelQueued) is now
@@ -431,7 +431,7 @@ export class OpencodeSession implements AgentSession {
         case "thinking": this.#thinking = eff.value; this.#activeTurn = eff.value ? (this.#norm?.currentTurn ?? this.#activeTurn) : null; this.#relay?.setThinking(eff.value); break;
         case "confirmPrompt":
           if (eff.messageID) {
-            this.#lastAdmitted = eff.messageID;
+            this.#noteAdmitted(eff.messageID);
             this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
             if (this.#cancelledIds.has(eff.messageID) && this.#client && this.#ocSessionId) {
               // Admitted after the user cancelled it: interrupt now (#77).
@@ -627,7 +627,27 @@ export class OpencodeSession implements AgentSession {
    *  interrupt failed, leaving work active while queueItemState said
    *  cancelled (Astra on cde740c1, #77). A kept tombstone lets the next
    *  admission evidence (HTTP ack or SSE confirm) retry it. */
+  /** Admission order is MONOTONIC: an id's first admission (HTTP ack or SSE
+   *  confirm, whichever arrives first) assigns it a sequence; a duplicate or
+   *  late admission of an already-admitted id never bumps it, so stale
+   *  evidence for an OLD prompt cannot make it "the latest" again and steer
+   *  an interrupt at newer work (Astra on 7c27b926, #77). */
+  #noteAdmitted(id: string): void {
+    if (this.#admissionSeq.has(id)) return;
+    this.#admissionSeq.set(id, ++this.#admissionClock);
+    this.#lastAdmitted = id;
+    if (this.#admissionSeq.size > 500) { const first = this.#admissionSeq.keys().next().value; if (first !== undefined) this.#admissionSeq.delete(first); }
+  }
+  #admissionSeq = new Map<string, number>();
+  #admissionClock = 0;
+  /** May an interrupt on behalf of cancelled `id` still fire? Only while no
+   *  newer prompt has been admitted — the endpoint interrupts the SESSION. */
+  #ownsInterrupt(id: string): boolean {
+    return this.#cancelledIds.has(id) && !this.#isEnded() && this.#lastAdmitted === id;
+  }
+
   #interruptCancelled(id: string, client: OpencodeClient, ocSessionId: string): void {
+    if (!this.#ownsInterrupt(id)) return; // every path — first attempt, coalesced retry, timer retry
     // One interrupt in flight per tombstone: the HTTP ack and the SSE confirm
     // of the same prompt both arrive as admission evidence, and two interrupts
     // could stop the NEXT turn (the endpoint has no turn identity; Astra on
@@ -635,7 +655,7 @@ export class OpencodeSession implements AgentSession {
     if (this.#interrupting.has(id)) { this.#interruptAgain.add(id); return; } // evidence during an in-flight interrupt = retry if it fails
     this.#interrupting.add(id);
     void client.interrupt(ocSessionId)
-      .then(() => { this.#cancelledIds.delete(id); this.#interruptAgain.delete(id); this.#interruptAttempts.delete(id); })
+      .then(() => { this.#cancelledIds.delete(id); this.#interruptAgain.delete(id); this.#interruptAttempts.delete(id); const t = this.#interruptTimers.get(id); if (t) { clearTimeout(t); this.#interruptTimers.delete(id); } })
       .catch((e) => {
         process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`);
         // No further admission evidence may ever come (HTTP-only admission,
@@ -647,7 +667,13 @@ export class OpencodeSession implements AgentSession {
         // so once a newer prompt was admitted the retry would stop that one
         // instead (Astra on af76c787). The tombstone then stays for the next
         // admission evidence of THIS prompt, if any.
-        if (n < INTERRUPT_RETRY_MAX) setTimeout(() => { if (this.#cancelledIds.has(id) && !this.#isEnded() && this.#lastAdmitted === id) this.#interruptCancelled(id, client, ocSessionId); }, INTERRUPT_RETRY_MS).unref?.();
+        // One pending retry timer per id: an HTTP failure and a later SSE
+        // failure used to arm two (Astra on 7c27b926).
+        const prior = this.#interruptTimers.get(id); if (prior) clearTimeout(prior);
+        if (n < INTERRUPT_RETRY_MAX) {
+          const t = setTimeout(() => { this.#interruptTimers.delete(id); this.#interruptCancelled(id, client, ocSessionId); }, INTERRUPT_RETRY_MS);
+          t.unref?.(); this.#interruptTimers.set(id, t);
+        }
         else process.stderr.write(`[opencode ${this.id}] giving up interrupting cancelled ${id} after ${n} attempts\n`);
       })
       .finally(() => {
@@ -655,12 +681,13 @@ export class OpencodeSession implements AgentSession {
         // Admission evidence that arrived while this attempt was pending was
         // coalesced away; if the attempt failed, that evidence still owes a
         // retry (Astra on 03b558f0).
-        if (this.#interruptAgain.delete(id) && this.#cancelledIds.has(id) && !this.#isEnded()) this.#interruptCancelled(id, client, ocSessionId);
+        if (this.#interruptAgain.delete(id)) this.#interruptCancelled(id, client, ocSessionId); // ownership re-checked inside
       });
   }
   #interrupting = new Set<string>();
   #interruptAgain = new Set<string>();
   #interruptAttempts = new Map<string, number>();
+  #interruptTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** clientId of the most recently admitted prompt (HTTP ack or SSE confirm). */
   #lastAdmitted: string | null = null;
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
