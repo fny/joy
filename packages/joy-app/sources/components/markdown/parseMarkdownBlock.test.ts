@@ -240,3 +240,31 @@ describe('parseMarkdownBlock - blank-separated tables (#265)', () => {
         ]);
     });
 });
+
+describe('parseMarkdownBlock - unterminated options opener (#264 residual)', () => {
+    it('an opener with no closer and no option tags does not hide the instructions after it', () => {
+        expect(parseMarkdown('<joy-options>\nThis malformed tag must not hide the actual instruction.')).toEqual([
+            { type: 'text', content: spans('This malformed tag must not hide the actual instruction.') },
+        ]);
+    });
+
+    it('text on the opener line itself is kept, and later blocks still parse', () => {
+        expect(parseMarkdown('<joy-options> Pick one:\n- a\n- b')).toEqual([
+            { type: 'text', content: spans('Pick one:') },
+            { type: 'list', items: [{ depth: 0, spans: spans('a') }, { depth: 0, spans: spans('b') }] },
+        ]);
+    });
+
+    it('a second stray opener is dropped the same way and the loop terminates', () => {
+        expect(parseMarkdown('<joy-options>\n<joy-options>\nstill here')).toEqual([
+            { type: 'text', content: spans('still here') },
+        ]);
+    });
+
+    it('an unterminated block that already holds option tags is still the streaming case', () => {
+        expect(parseMarkdown('<joy-options>\n<joy-option>A</joy-option>\n<joy-option>B')).toEqual([
+            { type: 'options', items: ['A'] },
+        ]);
+        expect(parseMarkdown('<joy-options>\n<joy-option>A')).toEqual([]);
+    });
+});

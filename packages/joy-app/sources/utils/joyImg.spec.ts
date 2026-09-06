@@ -137,3 +137,28 @@ describe('splitJoySegments — tags inside code are documentation (#436)', () =>
         expect(splitJoySegments(text)).toEqual([{ kind: 'md', text }]);
     });
 });
+
+describe('splitJoySegments — fence closers with CR / trailing spaces (#436 residual)', () => {
+    it('a real tag after a CRLF- or space-terminated closing fence is still an attachment', () => {
+        for (const close of ['```\r', '```  ']) {
+            const text = '```xml\n<joy-img src="/literal.png"/>\n' + close + '\n<joy-img src="/real.png"/>';
+            const segs = splitJoySegments(text);
+            expect(segs.filter(s => s.kind === 'img')).toEqual([{ kind: 'img', src: '/real.png', width: null, height: null, alt: null }]);
+            expect(segs[0]).toEqual({ kind: 'md', text: '```xml\n<joy-img src="/literal.png"/>\n' + close + '\n' });
+        }
+    });
+});
+
+describe('splitJoySegments — shared parse budget', () => {
+    it('text without a joy tag pays for no prepass, whatever its shape', () => {
+        const text = 'prefix ' + Array.from({ length: 1200 }, (_, i) => '`'.repeat(i + 1)).join(' ');
+        const t0 = performance.now();
+        expect(splitJoySegments(text)).toEqual([{ kind: 'md', text }]);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+    });
+
+    it('past the input cap the text is returned verbatim, tags included', () => {
+        const text = '<joy-img src="/a.png" /> ' + 'x'.repeat(200_001);
+        expect(splitJoySegments(text)).toEqual([{ kind: 'md', text }]);
+    });
+});

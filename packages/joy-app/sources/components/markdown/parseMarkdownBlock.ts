@@ -127,8 +127,10 @@ export function parseMarkdownBlock(markdown: string) {
             // text AFTER the closer on that line is handed back to the loop as
             // its own line. Looking only at the FOLLOWING lines for options and
             // a standalone closer swallowed the whole rest of the message (#264).
-            // No closer yet (mid-stream) → the remainder is only option lines,
-            // consume them as before.
+            // No closer yet but option tags present (mid-stream) → the
+            // remainder is only option lines, consume them as before. No
+            // closer AND no option tag → not a block at all: the text goes
+            // back to the loop (#264).
             const collected: string[] = [trimmed];
             let closerFound = trimmed.includes('</joy-options>');
             while (!closerFound && index < lines.length) {
@@ -146,6 +148,15 @@ export function parseMarkdownBlock(markdown: string) {
                     // Re-inject the trailing text so it is parsed like any line.
                     lines.splice(index, 0, after.trim());
                 }
+            } else if (!/<joy-option>/.test(body)) {
+                // A stray or malformed opener swallowed real instructions
+                // (#264). Hand every consumed line back to the loop; only the
+                // opener itself is dropped, like any bare joy control tag.
+                // The loop consumed to the end, so index === lines.length and
+                // pushing restores the original order.
+                lines.push(trimmed.slice('<joy-options>'.length));
+                for (let i = 1; i < collected.length; i++) lines.push(collected[i]);
+                continue;
             }
             const items: string[] = [];
             const optionRe = /<joy-option>([\s\S]*?)<\/joy-option>/g;

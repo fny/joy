@@ -4,6 +4,7 @@ import { WebView } from 'react-native-webview';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
+import { nativeMermaidViewport } from './mermaidViewport';
 
 // Style for Web platform
 const webStyle: any = {
@@ -33,16 +34,15 @@ function removeMermaidScratch(id: string) {
     }
 }
 
-// Native: the WebView measures its own document and posts the height.
-const NATIVE_INITIAL_HEIGHT = 200;
-
 // Mermaid render component that works on all platforms
 export const MermaidRenderer = React.memo((props: {
     content: string;
 }) => {
     const { theme } = useUnistyles();
-    const [dimensions, setDimensions] = React.useState({ width: 0, height: NATIVE_INITIAL_HEIGHT });
-    const [measured, setMeasured] = React.useState(false);
+    const [dimensions, setDimensions] = React.useState({ width: 0 });
+    // Native: the WebView measures its own document and posts the height;
+    // the viewport (height + whether it still scrolls) derives from it.
+    const [reportedHeight, setReportedHeight] = React.useState<number | null>(null);
     const [svgContent, setSvgContent] = React.useState<string | null>(null);
 
     const onLayout = React.useCallback((event: any) => {
@@ -209,16 +209,20 @@ export const MermaidRenderer = React.memo((props: {
         </html>
     `;
 
+    const viewport = nativeMermaidViewport(reportedHeight);
+
     return (
         <View style={style.container} onLayout={onLayout}>
-            <View style={[style.innerContainer, { height: dimensions.height }]}>
+            <View style={[style.innerContainer, { height: viewport.height }]}>
                 <WebView
                     source={{ html }}
                     style={{ flex: 1 }}
                     // Until the document reports its height the viewport may be
                     // too short, so scrolling stays available as the fallback;
-                    // once sized to the diagram there is nothing to scroll (#259).
-                    scrollEnabled={!measured}
+                    // once sized to the diagram there is nothing to scroll —
+                    // unless the height was capped, when the rest of the
+                    // diagram is only reachable by scrolling (#259).
+                    scrollEnabled={viewport.scrollEnabled}
                     onMessage={(event) => {
                         // Anything in the WebView can postMessage: never let a
                         // non-JSON payload throw in the native callback (#17).
@@ -227,10 +231,7 @@ export const MermaidRenderer = React.memo((props: {
                         if (!data || typeof data !== 'object') return;
                         const height = data.height;
                         if (data.type === 'dimensions' && typeof height === 'number' && Number.isFinite(height) && height > 0) {
-                            // Clamp: a runaway document must not grow the chat unboundedly.
-                            const clamped = Math.min(Math.max(Math.round(height), NATIVE_INITIAL_HEIGHT), 4000);
-                            setMeasured(true);
-                            setDimensions(prev => (prev.height === clamped ? prev : { ...prev, height: clamped }));
+                            setReportedHeight(Math.round(height));
                         }
                     }}
                 />

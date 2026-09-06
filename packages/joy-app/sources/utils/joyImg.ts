@@ -12,7 +12,7 @@
  * shown as raw XML.
  */
 
-import { parseBudget } from './parseBudget';
+import { exceedsInputBudget, parseBudget } from './parseBudget';
 import { findCodeRanges, isInsideCode } from '@/components/markdown/codeRanges';
 
 export interface JoyImgSegment {
@@ -93,6 +93,13 @@ export function hasJoyTags(text: string): boolean {
 
 export function splitJoySegments(text: string): JoySegment[] {
     const segments: JoySegment[] = [];
+    // Plain text without a tag skips every pass below, the code-range
+    // prepass included; past the shared input cap the text is shown
+    // verbatim, like the other decorating parsers (utils/parseBudget).
+    if (!hasJoyTags(text) || exceedsInputBudget(text)) {
+        if (text.trim()) segments.push({ kind: 'md', text });
+        return segments;
+    }
     // A tag quoted inside a fenced or inline code example is documentation,
     // not an attachment: extracting it replaced the literal with a live image
     // and split the fence around it (#436).

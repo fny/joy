@@ -79,3 +79,16 @@ describe('parseLocalCommandMessage — mixed content keeps the command and its a
         expect(parseLocalCommandMessage(text)).toEqual({ kind: 'text', text: '/compact\ntrailing note' });
     });
 });
+
+describe('parseLocalCommandMessage — replacement metacharacters in arguments (#271 residual)', () => {
+    it('a literal "$&" in the arguments stays literal', () => {
+        const instruction = 'Use $& literally';
+        const m = parseLocalCommandMessage(`<command-message>review</command-message><command-name>/review</command-name><command-args>${instruction}</command-args>\nBase: x`);
+        expect(m).toEqual({ kind: 'text', text: `/review ${instruction}\nBase: x` });
+    });
+
+    it('"$1", "$$" and "$\'" are literal too, in the args and the command name', () => {
+        const m = parseLocalCommandMessage("<command-name>/pay$$</command-name><command-args>$1 then $' end</command-args>\nok");
+        expect(m).toEqual({ kind: 'text', text: "/pay$$ $1 then $' end\nok" });
+    });
+});

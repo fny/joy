@@ -14,7 +14,7 @@ import { useRouter } from 'expo-router';
 import { copyToClipboard } from '@/utils/clipboard';
 import { MermaidRenderer } from './MermaidRenderer';
 import { t } from '@/text';
-import { isHttpMarkdownLink, markdownImageHost } from './linkUtils';
+import { isApprovedImageUrl, isHttpMarkdownLink, markdownImageHost } from './linkUtils';
 import { openExternalUrl } from '@/utils/openExternalUrl';
 import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
@@ -107,7 +107,8 @@ export const MarkdownView = React.memo((props: {
                     } else if (block.type === 'table') {
                         return <RenderTableBlock headers={block.headers} rows={block.rows} onLinkPress={handleLinkPress} selectable={selectable} key={index} first={index === 0} last={index === blocks.length - 1} />;
                     } else if (block.type === 'image') {
-                        return <RenderImageBlock url={block.url} alt={block.alt} key={index} first={index === 0} last={index === blocks.length - 1} />;
+                        // The URL is part of the key: a different image is a different decision (#94).
+                        return <RenderImageBlock url={block.url} alt={block.alt} key={`${index}:${block.url}`} first={index === 0} last={index === blocks.length - 1} />;
                     } else {
                         return null;
                     }
@@ -286,9 +287,10 @@ function RenderCodeBlock(props: { content: string, language: string | null, firs
 function RenderImageBlock(props: { url: string, alt: string, first: boolean, last: boolean }) {
     const accessibleLabel = props.alt || 'Markdown image';
     const host = markdownImageHost(props.url);
-    const [loaded, setLoaded] = React.useState(false);
-    // A new URL is a new decision.
-    React.useEffect(() => { setLoaded(false); }, [props.url]);
+    // The approval names the URL and is checked synchronously in render, so
+    // a new URL is a new decision on the very render it appears (#94).
+    const [approvedUrl, setApprovedUrl] = React.useState<string | null>(null);
+    const loaded = isApprovedImageUrl(approvedUrl, props.url);
 
     if (!host) {
         // Not loadable: keep the alt text so the reader knows an image was here.
@@ -311,7 +313,7 @@ function RenderImageBlock(props: { url: string, alt: string, first: boolean, las
             ) : (
                 <Pressable
                     style={[style.image, style.imagePlaceholder]}
-                    onPress={() => setLoaded(true)}
+                    onPress={() => setApprovedUrl(props.url)}
                     accessibilityRole="button"
                     accessibilityLabel={t('markdown.loadImage', { host })}
                 >

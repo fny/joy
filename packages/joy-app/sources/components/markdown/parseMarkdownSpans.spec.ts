@@ -84,3 +84,34 @@ describe('parseMarkdownSpans — parentheses in link destinations (#266)', () =>
         expect(parseMarkdownSpans('[x](https://a/b\\(c\\))', false)).toEqual([{ styles: [], text: 'x', url: 'https://a/b(c)' }]);
     });
 });
+
+describe('parseMarkdownSpans — balanced, escape-aware link destinations (#266 residual)', () => {
+    it('an escaped ")" is part of the destination, not its closer', () => {
+        expect(parseMarkdownSpans('[x](https://x.test/a\\)b)', false)).toEqual([{ styles: [], text: 'x', url: 'https://x.test/a)b' }]);
+    });
+
+    it('parentheses nested deeper than one level are balanced', () => {
+        const deep = 'https://x.test/a_(b_(c))';
+        expect(parseMarkdownSpans(`[x](${deep})`, false)).toEqual([{ styles: [], text: 'x', url: deep }]);
+        expect(parseMarkdownSpans(`**[x](${deep})** tail`, false)).toEqual([
+            { styles: ['bold'], text: 'x', url: deep },
+            { styles: [], text: ' tail', url: null },
+        ]);
+    });
+
+    it('an unbalanced destination or an empty one leaves the brackets as text', () => {
+        expect(parseMarkdownSpans('[x](a(b) c', false).some(s => s.url)).toBe(false);
+        const empty = parseMarkdownSpans('[x]() y', false);
+        expect(empty.map(s => s.text).join('')).toBe('[x]() y');
+        expect(empty.some(s => s.url)).toBe(false);
+        expect(parseMarkdownSpans('[x](a\nb)', false).some(s => s.url)).toBe(false);
+    });
+
+    it('a run of "[x](" fragments stays linear with the bounded scanner', () => {
+        const text = '[x](a'.repeat(20_000);
+        const t0 = performance.now();
+        const spans = parseMarkdownSpans(text, false);
+        expect(performance.now() - t0).toBeLessThan(PERF_BUDGET_MS);
+        expect(spans.map(s => s.text).join('')).toBe(text);
+    });
+});

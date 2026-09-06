@@ -406,6 +406,52 @@ function looksLikePathStart(text: string): boolean {
 // exhaustion leaves the rest of the text plain rather than unrendered.
 const MAX_PATH_SPAN_TOKENS = 8;
 
+const QUOTE_CHARS = '"\'`';
+
+// True when the token `raw` ends with `quote`, allowing the wrapping
+// punctuation stripToken removes after it (so the two agree on the span).
+function closesQuote(raw: string, quote: string): boolean {
+    const trailing = raw.match(TRAILING_WRAP)?.[0] ?? '';
+    if (trailing.includes(quote)) {
+        return true; // " and ` are wrapping punctuation themselves
+    }
+    return raw.slice(0, raw.length - trailing.length).endsWith(quote); // ' is not
+}
+
+/**
+ * Index of the token that closes the quote the token at `from` opens, or -1.
+ * An explicitly quoted reference is ONE path however many words it holds:
+ * "/repo/my.txt file.ts" is the file "my.txt file.ts", not two references —
+ * the separate-reference rule (#445) stopped it at its first word. The span
+ * is bounded like any other candidate (token count, same line) and a token
+ * that opens the same quote again means the first one was stray.
+ */
+function quotedSpanEnd(text: string, tokens: TokenMatch[], from: number): number {
+    const first = text.slice(tokens[from].start, tokens[from].end);
+    const leading = first.match(LEADING_WRAP)?.[0] ?? '';
+    let quote = '';
+    for (const ch of leading) {
+        if (QUOTE_CHARS.includes(ch)) quote = ch;
+    }
+    if (!quote || closesQuote(first.slice(leading.length), quote)) {
+        return -1;
+    }
+    for (let i = from + 1; i < tokens.length && i - from < MAX_PATH_SPAN_TOKENS; i++) {
+        if (text.slice(tokens[i - 1].end, tokens[i].start).includes('\n')) {
+            return -1;
+        }
+        const raw = text.slice(tokens[i].start, tokens[i].end);
+        const lead = raw.match(LEADING_WRAP)?.[0] ?? '';
+        if (lead.includes(quote)) {
+            return -1;
+        }
+        if (closesQuote(raw, quote)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 export function splitSessionFileText(text: string, sessionRoot?: string | null): SessionFileTextSegment[] {
     const segments: SessionFileTextSegment[] = [];
     if (exceedsInputBudget(text)) {
@@ -440,7 +486,22 @@ export function splitSessionFileText(text: string, sessionRoot?: string | null):
         let bestCore = '';
         let bestTrailing = '';
 
-        for (let candidateIndex = tokenIndex; candidateIndex < tokens.length; candidateIndex += 1) {
+        // An explicitly quoted span is tried whole first: quote boundaries
+        // outrank the separate-reference heuristics below.
+        const quotedEnd = quotedSpanEnd(text, tokens, tokenIndex);
+        if (quotedEnd !== -1 && budget.spend()) {
+            const stripped = stripToken(text.slice(token.start, tokens[quotedEnd].end));
+            const link = stripped.core ? parseSessionFileLink(stripped.core, { sessionRoot, bareText: true }) : null;
+            if (link) {
+                bestEnd = quotedEnd;
+                bestLink = link;
+                bestLeading = stripped.leading;
+                bestCore = stripped.core;
+                bestTrailing = stripped.trailing;
+            }
+        }
+
+        for (let candidateIndex = tokenIndex; bestEnd === -1 && candidateIndex < tokens.length; candidateIndex += 1) {
             if (candidateIndex - tokenIndex >= MAX_PATH_SPAN_TOKENS) break;
             if (candidateIndex > tokenIndex
                 && text.slice(tokens[candidateIndex - 1].end, tokens[candidateIndex].start).includes('\n')) {

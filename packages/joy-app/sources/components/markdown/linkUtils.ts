@@ -16,3 +16,14 @@ export function markdownImageHost(url: string): string | null {
         return null;
     }
 }
+
+/**
+ * A remote image's tap approval is the URL that was approved, never a flag,
+ * compared during render: a component instance that moves on to another URL
+ * (markdown blocks are keyed by index) shows THAT URL's placeholder. A
+ * boolean reset in a passive effect let URL B mount an <Image> for one
+ * render on URL A's approval (#94).
+ */
+export function isApprovedImageUrl(approvedUrl: string | null, url: string): boolean {
+    return approvedUrl !== null && approvedUrl === url;
+}

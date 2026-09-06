@@ -256,3 +256,31 @@ describe('resolveSessionFilePath — UNC paths (#452)', () => {
         });
     });
 });
+
+describe('splitSessionFileText — explicit quote boundaries (#445 residual)', () => {
+    it('a double-quoted path with a space is one reference, even when its first word looks like a file', () => {
+        const text = 'See "/repo/my.txt file.ts" now';
+        const segments = splitSessionFileText(text, '/repo');
+        expect(segments.filter(s => s.link).map(s => s.text)).toEqual(['/repo/my.txt file.ts']);
+        expect(segments.find(s => s.link)?.link?.absolutePath).toBe('/repo/my.txt file.ts');
+        expect(segments.map(s => s.text).join('')).toBe(text);
+    });
+
+    it('single quotes and backticks bound a span the same way, with wrapping punctuation outside', () => {
+        expect(splitSessionFileText("open '/repo/my.txt file.ts', thanks", '/repo')).toEqual([
+            { text: "open '", link: null },
+            { text: '/repo/my.txt file.ts', link: expect.objectContaining({ absolutePath: '/repo/my.txt file.ts' }) },
+            { text: "', thanks", link: null },
+        ]);
+        expect(splitSessionFileText('open (`src/a b.ts`), thanks', '/repo').filter(s => s.link).map(s => s.text)).toEqual(['src/a b.ts']);
+    });
+
+    it('a stray opening quote, or a quote closed on another line, does not merge separate references', () => {
+        expect(splitSessionFileText('See "/repo/a.ts and "/repo/b.ts"', '/repo').filter(s => s.link).map(s => s.text)).toEqual(['/repo/a.ts', '/repo/b.ts']);
+        expect(splitSessionFileText('See "/repo/a.ts and\n/repo/b.ts"', '/repo').filter(s => s.link).map(s => s.text)).toEqual(['/repo/a.ts', '/repo/b.ts']);
+    });
+
+    it('the same words unquoted still stop at the first file (#445)', () => {
+        expect(splitSessionFileText('See /repo/my.txt file.ts', '/repo').filter(s => s.link).map(s => s.text)).toEqual(['/repo/my.txt']);
+    });
+});
