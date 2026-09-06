@@ -502,7 +502,8 @@ export class Ledger {
 
   /** Durable cancel request: a queued row is cancelled at once; a row in
    *  flight keeps its state and carries the flag (the next recordAttempt
-   *  refuses it; C2 turns it into `cancelling`). Null = unknown or terminal. */
+   *  refuses it; the coordinator turns it into `cancelling` and counts its
+   *  interrupt tries with noteCancelAttempt). Null = unknown or terminal. */
   requestCancel(id: string, reason = "cancelled"): CommandRow | null {
     return this.tx(() => {
       const row = this.getCommand(id);
@@ -512,7 +513,7 @@ export class Ledger {
         this.#run("UPDATE commands SET state='cancelled', terminal_reason=?, cancel_requested_at=COALESCE(cancel_requested_at,?), active_op=NULL, updated_at=? WHERE id=?", reason, now, now, id);
         this.#run("UPDATE attempts SET state='superseded', settled_at=? WHERE command_id=? AND state IN ('submitting','accepted','unknown')", now, id);
       } else {
-        this.#run("UPDATE commands SET cancel_requested_at=COALESCE(cancel_requested_at,?), cancel_attempts=cancel_attempts+1, updated_at=? WHERE id=?", now, now, id);
+        this.#run("UPDATE commands SET cancel_requested_at=COALESCE(cancel_requested_at,?), updated_at=? WHERE id=?", now, now, id);
       }
       return this.getCommand(id);
     }, "cancel");
@@ -625,6 +626,34 @@ export class Ledger {
   matchAttemptByRef(sessionId: string, runtimeRef: string, states: readonly AttemptState[] = AWAITING_ATTEMPT_STATES): AttemptRow | null {
     const r = this.#get(`SELECT * FROM attempts WHERE session_id=? AND runtime_ref=? AND state IN (${placeholders(states.length)}) ORDER BY submitted_at, attempt_no LIMIT 1`, sessionId, runtimeRef, ...states);
     return r ? rowAttempt(r) : null;
+  }
+  /** The newest attempt of this session carrying `ref`, whatever its state
+   *  (a late echo of a settled submission still pairs with it). */
+  attemptByRef(sessionId: string, runtimeRef: string): AttemptRow | null {
+    const r = this.#get("SELECT * FROM attempts WHERE session_id=? AND runtime_ref=? ORDER BY submitted_at DESC, attempt_no DESC LIMIT 1", sessionId, runtimeRef);
+    return r ? rowAttempt(r) : null;
+  }
+  /** Every attempt of this session that rode the runtime's turn (a steered
+   *  message joins the running turn; all of them end with it). */
+  attemptsByRuntimeTurnId(sessionId: string, runtimeTurnId: string): AttemptRow[] {
+    return this.#all("SELECT * FROM attempts WHERE session_id=? AND runtime_turn_id=? ORDER BY submitted_at, attempt_no", sessionId, runtimeTurnId).map(rowAttempt);
+  }
+  /** The attempt the runtime named by its turn id (a turn_ended correlates here). */
+  attemptByRuntimeTurnId(sessionId: string, runtimeTurnId: string): AttemptRow | null {
+    const r = this.#get("SELECT * FROM attempts WHERE session_id=? AND runtime_turn_id=? ORDER BY submitted_at DESC, attempt_no DESC LIMIT 1", sessionId, runtimeTurnId);
+    return r ? rowAttempt(r) : null;
+  }
+  /** Bind the runtime's turn id to an attempt once it is known (an echo
+   *  carrying the turn, a turn_started matched by ref). */
+  setAttemptTurn(attemptId: string, runtimeTurnId: string): void {
+    this.tx(() => { this.#run("UPDATE attempts SET runtime_turn_id=? WHERE id=?", runtimeTurnId, attemptId); }, "attempt");
+  }
+  /** One more interrupt try for a cancelling command; returns the count. */
+  noteCancelAttempt(commandId: string): number {
+    return this.tx(() => {
+      this.#run("UPDATE commands SET cancel_attempts=cancel_attempts+1, updated_at=? WHERE id=?", this.#now(), commandId);
+      return (this.#get("SELECT cancel_attempts AS n FROM commands WHERE id=?", commandId)?.n as number | undefined) ?? 0;
+    }, "cancel");
   }
   /** Did this session ever submit `ref` (any attempt) or confirm it (a receipt of `kind`)? */
   ownsRuntimeRef(sessionId: string, ref: string, receiptKind: string): boolean {
