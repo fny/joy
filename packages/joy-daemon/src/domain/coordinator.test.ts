@@ -819,6 +819,144 @@ test("tombstone (e8f8b2cc): with nothing else running the late turn is interrupt
   expect(coord.snapshot("s1").unresolvedCancels).toEqual([again.id]);
 });
 
+// ── collateral / serialization boundaries (Astra on 0853706d) ───────────────
+
+/** A claude-like session whose first prompt timed out at the pane and was
+ *  cancelled while queued: `ref` is the runtime ref its late echo carries. */
+async function cancelledTimedOut(d: FakeDriver, text = "old"): Promise<{ old: ReturnType<typeof accept>; ref: string }> {
+  const old = accept("s1", text);
+  await settle();
+  const ref = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  expect(coord.cancel(old.id)).toMatchObject({ kind: "cancelled" });
+  return { old, ref };
+}
+
+test("collateral (0853706d): a late echo of a cancelled row while the newer command is still SUBMITTING issues no untargeted interrupt until that submission settles", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const { old, ref } = await cancelledTimedOut(d);
+  const current = accept("s1", "current");
+  await clock.advance(100);
+  expect(d.lastSubmit.cmd.id).toBe(current.id);
+  expect(stateOf(current.id)).toBe("submitting"); // the driver promise is still out
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(0); // an Escape now could land on `current`'s submission
+  expect(stateOf(current.id)).toBe("submitting");
+  expect(stateOf(old.id)).toBe("cancelled");
+  // Parked, not dropped: while the submission is out the retry keeps re-parking.
+  await clock.advance(30_000);
+  expect(d.interrupts).toHaveLength(0);
+  expect(stateOf(current.id)).toBe("submitting");
+  // The submission settles as accepted → running: still collateral.
+  d.lastSubmit.settle.resolve({ kind: "accepted" });
+  await settle();
+  d.emit({ kind: "echo", runtimeRef: d.lastSubmit.attempt.runtimeRef });
+  expect(stateOf(current.id)).toBe("running");
+  await clock.advance(30_000);
+  expect(d.interrupts).toHaveLength(0);
+  // The run ends: the tombstone is dropped with it; nothing is ever sent.
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(current.id)).toBe("completed");
+  await clock.advance(60_000);
+  expect(d.interrupts).toHaveLength(0);
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([]);
+});
+
+test("collateral (0853706d): a submission that settles as a permanent rejection frees the parked tombstone interrupt — it goes out then, once", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const { ref } = await cancelledTimedOut(d);
+  const current = accept("s1", "current");
+  await clock.advance(100);
+  expect(stateOf(current.id)).toBe("submitting");
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(0);
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: true, detail: "no pane" });
+  await settle();
+  expect(stateOf(current.id)).toBe("failed");
+  await clock.advance(12_000); // the parked retry fires into a clear session
+  expect(d.interrupts).toHaveLength(1);
+  expect(d.lastInterrupt.attempt?.runtimeRef).toBe(ref);
+});
+
+test("collateral (0853706d): an unrelated foreign (TUI) turn is protected — a late echo naming ANOTHER turn parks the interrupt until the foreign turn ends", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const { old, ref } = await cancelledTimedOut(d);
+  d.emit({ kind: "turn_started", runtimeTurnId: "T-foreign" });
+  expect(coord.snapshot("s1").provenance).toBe("terminal");
+  d.emit({ kind: "echo", runtimeRef: ref, runtimeTurnId: "T-old" });
+  await settle();
+  expect(coord.snapshot("s1").provenance).toBe("terminal"); // the echo named a different turn: the foreign turn stands
+  expect(d.interrupts).toHaveLength(0);
+  expect(stateOf(old.id)).toBe("cancelled");
+  // Re-parked for as long as the foreign turn lives; no budget spent.
+  await clock.advance(60_000);
+  expect(d.interrupts).toHaveLength(0);
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([]);
+  // The foreign turn ends: the late turn T-old is still unaccounted for and
+  // is interrupted through the scheduler.
+  d.emit({ kind: "turn_ended", runtimeTurnId: "T-foreign", status: "completed" });
+  expect(coord.snapshot("s1").provenance).toBeNull();
+  await clock.advance(12_000);
+  expect(d.interrupts).toHaveLength(1);
+  expect(d.lastInterrupt.attempt?.runtimeTurnId).toBe("T-old");
+});
+
+test("serialization (0853706d): a pending untargeted interrupt gates a new accept — driver.prepare / submit run only once the interrupt settled", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const { ref } = await cancelledTimedOut(d);
+  let prepares = 0;
+  d.prepare = async () => { prepares++; return "ready"; };
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(1); // the Escape is out, unanswered
+  const current = accept("s1", "current");
+  await clock.advance(100);
+  await settle();
+  expect(stateOf(current.id)).toBe("queued");
+  expect(prepares).toBe(0);
+  expect(d.submits).toHaveLength(1); // still only `old`'s
+  // The interrupt settles: the pump re-plans and the pane is used again.
+  d.lastInterrupt.settle.resolve({ kind: "sent" });
+  await settle();
+  expect(prepares).toBe(1);
+  expect(d.submits).toHaveLength(2);
+  expect(d.lastSubmit.cmd.id).toBe(current.id);
+  expect(stateOf(current.id)).toBe("submitting");
+  // The scheduler's confirm-retry now finds `current` in flight: parked, no second Escape.
+  await clock.advance(30_000);
+  expect(d.interrupts).toHaveLength(1);
+  expect(stateOf(current.id)).toBe("submitting");
+});
+
+test("serialization (0853706d): an untargeted interrupt that starts DURING the pane gate wait is awaited after the gate; the head is re-planned and gated again before it is submitted", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const { ref } = await cancelledTimedOut(d);
+  const gates: Array<ReturnType<typeof deferred<"ready" | "cancelled" | "retired">>> = [];
+  d.prepare = () => { const g = deferred<"ready" | "cancelled" | "retired">(); gates.push(g); return g.promise; };
+  const current = accept("s1", "current");
+  await clock.advance(100);
+  expect(gates).toHaveLength(1); // waiting at the gate; no attempt yet
+  expect(stateOf(current.id)).toBe("queued");
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(1); // nothing was collateral: the Escape went out
+  gates[0].resolve("ready");
+  await settle();
+  expect(d.submits).toHaveLength(1); // not submitted under the outstanding Escape
+  expect(stateOf(current.id)).toBe("queued");
+  d.lastInterrupt.settle.resolve({ kind: "sent" });
+  await settle();
+  expect(gates).toHaveLength(2); // re-planned: the gate runs again
+  gates[1].resolve("ready");
+  await settle();
+  expect(d.submits).toHaveLength(2);
+  expect(d.lastSubmit.cmd.id).toBe(current.id);
+  expect(stateOf(current.id)).toBe("submitting");
+});
+
 test("waitFor resolves on the named state, immediately when already there, and with the current state on timeout", async () => {
   const d = session("s1");
   const c = accept("s1", "x");

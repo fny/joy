@@ -325,7 +325,9 @@ interface Actor {
    *  tombstone rule): commandId → the attempt that surfaced. Owned by the
    *  same interrupt scheduler as `cancelling` rows. */
   tombstones: Map<string, string>;
-  /** A session-wide interrupt in flight (untargeted drivers). */
+  /** Every session-wide interrupt in flight (untargeted drivers), settled
+   *  when the last of them is: no pane submission / preparation starts and
+   *  no second Escape goes out until it settles (Astra on 0853706d). */
   sessionInterrupt: Promise<void> | null;
   /** Aborts the driver's `prepare` wait so the pump re-plans (a steer arrived). */
   prepareAbort: AbortController | null;
@@ -571,20 +573,19 @@ export class SessionCoordinator {
     for (const r of ops) {
       actor.cancelTimers.get(r.id)?.(); actor.cancelTimers.delete(r.id);
       const res = await this.#interruptOp(actor, r.id);
-      if (res) invoked++;
+      // Withheld (a foreign turn would be collateral): no driver verdict —
+      // Stop means the runtime itself, so the session-wide interrupt below
+      // covers it.
+      if (res && res.kind !== "withheld") invoked++;
       if (res?.kind === "failed") errors.push(res.error ?? "interrupt failed");
     }
     // Nothing reached the driver (every attempt still submitting — its
     // completion consults the cancel flag) — but Stop means the runtime
     // itself, so the session-wide interrupt still goes out once.
     if (inFlight.length && !actor.foreignTurn && invoked > 0) return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
-    try {
-      const r = await actor.driver.interrupt({ attempt: null });
-      if (r.kind === "failed") return { ok: false, error: r.error ?? "interrupt failed" };
-      return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
-    } catch (e) {
-      return { ok: false, error: `interrupt failed: ${e instanceof Error ? e.message : e}` };
-    }
+    const r = await this.#driverInterrupt(actor, null);
+    if (r.kind === "failed") return { ok: false, error: r.error ?? "interrupt failed" };
+    return errors.length ? { ok: false, error: errors.join("; ") } : { ok: true };
   }
 
   // ── reads ──
@@ -687,6 +688,10 @@ export class SessionCoordinator {
       if (this.ledger.outboundPressure(sessionId).over) return; // the outbox scheduler pumps when it drains
       const wait = actor.holdUntil - this.#now();
       if (wait > 0) { this.#holdPump(actor, wait); return; }
+      // A session-wide interrupt still in flight (a late Escape for a
+      // cancelled row) must not overlap a new pane operation: wait for its
+      // verdict, then re-plan from the ledger (Astra on 0853706d).
+      if (actor.sessionInterrupt) { await actor.sessionInterrupt; continue; }
       if (driver.prepare && !asSteer) {
         // The gate wait is pre-emptible: a steer accepted meanwhile aborts it
         // and the loop re-plans with the steer at the head.
@@ -708,6 +713,9 @@ export class SessionCoordinator {
         // (Astra on e8f8b2cc); the head that is still current is dispatched.
         const fresh = this.#queueHead(sessionId);
         if (!fresh || fresh.id !== head.id || fresh.payloadVersion !== head.payloadVersion) continue;
+        // An interrupt that started during the gate wait: same rule, and the
+        // re-plan runs the gate again (the pane may have changed under it).
+        if (actor.sessionInterrupt) { await actor.sessionInterrupt; continue; }
       }
       await this.#dispatch(actor, head.id, asSteer);
     }
@@ -843,7 +851,7 @@ export class SessionCoordinator {
     }
     if (orphanAccepted) {
       this.#log(`${actor.sessionId}: submit for ${commandId} completed after the op lost the row — interrupting the orphan turn`);
-      void actor.driver.interrupt({ attempt: { ...ref, runtimeTurnId: result.kind === "accepted" ? result.runtimeTurnId ?? null : null } }).catch(() => {});
+      void this.#driverInterrupt(actor, { ...ref, runtimeTurnId: result.kind === "accepted" ? result.runtimeTurnId ?? null : null });
     }
     this.#emitCommand(commandId);
     if (followUp === "interrupt") this.#scheduleInterrupt(actor, commandId, 0);
@@ -891,47 +899,52 @@ export class SessionCoordinator {
    *  evidence bypassed every fence below). Serialized per command, fenced
    *  against collateral for session-wide interrupts, bounded by the cancel
    *  budget. */
-  async #interruptOp(actor: Actor, commandId: string): Promise<InterruptResult | null> {
-    if (actor.retired) return null;
-    const row = this.ledger.getCommand(commandId);
-    if (!row) return null;
-    const tombstone = row.state === "cancelled" ? actor.tombstones.get(commandId) ?? null : null;
-    if (row.state !== "cancelling" && !tombstone) return null;
-    const attempt = tombstone ? this.ledger.getAttempt(tombstone) : this.ledger.latestAttempt(commandId);
-    // The submit is still in flight: its completion consults the cancel flag
-    // and schedules the interrupt with the turn identity it learns (#35).
-    if (attempt?.state === "submitting") return null;
-    // One interrupt op per command at a time: a second trigger (another late
-    // echo, a re-fired cancel) rides the verdict of the one in flight, which
-    // schedules the retry.
-    if (actor.cancelOps.has(commandId)) return null;
-    // A session-wide interrupt (opencode, pi, claude's Escape) would also
-    // stop commands nobody cancelled: refuse it while such work runs — the
-    // cancel keeps retrying and is surfaced as unresolved rather than
-    // stopping the wrong turn (Astra on af76c787, #77). A second session-wide
-    // op in flight already covers this one: wait for its verdict instead of
-    // doubling it.
-    if (!actor.driver.capabilities.targetedInterrupt) {
-      if (actor.sessionInterrupt) { await actor.sessionInterrupt; if (!this.#interruptLive(actor, commandId) || actor.cancelOps.has(commandId)) return null; }
-      const collateral = this.ledger.listPending(actor.sessionId).filter((r) => (r.state === "running" || r.state === "accepted") && r.id !== commandId);
+  async #interruptOp(actor: Actor, commandId: string): Promise<InterruptResult | { kind: "withheld"; error: string } | null> {
+    let tombstone: string | null;
+    let attempt: AttemptRow | null;
+    // Every check below is re-run from scratch after an await: a submission
+    // that started, a foreign turn that began, a cancel op that opened while
+    // this one waited must be seen before anything reaches the driver
+    // (Astra on 0853706d).
+    for (;;) {
+      if (actor.retired) return null;
+      const row = this.ledger.getCommand(commandId);
+      if (!row) return null;
+      tombstone = row.state === "cancelled" ? actor.tombstones.get(commandId) ?? null : null;
+      if (row.state !== "cancelling" && !tombstone) return null;
+      attempt = tombstone ? this.ledger.getAttempt(tombstone) : this.ledger.latestAttempt(commandId);
+      // The submit is still in flight: its completion consults the cancel flag
+      // and schedules the interrupt with the turn identity it learns (#35).
+      if (attempt?.state === "submitting") return null;
+      // One interrupt op per command at a time: a second trigger (another late
+      // echo, a re-fired cancel) rides the verdict of the one in flight, which
+      // schedules the retry.
+      if (actor.cancelOps.has(commandId)) return null;
+      if (actor.driver.capabilities.targetedInterrupt) break;
+      // A session-wide interrupt (opencode, pi, claude's Escape) would also
+      // stop work nobody cancelled: refuse it while such work runs — the
+      // cancel keeps retrying and is surfaced as unresolved rather than
+      // stopping the wrong turn (Astra on af76c787, #77). A second session-wide
+      // op in flight already covers this one: wait for its verdict instead of
+      // doubling it, then look again.
+      if (actor.sessionInterrupt) { await actor.sessionInterrupt; continue; }
+      const collateral = this.#collateral(actor, commandId, attempt);
       if (collateral.length) {
         // Not an interrupt attempt (the budget is untouched): the cancel
         // stays pending and resolves with the turn's own end, or once the
         // other work is cancelled too (abortRunning).
         this.#scheduleInterrupt(actor, commandId, Math.min(30_000, this.#o.interruptConfirmMs * 4));
-        return { kind: "failed", error: `a session-wide interrupt would also stop ${collateral.map((c) => c.id).join(", ")}` };
+        return { kind: "withheld", error: `a session-wide interrupt would also stop ${collateral.join(", ")}` };
       }
+      break;
     }
     const tries = this.ledger.noteCancelAttempt(commandId);
     if (tries > this.#o.maxCancelAttempts) { actor.tombstones.delete(commandId); this.#markUnresolved(actor, commandId, attempt?.id ?? null, tries - 1); return { kind: "failed", error: "unresolved" }; }
     const token = randomUUID();
     actor.cancelOps.set(commandId, token);
-    const call = (async (): Promise<InterruptResult> => {
-      try { return await actor.driver.interrupt({ attempt: attempt ? this.#ref(attempt) : null }); }
-      catch (e) { return { kind: "failed", error: e instanceof Error ? e.message : String(e) }; }
-    })();
-    if (!actor.driver.capabilities.targetedInterrupt) actor.sessionInterrupt = call.then(() => {}, () => {}).finally(() => { actor.sessionInterrupt = null; });
-    const r = await call;
+    // No await separates the collateral check from the driver call: what
+    // was clear is what the interrupt meets.
+    const r = await this.#driverInterrupt(actor, attempt ? this.#ref(attempt) : null);
     if (actor.retired || actor.cancelOps.get(commandId) !== token) return r;
     actor.cancelOps.delete(commandId);
     if (!this.#interruptLive(actor, commandId)) return r; // confirmed meanwhile by an observation
@@ -963,6 +976,36 @@ export class SessionCoordinator {
     this.#scheduleInterrupt(actor, commandId, r.kind === "sent" ? Math.max(backoff, this.#o.interruptConfirmMs) : backoff);
     if (r.kind === "failed") this.#log(`${actor.sessionId}: interrupt for ${commandId} failed (${r.error ?? "?"}) — retry ${tries}/${this.#o.maxCancelAttempts} in ${backoff}ms`);
     return r;
+  }
+
+  /** What a session-wide interrupt on behalf of `commandId` would ALSO stop:
+   *  every other command the runtime has taken or may have taken (running,
+   *  accepted, a submission whose verdict is still out, an `unknown` one),
+   *  and a foreign turn other than the one the interrupt is for. */
+  #collateral(actor: Actor, commandId: string, attempt: AttemptRow | null): string[] {
+    const out = this.ledger.listPending(actor.sessionId)
+      .filter((r) => r.id !== commandId && (r.state === "running" || r.state === "accepted" || r.state === "submitting" || r.state === "unknown"))
+      .map((r) => `${r.id} (${r.state})`);
+    const ft = actor.foreignTurn;
+    if (ft && !(ft.runtimeTurnId != null && ft.runtimeTurnId === attempt?.runtimeTurnId)) out.push(`foreign turn ${ft.runtimeTurnId ?? "(unnamed)"}`);
+    return out;
+  }
+
+  /** The one call into driver.interrupt. Never rejects. For an untargeted
+   *  driver the call is registered as the session-wide interrupt in flight
+   *  (`actor.sessionInterrupt`, joined with any earlier one still out) so
+   *  the pump and the scheduler wait for it. */
+  #driverInterrupt(actor: Actor, attempt: AttemptRef | null): Promise<InterruptResult> {
+    const call = (async (): Promise<InterruptResult> => {
+      try { return await actor.driver.interrupt({ attempt }); }
+      catch (e) { return { kind: "failed", error: e instanceof Error ? e.message : String(e) }; }
+    })();
+    if (!actor.driver.capabilities.targetedInterrupt) {
+      const prev = actor.sessionInterrupt;
+      const gate: Promise<void> = (prev ? Promise.all([prev, call]) : call).then(() => {}, () => {}).finally(() => { if (actor.sessionInterrupt === gate) actor.sessionInterrupt = null; });
+      actor.sessionInterrupt = gate;
+    }
+    return call;
   }
 
   #markUnresolved(actor: Actor, commandId: string, attemptId: string | null, tries: number): void {
