@@ -9,11 +9,29 @@ import { Metadata } from '@/sync/storageTypes';
  * @param metadata - Optional metadata containing the root path
  * @returns The resolved absolute path
  */
+/** Case folds only where the remote filesystem is known to: Windows and the
+ *  default macOS volume. On a case-sensitive host /srv/Project and
+ *  /srv/project are different directories, and folding both mislabeled the
+ *  second one's files as the session's own (#441). With no `os` on the
+ *  metadata the session path itself tells: a drive letter or backslashes
+ *  mean Windows, /Users/… means macOS, anything else is treated as
+ *  case-sensitive. */
+function foldsCase(metadata: Metadata): boolean {
+    const os = (metadata.os ?? '').toLowerCase();
+    if (os === 'win32' || os === 'windows' || os === 'darwin' || os === 'macos') return true;
+    if (os !== '') return false;
+    const root = metadata.path;
+    return /^[A-Za-z]:/.test(root) || root.includes('\\') || root.startsWith('/Users/');
+}
+
 export function resolvePath(path: string, metadata: Metadata | null): string {
     if (!metadata) {
         return path;
     }
-    if (path.toLowerCase().startsWith(metadata.path.toLowerCase())) {
+    const fold = foldsCase(metadata);
+    const candidate = fold ? path.toLowerCase() : path;
+    const root = fold ? metadata.path.toLowerCase() : metadata.path;
+    if (candidate.startsWith(root)) {
         // Check that the path is actually within the metadata path by ensuring
         // there's either an exact match or a path separator after the metadata path
         const remainder = path.slice(metadata.path.length);
@@ -29,6 +47,20 @@ export function resolvePath(path: string, metadata: Metadata | null): string {
         }
     }
     return path;
+}
+
+/**
+ * Drop one trailing separator UNLESS it is the whole root: a home of `/`
+ * became '' and `C:\` became the drive-relative `C:` (#442), which resolves
+ * to the process's current directory on that drive, not the root.
+ */
+function stripTrailingSeparator(dir: string): string {
+    if (!dir.endsWith('/') && !dir.endsWith('\\')) return dir;
+    const trimmed = dir.slice(0, -1);
+    // POSIX root ('/'), a drive root ('C:\' / 'C:/') or a UNC-less empty
+    // prefix: the separator IS the path.
+    if (trimmed === '' || /^[A-Za-z]:$/.test(trimmed)) return dir;
+    return trimmed;
 }
 
 /**
@@ -52,22 +84,19 @@ export function resolveAbsolutePath(path: string, homeDir?: string): string {
     
     // Handle exact ~ (home directory)
     if (path === '~') {
-        // Remove trailing separator for consistency
-        return homeDir.endsWith('/') || homeDir.endsWith('\\') 
-            ? homeDir.slice(0, -1) 
-            : homeDir;
+        return stripTrailingSeparator(homeDir);
     }
-    
+
     // Handle ~/ and ~/path (home directory with subdirectory)
     if (path.startsWith('~/')) {
         const relativePart = path.slice(2); // Remove '~/'
         // Detect path separator based on homeDir - prefer the last separator found
         const hasBackslash = homeDir.lastIndexOf('\\') > homeDir.lastIndexOf('/');
         const separator = hasBackslash ? '\\' : '/';
-        const normalizedHome = homeDir.endsWith('/') || homeDir.endsWith('\\') 
-            ? homeDir.slice(0, -1) 
-            : homeDir;
-        return normalizedHome + separator + relativePart;
+        const normalizedHome = stripTrailingSeparator(homeDir);
+        // A root home keeps its own separator: '/' + 'x' is '/x', never '//x'.
+        const joiner = normalizedHome.endsWith('/') || normalizedHome.endsWith('\\') ? '' : separator;
+        return normalizedHome + joiner + relativePart;
     }
     
     // Handle ~username paths (not supported, return original)

@@ -6,6 +6,7 @@ import * as React from 'react';
 import { View, PanResponder, Image, Platform, StyleSheet as RNStyleSheet } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
+import { strokePath, type Stroke } from './drawingModel';
 
 export interface DrawingSurfaceHandle {
     undo(): void;
@@ -25,29 +26,9 @@ export interface DrawingSurfaceProps {
     onBackgroundLoad?: (uri: string, ok: boolean) => void;
 }
 
-interface Stroke {
-    color: string;
-    width: number;
-    points: Array<{ x: number; y: number }>;
-}
-
-/** Midpoint-quadratic smoothing: M p0, then Q(p[i], mid(p[i], p[i+1])). */
-export function strokePath(points: Array<{ x: number; y: number }>): string {
-    if (points.length === 0) return '';
-    if (points.length < 3) {
-        const p = points[0];
-        return `M ${p.x} ${p.y} L ${p.x + 0.1} ${p.y + 0.1}`;
-    }
-    let d = `M ${points[0].x} ${points[0].y}`;
-    for (let i = 1; i < points.length - 1; i++) {
-        const midX = (points[i].x + points[i + 1].x) / 2;
-        const midY = (points[i].y + points[i + 1].y) / 2;
-        d += ` Q ${points[i].x} ${points[i].y} ${midX} ${midY}`;
-    }
-    const last = points[points.length - 1];
-    d += ` L ${last.x} ${last.y}`;
-    return d;
-}
+// Path geometry lives in drawingModel.ts (shared with the web pad, tested
+// there): a two-point flick is a line, not a dot (#210).
+export { strokePath };
 
 export const DrawingSurface = React.forwardRef<DrawingSurfaceHandle, DrawingSurfaceProps>((props, ref) => {
     const [strokes, setStrokes] = React.useState<Stroke[]>([]);
