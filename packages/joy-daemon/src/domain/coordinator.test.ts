@@ -722,6 +722,84 @@ test("observation fencing (e8f8b2cc): a late echo of the pre-edit attempt does n
   expect(stateOf(plain.id)).toBe("running"); // same payload, newest attempt: it landed after all
 });
 
+test("tombstone (e8f8b2cc): late evidence of a cancelled timed-out prompt never issues an untargeted interrupt while the current command runs — deferred through the scheduler, dropped when the run ends", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const old = accept("s1", "old");
+  await settle();
+  const ref = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  expect(coord.cancel(old.id)).toMatchObject({ kind: "cancelled" });
+  const current = accept("s1", "current");
+  await clock.advance(100);
+  expect(d.lastSubmit.cmd.id).toBe(current.id);
+  d.lastSubmit.settle.resolve({ kind: "accepted" });
+  await settle();
+  d.emit({ kind: "echo", runtimeRef: d.lastSubmit.attempt.runtimeRef });
+  expect(stateOf(current.id)).toBe("running");
+  expect(d.interrupts).toHaveLength(0);
+  // The old prompt's echo surfaces while `current` runs: an Escape now would
+  // stop the wrong turn (collateral) — nothing is sent, the retry is parked.
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(0);
+  expect(stateOf(current.id)).toBe("running");
+  expect(stateOf(old.id)).toBe("cancelled");
+  // A second echo of the same late turn coalesces: still nothing in flight.
+  d.emit({ kind: "echo", runtimeRef: ref });
+  await settle();
+  expect(d.interrupts).toHaveLength(0);
+  expect(clock.pending).toBe(1); // exactly one parked retry
+  // The run ends: the parked retry is dropped, not fired at the next command.
+  d.emit({ kind: "turn_ended", status: "completed" });
+  expect(stateOf(current.id)).toBe("completed");
+  await clock.advance(60_000);
+  expect(d.interrupts).toHaveLength(0);
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([]);
+});
+
+test("tombstone (e8f8b2cc): with nothing else running the late turn is interrupted ONCE through the scheduler; a failed result retries on the cancel budget and is bounded", async () => {
+  const d = session("s1", CLAUDE_LIKE, "claude");
+  const old = accept("s1", "old");
+  await settle();
+  const ref = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  coord.cancel(old.id);
+  expect(stateOf(old.id)).toBe("cancelled");
+  d.emit({ kind: "echo", runtimeRef: ref });
+  d.emit({ kind: "echo", runtimeRef: ref }); // two echoes → one interrupt in flight
+  await settle();
+  expect(d.interrupts).toHaveLength(1);
+  expect(d.lastInterrupt.attempt?.runtimeRef).toBe(ref);
+  // The Escape failed: retried with the cancel backoff, never a bare re-fire.
+  d.lastInterrupt.settle.resolve({ kind: "failed", error: "pane gone" });
+  await settle();
+  expect(d.interrupts).toHaveLength(1);
+  await clock.advance(1_000);
+  expect(d.interrupts).toHaveLength(2);
+  // The runtime's own interrupt marker confirms it: no further tries.
+  d.lastInterrupt.settle.resolve({ kind: "sent" });
+  await settle();
+  d.emit({ kind: "turn_ended", status: "cancelled" });
+  await clock.advance(120_000);
+  expect(d.interrupts).toHaveLength(2);
+  expect(stateOf(old.id)).toBe("cancelled");
+  // Budget: a tombstone whose interrupts keep failing is bounded and surfaced unresolved.
+  const again = accept("s1", "again");
+  await settle();
+  const ref2 = d.lastSubmit.attempt.runtimeRef;
+  d.lastSubmit.settle.resolve({ kind: "rejected", permanent: false, busy: true, detail: "timeout", retryAfterMs: 100 });
+  await settle();
+  coord.cancel(again.id);
+  d.onInterrupt = () => ({ kind: "failed", error: "still no pane" });
+  d.emit({ kind: "echo", runtimeRef: ref2 });
+  await settle();
+  await clock.advance(600_000);
+  expect(d.interrupts.length).toBe(2 + 5); // maxCancelAttempts (5) for the second tombstone, then unresolved
+  expect(coord.snapshot("s1").unresolvedCancels).toEqual([again.id]);
+});
+
 test("waitFor resolves on the named state, immediately when already there, and with the current state on timeout", async () => {
   const d = session("s1");
   const c = accept("s1", "x");
