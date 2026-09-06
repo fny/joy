@@ -146,6 +146,14 @@ export interface TailerHealth {
 const HEALTH_ALERT_THRESHOLD = 25;
 const HEALTH_LOG_EVERY = 100;
 
+/** Safety-net poll (#488): fs.watch is bound to an INODE, so a transcript
+ *  replaced by write-sibling-then-rename leaves the watcher on a file nothing
+ *  writes to any more. The inotify events for the unlink usually get us to
+ *  readNew (which notices the inode change and re-arms), but nothing
+ *  guarantees them, so a cheap stat every couple of seconds is the floor. */
+const REPLACE_POLL_MS = 2000;
+const EMPTY = Buffer.alloc(0);
+
 /**
  * Tail a JSONL file, invoking onEntry for each complete parsed line as it is
  * appended. Reads incrementally from a byte offset, carrying incomplete
@@ -160,8 +168,17 @@ export function tailJsonl(
   onHealth?: (h: TailerHealth) => void,
 ): TranscriptTailer {
   let byteOffset = startOffset;
-  let leftover = ""; // incomplete line carried across reads
+  // Incomplete line carried across reads — kept as BYTES, not a string (#38):
+  // a read can end inside a 2-4 byte UTF-8 sequence, and decoding the halves
+  // separately turned each into U+FFFD (the reassembled line still parsed, so
+  // the corruption was silent) while offset() then subtracted the 3-byte
+  // replacement chars instead of the real bytes, skewing the checkpoint.
+  let leftover: Buffer = EMPTY;
   let fsWatcher: ReturnType<typeof watch> | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Inode the offset/leftover describe — a different one under the same
+   *  path means the transcript was replaced (#488). */
+  let fileIno: bigint | null = null;
   let closed = false;
   // Health (codex finding 6): skip-and-advance stays — a garbage line must
   // not wedge the tailer (liveness) — but failures are now COUNTED and
@@ -189,9 +206,53 @@ export function tailJsonl(
     }
   }
 
-  function readNew() {
+  function handleLine(line: string) {
+    if (!line.trim()) return;
     try {
-      const { size } = statSync(path);
+      const entry = JSON.parse(line);
+      parseConsecutive = 0;
+      onEntry(entry);
+    } catch (e) {
+      // onEntry throwing is a CONSUMER bug, but counting it as parse
+      // health keeps the alarm honest either way.
+      if (e instanceof SyntaxError) noteParseFailure(line);
+      else process.stderr.write(`[tail] onEntry threw for ${path}: ${e}\n`);
+    }
+  }
+
+  /** (Re)bind fs.watch to whatever inode `path` names right now. Throws when
+   *  the path can't be watched (caller decides: retry later / poll). */
+  function armWatcher() {
+    fsWatcher?.close();
+    fsWatcher = watch(path, () => readNew());
+    // An async watcher error with no listener is THROWN at the event loop —
+    // that would take the daemon down for one unreadable transcript. Drop
+    // the watcher instead; the poll re-arms it on its next tick (#488).
+    fsWatcher.on("error", () => { fsWatcher?.close(); fsWatcher = null; });
+  }
+
+  function readNew() {
+    if (closed) return;
+    try {
+      const st = statSync(path, { bigint: true });
+      if (fileIno !== null && st.ino !== fileIno) {
+        // The path names a DIFFERENT file (atomic replace: sibling + rename,
+        // #488). Our offset and leftover describe the old inode, and so does
+        // fs.watch — start the new file from byte 0 and re-arm on it.
+        byteOffset = 0;
+        leftover = EMPTY;
+        try { armWatcher(); } catch { fsWatcher = null; /* the poll retries */ }
+      }
+      fileIno = st.ino;
+      const size = Number(st.size);
+      if (size < byteOffset) {
+        // Truncated / rewritten in place (#487): the old offset is past the
+        // new end, so `size <= byteOffset` alone would sit silent until the
+        // rewrite outgrew it and then resume mid-line. Also covers a persisted
+        // checkpoint that outlived the file it described. Re-read from 0.
+        byteOffset = 0;
+        leftover = EMPTY;
+      }
       if (size <= byteOffset) return;
       // The descriptor is closed on EVERY path: a readSync that threw (EIO,
       // EISDIR after a replace) used to leak one fd per retry until the daemon
@@ -202,41 +263,55 @@ export function tailJsonl(
       });
       byteOffset += bytesRead;
       readConsecutive = 0;
-      const chunk = leftover + buf.subarray(0, bytesRead).toString("utf-8");
-      const parts = chunk.split("\n");
-      leftover = parts.pop() ?? ""; // last part is incomplete if no trailing \n
-      for (const line of parts) {
-        if (!line.trim()) continue;
-        try {
-          const entry = JSON.parse(line);
-          parseConsecutive = 0;
-          onEntry(entry);
-        } catch (e) {
-          // onEntry throwing is a CONSUMER bug, but counting it as parse
-          // health keeps the alarm honest either way.
-          if (e instanceof SyntaxError) noteParseFailure(line);
-          else process.stderr.write(`[tail] onEntry threw for ${path}: ${e}\n`);
-        }
+      // Split on the newline BYTE first and decode each complete line on its
+      // own (#38); the tail is carried as raw bytes so a character cut by the
+      // read boundary is decoded exactly once, whole, on the next pass.
+      const fresh = buf.subarray(0, bytesRead);
+      const chunk = leftover.length ? Buffer.concat([leftover, fresh]) : fresh;
+      let start = 0;
+      for (let nl = chunk.indexOf(0x0a, start); nl >= 0; nl = chunk.indexOf(0x0a, start)) {
+        handleLine(chunk.toString("utf-8", start, nl));
+        start = nl + 1;
       }
+      // Copy the tail so the (possibly large) read buffer can be collected.
+      leftover = start < chunk.length ? Buffer.from(chunk.subarray(start)) : EMPTY;
     } catch (e) { noteReadFailure(e); }
+  }
+
+  function poll() {
+    if (closed) return;
+    if (!shouldRetry()) { stopPoll(); return; }
+    if (!fsWatcher) { try { armWatcher(); } catch { /* still unwatchable — next tick */ } }
+    readNew();
+  }
+
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
   function attach() {
     if (closed || !shouldRetry()) return;
     try {
-      fsWatcher = watch(path, () => readNew());
+      armWatcher();
       readNew();
+      pollTimer = setInterval(poll, REPLACE_POLL_MS);
+      pollTimer.unref?.();
     } catch {
+      fsWatcher = null;
       setTimeout(attach, 500);
     }
   }
 
   attach();
   return {
-    offset() { return byteOffset - Buffer.byteLength(leftover, "utf-8"); },
+    // leftover is bytes, so this is the exact byte offset of the first
+    // unconsumed line (#38) — what the session persists as its checkpoint.
+    offset() { return byteOffset - leftover.length; },
     close() {
       closed = true;
+      stopPoll();
       fsWatcher?.close();
+      fsWatcher = null;
     },
   };
 }
