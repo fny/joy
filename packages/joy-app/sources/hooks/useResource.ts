@@ -1,0 +1,153 @@
+/**
+ * Component binding for sync/resource: subscribe to a resource's entry,
+ * ensure it on mount / key change / version change, and apply the focus,
+ * polling and reconnect policies. The store owns the data; the component
+ * owns nothing but its subscription.
+ */
+import * as React from 'react';
+import { AppState } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import { resources, type ResourceEntry, type ResourceSpec } from '@/sync/resource';
+import { storage } from '@/sync/storage';
+import { useActiveInterval } from './useActiveInterval';
+
+let signalsInstalled = false;
+/** App focus → refetch observed entries that opted in; relay reconnect → same. */
+function installResourceSignals(): void {
+    if (signalsInstalled) return;
+    signalsInstalled = true;
+    try {
+        AppState.addEventListener('change', (s) => { if (s === 'active') resources.onFocus(); });
+        let last = storage.getState().socketStatus;
+        storage.subscribe((state) => {
+            const next = state.socketStatus;
+            if (next === 'connected' && last !== 'connected') resources.onReconnect();
+            last = next;
+        });
+    } catch {
+        // Test environments without react-native: policies are exercised on the store directly.
+    }
+}
+
+export interface UseResourceOptions {
+    /** False: subscribe only, never fetch (a picker that is closed, an offline machine). */
+    enabled?: boolean;
+    /** Poll while the screen is focused and the app is foregrounded. */
+    refetchInterval?: number;
+    /** Screen focus (navigation): 'stale' re-ensures under staleTime, 'always'
+     *  refreshes, false does nothing. Default 'stale'. */
+    refetchOnScreenFocus?: 'stale' | 'always' | false;
+}
+
+export type ResourceView<T> = ResourceEntry<T> & {
+    /** No value yet and a request is running (the only time a spinner is right). */
+    isLoading: boolean;
+    /** Start a new request now (supersedes what is in flight). */
+    refresh: () => Promise<ResourceEntry<T>>;
+};
+
+const idleView = new Map<string, ResourceEntry<unknown>>();
+function idleFor<T>(key: string): ResourceEntry<T> {
+    let e = idleView.get(key);
+    if (!e) { e = resources.peek(key); idleView.set(key, e); }
+    return e as ResourceEntry<T>;
+}
+
+/**
+ * Passive subscription: the entry as cached, never fetched by this hook and
+ * with no navigation-focus binding (safe anywhere, e.g. list rows and badges).
+ */
+export function useResourceEntry<T>(key: string | null): ResourceEntry<T> {
+    const subscribe = React.useCallback((listener: () => void) => (key ? resources.subscribe(key, listener) : () => {}), [key]);
+    const getSnapshot = React.useCallback((): ResourceEntry<T> => (key ? resources.peek<T>(key) : idleFor<T>('')), [key]);
+    return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Subscribe to `spec.key` and keep it fresh. Passing `null` renders the idle
+ * entry (no key yet — a session still hydrating). The returned entry object is
+ * referentially stable until the store publishes a change for the key.
+ */
+export function useResource<T>(spec: ResourceSpec<T> | null, opts: UseResourceOptions = {}): ResourceView<T> {
+    installResourceSignals();
+    const enabled = opts.enabled ?? true;
+    const key = spec?.key ?? null;
+    const version = spec?.version;
+    const specRef = React.useRef(spec);
+    specRef.current = spec;
+
+    const subscribe = React.useCallback((listener: () => void) => (key ? resources.subscribe(key, listener) : () => {}), [key]);
+    const getSnapshot = React.useCallback((): ResourceEntry<T> => (key ? resources.peek<T>(key) : idleFor<T>('')), [key]);
+    const entry = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+    React.useEffect(() => {
+        if (!enabled || !specRef.current) return;
+        void resources.ensure(specRef.current);
+    }, [key, version, enabled]);
+
+    const onScreenFocus = opts.refetchOnScreenFocus ?? 'stale';
+    const focusedKey = React.useRef<string | null | undefined>(undefined);
+    useFocusEffect(React.useCallback(() => {
+        // The ensure effect above already ran for this key; act on RE-focus only.
+        if (focusedKey.current !== key) { focusedKey.current = key; return; }
+        if (!enabled || !specRef.current || onScreenFocus === false) return;
+        if (onScreenFocus === 'always') void resources.refresh(specRef.current);
+        else void resources.ensure(specRef.current);
+    }, [key, enabled, onScreenFocus]));
+
+    // Polling coalesces with a read already in flight (ensure), so the tick
+    // that fires on (re)start never doubles the mount read.
+    const interval = opts.refetchInterval ?? 0;
+    useActiveInterval(() => {
+        if (specRef.current) void resources.ensure(specRef.current, { staleTime: 0 });
+    }, interval, enabled && interval > 0 && !!key);
+
+    const refresh = React.useCallback(() => {
+        const s = specRef.current;
+        return s ? resources.refresh(s) : Promise.resolve(idleFor<T>(''));
+    }, []);
+
+    return React.useMemo(() => ({
+        ...entry,
+        isLoading: !entry.hasData && entry.fetching,
+        refresh,
+    }), [entry, refresh]);
+}
+
+/**
+ * Subscribe to many specs at once (a diff per changed file). Ensures each
+ * whose key or version changed; the returned array is stable while no entry
+ * changed.
+ */
+export function useResources<T>(specs: ResourceSpec<T>[], opts: { enabled?: boolean } = {}): ResourceEntry<T>[] {
+    installResourceSignals();
+    const enabled = opts.enabled ?? true;
+    const keys = specs.map((s) => s.key);
+    const keysId = keys.join('\u0000');
+    const versionsId = specs.map((s) => s.version ?? '').join('\u0000');
+    const specsRef = React.useRef(specs);
+    specsRef.current = specs;
+
+    const subscribe = React.useCallback((listener: () => void) => {
+        const unsubs = keys.map((k) => resources.subscribe(k, listener));
+        return () => { for (const u of unsubs) u(); };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [keysId]);
+    const last = React.useRef<ResourceEntry<T>[]>([]);
+    const getSnapshot = React.useCallback((): ResourceEntry<T>[] => {
+        const next = keys.map((k) => resources.peek<T>(k));
+        const prev = last.current;
+        if (prev.length === next.length && prev.every((e, i) => e === next[i])) return prev;
+        last.current = next;
+        return next;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [keysId]);
+    const entries = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+    React.useEffect(() => {
+        if (!enabled) return;
+        for (const s of specsRef.current) void resources.ensure(s);
+    }, [keysId, versionsId, enabled]);
+
+    return entries;
+}
