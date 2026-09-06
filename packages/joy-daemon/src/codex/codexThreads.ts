@@ -7,12 +7,13 @@
 
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join } from "path";
+import { codexHome as resolveCodexHome, codexSessionsDir as sessionsDirUnder } from "./codexHome";
 
 const SCAN_CAP = 200;
 
+/** The rollout store — the shared resolver (#524 #541 #546) unless a home is given. */
 export function codexSessionsDir(codexHome?: string): string {
-  const home = codexHome ?? process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex");
-  return join(home, "sessions");
+  return sessionsDirUnder(codexHome ?? resolveCodexHome());
 }
 
 /** The newest thread id whose rollout ran in `cwd`, or null. */

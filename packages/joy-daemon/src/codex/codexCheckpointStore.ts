@@ -18,9 +18,10 @@
 // unbounded-safe (no cap, no eviction), and never falsely covers an undelivered
 // turn.
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from "fs";
+import { existsSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
+import { writeFileAtomic } from "../domain/atomicWrite";
 
 export interface CodexCheckpoint {
   threadId: string | null;
@@ -68,13 +69,13 @@ export function loadCheckpoint(id: string, baseDir = joyStateDir()): CodexCheckp
   } catch { return empty(); }
 }
 
+/** Atomic replace through the shared primitive (Wave B adoption of the A2
+ *  helper): the previous checkpoint survives any failed write, so a crash can
+ *  never regress the high-water to "nothing delivered" and replay every turn.
+ *  Returns false on failure; callers keep the in-memory state and retry. */
 export function saveCheckpoint(id: string, cp: CodexCheckpoint, baseDir = joyStateDir()): boolean {
   try {
-    mkdirSync(baseDir, { recursive: true });
-    const p = fileFor(id, baseDir);
-    const tmp = `${p}.tmp`;
-    writeFileSync(tmp, JSON.stringify(cp));
-    renameSync(tmp, p);
+    writeFileAtomic(fileFor(id, baseDir), JSON.stringify(cp));
     return true;
   } catch (e) {
     process.stderr.write(`[codex-checkpoint] save failed for ${id}: ${e}\n`);

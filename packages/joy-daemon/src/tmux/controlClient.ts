@@ -17,6 +17,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import { run, tmuxArgv } from "./shell";
 import { tmuxCommand } from "./serialize";
+import { retireChildProcess } from "../domain/bounded";
 import type { TmuxResult } from "./driver";
 
 /**
@@ -40,31 +41,30 @@ export type ControlEvent =
  * lines, get events. Keeps NO command-queue knowledge; the client decides whether a
  * block-end resolves a pending command or is the unsolicited attach block.
  *
- * Correctness: a %begin opens a block keyed on its command-number; the block closes
- * ONLY on a %end/%error carrying that SAME number — because captured pane content can
- * itself contain lines that look like "%end 1 2 3".
+ * Correctness: a %begin opens a block keyed on its COMPLETE identity — timestamp,
+ * command-number AND flags; the block closes ONLY on an anchored %end/%error line
+ * carrying all three — because captured pane content can itself contain lines that
+ * look like "%end 1 42 0". Matching the number alone let such a line close a
+ * capture early and truncate the snapshot (#591).
  */
 export class ControlParser {
-  #inBlock = false;
-  #num = "";
+  #begin: { time: string; num: string; flags: string } | null = null;
   #lines: string[] = [];
-  #err = false;
 
   feed(line: string): ControlEvent[] {
-    if (this.#inBlock) {
-      const term = /^%(end|error) \d+ (\d+)\b/.exec(line);
-      if (term && term[2] === this.#num) {
+    if (this.#begin) {
+      const term = /^%(end|error) (\d+) (\d+) (\d+)$/.exec(line);
+      if (term && term[2] === this.#begin.time && term[3] === this.#begin.num && term[4] === this.#begin.flags) {
         const ev: ControlEvent = { type: "block-end", ok: term[1] === "end", out: this.#lines.join("\n") };
-        this.#inBlock = false;
+        this.#begin = null;
         this.#lines = [];
-        this.#num = "";
         return [ev];
       }
       this.#lines.push(line); // ordinary block content (incl. %-looking pane text)
       return [];
     }
-    const begin = /^%begin \d+ (\d+)\b/.exec(line);
-    if (begin) { this.#inBlock = true; this.#num = begin[1]; this.#lines = []; return []; }
+    const begin = /^%begin (\d+) (\d+) (\d+)$/.exec(line);
+    if (begin) { this.#begin = { time: begin[1], num: begin[2], flags: begin[3] }; this.#lines = []; return []; }
     const out = /^%output (%\d+) /.exec(line);
     if (out) return [{ type: "output", paneId: out[1] }];
     if (line.startsWith("%exit")) return [{ type: "exit" }];
@@ -245,13 +245,12 @@ export class TmuxControlClient {
                        // all fire for one proc; without this we'd schedule N reconnects
                        // (→ N control clients). First call wins; the rest no-op.
     this.#proc = null;
-    proc.removeAllListeners();
-    proc.stdin?.removeAllListeners();
-    // Kill the abandoned client. On the normal exit path it's already dead (no-op);
-    // on the SYNTHETIC path (a sync write threw but the process may still be alive)
-    // this stops the old `tmux -C` from lingering as an orphan.
-    try { proc.stdin?.destroy(); } catch { /* ignore */ }
-    try { proc.kill(); } catch { /* ignore */ }
+    // Retire the abandoned client: lifecycle listeners off, terminal error sinks
+    // on (a late spawn 'error' must not crash the daemon — #590), stdin destroyed,
+    // process killed. On the normal exit path the kill is a no-op; on the
+    // SYNTHETIC path (a sync write threw but the process may still be alive) it
+    // stops the old `tmux -C` from lingering as an orphan.
+    retireChildProcess(proc, { stdin: "destroy" });
     this.#ready = false;
     if (this.#activeTimer) { clearTimeout(this.#activeTimer); this.#activeTimer = null; }
     // Fail the in-flight + every queued command so awaiters fall back instead of hanging.
@@ -272,9 +271,10 @@ export class TmuxControlClient {
     this.#stopped = true;
     const proc = this.#proc;
     this.#proc = null;
-    proc?.removeAllListeners();
-    try { proc?.stdin?.end(); } catch { /* ignore */ }
-    try { proc?.kill(); } catch { /* ignore */ }
+    // A spawn that failed (ENOENT/EACCES/EAGAIN) delivers its 'error' AFTER this
+    // returns; bare removeAllListeners() left it unhandled and took the whole
+    // daemon down with a disposed session (#590). The retire helper keeps a sink.
+    retireChildProcess(proc, { stdin: "end" });
     if (this.#activeTimer) { clearTimeout(this.#activeTimer); this.#activeTimer = null; }
     if (this.#active) { this.#active.resolve({ ok: false, out: "", error: "stopped" }); this.#active = null; }
     for (const { p } of this.#writeQueue.splice(0)) p.resolve({ ok: false, out: "", error: "stopped" });

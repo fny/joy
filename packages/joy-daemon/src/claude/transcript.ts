@@ -3,9 +3,10 @@
 // (turns, receipts, relay events) lives in session.ts; this module only
 // knows how to find the file and stream its lines.
 
-import { openSync, readSync, closeSync, statSync, readdirSync, readFileSync, watch } from "fs";
+import { readSync, statSync, readdirSync, readFileSync, watch } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { withFd } from "../domain/bounded";
 
 /** True for a real user prompt (turn boundary) — not a tool_result, meta, or CLI wrapper. */
 function isUserPromptLine(line: string): boolean {
@@ -192,10 +193,13 @@ export function tailJsonl(
     try {
       const { size } = statSync(path);
       if (size <= byteOffset) return;
-      const fd = openSync(path, "r");
-      const buf = Buffer.allocUnsafe(size - byteOffset);
-      const bytesRead = readSync(fd, buf, 0, buf.length, byteOffset);
-      closeSync(fd);
+      // The descriptor is closed on EVERY path: a readSync that threw (EIO,
+      // EISDIR after a replace) used to leak one fd per retry until the daemon
+      // hit its limit (#489).
+      const { buf, bytesRead } = withFd(path, "r", (fd) => {
+        const buf = Buffer.allocUnsafe(size - byteOffset);
+        return { buf, bytesRead: readSync(fd, buf, 0, buf.length, byteOffset) };
+      });
       byteOffset += bytesRead;
       readConsecutive = 0;
       const chunk = leftover + buf.subarray(0, bytesRead).toString("utf-8");

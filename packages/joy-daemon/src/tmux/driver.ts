@@ -121,7 +121,11 @@ export class TmuxDriver {
     if (opts?.color) args.push("-e");
     if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
     args.push("-t", target);
-    return run(...this.#argv, ...args);
+    const r = run(...this.#argv, ...args);
+    // Same framing as a control-mode capture (rows joined by "\n", no trailing
+    // newline): capture-pane -p ends its output with one "\n", and run() no
+    // longer trims — so leading whitespace and blank rows now survive (#595).
+    return r.ok && r.out.endsWith("\n") ? { ...r, out: r.out.slice(0, -1) } : r;
   }
 
   /**

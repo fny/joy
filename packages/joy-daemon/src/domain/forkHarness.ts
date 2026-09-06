@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { codexSessionsDir } from "../codex/codexHome";
 
 export class ForkUnsupported extends Error {}
 
@@ -80,7 +81,7 @@ export function forkPiSession(sessionId: string): string {
 
 /** Locate a codex rollout by thread id (any day directory). */
 export function findCodexRollout(threadId: string): string | null {
-  const root = join(homedir(), ".codex", "sessions");
+  const root = codexSessionsDir(); // honours $CODEX_HOME (#541)
   if (!existsSync(root)) return null;
   const stack = [root];
   while (stack.length) {
@@ -107,7 +108,8 @@ export function forkCodexThread(threadId: string): string {
   if (first.type !== "session_meta" || !first.payload) throw new ForkUnsupported("codex rollout has an unexpected header");
   first.payload.id = id; first.payload.session_id = id; first.payload.timestamp = now.toISOString();
   lines[0] = JSON.stringify(first);
-  const dir = join(homedir(), ".codex", "sessions", String(now.getUTCFullYear()), String(now.getUTCMonth() + 1).padStart(2, "0"), String(now.getUTCDate()).padStart(2, "0"));
+  // The fork lands in the SAME store codex reads from (#541).
+  const dir = join(codexSessionsDir(), String(now.getUTCFullYear()), String(now.getUTCMonth() + 1).padStart(2, "0"), String(now.getUTCDate()).padStart(2, "0"));
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `rollout-${ts}-${id}.jsonl`), lines.join("\n") + "\n");
   return id;

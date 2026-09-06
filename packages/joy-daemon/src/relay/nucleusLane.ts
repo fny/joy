@@ -22,7 +22,8 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { writeFileAtomic } from "../domain/atomicWrite";
 import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
@@ -228,12 +229,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const writeSpawnIntent = (commandId: string, localId: string): void => {
     const m = readSpawnIntents();
     m[commandId] = localId;
-    mkdirSync(joyStateDir(), { recursive: true });
-    // tmp + rename: a crash mid-write used to truncate the whole map and lose
-    // every other command's mapping (Astra on 2f803b14, #75).
-    const tmp = `${spawnIntentPath}.tmp`;
-    writeFileSync(tmp, JSON.stringify(m, null, 2));
-    renameSync(tmp, spawnIntentPath);
+    // Atomic replace via the shared primitive (fsync'd temp + rename): a crash
+    // mid-write used to truncate the whole map and lose every other command's
+    // mapping (Astra on 2f803b14, #75); Wave B routes the remaining hand-rolled
+    // tmp+rename through domain/atomicWrite.
+    writeFileAtomic(spawnIntentPath, JSON.stringify(m, null, 2));
   };
   // v2 sessionId → local session id, rebuilt from the relay on start and
   // extended by every bind we perform.
