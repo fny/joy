@@ -62,20 +62,3 @@ export function resolveEnvErrorRow(error: string | null): EnvErrorRow | null {
     if (error === 'no_machine_key' || error === 'no_ctx') return { kind: 'no_key' };
     return { kind: 'failure', detail: error };
 }
-
-/** The environment key names together with the machine that answered (#226). */
-export interface EnvNames {
-    machineId: string;
-    names: string[];
-}
-
-/**
- * Names to render for the machine on screen: only a list THAT machine
- * produced. A list from a previous machine (kept in state until the new
- * one answers) renders nothing rather than lending its rows — and their
- * delete actions — to the wrong machine (#226).
- */
-export function envNamesFor(env: EnvNames | null, machineId: string): string[] | null {
-    if (!env || env.machineId !== machineId) return null;
-    return env.names;
-}

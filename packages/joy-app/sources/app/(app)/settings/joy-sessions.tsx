@@ -13,62 +13,42 @@ import type { JoySession } from '@/joy/types';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { StyleSheet } from 'react-native-unistyles';
-import { sync } from '@/sync/sync';
-import { machineStatusOnly } from '@/sync/v2/machine';
+import { resources } from '@/sync/resource';
+import { joyMachinesSpec, joyStatusSpec } from '@/sync/machineResources';
+import { useResource } from '@/hooks/useResource';
 
-// Survives navigation: which machines answered the joy-tmux probe last time.
-// Lets revisits render the machine list instantly while a background
-// re-probe keeps it fresh.
-let cachedJoyMachineIds: Set<string> | null = null;
+const NO_MACHINES = new Set<string>();
 
 export default React.memo(function JoySessionsScreen() {
     const machines = useAllMachines({ includeOffline: true });
     const onlineMachines = machines.filter(isMachineOnline);
     const offlineMachines = machines.filter(m => !isMachineOnline(m));
 
-    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(
-        () => cachedJoyMachineIds?.values().next().value ?? null,
-    );
-    // null = first-ever probe in flight; afterwards the set of machine ids
-    // that answered a joy-list-sessions probe within 3s. Online machines
-    // without joy-tmux never respond (machineRPC has no timeout), hence the
-    // per-probe race. Results are cached module-level: the machine
-    // list renders instantly from synced storage, and without the cache this
-    // page ate a 3s live-probe on every visit. Cached results render
-    // immediately; a background re-probe refreshes them.
-    const [joyMachineIds, setJoyMachineIds] = React.useState<Set<string> | null>(cachedJoyMachineIds);
-    // Bumped by "Probe again" so a failed or empty first probe can be retried
-    // without leaving the screen.
-    const [probeAttempt, setProbeAttempt] = React.useState(0);
+    // Which online machines run joy-daemon: a RESOURCE keyed by the probed
+    // set (sync/machineResources). Survives navigation in the resource cache,
+    // so revisits render the machine list instantly while a background
+    // re-probe keeps it fresh. A change of the online set is a new key, so a
+    // run for the old set can never settle into the new one and the screen
+    // cannot sit on Loading forever (#178); with no online machines there is
+    // nothing to probe.
+    const onlineIds = onlineMachines.map(m => m.id).join(',');
+    const probeSpec = React.useMemo(() => joyMachinesSpec(onlineIds ? onlineIds.split(',') : []), [onlineIds]);
+    const probe = useResource(probeSpec, { enabled: onlineMachines.length > 0 });
+    // null = first-ever probe for this set in flight; afterwards the ids that answered.
+    const joyMachineIds: Set<string> | null = onlineMachines.length === 0
+        ? NO_MACHINES
+        : probe.data ? new Set(probe.data) : null;
 
-    // One discovery run per online-machine set. A change while a run is in
-    // flight cancels that run and starts a new one — the old code marked the
-    // screen "probed" on the first run, so the cancelled run never settled and
-    // the replacement returned at once: Loading forever (#178). With no online
-    // machines there is nothing to probe: settle to an empty set instead of
-    // staying on Loading.
+    const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(
+        () => resources.peek<string[]>(probeSpec.key).data?.[0] ?? null,
+    );
     React.useEffect(() => {
-        if (onlineMachines.length === 0) {
-            setJoyMachineIds(new Set());
-            return;
-        }
-        let cancelled = false;
-        void (async () => {
-            const probeOne = (id: string) => Promise.race([
-                (async () => { const c = sync.machineOnlyCtx(id); if (!c) throw new Error('no ctx'); await machineStatusOnly(c); return id; })(),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
-            ]);
-            const results = await Promise.allSettled(onlineMachines.map(m => probeOne(m.id)));
-            if (cancelled) return;
-            const found = new Set(
-                results.filter(r => r.status === 'fulfilled').map(r => (r as PromiseFulfilledResult<string>).value),
-            );
-            cachedJoyMachineIds = found;
-            setJoyMachineIds(found);
-            setSelectedMachineId(prev => (prev && found.has(prev)) ? prev : (found.values().next().value ?? null));
-        })();
-        return () => { cancelled = true; };
-    }, [onlineMachines.map(m => m.id).join(','), probeAttempt]);
+        const found = probe.data;
+        if (!found) return;
+        setSelectedMachineId(prev => (prev && found.includes(prev)) ? prev : (found[0] ?? null));
+    }, [probe.data]);
+    // "Probe again": a failed or empty probe can be retried without leaving the screen.
+    const probeAgain = React.useCallback(() => { void probe.refresh(); }, [probe.refresh]);
 
     const handleSelectMachine = React.useCallback((id: string) => {
         setSelectedMachineId(id);
@@ -95,7 +75,7 @@ export default React.memo(function JoySessionsScreen() {
                     <Item
                         title="No machines running joy-daemon"
                         subtitle={onlineMachines.length > 0 ? 'Tap to probe again' : undefined}
-                        onPress={onlineMachines.length > 0 ? () => setProbeAttempt((n) => n + 1) : undefined}
+                        onPress={onlineMachines.length > 0 ? probeAgain : undefined}
                         showChevron={false}
                     />
                 ) : (
@@ -149,18 +129,9 @@ export default React.memo(function JoySessionsScreen() {
 const MachineSessions = React.memo(function MachineSessions({ machineId }: { machineId: string }) {
     const { sessions, loading, error, createSession, killSession, fetchPane } = useJoyRpcSessions(machineId);
 
-    // Daemon card: one-shot joy-status fetch per machine selection.
-    type JoyStatus = { ok: boolean; version?: string; uptimeMs?: number; claude?: { available: boolean; version: string | null } };
-    const [daemonStatus, setDaemonStatus] = React.useState<JoyStatus | null>(null);
-    React.useEffect(() => {
-        setDaemonStatus(null);
-        let cancelled = false;
-        Promise.race([
-            (function(){ const c0 = sync.machineOnlyCtx(machineId); if (!c0) return Promise.reject(new Error('no machine context')); return machineStatusOnly(c0).then(r => r.data as never); })(),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000)),
-        ]).then(s => { if (!cancelled) setDaemonStatus(s); }).catch(() => { /* card stays hidden */ });
-        return () => { cancelled = true; };
-    }, [machineId]);
+    // Daemon card: the machine's joy-status resource (4s probe, keyed by
+    // machine — another machine's answer can never fill this card).
+    const daemonStatus = useResource(React.useMemo(() => joyStatusSpec(machineId), [machineId])).data ?? null;
 
     const killingIdRef = React.useRef<string | null>(null);
     const screenshotIdRef = React.useRef<string | null>(null);
