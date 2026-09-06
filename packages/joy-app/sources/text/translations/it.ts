@@ -743,6 +743,7 @@ export const it: TranslationStructure = {
         fileConflictDescription: 'Questo file è stato modificato sul dispositivo mentre lo stavi modificando. Ricarica per vedere l\'ultima versione.',
         reload: 'Ricarica',
         overwrite: 'Sovrascrivi',
+        conflicted: 'Conflitto',
     },
 
 

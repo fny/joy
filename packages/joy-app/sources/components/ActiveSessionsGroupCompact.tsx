@@ -11,6 +11,7 @@ import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
 import { useAllMachines, useSessionGitStatus } from '@/sync/storage';
+import { knownLines } from '@/sync/gitStatusFiles';
 import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
@@ -55,11 +56,13 @@ function useSectionGitInfo(sessionId: string) {
         if (!gitStatus || gitStatus.lastUpdatedAt === 0) {
             return { branch: null, linesAdded: 0, linesRemoved: 0, hasChanges: false };
         }
+        // 'unavailable' counts show no numbers — never a stand-in zero.
+        const lines = knownLines(gitStatus.unstagedLines) ?? { added: 0, removed: 0 };
         return {
             branch: gitStatus.branch,
-            linesAdded: gitStatus.unstagedLinesAdded,
-            linesRemoved: gitStatus.unstagedLinesRemoved,
-            hasChanges: gitStatus.unstagedLinesAdded > 0 || gitStatus.unstagedLinesRemoved > 0,
+            linesAdded: lines.added,
+            linesRemoved: lines.removed,
+            hasChanges: lines.added > 0 || lines.removed > 0,
         };
     }, [gitStatus]);
 }

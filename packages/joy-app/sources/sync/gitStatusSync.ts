@@ -1,18 +1,22 @@
 /**
  * Git status synchronization module
- * Provides real-time git repository status tracking using remote bash commands
+ * Keeps the per-project GitStatus summary (branch, counts, line totals) fresh
+ * from the daemon's STRUCTURED status over the sealed tunnel. No git text is
+ * parsed here: the daemon returns typed facts (docs/API.md, "Structured git
+ * status") and this module only projects them onto the store's shape.
  */
 
 import { InvalidateSync } from '@/utils/sync';
-import { GitStatus } from './storageTypes';
 import { storage } from './storage';
-import { parseStatusSummary, getStatusCounts, isDirty } from './git-parsers/parseStatus';
-import { parseStatusSummaryV2, getStatusCountsV2, isDirtyV2, getCurrentBranchV2, getTrackingInfoV2 } from './git-parsers/parseStatusV2';
-import { parseCurrentBranch } from './git-parsers/parseBranch';
-import { parseNumStat, mergeDiffSummaries } from './git-parsers/parseDiff';
 import { sync } from './sync';
-import { machineGitStatus, machineGitDiff } from './v2/machine';
+import { machineGitStatus } from './v2/machine';
+import { gitStatusFromStructured } from './gitStatusModel';
 
+/** Retryable read failure: rethrown so InvalidateSync's backoff loop retries
+ *  instead of treating one failed refresh as a completed one (#379). */
+class GitStatusUnavailable extends Error {
+    constructor(message: string) { super(message); this.name = 'GitStatusUnavailable'; }
+}
 
 export class GitStatusSync {
     // Map project keys to sync instances
@@ -21,6 +25,11 @@ export class GitStatusSync {
     private sessionToProjectKey = new Map<string, string>();
     // Debounce timers to coalesce rapid invalidations (e.g. new-message + update-session arriving together)
     private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    // Generation per project: bumped whenever the project's sync is stopped or
+    // its status cleared. A request that started under an older generation may
+    // not publish — a stopped synchronizer's late answer used to overwrite its
+    // replacement's fresher status, or repopulate a cleared one (#378).
+    private generation = new Map<string, number>();
 
     /**
      * Get project key string for a session
@@ -48,10 +57,10 @@ export class GitStatusSync {
 
         let sync = this.projectSyncMap.get(projectKey);
         if (!sync) {
-            // Bind the PROJECT, not the first session: the bash route is resolved to
-            // a currently-online session at fetch time. Baking in `sessionId` froze
-            // git status forever once that session detached, even with another live
-            // session in the same repo (BUG-14).
+            // Bind the PROJECT, not the first session: the route is resolved to a
+            // currently-online session at fetch time. Baking in `sessionId` froze
+            // git status forever once that session detached, even with another
+            // live session in the same repo (BUG-14).
             sync = new InvalidateSync(() => this.fetchGitStatusForProject(projectKey));
             this.projectSyncMap.set(projectKey, sync);
         }
@@ -61,7 +70,7 @@ export class GitStatusSync {
     /**
      * Invalidate git status for a session (triggers refresh for the entire project).
      * Debounces rapid calls (e.g. new-message + update-session arriving together)
-     * to avoid duplicate RPC round-trips.
+     * to avoid duplicate round-trips.
      */
     invalidate(sessionId: string): void {
         const projectKey = this.sessionToProjectKey.get(sessionId);
@@ -86,10 +95,10 @@ export class GitStatusSync {
         const projectKey = this.sessionToProjectKey.get(sessionId);
         if (projectKey) {
             this.sessionToProjectKey.delete(sessionId);
-            
+
             // Check if any other sessions are using this project
             const hasOtherSessions = Array.from(this.sessionToProjectKey.values()).includes(projectKey);
-            
+
             // Only stop the project sync if no other sessions are using it
             if (!hasOtherSessions) {
                 const timer = this.debounceTimers.get(projectKey);
@@ -102,6 +111,7 @@ export class GitStatusSync {
                     sync.stop();
                     this.projectSyncMap.delete(projectKey);
                 }
+                this.bumpGeneration(projectKey); // in-flight requests of this sync may not publish (#378)
             }
         }
     }
@@ -120,55 +130,22 @@ export class GitStatusSync {
         if (projectKey) {
             const hasOtherSessions = Array.from(this.sessionToProjectKey.values()).includes(projectKey);
             if (!hasOtherSessions) {
+                this.bumpGeneration(projectKey);
                 storage.getState().applyGitStatus(projectKey, null);
             }
         }
     }
 
-    /**
-     * Pick a currently-online session for a project (machineId:path) to route bash
-     * through, so a detached session can't freeze the repo's git status. Prefers an
-     * online session; returns null if none is live (we then keep the last good
-     * status rather than clearing or failing).
-     */
-    /** Daemon-parsed porcelain (v2) → the app's GitStatus shape. */
-    private fromV2GitStatus(d: import('./v2/machine').V2GitStatus, unstagedNumstat = '', stagedNumstat = ''): GitStatus {
-        const sum = (raw: string) => {
-            const d = parseNumStat(raw.trim());
-            return { added: d.insertions, removed: d.deletions };
-        };
-        const u = sum(unstagedNumstat), sg = sum(stagedNumstat);
-        const modified: string[] = [];
-        const staged: string[] = [];
-        const untracked: string[] = [];
-        for (const e of d.entries ?? []) {
-            if (e.untracked) { untracked.push(e.path); continue; }
-            if (e.staged) staged.push(e.path);
-            if (e.unstaged) modified.push(e.path);
-        }
-        return {
-            branch: d.branch ?? null,
-            ahead: d.ahead ?? 0,
-            behind: d.behind ?? 0,
-            modifiedCount: modified.length,
-            stagedCount: staged.length,
-            untrackedCount: untracked.length,
-            modifiedFiles: modified,
-            stagedFiles: staged,
-            untrackedFiles: untracked,
-            isDirty: (d.entries ?? []).length > 0,
-            stagedLinesAdded: sg.added,
-            stagedLinesRemoved: sg.removed,
-            unstagedLinesAdded: u.added,
-            unstagedLinesRemoved: u.removed,
-            linesAdded: u.added + sg.added,
-            linesRemoved: u.removed + sg.removed,
-            linesChanged: u.added + sg.added + u.removed + sg.removed,
-            stashCount: 0,
-            lastUpdatedAt: Date.now(),
-        } as unknown as GitStatus;
+    private bumpGeneration(projectKey: string): void {
+        this.generation.set(projectKey, (this.generation.get(projectKey) ?? 0) + 1);
     }
 
+    /**
+     * Pick a currently-online session for a project (machineId:path) to route
+     * through, so a detached session can't freeze the repo's git status.
+     * Returns null if none is live (we then keep the last good status rather
+     * than clearing or failing).
+     */
     private resolveLiveSessionForProject(projectKey: string): string | null {
         const sessions = storage.getState().sessions;
         for (const s of Object.values(sessions)) {
@@ -180,138 +157,50 @@ export class GitStatusSync {
     }
 
     /**
-     * Fetch git status for a project using a currently-online session in that project
+     * Fetch git status for a project using a currently-online session in that project.
+     * Throws GitStatusUnavailable on a retryable failure (InvalidateSync backs off
+     * and retries); a confirmed non-repository result and a git-side failure are
+     * terminal for this refresh.
      */
     private async fetchGitStatusForProject(projectKey: string): Promise<void> {
-        try {
-            // Route through a live session resolved NOW (not a frozen first session).
-            const sessionId = this.resolveLiveSessionForProject(projectKey);
-            if (!sessionId) return; // no online session → keep last good status
-            const session = storage.getState().sessions[sessionId];
-            if (!session?.metadata?.path) {
-                return;
-            }
-
-            // v2 sessions read git state from the DAEMON's machine plane over
-            // the sealed tunnel — one parsed call instead of four shell
-            // round-trips, and no realtime socket involved.
-            const mctx = await sync.awaitMachineCtx(sessionId);
-            if (mctx) {
-                const { status, data } = await machineGitStatus(mctx);
-                if (status === 200 && data?.ok) {
-                    // Line counts come from two numstat calls; without them every
-                    // +N/−N badge was blank (#103).
-                    const [unstaged, staged] = await Promise.all([
-                        machineGitDiff(mctx, { numstat: true }),
-                        machineGitDiff(mctx, { numstat: true, staged: true }),
-                    ]);
-                    storage.getState().applyGitStatus(projectKey, this.fromV2GitStatus(data, unstaged.data?.diff ?? '', staged.data?.diff ?? ''));
-                } else if (status === 200 && data && !data.ok) {
-                    storage.getState().applyGitStatus(projectKey, null); // not a repo
-                }
-                return;
-            }
-
-            // No machine context yet (the session is still binding): keep the
-            // last good status. The shell fallback that lived here never
-            // reached the daemon (#5).
+        // Route through a live session resolved NOW (not a frozen first session).
+        const sessionId = this.resolveLiveSessionForProject(projectKey);
+        if (!sessionId) return; // no online session → keep last good status
+        const session = storage.getState().sessions[sessionId];
+        if (!session?.metadata?.path) {
             return;
-
-        } catch (error) {
-            console.error('Error fetching git status for project', projectKey, ':', error);
-            // Don't apply error state, just skip this update
         }
+        const gen = this.generation.get(projectKey) ?? 0;
+        const stillCurrent = () => (this.generation.get(projectKey) ?? 0) === gen && this.projectSyncMap.has(projectKey);
+
+        // No machine context yet (the session is still binding): keep the last
+        // good status and let the next invalidation try again.
+        const mctx = await sync.awaitMachineCtx(sessionId);
+        if (!mctx) return;
+
+        let res: Awaited<ReturnType<typeof machineGitStatus>>;
+        try {
+            res = await machineGitStatus(mctx);
+        } catch (error) {
+            throw new GitStatusUnavailable(`git status for ${projectKey}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (!stillCurrent()) return; // stopped or cleared while the request was in flight (#378)
+        const { status, data } = res;
+        if (status !== 200 || !data) {
+            throw new GitStatusUnavailable(`git status for ${projectKey}: HTTP ${status}`);
+        }
+        if (!data.ok) {
+            // git itself failed on the machine (bad ownership, timeout): not a
+            // tunnel problem, so no retry storm — keep the last good status.
+            console.warn(`[git] status unavailable for ${projectKey}, keeping last result: ${data.code} ${data.error}`);
+            return;
+        }
+        if (data.relation === 'none') {
+            storage.getState().applyGitStatus(projectKey, null); // authoritative: not a repository
+            return;
+        }
+        storage.getState().applyGitStatus(projectKey, gitStatusFromStructured(data));
     }
-
-    /**
-     * Parse git status porcelain v2 output into structured data
-     */
-    private parseGitStatusV2(
-        porcelainV2Output: string,
-        diffStatOutput: string = '',
-        stagedDiffStatOutput: string = ''
-    ): GitStatus {
-        // Parse status using v2 parser
-        const statusSummary = parseStatusSummaryV2(porcelainV2Output);
-        const counts = getStatusCountsV2(statusSummary);
-        const repoIsDirty = isDirtyV2(statusSummary);
-        const branchName = getCurrentBranchV2(statusSummary);
-        const trackingInfo = getTrackingInfoV2(statusSummary);
-
-        // Parse diff statistics
-        const unstagedDiff = parseNumStat(diffStatOutput);
-        const stagedDiff = parseNumStat(stagedDiffStatOutput);
-        const { stagedAdded, stagedRemoved, unstagedAdded, unstagedRemoved } = mergeDiffSummaries(stagedDiff, unstagedDiff);
-        
-        // Calculate totals
-        const linesAdded = stagedAdded + unstagedAdded;
-        const linesRemoved = stagedRemoved + unstagedRemoved;
-        const linesChanged = linesAdded + linesRemoved;
-
-        return {
-            branch: branchName,
-            isDirty: repoIsDirty,
-            modifiedCount: counts.modified,
-            untrackedCount: counts.untracked,
-            stagedCount: counts.staged,
-            stagedLinesAdded: stagedAdded,
-            stagedLinesRemoved: stagedRemoved,
-            unstagedLinesAdded: unstagedAdded,
-            unstagedLinesRemoved: unstagedRemoved,
-            linesAdded,
-            linesRemoved,
-            linesChanged,
-            lastUpdatedAt: Date.now(),
-            // V2-specific fields
-            upstreamBranch: statusSummary.branch.upstream || null,
-            aheadCount: trackingInfo?.ahead,
-            behindCount: trackingInfo?.behind,
-            stashCount: statusSummary.stashCount
-        };
-    }
-
-    /**
-     * Parse git status porcelain output into structured data using simple-git parsers
-     * (Legacy v1 fallback method - kept for compatibility)
-     */
-    private parseGitStatus(
-        branchName: string | null, 
-        porcelainOutput: string,
-        diffStatOutput: string = '',
-        stagedDiffStatOutput: string = ''
-    ): GitStatus {
-        // Parse status using simple-git parser
-        const statusSummary = parseStatusSummary(porcelainOutput);
-        const counts = getStatusCounts(statusSummary);
-        const repoIsDirty = isDirty(statusSummary);
-
-        // Parse diff statistics
-        const unstagedDiff = parseNumStat(diffStatOutput);
-        const stagedDiff = parseNumStat(stagedDiffStatOutput);
-        const { stagedAdded, stagedRemoved, unstagedAdded, unstagedRemoved } = mergeDiffSummaries(stagedDiff, unstagedDiff);
-        
-        // Calculate totals
-        const linesAdded = stagedAdded + unstagedAdded;
-        const linesRemoved = stagedRemoved + unstagedRemoved;
-        const linesChanged = linesAdded + linesRemoved;
-
-        return {
-            branch: branchName || null,
-            isDirty: repoIsDirty,
-            modifiedCount: counts.modified,
-            untrackedCount: counts.untracked,
-            stagedCount: counts.staged,
-            stagedLinesAdded: stagedAdded,
-            stagedLinesRemoved: stagedRemoved,
-            unstagedLinesAdded: unstagedAdded,
-            unstagedLinesRemoved: unstagedRemoved,
-            linesAdded,
-            linesRemoved,
-            linesChanged,
-            lastUpdatedAt: Date.now()
-        };
-    }
-
 }
 
 // Global singleton instance

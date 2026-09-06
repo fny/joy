@@ -46,16 +46,17 @@ export async function getProjectFiles(sessionId: string): Promise<ProjectFilesLi
     const { data } = await machineGitEntries(ctx, { untracked: true });
     if (!data?.ok || !data.files) return null;
 
+    // The daemon splits `ls-files -z` on NUL and hands back one exact path per
+    // entry. Re-joining on newlines and trimming turned a name with a newline
+    // into two nonexistent files and dropped an all-space name (#384) — take
+    // the entries as they are.
     const files: ProjectFile[] = data.files
-        .join('\n')
-        .split('\n')
-        .filter(p => p.trim().length > 0)
+        .filter(p => p.length > 0)
         .map(p => {
-            const clean = p.startsWith('./') ? p.slice(2) : p;
-            const parts = clean.split('/');
-            const fileName = parts[parts.length - 1] || clean;
-            const filePath = parts.slice(0, -1).join('/');
-            return { fileName, filePath, fullPath: clean };
+            const cut = p.lastIndexOf('/');
+            const fileName = cut < 0 ? p : (p.slice(cut + 1) || p);
+            const filePath = cut < 0 ? '' : p.slice(0, cut);
+            return { fileName, filePath, fullPath: p };
         });
 
     return { files, fetchedAt: Date.now() };

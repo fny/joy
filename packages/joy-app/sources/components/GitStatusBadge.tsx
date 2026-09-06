@@ -3,6 +3,7 @@ import { View, Text } from 'react-native';
 import Octicons from '@expo/vector-icons/Octicons';
 import { useSessionGitStatus } from '@/sync/storage';
 import { GitStatus } from '@/sync/storageTypes';
+import { knownLines } from '@/sync/gitStatusFiles';
 import { useUnistyles } from 'react-native-unistyles';
 
 // Custom hook to check if git status should be shown (always true if git repo exists)
@@ -24,7 +25,9 @@ export function GitStatusBadge({ sessionId }: GitStatusBadgeProps) {
         return null;
     }
 
-    const hasLineChanges = gitStatus.unstagedLinesAdded > 0 || gitStatus.unstagedLinesRemoved > 0;
+    // Exact counts or nothing: an 'unavailable' side renders no badge rather than "+0".
+    const lines = knownLines(gitStatus.unstagedLines);
+    const hasLineChanges = !!lines && (lines.added > 0 || lines.removed > 0);
 
     return (
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, overflow: 'hidden' }}>
@@ -36,9 +39,9 @@ export function GitStatusBadge({ sessionId }: GitStatusBadgeProps) {
             />
 
             {/* Line changes only */}
-            {hasLineChanges && (
+            {hasLineChanges && lines && (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, flexShrink: 0 }}>
-                    {gitStatus.unstagedLinesAdded > 0 && (
+                    {lines.added > 0 && (
                         <Text
                             style={{
                                 fontSize: 12,
@@ -47,10 +50,10 @@ export function GitStatusBadge({ sessionId }: GitStatusBadgeProps) {
                             }}
                             numberOfLines={1}
                         >
-                            +{gitStatus.unstagedLinesAdded}
+                            +{lines.added}
                         </Text>
                     )}
-                    {gitStatus.unstagedLinesRemoved > 0 && (
+                    {lines.removed > 0 && (
                         <Text
                             style={{
                                 fontSize: 12,
@@ -59,7 +62,7 @@ export function GitStatusBadge({ sessionId }: GitStatusBadgeProps) {
                             }}
                             numberOfLines={1}
                         >
-                            -{gitStatus.unstagedLinesRemoved}
+                            -{lines.removed}
                         </Text>
                     )}
                 </View>
@@ -69,14 +72,14 @@ export function GitStatusBadge({ sessionId }: GitStatusBadgeProps) {
 }
 
 function getTotalChangedFiles(status: GitStatus): number {
-    return status.modifiedCount + status.untrackedCount + status.stagedCount;
+    return status.modifiedCount + status.untrackedCount + status.stagedCount + status.conflictedCount;
 }
 
 function hasMeaningfulChanges(status: GitStatus): boolean {
     // Must have been loaded (lastUpdatedAt > 0) and be dirty and have either file changes or line changes
+    const lines = knownLines(status.unstagedLines);
     return status.lastUpdatedAt > 0 && status.isDirty && (
         getTotalChangedFiles(status) > 0 ||
-        status.unstagedLinesAdded > 0 ||
-        status.unstagedLinesRemoved > 0
+        (!!lines && (lines.added > 0 || lines.removed > 0))
     );
 }
