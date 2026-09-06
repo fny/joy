@@ -1,3 +1,4 @@
+import type { Href } from 'expo-router';
 import type { ReducerState } from '@/sync/reducer/reducer';
 import type { Message, ToolCallMessage } from '@/sync/typesMessage';
 
@@ -36,8 +37,8 @@ export function messageLinkId(message: Message): string {
 }
 
 /** The detail route for `message`, addressed by durable identity. */
-export function messageDetailPath(sessionId: string, message: Message): string {
-    return `/session/${sessionId}/message/${encodeURIComponent(messageLinkId(message))}`;
+export function messageDetailPath(sessionId: string, message: Message): Href {
+    return `/session/${sessionId}/message/${encodeURIComponent(messageLinkId(message))}` as Href;
 }
 
 const MAX_OWNER_HOPS = 64;
