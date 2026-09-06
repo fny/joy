@@ -6,8 +6,11 @@ import { isDemoSession } from '@/sync/demoSession';
 import { Text } from '@/components/StyledText';
 import { SimpleSyntaxHighlighter } from '@/components/SimpleSyntaxHighlighter';
 import { Typography } from '@/constants/Typography';
-import {sessionReadFile, sessionGitDiff, sessionDeleteFile } from '@/sync/ops';
-import { storage, useSession, useSessionFileCache, useLocalSettingMutable } from '@/sync/storage';
+import { sessionReadFile, sessionDeleteFile } from '@/sync/ops';
+import { storage, useSession, useLocalSettingMutable } from '@/sync/storage';
+import { resources } from '@/sync/resource';
+import { fileContentsSpec, gitDiffSpec, type FileContents } from '@/sync/fileContents';
+import { useResourceEntry } from '@/hooks/useResource';
 import { pickDownloadPayload } from '@/utils/fileDownloadSource';
 import { isBinaryPath } from '@/utils/binaryFile';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -28,19 +31,6 @@ interface FileContent {
     content: string;
     encoding: 'utf8' | 'base64';
     isBinary: boolean;
-}
-
-function decodeBase64ToBytes(base64: string): Uint8Array {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-}
-
-function decodeUtf8Bytes(bytes: Uint8Array): string {
-    return new TextDecoder().decode(bytes);
 }
 
 // Diff display component
@@ -121,8 +111,17 @@ export default React.memo(function FileScreen() {
     const filePath = resolvedPath?.absolutePath ?? rawPath;
     const gitDiffPath = resolvedPath?.withinSessionRoot ? resolvedPath.relativePath : null;
 
-    // Read from Zustand cache for instant rendering on revisit
-    const cached = useSessionFileCache(sessionId!, filePath);
+    // The file and its diff are RESOURCES (sync/fileContents) shared with the
+    // prefetcher and the file panel: rendered from cache for instant display
+    // on revisit, revalidated by the load below.
+    const fileSpec = React.useMemo(() => (sessionId ? fileContentsSpec(sessionId, filePath) : null), [sessionId, filePath]);
+    const diffSpec = React.useMemo(
+        () => (sessionId && gitDiffPath && gitDiffPath !== '.' ? gitDiffSpec(sessionId, gitDiffPath) : null),
+        [sessionId, gitDiffPath],
+    );
+    const cachedFile = useResourceEntry<FileContents>(fileSpec?.key ?? null).data ?? null;
+    const cachedDiff = useResourceEntry<string>(diffSpec?.key ?? null).data ?? null;
+    const cached = cachedFile ? { content: cachedFile.content, isBinary: cachedFile.isBinary, diff: cachedDiff } : null;
 
     const [fileContent, setFileContent] = React.useState<FileContent | null>(() => {
         if (!cached) return null;
@@ -308,59 +307,29 @@ export default React.memo(function FileScreen() {
                     }
                     if (!isCancelled) {
                         setFileContent({ content: '', encoding: 'base64', isBinary: true });
-                        storage.getState().applyFileCache(sessionId!, filePath, '', null, true);
                         setIsLoading(false);
                     }
                     return;
                 }
 
-                let fetchedDiff: string | null = null;
-
-                // Fetch git diff for the file (if in git repo)
-                if (sessionPath && sessionId && gitDiffPath && gitDiffPath !== '.') {
-                    try {
-                        const diffResponse = await sessionGitDiff(sessionId, { path: gitDiffPath });
-
-                        if (!isCancelled && diffResponse.success && diffResponse.diff.trim()) {
-                            fetchedDiff = diffResponse.diff;
-                            setDiffContent(fetchedDiff);
-                        }
-                    } catch (diffError) {
-                        console.log('Could not fetch git diff:', diffError);
-                    }
+                // Fetch git diff for the file (if in git repo) — best-effort:
+                // a failed diff read is no diff.
+                if (sessionPath && diffSpec) {
+                    const diff = await resources.ensure(diffSpec);
+                    if (!isCancelled && diff.data && diff.data.trim()) setDiffContent(diff.data);
                 }
 
-                const response = await sessionReadFile(sessionId, filePath);
+                // A fresh read through the file resource: decoded once there
+                // (an empty file is a file, #87), superseding any prefetch of
+                // this path still in flight.
+                const entry = await resources.refresh(fileSpec!);
 
                 if (!isCancelled) {
-                    if (response.success) {
-                        // An empty file is a file: `success && content` treated the
-                        // daemon's "" as a failure and the fileEmpty notice was
-                        // unreachable (#87).
-                        let rawBytes: Uint8Array;
-                        let decodedContent: string;
-                        setRawBase64(response.content ?? '');
-                        try {
-                            rawBytes = decodeBase64ToBytes(response.content ?? '');
-                            decodedContent = decodeUtf8Bytes(rawBytes);
-                        } catch (decodeError) {
-                            setFileContent({ content: '', encoding: 'base64', isBinary: true });
-                            storage.getState().applyFileCache(sessionId!, filePath, '', fetchedDiff, true);
-                            return;
-                        }
-
-                        const hasNullBytes = rawBytes.some((byte) => byte === 0);
-                        const nonPrintableCount = decodedContent.split('').filter(char => {
-                            const code = char.charCodeAt(0);
-                            return code < 32 && code !== 9 && code !== 10 && code !== 13;
-                        }).length;
-                        const isBinary = hasNullBytes || (nonPrintableCount / decodedContent.length > 0.1);
-
-                        const content = isBinary ? '' : decodedContent;
-                        setFileContent({ content, encoding: 'utf8', isBinary });
-                        storage.getState().applyFileCache(sessionId!, filePath, content, fetchedDiff, isBinary);
+                    if (entry.data) {
+                        setRawBase64(entry.data.base64);
+                        setFileContent({ content: entry.data.content ?? '', encoding: entry.data.isBinary ? 'base64' : 'utf8', isBinary: entry.data.isBinary });
                     } else {
-                        setError(response.error || 'Failed to read file');
+                        setError(entry.error || entry.unavailable || 'Failed to read file');
                     }
                 }
             } catch (error) {
@@ -381,7 +350,7 @@ export default React.memo(function FileScreen() {
         return () => {
             isCancelled = true;
         };
-    }, [filePath, gitDiffPath, isBinaryFile, sessionId, sessionPath, hasSession, sessionsReady]);
+    }, [filePath, fileSpec, diffSpec, isBinaryFile, sessionId, sessionPath, hasSession, sessionsReady]);
 
     // Show error modal if there's an error
     React.useEffect(() => {

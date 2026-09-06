@@ -38,11 +38,13 @@ import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { t } from '@/text';
 import { useAllMachines, useSessions, useSetting, useSettingMutable, storage } from '@/sync/storage';
 import { sync } from '@/sync/sync';
-import { machineStatusOnly, machineHarnessModels, machineHistoryLogs, machineOpencodeSessions, machineTeleportExport, machineTeleportImport } from '@/sync/v2/machine';
+import { machineTeleportExport, machineTeleportImport } from '@/sync/v2/machine';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { pastSessionsContextKey } from '@/utils/pastSessionsContext';
-import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
+import { resources } from '@/sync/resource';
+import { harnessModelsSpec, joyMachinesSpec, pastSessionsSpec, type HarnessModel, type PastSessionRow } from '@/sync/machineResources';
+import { useResource } from '@/hooks/useResource';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
@@ -80,6 +82,9 @@ function scaledComposerMetrics(scale: number) {
         ),
     };
 }
+
+const NO_MODELS: HarnessModel[] = [];
+const NO_PAST: PastSessionRow[] = [];
 
 function getMachineName(machine: Machine): string {
     return machine.metadata?.displayName || machine.metadata?.host || 'unknown';
@@ -174,14 +179,12 @@ function NewJoyTmuxSessionScreen() {
     const [machinePickerOpen, setMachinePickerOpen] = React.useState(false);
     const [pathPickerOpen, setPathPickerOpen] = React.useState(false);
 
-    // Probe online machines for a joy-tmux daemon: ping every online machine
-    // with `joy-list-sessions` in parallel and pick the first one that
-    // responds within 3s. Mirrors the pattern in settings/joy-sessions.
-    // Without this, we'd auto-select the first online machine — which usually
-    // doesn't run joy-tmux — and the create RPC would hang silently.
-    // The per-probe timeout is critical: a tunnel call to a machine that is
-    // not running joy-daemon can hang; without racing each probe against a
-    // timer, Promise.allSettled would wait forever.
+    // Probe online machines for a joy-tmux daemon (the joy-machines RESOURCE
+    // shared with settings/joy-sessions: every online machine is pinged in
+    // parallel, 3s each) and pick the first one that answered. Without this,
+    // we'd auto-select the first online machine — which usually doesn't run
+    // joy-tmux — and the create RPC would hang silently. A recent probe is
+    // reused instead of waiting 3s again.
     const probedRef = React.useRef(false);
     React.useEffect(() => {
         if (probedRef.current || selectedMachineId) return;
@@ -201,23 +204,11 @@ function NewJoyTmuxSessionScreen() {
         }
         probedRef.current = true;
         let cancelled = false;
-        const probeOne = async (machineId: string): Promise<string> => {
-            const octx = sync.machineOnlyCtx(machineId);
-            if (!octx) throw new Error('no machine context');
-            const result = await Promise.race([
-                machineStatusOnly(octx).then(() => machineId),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
-            ]);
-            return result;
-        };
-        (async () => {
-            const results = await Promise.allSettled(online.map(m => probeOne(m.id)));
+        void resources.ensure(joyMachinesSpec(online.map(m => m.id)), { staleTime: 60_000 }).then((entry) => {
             if (cancelled) return;
-            const found = results.find(r => r.status === 'fulfilled');
-            setSelectedMachineId(
-                found?.status === 'fulfilled' ? (found.value as string) : online[0].id,
-            );
-        })();
+            const found = online.find(m => entry.data?.includes(m.id));
+            setSelectedMachineId(found?.id ?? online[0].id);
+        });
         return () => { cancelled = true; };
     }, [allMachines.map(m => m.id).join(','), selectedMachineId, recentMachinePaths]);
 
@@ -268,128 +259,54 @@ function NewJoyTmuxSessionScreen() {
     );
     const currentEffort = effortLevels[effortIndex] ?? effortLevels[0];
 
-    // Codex model catalog (model/list), fetched from the daemon when codex is
-    // selected. Independent index state so switching agents doesn't clobber the
-    // claude picker.
-    // Harness catalogs are per MACHINE: switching machines resets them and
-    // holds Create until the new machine's list is back — the stale arrays
-    // stayed selectable and sent machine A's model id to machine B.
-    const [catalogReady, setCatalogReady] = React.useState(true);
-    const [codexModels, setCodexModels] = React.useState<{ model: string; displayName: string; supportedReasoningEfforts: string[]; defaultReasoningEffort: string | null; isDefault?: boolean }[]>([]);
-    const [codexModelIndex, setCodexModelIndex] = React.useState(0);
+    // Harness model catalogs (codex: model/list; opencode: the daemon's
+    // curated allowlist; agy: `agy models` display names — what `agy --model`
+    // takes) are a RESOURCE per MACHINE and harness (sync/machineResources).
+    // The picker always reads the entry for the machine + harness on screen,
+    // so machine A's list can never be selected — or its model id sent — for
+    // machine B; Create waits until this machine's catalog answered. No
+    // machine context yet is `unavailable`, which does not leave Create
+    // disabled (#86).
+    const catalogAgent = selectedAgent === 'codex' || selectedAgent === 'opencode' || selectedAgent === 'agy';
+    const catalog = useResource(catalogAgent && selectedMachineId ? harnessModelsSpec(selectedMachineId, selectedAgent) : null);
+    const catalogReady = !catalogAgent || catalog.hasData || !!catalog.error || !!catalog.unavailable;
+    const catalogModels: HarnessModel[] = catalog.data ?? NO_MODELS;
+    // Index into the catalog on screen; re-seeded to the harness's default
+    // whenever the catalog (machine or harness) changes.
+    const [catalogModelIndex, setCatalogModelIndex] = React.useState(0);
+    React.useEffect(() => {
+        const def = catalogModels.findIndex((m) => m.isDefault);
+        setCatalogModelIndex(def >= 0 ? def : 0);
+    }, [catalogModels]);
+    const cycleCatalogModel = React.useCallback(() => { setCatalogModelIndex(i => catalogModels.length ? (i + 1) % catalogModels.length : 0); }, [catalogModels.length]);
+    const catalogModel: HarnessModel | undefined = catalogModels[catalogModelIndex];
+    const codexModel = selectedAgent === 'codex' ? catalogModel : undefined;
+    const ocModel = selectedAgent === 'opencode' ? catalogModel : undefined;
+    const agyModel = selectedAgent === 'agy' ? catalogModel : undefined;
     const [codexEffortIndex, setCodexEffortIndex] = React.useState(0);
-    React.useEffect(() => {
-        if (selectedAgent !== 'codex' || !selectedMachineId) return;
-        let cancelled = false;
-        setCodexModels([]); setCodexModelIndex(0); setCatalogReady(false);
-        const cctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!cctx) { setCatalogReady(true); return; } // no machine context yet: do not leave Create disabled (#86)
-        machineHarnessModels(cctx, 'codex').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof codexModels | undefined }))
-            .then((res) => {
-                if (cancelled || !res.models?.length) return;
-                setCodexModels(res.models);
-                const def = res.models.findIndex((m) => m.isDefault);
-                setCodexModelIndex(def >= 0 ? def : 0);
-            })
-            .catch(() => { /* codex not present / offline — picker stays empty */ })
-            .finally(() => { if (!cancelled) setCatalogReady(true); });
-        return () => { cancelled = true; };
-    }, [selectedAgent, selectedMachineId]);
-    // Opencode model catalog: static curated allowlist from the daemon
-    // (joy-opencode-models — kimi-k3 default + glm-5p2 in v1).
-    const [ocModels, setOcModels] = React.useState<{ id: string; providerID: string; displayName: string; isDefault?: boolean }[]>([]);
-    const [ocModelIndex, setOcModelIndex] = React.useState(0);
-    React.useEffect(() => {
-        if (selectedAgent !== 'opencode' || !selectedMachineId) return;
-        let cancelled = false;
-        setOcModels([]); setOcModelIndex(0); setCatalogReady(false);
-        const octx2 = sync.machineOnlyCtx(selectedMachineId);
-        if (!octx2) { setCatalogReady(true); return; } // no machine context yet: do not leave Create disabled (#86)
-        machineHarnessModels(octx2, 'opencode').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof ocModels | undefined }))
-            .then((res) => {
-                if (cancelled || !res.models?.length) return;
-                setOcModels(res.models);
-                const def = res.models.findIndex((m) => m.isDefault);
-                setOcModelIndex(def >= 0 ? def : 0);
-            })
-            .catch(() => { /* opencode op absent (old daemon) — chip stays empty */ })
-            .finally(() => { if (!cancelled) setCatalogReady(true); });
-        return () => { cancelled = true; };
-    }, [selectedAgent, selectedMachineId]);
-    const ocModel = ocModels[ocModelIndex];
-    const cycleOcModel = React.useCallback(() => { setOcModelIndex(i => ocModels.length ? (i + 1) % ocModels.length : 0); }, [ocModels.length]);
-    // Antigravity model catalog: `agy models` display names via the daemon
-    // (joy-agy-models); the display name is what `agy --model` takes.
-    const [agyModels, setAgyModels] = React.useState<{ id: string; displayName: string; isDefault?: boolean }[]>([]);
-    const [agyModelIndex, setAgyModelIndex] = React.useState(0);
-    React.useEffect(() => {
-        if (selectedAgent !== 'agy' || !selectedMachineId) return;
-        let cancelled = false;
-        setAgyModels([]); setAgyModelIndex(0); setCatalogReady(false);
-        const actx = sync.machineOnlyCtx(selectedMachineId);
-        if (!actx) { setCatalogReady(true); return; } // no machine context yet: do not leave Create disabled (#86)
-        machineHarnessModels(actx, 'agy').then(r => ({ ok: r.data?.ok, models: r.data?.models as typeof agyModels | undefined }))
-            .then((res) => {
-                if (cancelled || !res.models?.length) return;
-                setAgyModels(res.models);
-                const def = res.models.findIndex((m) => m.isDefault);
-                setAgyModelIndex(def >= 0 ? def : 0);
-            })
-            .catch(() => { /* agy op absent (old daemon) — chip stays empty */ })
-            .finally(() => { if (!cancelled) setCatalogReady(true); });
-        return () => { cancelled = true; };
-    }, [selectedAgent, selectedMachineId]);
-    const agyModel = agyModels[agyModelIndex];
-    const cycleAgyModel = React.useCallback(() => { setAgyModelIndex(i => agyModels.length ? (i + 1) % agyModels.length : 0); }, [agyModels.length]);
-    // Past-sessions pickers (opencode / claude). The list belongs to ONE
-    // machine + directory + harness: a change of any of them clears the rows,
-    // closes the picker and retires the in-flight request, so a row fetched
-    // for project A can never be submitted as a resume id against project B,
-    // and A's slow response cannot repopulate the list after the change (#153).
+    // Past-sessions picker (opencode / claude): a RESOURCE of ONE machine +
+    // directory + harness (#153). A change of any of them is another key, so
+    // a row fetched for project A can never be listed — or submitted as a
+    // resume id — under project B, and A's slow response lands in A's cache
+    // only. The picker closes on a context change; the list is read on open
+    // (opencode boots a short-lived server, so its first load takes a few
+    // seconds; joy-list-logs is stat-only, so claude's is instant).
     const pastCwd = resolveAbsolutePath(trimPathInput(pathInput) || '~', selectedMachine?.metadata?.homeDir);
     const pastContextKey = pastSessionsContextKey({ machineId: selectedMachineId, cwd: pastCwd, agent: selectedAgent });
-    const pastGenKey = useLatestKey('new-session-past');
-    // On-demand list of opencode sessions recorded for the chosen directory
-    // (daemon boots a short-lived server, so first load takes a few seconds).
-    const [ocPastOpen, setOcPastOpen] = React.useState(false);
-    const [ocPastLoading, setOcPastLoading] = React.useState(false);
-    const [ocPast, setOcPast] = React.useState<{ id: string; title: string; updatedAt: number }[]>([]);
-    // Claude: past conversations in this directory — the transcript JSONLs the
-    // daemon can resume (joy-list-logs is stat-only, so this is instant).
-    const [ccPastOpen, setCcPastOpen] = React.useState(false);
-    const [ccPastLoading, setCcPastLoading] = React.useState(false);
-    const [ccPast, setCcPast] = React.useState<{ sessionId: string; sizeBytes: number; mtimeMs: number }[]>([]);
-    React.useEffect(() => {
-        retire(pastGenKey);
-        setOcPastOpen(false); setOcPastLoading(false); setOcPast([]);
-        setCcPastOpen(false); setCcPastLoading(false); setCcPast([]);
-    }, [pastContextKey, pastGenKey]);
-    const toggleOcPast = React.useCallback(() => {
-        if (ocPastOpen) { setOcPastOpen(false); return; }
-        setOcPastOpen(true);
-        if (!selectedMachineId) return;
-        const sctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!sctx) return;
-        setOcPastLoading(true);
-        const gen = nextGen(pastGenKey);
-        machineOpencodeSessions(sctx, pastCwd).then(r => ({ ok: r.data?.ok, sessions: r.data?.sessions as typeof ocPast | undefined }))
-            .then((res) => { if (isLatest(pastGenKey, gen)) setOcPast(res.sessions ?? []); })
-            .catch(() => { if (isLatest(pastGenKey, gen)) setOcPast([]); })
-            .finally(() => { if (isLatest(pastGenKey, gen)) setOcPastLoading(false); });
-    }, [ocPastOpen, selectedMachineId, pastCwd, pastGenKey]);
-    const toggleCcPast = React.useCallback(() => {
-        if (ccPastOpen) { setCcPastOpen(false); return; }
-        setCcPastOpen(true);
-        if (!selectedMachineId) return;
-        const lctx = sync.machineOnlyCtx(selectedMachineId);
-        if (!lctx) return;
-        setCcPastLoading(true);
-        const gen = nextGen(pastGenKey);
-        machineHistoryLogs(lctx, pastCwd).then(r => ({ ok: r.data?.ok, logs: r.data?.logs as typeof ccPast | undefined }))
-            .then((res) => { if (isLatest(pastGenKey, gen)) setCcPast((res.logs ?? []).slice().sort((a, b) => b.mtimeMs - a.mtimeMs)); })
-            .catch(() => { if (isLatest(pastGenKey, gen)) setCcPast([]); })
-            .finally(() => { if (isLatest(pastGenKey, gen)) setCcPastLoading(false); });
-    }, [ccPastOpen, selectedMachineId, pastCwd, pastGenKey]);
+    const [pastOpen, setPastOpen] = React.useState(false);
+    React.useEffect(() => { setPastOpen(false); }, [pastContextKey]);
+    const past = useResource(
+        selectedMachineId && (selectedAgent === 'claude' || selectedAgent === 'opencode') ? pastSessionsSpec(selectedMachineId, pastCwd, selectedAgent) : null,
+        { enabled: pastOpen },
+    );
+    const pastRows = pastOpen ? (past.data ?? NO_PAST) : NO_PAST;
+    const pastLoading = pastOpen && past.isLoading;
+    const pastError = pastOpen ? (past.error ?? past.unavailable) : null;
+    const pastHint = pastLoading ? 'loading…'
+        : pastOpen && pastError ? `could not list: ${pastError}`
+            : pastOpen && !pastRows.length ? 'none in this directory'
+                : 'resume an earlier conversation';
+    const togglePast = React.useCallback(() => { setPastOpen((o) => !o); }, []);
 
     const ocAge = (ts: number): string => {
         const m = Math.max(1, Math.round((Date.now() - ts) / 60000));
@@ -402,10 +319,8 @@ function NewJoyTmuxSessionScreen() {
     // Switching agents swaps the permission-mode list (claude vs codex) — reset
     // the index so a stale claude index can't select the wrong codex mode.
     React.useEffect(() => { setModeIndex(0); }, [selectedAgent]);
-    const codexModel = codexModels[codexModelIndex];
     const codexEfforts = codexModel?.supportedReasoningEfforts ?? [];
     const codexEffort = codexEfforts[codexEffortIndex];
-    const cycleCodexModel = React.useCallback(() => { setCodexModelIndex(i => codexModels.length ? (i + 1) % codexModels.length : 0); }, [codexModels.length]);
     const cycleCodexEffort = React.useCallback(() => { setCodexEffortIndex(i => codexEfforts.length ? (i + 1) % codexEfforts.length : 0); }, [codexEfforts.length]);
     // Seed the effort picker to the model's OWN default (finding #8): an
     // untouched index-0 pick would otherwise override codex's defaultReasoning-
@@ -415,7 +330,7 @@ function NewJoyTmuxSessionScreen() {
         const def = codexModel.defaultReasoningEffort;
         const idx = def ? (codexModel.supportedReasoningEfforts ?? []).indexOf(def) : -1;
         setCodexEffortIndex(idx >= 0 ? idx : 0);
-    }, [codexModelIndex, codexModels]);
+    }, [codexModel]);
 
     // Reset effort to a sensible default when model changes
     React.useEffect(() => {
@@ -559,7 +474,6 @@ function NewJoyTmuxSessionScreen() {
         }
     }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, selectedAgent, codexModel, codexEffort, ocModel, agyModel, teleportFrom, teleportSource, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
 
-    const catalogAgent = selectedAgent === 'codex' || selectedAgent === 'opencode' || selectedAgent === 'agy';
     const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning && (!catalogAgent || catalogReady);
 
     const handleKeyPress = React.useCallback((event: KeyPressEvent): boolean => {
@@ -637,7 +551,7 @@ function NewJoyTmuxSessionScreen() {
                                 {selectedAgent === 'codex' && codexModel && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleCodexModel} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                        <Pressable onPress={cycleCatalogModel} style={(p) => [p.pressed && styles.configRowPressed]}>
                                             <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{codexModel.displayName}</Text>
                                         </Pressable>
                                         {codexEfforts.length > 0 && (
@@ -653,7 +567,7 @@ function NewJoyTmuxSessionScreen() {
                                 {selectedAgent === 'opencode' && ocModel && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleOcModel} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                        <Pressable onPress={cycleCatalogModel} style={(p) => [p.pressed && styles.configRowPressed]}>
                                             <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{ocModel.displayName}</Text>
                                         </Pressable>
                                     </>
@@ -661,7 +575,7 @@ function NewJoyTmuxSessionScreen() {
                                 {selectedAgent === 'agy' && agyModel && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleAgyModel} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                        <Pressable onPress={cycleCatalogModel} style={(p) => [p.pressed && styles.configRowPressed]}>
                                             <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{agyModel.displayName}</Text>
                                         </Pressable>
                                     </>
@@ -811,29 +725,27 @@ function NewJoyTmuxSessionScreen() {
                             {selectedAgent === 'claude' && (<>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
-                                onPress={toggleCcPast}
+                                onPress={togglePast}
                             >
-                                <Ionicons name={ccPastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
+                                <Ionicons name={pastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
                                 <Text style={styles.configLabel} numberOfLines={1}>past sessions</Text>
-                                <Text style={styles.configHint} numberOfLines={1}>
-                                    {ccPastLoading ? 'loading…' : ccPastOpen && !ccPast.length ? 'none in this directory' : 'resume an earlier conversation'}
-                                </Text>
+                                <Text style={styles.configHint} numberOfLines={1}>{pastHint}</Text>
                             </Pressable>
-                            {ccPastOpen && !ccPastLoading && ccPast.slice(0, 8).map((ps) => (
+                            {pastOpen && !pastLoading && pastRows.slice(0, 8).map((ps) => (
                                 <Pressable
-                                    key={ps.sessionId}
+                                    key={ps.id}
                                     style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
-                                    onPress={() => { setResumeId(ps.sessionId); setContinueLast(true); setCcPastOpen(false); }}
+                                    onPress={() => { setResumeId(ps.id); setContinueLast(true); setPastOpen(false); }}
                                 >
                                     <Ionicons
-                                        name={resumeId === ps.sessionId ? 'radio-button-on' : 'radio-button-off'}
+                                        name={resumeId === ps.id ? 'radio-button-on' : 'radio-button-off'}
                                         size={13}
-                                        color={resumeId === ps.sessionId ? theme.colors.textLink : theme.colors.textSecondary}
+                                        color={resumeId === ps.id ? theme.colors.textLink : theme.colors.textSecondary}
                                     />
                                     <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                                        {ps.sessionId.slice(0, 18)}…
+                                        {ps.id.slice(0, 18)}…
                                     </Text>
-                                    <Text style={styles.configHint} numberOfLines={1}>{ocAge(ps.mtimeMs)} · {Math.max(1, Math.round(ps.sizeBytes / 1024))}KB</Text>
+                                    <Text style={styles.configHint} numberOfLines={1}>{ocAge(ps.updatedAt)} · {Math.max(1, Math.round((ps.sizeBytes ?? 0) / 1024))}KB</Text>
                                 </Pressable>
                             ))}
                             </>)}
@@ -843,19 +755,17 @@ function NewJoyTmuxSessionScreen() {
                             {selectedAgent === 'opencode' && (<>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
-                                onPress={toggleOcPast}
+                                onPress={togglePast}
                             >
-                                <Ionicons name={ocPastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
+                                <Ionicons name={pastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
                                 <Text style={styles.configLabel} numberOfLines={1}>past sessions</Text>
-                                <Text style={styles.configHint} numberOfLines={1}>
-                                    {ocPastLoading ? 'loading…' : ocPastOpen && !ocPast.length ? 'none in this directory' : 'resume an earlier conversation'}
-                                </Text>
+                                <Text style={styles.configHint} numberOfLines={1}>{pastHint}</Text>
                             </Pressable>
-                            {ocPastOpen && !ocPastLoading && ocPast.slice(0, 8).map((ps) => (
+                            {pastOpen && !pastLoading && pastRows.slice(0, 8).map((ps) => (
                                 <Pressable
                                     key={ps.id}
                                     style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
-                                    onPress={() => { setResumeId(ps.id); setContinueLast(true); setOcPastOpen(false); }}
+                                    onPress={() => { setResumeId(ps.id); setContinueLast(true); setPastOpen(false); }}
                                 >
                                     <Ionicons
                                         name={resumeId === ps.id ? 'radio-button-on' : 'radio-button-off'}

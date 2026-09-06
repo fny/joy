@@ -28,7 +28,6 @@ import { useDrawingResult } from '@/hooks/useDrawingResult';
 import { useEscapeAbort } from '@/hooks/useEscapeAbort';
 import { useImagePicker, releaseAttachmentUris } from '@/hooks/useImagePicker';
 import { Modal } from '@/modal';
-import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
 import { storage, useIsDataReady, useLocalSetting, useSessionMessages, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
@@ -41,7 +40,7 @@ import { FilesSidebar, SidebarMode } from '@/components/FilesSidebar';
 import { AllFilesDiffView } from '@/components/AllFilesDiffView';
 import { FileViewPanel } from '@/components/FileViewPanel';
 import { prefetchPierreDiff } from '@/components/diff/PierreDiffView';
-import { GitFileStatus } from '@/sync/gitStatusFiles';
+import { GitFileStatus } from '@/sync/gitStatusModel';
 import { useOverlayNav } from '@/-session/sessionOverlayNav';
 import { formatPathRelativeToHome, getResumeCommandBlock, getSessionName, useSessionStatus } from '@/utils/sessionUtils';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
@@ -1063,8 +1062,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // Mark session as currently being viewed (clears unread)
         storage.getState().setCurrentViewingSession(sessionId);
 
-        // Initialize git status sync for this session
-        gitStatusSync.getSync(sessionId);
+        // Git status: sync.onSessionVisible refreshes the project's resource.
 
         return () => {
             // Clear viewing session on unmount

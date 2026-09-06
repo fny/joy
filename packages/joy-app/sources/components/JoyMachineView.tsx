@@ -19,16 +19,18 @@ import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
 import { useJoyAction } from '@/hooks/useJoyAction';
-import { machineEnvList, machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
+import { machineEnvSet, machineEnvUnset } from '@/sync/v2/machine';
 import { Modal } from '@/modal';
-import { alertError, errorMessage, guarded } from '@/utils/guardAsync';
-import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
+import { alertError, guarded } from '@/utils/guardAsync';
+import { resources } from '@/sync/resource';
+import { machineEnvSpec } from '@/sync/machineResources';
+import { useResource } from '@/hooks/useResource';
 import { t } from '@/text';
 import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { machineStatusOnly, machineSlashCommandsAll } from '@/sync/v2/machine';
-import { resolveDaemonRow, resolveEnvErrorRow, envNamesFor, type DaemonProbe, type EnvNames } from './joyMachineDaemonState';
+import { resolveDaemonRow, resolveEnvErrorRow, type DaemonProbe } from './joyMachineDaemonState';
 
 // Bytes → "X.X GB" for the system readouts.
 const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
@@ -404,43 +406,16 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
  * once, when set. Applies to sessions spawned from now on.
  */
 const EnvironmentSection = React.memo(({ machineId, online }: { machineId: string; online: boolean }) => {
-    // The list remembers WHICH machine answered, and rows render only while
-    // that is the machine on screen — so a delete row can never be aimed at
-    // a machine other than the one whose names it shows (#226).
-    const [env, setEnv] = React.useState<EnvNames | null>(null);
-    const [error, setError] = React.useState<string | null>(null);
-    // Every response is fenced to the request that asked. The generation is
-    // minted BEFORE the context lookup and retired on every identity/offline
-    // transition (effect cleanup): switching from A to a B that has no
-    // context yet used to leave A's generation current, so A's late list
-    // landed as B's names and wiped B's "no key" error (#226).
-    const envKey = useLatestKey('machine-env');
-    const reload = React.useCallback(async () => {
-        const gen = nextGen(envKey);
-        const ctx = sync.machineOnlyCtx(machineId);
-        if (!ctx) { setError('no_ctx'); return; }
-        try {
-            const r = await machineEnvList(ctx);
-            if (!isLatest(envKey, gen)) return;
-            if (r.data?.ok) { setEnv({ machineId, names: r.data.names ?? [] }); setError(null); }
-            else setError(r.data?.error ?? `http_${r.status}`);
-        } catch (e) {
-            // A timed-out or failed tunnel request is an error state, not an
-            // unhandled rejection. It gets its own Retry row below — the Add
-            // row is NOT a retry: it prompts for a name first and reloads
-            // only after a successful change (#227).
-            if (isLatest(envKey, gen)) setError(errorMessage(e));
-        }
-    }, [machineId, envKey]);
-    React.useEffect(() => {
-        setEnv(null);
-        setError(null);
-        if (online) guarded(reload)();
-        else retire(envKey);
-        // Leaving this identity (machine change, offline, unmount) retires
-        // whatever is still in flight for it (#226).
-        return () => retire(envKey);
-    }, [online, reload, envKey]);
+    // The names are a RESOURCE keyed by machine (sync/machineResources): the
+    // rows on screen are always the entry for the machine on screen, so a
+    // late list for machine A lands in A's cache and can never render — or
+    // aim a delete row — under B (#226). A timed-out or failed request is
+    // the entry's error, shown as its own Retry row (#227); a missing
+    // machine key is `unavailable: 'no_ctx'` (the locked row).
+    const env = useResource(online ? machineEnvSpec(machineId) : null, { enabled: online });
+    const error = env.error ?? env.unavailable;
+    const names = env.data ?? null;
+    const reload = React.useCallback(async () => { await env.refresh(); }, [env.refresh]);
     const [adding, doAdd] = useJoyAction(React.useCallback(async () => {
         const ctx = sync.machineOnlyCtx(machineId);
         if (!ctx) return;
@@ -462,12 +437,11 @@ const EnvironmentSection = React.memo(({ machineId, online }: { machineId: strin
                 if (!ctx) return;
                 const r = await machineEnvUnset(ctx, name);
                 if (!r.data?.ok) throw new Error(r.data?.error ?? `http_${r.status}`);
-                await reload();
+                await resources.refresh(machineEnvSpec(sourceMachineId)); // the row's machine, whichever is on screen now
             }, alertError()) },
         ]);
-    }, [reload]);
+    }, []);
     const errorRow = resolveEnvErrorRow(error);
-    const names = envNamesFor(env, machineId);
     if (!online) return null;
     return (
         <ItemGroup title={t('machine.environment')} footer={t('machine.environmentFooter')}>
@@ -495,7 +469,7 @@ const EnvironmentSection = React.memo(({ machineId, online }: { machineId: strin
                 />
             )}
             {names?.map((n) => (
-                <Item key={n} title={n} detail="••••••" icon={<Ionicons name="key-outline" size={29} color="#5856D6" />} onPress={() => remove(env!.machineId, n)} showChevron={false} />
+                <Item key={n} title={n} detail="••••••" icon={<Ionicons name="key-outline" size={29} color="#5856D6" />} onPress={() => remove(machineId, n)} showChevron={false} />
             ))}
             {names && names.length === 0 && !error && (
                 <Item title={t('machine.environmentNone')} icon={<Ionicons name="key-outline" size={29} color="#8E8E93" />} showChevron={false} />

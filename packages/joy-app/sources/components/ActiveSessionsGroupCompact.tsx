@@ -10,8 +10,9 @@ import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLast
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines, useSessionGitStatus } from '@/sync/storage';
-import { knownLines } from '@/sync/gitStatusFiles';
+import { useAllMachines } from '@/sync/storage';
+import { useSessionGitStatus } from '@/sync/gitStatusResource';
+import { knownLines } from '@/sync/gitStatusModel';
 import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
