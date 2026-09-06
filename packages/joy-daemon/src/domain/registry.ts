@@ -68,6 +68,10 @@ export interface CreateSessionOpts {
   chrome?: boolean;
   /** Raw extra CLI arguments appended verbatim to the claude command line. */
   extraArgs?: string;
+  /** Codex app-server `-c key=value` overrides as a map — what a restart
+   *  carries from the session it replaces (#561); `extraArgs` is the
+   *  user-typed form and is parsed into this when it is absent. */
+  codexConfig?: Record<string, string>;
   /** Create the session detached: make the tmux window + relay (so file/git/diff
    *  RPCs work on the cwd) but DON'T launch Claude. Lands as joy__state='detached'
    *  (red). Starting it later (create/restart for the same cwd) launches Claude. */
@@ -886,9 +890,10 @@ export class SessionRegistry {
       resumeThread = findLatestCodexThreadForCwd(cwd) ?? undefined;
       if (!resumeThread) abortCreate(`no prior codex conversation found in ${cwd}`);
     }
-    // extraArgs for codex = `-c key=value` config overrides on the app-server.
-    let codexConfig: Record<string, string> | undefined;
-    if (opts.extraArgs?.trim()) {
+    // extraArgs for codex = `-c key=value` config overrides on the app-server;
+    // a restart hands over the map it persisted instead (#561).
+    let codexConfig: Record<string, string> | undefined = opts.codexConfig && Object.keys(opts.codexConfig).length > 0 ? { ...opts.codexConfig } : undefined;
+    if (!codexConfig && opts.extraArgs?.trim()) {
       const { parseCodexConfigArgs } = await import("../codex/codexThreads");
       const parsed = parseCodexConfigArgs(opts.extraArgs);
       if (Object.keys(parsed).length > 0) codexConfig = parsed;
@@ -1002,6 +1007,10 @@ export class SessionRegistry {
       // old restart dropped the mode → "default").
       const codexRec = rec ?? loadWindowRecord(opts.id);
       const codexMode = existing?.detectPermissionMode() ?? codexRec?.codexSettings?.permissionMode ?? undefined;
+      // The launch overrides (extraArgs → `-c key=value`) too: without them
+      // the replacement app-server ran on different defaults and then
+      // overwrote the saved config with nothing (#561).
+      const codexConfig = (existing instanceof CodexSession ? existing.codexConfig : undefined) ?? codexRec?.codexSettings?.config;
       const carried = await this.#retire(existing, opts.id);
       return this.#replace(opts.id, cwd, carried, () => this.create({
         agent: "codex",
@@ -1011,6 +1020,7 @@ export class SessionRegistry {
         model: existing?.currentModel ?? existing?.model ?? codexRec?.codexSettings?.model,
         effort: existing?.effort ?? codexRec?.codexSettings?.effort,
         permissionMode: codexMode && PERMISSION_MODES.has(codexMode) ? codexMode : undefined,
+        codexConfig,
       }));
     }
 
