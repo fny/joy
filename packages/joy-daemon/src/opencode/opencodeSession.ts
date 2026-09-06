@@ -624,10 +624,18 @@ export class OpencodeSession implements AgentSession {
    *  cancelled (Astra on cde740c1, #77). A kept tombstone lets the next
    *  admission evidence (HTTP ack or SSE confirm) retry it. */
   #interruptCancelled(id: string, client: OpencodeClient, ocSessionId: string): void {
+    // One interrupt in flight per tombstone: the HTTP ack and the SSE confirm
+    // of the same prompt both arrive as admission evidence, and two interrupts
+    // could stop the NEXT turn (the endpoint has no turn identity; Astra on
+    // 343e3bb6). Later evidence retries only after a failure settled.
+    if (this.#interrupting.has(id)) return;
+    this.#interrupting.add(id);
     void client.interrupt(ocSessionId)
       .then(() => { this.#cancelledIds.delete(id); })
-      .catch((e) => { process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`); });
+      .catch((e) => { process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`); })
+      .finally(() => { this.#interrupting.delete(id); });
   }
+  #interrupting = new Set<string>();
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
     // Terminal outcomes are monotonic: a late admission or reply for an item

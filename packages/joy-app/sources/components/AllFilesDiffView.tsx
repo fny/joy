@@ -91,6 +91,17 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     // (Astra on 81489690, #91). Only the latest request for a path commits.
     const fetchGen = React.useRef(new Map<string, number>());
     const genCounter = React.useRef(0);
+    // Session fence: the caches are keyed by path, and a mounted view whose
+    // sessionId changes keeps a pending request from the OLD session whose
+    // result would commit under the new one (Astra on ba243ffb). Retire
+    // everything when the session changes.
+    const sessionRef = React.useRef(sessionId);
+    if (sessionRef.current !== sessionId) {
+        sessionRef.current = sessionId;
+        fetchedSignatures.current.clear();
+        inFlight.current.clear();
+        fetchGen.current.clear();
+    }
 
     const fileSignature = (f: GitFileStatus) =>
         `${f.status}|${f.isStaged ? 1 : 0}|${f.linesAdded}|${f.linesRemoved}`;
@@ -203,7 +214,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                 return { file, content: null, error: err instanceof Error ? err.message : 'Failed to fetch diff' };
             }
             })();
-            if (fetchGen.current.get(path) !== myGen) return; // a newer request owns this path
+            if (sessionRef.current !== sessionId || fetchGen.current.get(path) !== myGen) return; // a newer request or another session owns this path
             inFlight.current.delete(path);
             const current = filesRef.current.find((f) => f.fullPath === path);
             if (!current) return; // removed while fetching

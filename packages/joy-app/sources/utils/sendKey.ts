@@ -24,7 +24,10 @@ export function beginSend(scope: string, text: string, attachmentIds: readonly s
     const payload = payloadOf(text, attachmentIds);
     const list = entries.get(scope) ?? [];
     const failed = list.find((e) => e.state === 'failed' && e.payload === payload);
-    if (failed) { failed.state = 'pending'; return failed.key; }
+    // A retry is a NEW begin in the scope's order: its success must retire
+    // failures older than the retry, not only those older than the first
+    // attempt (Astra on ba243ffb).
+    if (failed) { failed.state = 'pending'; failed.began = ++clock; return failed.key; }
     const entry: Entry = { key: randomUUID(), payload, state: 'pending', began: ++clock };
     // Bounded: abandoned failures never pile up. Only FAILED entries are
     // evicted (oldest first) — a pending identity is never safe to forget.
