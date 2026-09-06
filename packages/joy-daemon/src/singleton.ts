@@ -22,7 +22,7 @@
 // acquisition time in ms. Line 1 alone is what the legacy format held, so a
 // legacy reader (parseInt of the file) still sees the pid.
 
-import { openSync, writeSync, closeSync, unlinkSync, readFileSync, mkdirSync, linkSync, renameSync, statSync } from "fs";
+import { openSync, writeSync, closeSync, unlinkSync, readFileSync, mkdirSync, linkSync, statSync } from "fs";
 import { dirname } from "path";
 import { randomBytes } from "crypto";
 
@@ -119,28 +119,46 @@ export function acquireSingleton(
         throw new SingletonError(0, `another joy-daemon daemon is taking the lock at ${lockPath} right now`);
       }
     }
-    // Stale lock (dead holder, or junk older than the creation grace) — take
-    // exactly that file out of the way and retry the atomic create.
-    reclaim(lockPath, holder);
+    // Stale lock (dead holder, or junk older than the creation grace) — remove
+    // exactly that file under the reclaim mutex and retry the atomic create.
+    if (!reclaim(lockPath, holder, now)) continue;
   }
   throw new Error(`could not acquire daemon lock at ${lockPath} after retries`);
 }
 
-/** Remove a lock judged stale WITHOUT ever removing someone else's: rename
- *  it aside (atomic — a racing reclaimer's rename fails ENOENT and it simply
- *  retries), then verify the file we hold IS the record we judged. If a newer
- *  owner's lock had replaced it in between, link it straight back. */
-function reclaim(lockPath: string, stale: LockRecord): void {
-  const aside = `${lockPath}.reclaim.${process.pid}`;
-  try { renameSync(lockPath, aside); } catch { return; /* another reclaimer got there first */ }
-  let taken = "";
-  try { taken = readFileSync(aside, "utf8"); } catch { /* unreadable: nothing to restore */ }
-  if (taken !== stale.raw) {
-    // Not the file we judged: a newer owner published while we were deciding.
-    // Give it back. EEXIST here means a third starter already created one —
-    // that one wins; the displaced owner's release() sees a record that is
-    // not its own and leaves it alone.
-    try { linkSync(aside, lockPath); } catch { /* see above */ }
+/** A reclaimer that crashed holding the mutex must not block every later
+ *  starter: a mutex older than this is junk. */
+const RECLAIM_MUTEX_STALE_MS = 30_000;
+
+/** Remove a lock judged stale WITHOUT ever removing a live owner's, even
+ *  briefly. Reclaimers serialize on an O_EXCL mutex file; under it the lock
+ *  is re-read and unlinked only if it is byte-identical to the record that
+ *  was judged stale. A live owner can only appear by link(2), which fails
+ *  while that stale file exists, and can only replace it by reclaiming —
+ *  which needs this mutex. The earlier rename-aside/restore protocol left a
+ *  window where a third starter took the pathname while a fresh owner's lock
+ *  was aside, and both reported ownership (Astra on 53d22103, #589).
+ *  Returns false when the reclaim did not happen (the caller re-evaluates). */
+function reclaim(lockPath: string, stale: LockRecord, now: () => number): boolean {
+  const mutex = `${lockPath}.reclaiming`;
+  let fd: number;
+  try {
+    fd = openSync(mutex, "wx");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    let age = 0;
+    try { age = now() - statSync(mutex).mtimeMs; } catch { return false; }
+    if (age < RECLAIM_MUTEX_STALE_MS) throw new SingletonError(0, `another joy-daemon daemon is reclaiming the lock at ${lockPath} right now`);
+    try { unlinkSync(mutex); } catch { /* a racer removed it */ }
+    return false; // retry the whole evaluation
   }
-  try { unlinkSync(aside); } catch { /* best effort */ }
+  try {
+    closeSync(fd);
+    const current = readLock(lockPath);
+    if (!current || current.raw !== stale.raw) return false; // replaced or gone while we decided
+    try { unlinkSync(lockPath); } catch { return false; }
+    return true;
+  } finally {
+    try { unlinkSync(mutex); } catch { /* best effort */ }
+  }
 }

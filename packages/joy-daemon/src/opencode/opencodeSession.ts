@@ -103,6 +103,8 @@ export function messagesForReplay(
 }
 
 const WAIT_TIMEOUT_MS = 10 * 60_000;
+const INTERRUPT_RETRY_MS = 2_000;
+const INTERRUPT_RETRY_MAX = 5;
 
 // The full joy tag vocabulary rides the FIRST prompt of a fresh session
 // (config `instructions` — like `permission` — is present-but-ignored on the
@@ -631,8 +633,17 @@ export class OpencodeSession implements AgentSession {
     if (this.#interrupting.has(id)) { this.#interruptAgain.add(id); return; } // evidence during an in-flight interrupt = retry if it fails
     this.#interrupting.add(id);
     void client.interrupt(ocSessionId)
-      .then(() => { this.#cancelledIds.delete(id); this.#interruptAgain.delete(id); })
-      .catch((e) => { process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`); })
+      .then(() => { this.#cancelledIds.delete(id); this.#interruptAgain.delete(id); this.#interruptAttempts.delete(id); })
+      .catch((e) => {
+        process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`);
+        // No further admission evidence may ever come (HTTP-only admission,
+        // SSE dropped), so a failed interrupt also schedules its own bounded
+        // retry: the tombstone alone is the evidence (Astra on 5b06ba5c, #77).
+        const n = (this.#interruptAttempts.get(id) ?? 0) + 1;
+        this.#interruptAttempts.set(id, n);
+        if (n < INTERRUPT_RETRY_MAX) setTimeout(() => { if (this.#cancelledIds.has(id) && !this.#isEnded()) this.#interruptCancelled(id, client, ocSessionId); }, INTERRUPT_RETRY_MS).unref?.();
+        else process.stderr.write(`[opencode ${this.id}] giving up interrupting cancelled ${id} after ${n} attempts\n`);
+      })
       .finally(() => {
         this.#interrupting.delete(id);
         // Admission evidence that arrived while this attempt was pending was
@@ -643,6 +654,7 @@ export class OpencodeSession implements AgentSession {
   }
   #interrupting = new Set<string>();
   #interruptAgain = new Set<string>();
+  #interruptAttempts = new Map<string, number>();
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
     // Terminal outcomes are monotonic: a late admission or reply for an item
