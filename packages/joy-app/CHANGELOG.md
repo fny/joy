@@ -1,3 +1,9 @@
+# Sep 8 — Files and git, one source of truth
+
+- **Git status, file contents, diffs, machine environment keys, session lists and the new-session pickers now come from one shared cache per resource.** A late or cancelled request can no longer overwrite a newer answer, a failed refresh keeps the last good data instead of blanking the screen, and the same file or repository is never fetched twice in parallel.
+- **The file viewer detects an external change from the resource itself**: reverting the change on disk clears the warning, Reload always installs what is on disk, and a file emptied on disk shows as empty.
+- **Diffs in the Changes view refresh when a file's contents change**, even when its status and line counts did not, and a failed read shows Retry.
+
 # Sep 7 (5) — Tool cards, settings and sign-in
 
 - **Tool cards read one record.** Every card, detail screen and group summary shows the same outcome for a tool call, failed, cancelled, denied, running or done, across Claude, Codex, Gemini and pi sessions. Failures show their reason: no more "[object Object]", an ordinary tool error is no longer drawn as a cancellation, and a failed edit or patch is labelled as a proposal with the failure next to it.
