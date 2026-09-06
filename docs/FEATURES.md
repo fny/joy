@@ -523,7 +523,15 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   string id/text (or with a non-numeric seq) fails its whole file with
   nothing committed, and a window record whose execution field has the
   wrong shape (`transcriptCheckpoint.offset: "100"`) is neither imported
-  nor stripped until repaired. Settlements obey the current-owner rule:
+  nor stripped until repaired; a window record that cannot be read or
+  parsed (a truncating write left `{"launch`) fails and quarantines the
+  same way rather than being skipped, byte offsets and sequence numbers
+  must be non-negative safe integers, a handoff job is imported only in
+  the shape `domain/handoff.ts` can resume (a known role, a source's
+  target harness — and its `dst` once delivered — or a target's peer;
+  unknown fields dropped) and the report's counters are restored with
+  the rows when a file's transaction rolls back (review a7edccec).
+  Settlements obey the current-owner rule:
   `settleAttempt`/`confirmDelivery` change the command only when the claimed
   generation is the session's current one AND the attempt is the command's
   newest; anything else is recorded as a `stale_settlement` observation on
