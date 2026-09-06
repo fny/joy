@@ -143,3 +143,44 @@ describe("handoff / handback in-progress guard (#53)", () => {
 
 const TELEPORT_B64 = Buffer.from(JSON.stringify({ type: "user", message: { role: "user", content: "x" } }) + "\n").toString("base64");
 
+// ── #552 ─────────────────────────────────────────────────────────────────────
+
+describe("provenance keeps daemon slash commands interceptable (#552)", () => {
+  function interceptingSession(id: string) {
+    const seen: string[] = [];
+    const { s, driver, accepted } = fakeCoordinatedSession(id, { agent: "claude", cwd: home });
+    driver.commands = (text) => {
+      seen.push(text);
+      const cmd = parseJoyCommand(text);
+      if (!cmd) return null;
+      if (cmd.name === "steer") return { steer: cmd.args };
+      return { handled: true };
+    };
+    const reg = { get: (x: string) => (x === id ? s : undefined), nextChatId: () => 1, addChatMessage: () => {} } as never;
+    return { s, seen, accepted, reg };
+  }
+
+  it("/title with `from` reaches the adapter as a command (handled), not as a wrapped prompt", async () => {
+    const id = uid();
+    const { seen, accepted, reg } = interceptingSession(id);
+    const r = (await op("joy-send").handler(reg, { session_id: id, text: "/title New name", from: "cli" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r.ok).toBe(true);
+    expect(seen).toEqual(["/title New name"]);              // old code: "<joy-message from=\"cli\">\n/title New name\n</joy-message>"
+    expect(accepted()).toEqual(["/title New name"]);
+  });
+
+  it("/steer with `from` keeps its command head; the steered body carries the provenance", async () => {
+    const id = uid();
+    const { seen, reg } = interceptingSession(id);
+    const r = (await op("joy-send").handler(reg, { session_id: id, text: "/steer go left", from: "cli" }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r.ok).toBe(true);
+    expect(seen[0]).toMatch(/^\/steer <joy-message from="cli">\ngo left\n<\/joy-message>$/);
+  });
+
+  it("an ordinary message with `from` is still wrapped", async () => {
+    const id = uid();
+    const { accepted, reg } = interceptingSession(id);
+    await op("joy-send").handler(reg, { session_id: id, text: "plain words", from: "cli" }, { via: "rpc" });
+    expect(accepted()[0]).toBe('<joy-message from="cli">\nplain words\n</joy-message>');
+  });
+});
