@@ -24,7 +24,8 @@ import { useJoyAction } from '@/hooks/useJoyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
-import { machineSessionInfoFor, machineSessionLog, machineHandoff, machineHarnessModels } from '@/sync/v2/machine';
+import { machineSessionInfoFor, machineSessionLog, machineHandoff } from '@/sync/v2/machine';
+import { loadHarnessModels } from '@/hooks/useHarnessModels';
 import { Modal } from '@/modal';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
 import { JoyError } from '@/utils/errors';
@@ -201,8 +202,9 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
         let models: Array<{ id: string; name: string }> = [];
         if (agent === 'claude') models = JOY_CLAUDE_MODELS.map((m) => ({ id: m.key, name: m.name }));
         else {
-            const r = await machineHarnessModels(ctx, agent).catch(() => null);
-            const list = (r?.data?.models ?? []) as Array<{ id?: string; model?: string; displayName?: string }>;
+            // The shared catalog entry for this machine + harness (cached
+            // while fresh; the picker and the chat's chip read the same one).
+            const list = await loadHarnessModels(machineId, agent);
             models = list.slice(0, 8).map((m) => ({ id: String(m.id ?? m.model ?? ''), name: String(m.displayName ?? m.id ?? m.model ?? '') })).filter((m) => m.id);
         }
         const model = await new Promise<string | null | undefined>((resolve) => {

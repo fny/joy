@@ -29,23 +29,12 @@ import { t } from '@/text';
 import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
-import { machineStatusOnly, machineSlashCommandsAll } from '@/sync/v2/machine';
-import { resolveDaemonRow, resolveEnvErrorRow, type DaemonProbe } from './joyMachineDaemonState';
+import { machineSlashCommandsAll } from '@/sync/v2/machine';
+import { useDaemonStatus } from '@/hooks/useDaemonStatus';
+import { resolveEnvErrorRow } from './joyMachineDaemonState';
 
 // Bytes → "X.X GB" for the system readouts.
 const gb = (bytes: number) => `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
-
-type JoyStatus = {
-    ok?: boolean;
-    version?: string;
-    uptimeMs?: number;
-    sessions?: number;
-    messages?: number;
-    clients?: number;
-    pid?: number;
-    os?: { platform?: string; release?: string; arch?: string; hostname?: string };
-    claude?: { available: boolean; version: string | null };
-};
 
 function formatUptime(ms: number): string {
     const m = Math.floor(ms / 60000);
@@ -88,42 +77,11 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         Modal.alert(`${all.length} commands · ${plugins.size} plugins`, body);
     }, [machine?.metadata?.slashCommands, machine?.metadata?.pluginSlashCommands]);
 
-    // The probe result is stored WITH the machine it was issued for, and the
-    // rendered row is derived from (probe, current machine, online): a
-    // stopped daemon or a machine switch can no longer leave a stale green
-    // "running" (or another machine's PID) on screen (#228).
-    const [probe, setProbe] = React.useState<DaemonProbe<JoyStatus> | null>(null);
-    const [failed, setFailed] = React.useState(false);
-    React.useEffect(() => {
-        if (!machineId || !online) {
-            setFailed(!online);
-            return;
-        }
-        setFailed(false);
-        let cancelled = false;
-        let retry: ReturnType<typeof setTimeout> | null = null;
-        // The machine record can come from the local cache (so `online` is
-        // already true) before fetchMachines has decrypted this machine's data
-        // key — machineOnlyCtx is null for that window. Wait for the key rather
-        // than latching "unreachable" for the life of the page.
-        const attempt = (triesLeft: number) => {
-            if (cancelled) return;
-            const sctx = sync.machineOnlyCtx(machineId);
-            if (!sctx) {
-                if (triesLeft > 0) retry = setTimeout(() => attempt(triesLeft - 1), 500);
-                else setFailed(true);
-                return;
-            }
-            Promise.race([
-                machineStatusOnly(sctx).then(r => r.data as unknown as JoyStatus),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-            ]).then(s => { if (!cancelled) { setProbe({ machineId, status: s }); setFailed(false); } })
-                .catch(() => { if (!cancelled) setFailed(true); });
-        };
-        attempt(20);
-        return () => { cancelled = true; if (retry) clearTimeout(retry); };
-    }, [machineId, online]);
-    const daemon = resolveDaemonRow({ probe, machineId, online, failed });
+    // The daemon probe is the shared status resource keyed by machine
+    // (hooks/useDaemonStatus): the rendered row is derived from (entry,
+    // online), so a stopped daemon or a machine switch can no longer leave a
+    // stale green "running" (or another machine's PID) on screen (#228).
+    const { row: daemon, failed } = useDaemonStatus(machineId, online);
     const status = daemon.status;
 
     const machineName = machine?.metadata?.displayName || machine?.metadata?.host || 'machine';

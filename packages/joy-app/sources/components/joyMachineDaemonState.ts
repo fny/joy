@@ -62,3 +62,52 @@ export function resolveEnvErrorRow(error: string | null): EnvErrorRow | null {
     if (error === 'no_machine_key' || error === 'no_ctx') return { kind: 'no_key' };
     return { kind: 'failure', detail: error };
 }
+
+/** The slice of a resource entry (sync/resource) the Daemon row is derived from. */
+export interface DaemonProbeState<T> {
+    /** Last good status; kept across a later failure. */
+    data: T | undefined;
+    hasData: boolean;
+    /** The newest probe failed (thrown, timed out, or a daemon refusal). */
+    error: string | null;
+    /** The newest probe could not be made (no machine context yet). */
+    unavailable: string | null;
+}
+
+/**
+ * The Daemon row from the SHARED status resource (hooks/useDaemonStatus):
+ * the entry is keyed by machine, so "another machine's probe" cannot occur;
+ * the four resource states map onto the row instead.
+ *
+ *  - offline: the row says offline whatever the cache holds.
+ *  - error: the daemon did not answer NOW — unreachable, and the last good
+ *    status is not shown under it (a stale PID under a red row misleads).
+ *  - unavailable (no key yet): still loading while the caller waits for the
+ *    key; unreachable once it gave up (`contextTimedOut`).
+ *  - data: running when it reports ok, else unreachable with its details.
+ *  - nothing yet: loading.
+ */
+export function resolveDaemonRowFromResource<T extends { ok?: boolean }>(args: {
+    entry: DaemonProbeState<T>;
+    online: boolean;
+    contextTimedOut: boolean;
+}): DaemonRow<T> & { failed: boolean } {
+    const { entry, online, contextTimedOut } = args;
+    if (!online) {
+        return { status: null, running: false, detail: 'offline', loading: false, failed: true };
+    }
+    if (entry.error !== null) {
+        return { status: null, running: false, detail: 'unreachable', loading: false, failed: true };
+    }
+    if (entry.unavailable !== null && !entry.hasData) {
+        return contextTimedOut
+            ? { status: null, running: false, detail: 'unreachable', loading: false, failed: true }
+            : { status: null, running: false, detail: 'unreachable', loading: true, failed: false };
+    }
+    if (entry.hasData && entry.data !== undefined) {
+        return entry.data.ok
+            ? { status: entry.data, running: true, detail: 'running', loading: false, failed: false }
+            : { status: entry.data, running: false, detail: 'unreachable', loading: false, failed: false };
+    }
+    return { status: null, running: false, detail: 'unreachable', loading: true, failed: false };
+}
