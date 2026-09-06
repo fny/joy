@@ -340,6 +340,8 @@ export const pl: TranslationStructure = {
         switchMachinesHint: '• Przełącz maszynę, klikając na nią powyżej',
         createDirectoryTitle: 'Utworzyć katalog?',
         createDirectoryMessage: ({ path }: { path: string }) => `Katalog '${path}' nie istnieje na tej maszynie. Utworzyć go?`,
+        creationUncertainTitle: 'Sesja niepotwierdzona',
+        creationUncertainMessage: 'Relay nie potwierdził nowej sesji. Ponowienie wyśle to samo żądanie jeszcze raz, więc uruchomi się co najwyżej jedna sesja.',
     },
 
     sessionHistory: {

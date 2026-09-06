@@ -6,7 +6,7 @@
 import * as React from 'react';
 import type { JoySession } from '@/joy/types';
 import { sync } from '@/sync/sync';
-import { v2SpawnAndWait } from '@/sync/v2/spawn';
+import { v2SpawnInteractive } from '@/sync/v2/spawn';
 import { machineKillSession, machinePane } from '@/sync/v2/machine';
 import { joySessionsSpec } from '@/sync/machineResources';
 import { useResource } from './useResource';
@@ -29,7 +29,11 @@ export function useJoyRpcSessions(machineId: string | null) {
 
     const createSession = React.useCallback(async (cwd: string) => {
         if (!machineId) throw new Error('no machine selected');
-        await v2SpawnAndWait(machineId, { cwd });
+        // Interactive (#417): an unanswered creation offers a Retry that
+        // re-drives this very action under the same creation intent, so the
+        // relay replays rather than accepting a second session. A declined
+        // retry (null) is a quiet bail, like a declined directory prompt.
+        if (await v2SpawnInteractive(machineId, { cwd }) === null) return;
         await refresh();
     }, [machineId, refresh]);
 

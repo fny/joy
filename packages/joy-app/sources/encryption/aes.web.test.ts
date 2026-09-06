@@ -104,11 +104,29 @@ describe('aes.web byte envelope (#303)', () => {
         expect(new TextDecoder().decode((await decryptAESGCM(new Uint8Array(Buffer.from(oldText, 'base64')), key))!)).toBe('plain text, not base64');
     });
 
-    it('new byte payloads are versioned and round-trip arbitrary bytes', async () => {
+    it('new byte payloads are versioned by a carrier byte outside the ciphertext and round-trip arbitrary bytes', async () => {
         const key = encodeBase64(new Uint8Array(32).fill(2));
         const bytes = new Uint8Array([255, 128, 0, 65]);
         const sealed = await encryptAESGCM(bytes, key);
+        expect(sealed[0]).toBe(0x01);
         expect(Array.from((await decryptAESGCM(sealed, key))!)).toEqual([255, 128, 0, 65]);
-        expect(await decryptAESGCMString(encodeBase64(sealed), key)).toBe('joy-aes-bytes-v1:' + encodeBase64(bytes));
+        // The GCM plaintext is bare base64: no reserved marker inside it.
+        expect(await decryptAESGCMString(encodeBase64(sealed.subarray(1)), key)).toBe(encodeBase64(bytes));
+    });
+
+    it('#303 residual: legacy plaintext that begins with the old in-band marker decodes to that text, not to ABC (real WebCrypto)', async () => {
+        const key = encodeBase64(new Uint8Array(32).fill(3));
+        const old = await encryptAESGCMString('joy-aes-bytes-v1:QUJD', key);
+        const opened = await decryptAESGCM(new Uint8Array(Buffer.from(old, 'base64')), key);
+        expect(new TextDecoder().decode(opened!)).toBe('joy-aes-bytes-v1:QUJD');
+    });
+
+    it('a legacy blob whose nonce happens to start with 0x01 is still opened as legacy', async () => {
+        const key = encodeBase64(new Uint8Array(32).fill(4));
+        let legacy: Uint8Array;
+        do {
+            legacy = new Uint8Array(Buffer.from(await encryptAESGCMString('QUJD', key), 'base64'));
+        } while (legacy[0] !== 0x01);
+        expect(new TextDecoder().decode((await decryptAESGCM(legacy, key))!)).toBe('QUJD');
     });
 });

@@ -42,13 +42,13 @@ import { machineTeleportExport, machineTeleportImport } from '@/sync/v2/machine'
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { pastSessionsContextKey } from '@/utils/pastSessionsContext';
-import { resources } from '@/sync/resource';
 import { harnessModelsSpec, joyMachinesSpec, pastSessionsSpec, type HarnessModel, type PastSessionRow } from '@/sync/machineResources';
 import { useResource } from '@/hooks/useResource';
+import { onlineMachineIds, planMachineAutoSelect } from './machineAutoSelect';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
-import { v2SpawnAndWait, waitForLocalSession, type V2SpawnSpec } from '@/sync/v2/spawn';
+import { v2SpawnInteractive, waitForLocalSession, type V2SpawnSpec } from '@/sync/v2/spawn';
 import type { Machine, Session } from '@/sync/storageTypes';
 import {
     getEffortLevelsForModel,
@@ -181,36 +181,38 @@ function NewJoyTmuxSessionScreen() {
 
     // Probe online machines for a joy-tmux daemon (the joy-machines RESOURCE
     // shared with settings/joy-sessions: every online machine is pinged in
-    // parallel, 3s each) and pick the first one that answered. Without this,
-    // we'd auto-select the first online machine — which usually doesn't run
-    // joy-tmux — and the create RPC would hang silently. A recent probe is
-    // reused instead of waiting 3s again.
-    const probedRef = React.useRef(false);
+    // parallel, 3s each) and pick the first one that answered — the decision
+    // is planMachineAutoSelect over the entry of the CURRENT online set. The
+    // spec key IS the set (#178 shape), so a set that changes mid-probe is a
+    // new key: the old run settles into the old key and can neither select
+    // for, nor block, the new one — the former "probed once" latch did
+    // exactly that (E4 sweep residual). A recent probe in the cache is
+    // reused instead of waiting 3s again. Discovery is only owed while
+    // nothing is selected and no online last-used machine short-circuits it.
+    const onlineIds = onlineMachineIds(allMachines, isMachineOnline).join(',');
+    const discoverySpec = React.useMemo(() => joyMachinesSpec(onlineIds ? onlineIds.split(',') : []), [onlineIds]);
+    const recentMachinePath = recentMachinePaths[0];
+    const recentOnline = React.useMemo(() => {
+        const m = recentMachinePath ? allMachines.find(x => x.id === recentMachinePath.machineId) : undefined;
+        return !!m && isMachineOnline(m);
+    }, [allMachines, recentMachinePath]);
+    const discovery = useResource(discoverySpec, { enabled: !selectedMachineId && !!onlineIds && !recentOnline });
     React.useEffect(() => {
-        if (probedRef.current || selectedMachineId) return;
-        // Prefer the last-used machine when it's online; pre-fill its folder too
-        // (unless a path was passed in via params).
-        const recentId = recentMachinePaths[0]?.machineId;
-        const recent = recentId ? allMachines.find(m => m.id === recentId) : undefined;
-        if (recent && isMachineOnline(recent)) {
-            setSelectedMachineId(recent.id);
-            if (!params.path && recentMachinePaths[0]?.path) setPathInput(recentMachinePaths[0].path);
-            return;
-        }
-        const online = allMachines.filter(isMachineOnline);
-        if (online.length === 0) {
-            if (allMachines.length > 0) setSelectedMachineId(allMachines[0].id);
-            return;
-        }
-        probedRef.current = true;
-        let cancelled = false;
-        void resources.ensure(joyMachinesSpec(online.map(m => m.id)), { staleTime: 60_000 }).then((entry) => {
-            if (cancelled) return;
-            const found = online.find(m => entry.data?.includes(m.id));
-            setSelectedMachineId(found?.id ?? online[0].id);
+        const decision = planMachineAutoSelect({
+            selectedMachineId,
+            allMachines,
+            isOnline: isMachineOnline,
+            recent: recentMachinePath,
+            keepPath: !!params.path,
+            discovery: {
+                data: discovery.data,
+                failed: !discovery.fetching && !discovery.hasData && (discovery.error !== null || discovery.unavailable !== null),
+            },
         });
-        return () => { cancelled = true; };
-    }, [allMachines.map(m => m.id).join(','), selectedMachineId, recentMachinePaths]);
+        if (decision.kind !== 'select') return;
+        setSelectedMachineId(decision.machineId);
+        if (decision.path) setPathInput(decision.path);
+    }, [selectedMachineId, allMachines, recentMachinePath, params.path, discovery]);
 
     const selectedMachine = React.useMemo(
         () => allMachines.find(m => m.id === selectedMachineId) ?? null,
@@ -446,8 +448,12 @@ function NewJoyTmuxSessionScreen() {
                 forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
                 extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' ? (extraArgs.trim() || undefined) : undefined,
             };
-            const sessionId = await v2SpawnAndWait(selectedMachineId, spawnSpec as V2SpawnSpec);
-            if (!sessionId) return; // user declined the directory prompt
+            // Interactive (#417): an unanswered creation offers a Retry that
+            // re-drives THIS action under the same creation intent, so the
+            // relay replays the session it may already hold instead of
+            // accepting a second one.
+            const sessionId = await v2SpawnInteractive(selectedMachineId, spawnSpec as V2SpawnSpec);
+            if (!sessionId) return; // user declined the directory or retry prompt
 
             // Remember this machine+folder so the next new-session pre-selects it.
             // Store the tilde-relative form (~/…) so it stays portable across machines.

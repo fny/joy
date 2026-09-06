@@ -323,6 +323,8 @@ export const es: TranslationStructure = {
         switchMachinesHint: '• Cambia de máquina haciendo clic en la máquina de arriba',
         createDirectoryTitle: '¿Crear el directorio?',
         createDirectoryMessage: ({ path }: { path: string }) => `El directorio '${path}' no existe en la máquina. ¿Quieres crearlo?`,
+        creationUncertainTitle: 'Sesión sin confirmar',
+        creationUncertainMessage: 'El relay no confirmó la nueva sesión. Reintentar envía la misma solicitud de nuevo, así que se iniciará como máximo una sesión.',
     },
 
     sessionHistory: {
