@@ -3,6 +3,8 @@ import { Platform, Text, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { DiffView } from '@/components/diff/DiffView';
 import { Typography } from '@/constants/Typography';
+import { lazyOnce } from './lazyOnce';
+import { logError } from '@/utils/guardAsync';
 
 export interface PierreDiffViewProps {
     oldFile?: { name: string; contents: string };
@@ -33,43 +35,46 @@ export const PierreDiffView = React.memo(function PierreDiffView(props: PierreDi
 // Web module loader. Both @pierre/diffs and @pierre/diffs/react are lazy
 // chunks; we resolve them once per app run and memoize the promise so every
 // diff mount after the first one gets a cache hit with no extra render cycle.
+// A REJECTED load is not memoized (lazyOnce): offline at first open used to
+// pin the rejection for the whole app run and every later diff stayed on the
+// skeleton (#253). Each mount retries; a mount whose load fails renders the
+// native-style plain diff instead of a skeleton that never resolves.
 // ────────────────────────────────────────────────────────────────────────────
 
 type PierreMain = typeof import('@pierre/diffs');
 type PierreReact = typeof import('@pierre/diffs/react');
 type PierreBundle = { main: PierreMain; react: PierreReact };
 
-let pierreBundlePromise: Promise<PierreBundle> | null = null;
-
-function loadPierre(): Promise<PierreBundle> {
-    if (!pierreBundlePromise) {
-        pierreBundlePromise = (async () => {
-            // Side-effect import registers the <diffs-container> custom element.
-            const main = await import('@pierre/diffs');
-            const react = await import('@pierre/diffs/react');
-            return { main, react };
-        })();
-    }
-    return pierreBundlePromise;
-}
+const loadPierre = lazyOnce<PierreBundle>(async () => {
+    // Side-effect import registers the <diffs-container> custom element.
+    const main = await import('@pierre/diffs');
+    const react = await import('@pierre/diffs/react');
+    return { main, react };
+});
 
 /**
  * Fire-and-forget prefetch — call once when entering a screen that will show
  * diffs so the lazy chunks are already in cache by the time they're rendered.
+ * A prefetch failure is logged, not thrown: the mount effect retries (#253).
  */
 export function prefetchPierreDiff(): void {
     if (Platform.OS !== 'web') return;
-    void loadPierre();
+    loadPierre().catch(logError);
 }
 
-function usePierreBundle(): PierreBundle | null {
-    const [bundle, setBundle] = React.useState<PierreBundle | null>(null);
+type PierreLoad = { bundle: PierreBundle | null; failed: boolean };
+
+function usePierreBundle(): PierreLoad {
+    const [state, setState] = React.useState<PierreLoad>({ bundle: null, failed: false });
     React.useEffect(() => {
         let cancelled = false;
-        loadPierre().then((b) => { if (!cancelled) setBundle(b); });
+        loadPierre().then(
+            (b) => { if (!cancelled) setState({ bundle: b, failed: false }); },
+            (e) => { logError(e); if (!cancelled) setState({ bundle: null, failed: true }); },
+        );
         return () => { cancelled = true; };
     }, []);
-    return bundle;
+    return state;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -80,8 +85,12 @@ const PierreDiffViewWeb = React.memo(function PierreDiffViewWeb(props: PierreDif
     const { theme } = useUnistyles();
     const themeName: 'dark' | 'light' = props.theme ?? (theme.dark ? 'dark' : 'light');
     const diffsTheme = themeName === 'dark' ? 'github-dark-default' : 'github-light-default';
-    const bundle = usePierreBundle();
+    const { bundle, failed } = usePierreBundle();
 
+    // The chunk could not be fetched (offline): fall back to the dependency-
+    // free native renderer rather than a skeleton that never resolves (#253).
+    // The next mount retries the load.
+    if (failed) return <PierreDiffViewNative {...props} />;
     if (!bundle) return <DiffSkeleton />;
 
     const options = {

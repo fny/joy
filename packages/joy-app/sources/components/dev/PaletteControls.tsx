@@ -7,6 +7,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { useLocalSettingMutable } from '@/sync/storage';
 import { ColorBox } from './ColorBox';
 import { useAppearanceHistory, captureAppearance } from './appearanceHistory';
+import { mergeCopiedAccents } from './paletteCopy';
 import {
     PALETTES,
     DARK_PALETTES,
@@ -106,9 +107,9 @@ export const PaletteControls = React.memo(function PaletteControls({ mode }: { m
         const shellRec: Record<string, string> = Object.fromEntries(Object.entries(shell));
         setDraft(shell);
         setStoredCustom(shellRec);
-        const nextAccents = preset?.accents
-            ? ({ ...(accentOverrides ?? {}), ...preset.accents } as Record<string, string>)
-            : accentOverrides;
+        // Preset accents first, the user's overrides LAST — the precedence the
+        // preset was displayed with; the reverse order lost saved overrides (#251).
+        const nextAccents = mergeCopiedAccents(preset?.accents, accentOverrides);
         if (preset?.accents) setStoredAccents(nextAccents);
         setSelectedId(CUSTOM_PALETTE_ID);
         applyAppearance(CUSTOM_PALETTE_ID, shellRec, nextAccents);

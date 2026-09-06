@@ -114,3 +114,31 @@ describe('modelModeOptions', () => {
         expect(resolveCurrentOption(options, ['missing'])).toBeNull();
     });
 });
+
+// #267: the fallback catalog must contain the flavor's configured default (and
+// the session's current model) or the default cannot be resolved/re-selected.
+describe('getAvailableModels fallback consistency (#267)', () => {
+    it('includes the configured default model for claude and codex', () => {
+        const claude = getAvailableModels('claude', null, translate);
+        expect(claude.map((m) => m.key)).toContain(getDefaultModelKey('claude'));
+        expect(resolveCurrentOption(claude, [getDefaultModelKey('claude')])).not.toBeNull();
+        // Inserted right after 'default' so the list still leads with it.
+        expect(claude[0].key).toBe('default');
+        expect(claude[1].key).toBe('fable');
+
+        const codex = getAvailableModels('codex', undefined, translate);
+        expect(codex.map((m) => m.key)).toContain('gpt-5.6-sol');
+        expect(codex[0].key).toBe('default');
+    });
+
+    it('keeps the current model selectable when the catalog lacks it', () => {
+        const models = getAvailableModels('claude', null, translate, 'opus-4.9-preview');
+        expect(models.map((m) => m.key)).toContain('opus-4.9-preview');
+        expect(getAvailableModels('claude', null, translate, 'opus').filter((m) => m.key === 'opus')).toHaveLength(1);
+    });
+
+    it('leaves a metadata catalog untouched', () => {
+        const models = getAvailableModels('claude', { models: [{ code: 'x', value: 'X' }] } as any, translate, 'fable');
+        expect(models).toEqual([{ key: 'x', name: 'X', description: null }]);
+    });
+});

@@ -5,6 +5,7 @@ import { applyAppearance, applyDarkAppearance } from './palettes';
 import { setDefaultFontFamily } from './constants/Typography';
 import { Appearance, Platform } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
+import { planVisibilityResync } from './visibilityThemeResync';
 
 //
 // Theme
@@ -94,18 +95,26 @@ applyDarkAppearance(themePaletteDark);
 // Expo evaluates in Node during static rendering (Platform.OS is 'web' there
 // but there is no DOM) — an unguarded listener threw "document is not defined"
 // and aborted the HTML export before Root could render (#184).
-if (Platform.OS === 'web' && themePreference === 'adaptive' && typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+//
+// The listener is registered regardless of the STARTUP preference and reads
+// the preference and palette state at event time: it used to close over the
+// boot-time values, so after switching to fixed Light or picking another
+// palette, revisiting the tab re-enabled adaptive themes, flipped to the OS
+// scheme and restored the startup palette (#420). loadThemePreference and
+// loadPaletteState read the persisted settings on every call.
+if (Platform.OS === 'web' && typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
-            const themeName = Appearance.getColorScheme() === 'dark' ? 'dark' : 'light';
-            // Toggle adaptive off, set correct theme, toggle back on
-            UnistylesRuntime.setAdaptiveThemes(false);
-            UnistylesRuntime.setTheme(themeName);
-            UnistylesRuntime.setAdaptiveThemes(true);
-            // Re-apply the resolved theme's palette (and its background) — setTheme
-            // alone reverts to the stock theme without the palette override.
-            if (themeName === 'dark') applyDarkAppearance(themePaletteDark);
-            else applyAppearance(themePalette, customPalette, accentOverrides);
-        }
+        if (document.visibilityState !== 'visible') return;
+        const plan = planVisibilityResync(loadThemePreference(), Appearance.getColorScheme());
+        if (!plan) return; // a fixed preference is never overridden by the OS scheme
+        // Toggle adaptive off, set correct theme, toggle back on
+        UnistylesRuntime.setAdaptiveThemes(false);
+        UnistylesRuntime.setTheme(plan.theme);
+        UnistylesRuntime.setAdaptiveThemes(true);
+        // Re-apply the resolved theme's CURRENT palette (and its background) —
+        // setTheme alone reverts to the stock theme without the palette override.
+        const palette = loadPaletteState();
+        if (plan.theme === 'dark') applyDarkAppearance(palette.themePaletteDark);
+        else applyAppearance(palette.themePalette, palette.customPalette, palette.accentOverrides);
     });
 }

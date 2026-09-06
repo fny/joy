@@ -32,6 +32,7 @@ import { Modal } from '@/modal';
 import { generateThumbhash } from '@/utils/thumbhash';
 import { t } from '@/text';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
+import { appendWithinLimit } from './attachmentLimit';
 
 // iOS hands back HEIC from the photo library, which Claude's API rejects (and
 // the daemon's magic-byte sniff doesn't recognize → it'd be written as a generic
@@ -154,9 +155,16 @@ export function useImagePicker(): UseImagePickerResult {
         return remaining;
     }, []);
 
+    // Previews that do not fit (concurrent additions filled the remaining
+    // slots) are released, not just dropped: on web each one owns a blob URL
+    // (#320). Revoking is idempotent, so a replayed updater is harmless.
     const append = useCallback((previews: AttachmentPreview[]) => {
         if (previews.length === 0) return;
-        setSelectedImages(prev => [...prev, ...previews].slice(0, MAX_IMAGES_PER_MESSAGE));
+        setSelectedImages(prev => {
+            const { next, dropped } = appendWithinLimit(prev, previews, MAX_IMAGES_PER_MESSAGE);
+            releaseAttachmentUris(dropped);
+            return next;
+        });
     }, []);
 
     const pickImages = useCallback(async () => {
@@ -173,8 +181,12 @@ export function useImagePicker(): UseImagePickerResult {
 
         if (result.canceled || !result.assets?.length) return;
 
-        // On web, the multiple-select limit is not enforced — clamp here.
+        // On web, the multiple-select limit is not enforced — clamp here. The
+        // picker already allocated a blob URL per selected file, so the excess
+        // and anything the size gate rejects must be released, or repeated
+        // rejected selections retain their full bytes for the tab's life (#320).
         const assets = result.assets.slice(0, remaining);
+        releaseAttachmentUris(result.assets.slice(remaining));
         const previews: AttachmentPreview[] = [];
         for (const asset of assets) {
             const p = await buildPreview({
@@ -184,6 +196,7 @@ export function useImagePicker(): UseImagePickerResult {
                 mimeType: asset.mimeType ?? 'application/octet-stream',
             });
             if (p) previews.push(p);
+            else releaseAttachmentUris([asset]);
         }
         append(previews);
     }, [remainingOrAlert, append]);
@@ -202,6 +215,9 @@ export function useImagePicker(): UseImagePickerResult {
         });
         if (result.canceled || !result.assets?.length) return;
 
+        // Same cleanup as pickImages: truncated and size-rejected picks are
+        // released (#320).
+        releaseAttachmentUris(result.assets.slice(remaining));
         const previews: AttachmentPreview[] = [];
         for (const asset of result.assets.slice(0, remaining)) {
             const p = await buildPreview({
@@ -211,6 +227,7 @@ export function useImagePicker(): UseImagePickerResult {
                 mimeType: asset.mimeType ?? 'image/jpeg',
             });
             if (p) previews.push(p);
+            else releaseAttachmentUris([asset]);
         }
         append(previews);
     }, [remainingOrAlert, append]);
@@ -263,9 +280,9 @@ export function useImagePicker(): UseImagePickerResult {
 
     const addImages = useCallback((images: AttachmentPreview[]) => {
         setSelectedImages(prev => {
-            const remaining = MAX_IMAGES_PER_MESSAGE - prev.length;
-            if (remaining <= 0) return prev;
-            return [...prev, ...images.slice(0, remaining)];
+            const { next, dropped } = appendWithinLimit(prev, images, MAX_IMAGES_PER_MESSAGE);
+            releaseAttachmentUris(dropped); // pasted/dropped previews own blob URLs too (#320)
+            return dropped.length === images.length ? prev : next;
         });
     }, []);
 

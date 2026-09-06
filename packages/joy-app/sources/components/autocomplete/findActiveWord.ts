@@ -39,6 +39,13 @@ function findActiveWordStart(
     let spaceIndex = -1;
     let foundPrefix = false;
     let prefixIndex = -1;
+    // Position just after the nearest '.' passed on the way back. A dot is a
+    // boundary for ':' and '/' words, but INSIDE an @ file reference it is part
+    // of the path ("@src/file.ts", "@.github/workflows") — stopping at it
+    // killed file autocomplete the moment an extension or a hidden-directory
+    // prefix was typed, although the forward scan accepts dots (#247). So the
+    // scan remembers the dot boundary and keeps looking for an '@'.
+    let dotBoundary = -1;
 
     while (startIndex >= 0) {
         const char = content.charAt(startIndex);
@@ -48,6 +55,10 @@ function findActiveWordStart(
             if (foundPrefix) {
                 // We found a prefix earlier, return its position
                 return prefixIndex;
+            }
+            if (dotBoundary >= 0) {
+                // No '@' between the dot and this space: the dot was a boundary.
+                return dotBoundary;
             }
             if (spaceIndex >= 0) {
                 // Multiple spaces, stop here
@@ -62,22 +73,26 @@ function findActiveWordStart(
             prefixes.includes(char) &&
             (startIndex === 0 || content.charAt(startIndex - 1) === ' ' || content.charAt(startIndex - 1) === '\n')
         ) {
-            // For @ prefix, continue searching backwards to include the entire file path
             if (char === '@') {
+                // '@' owns everything up to the cursor, dots included (#247).
                 foundPrefix = true;
                 prefixIndex = startIndex;
-                // Return immediately for @ at word boundary
-                return startIndex;
-            } else {
                 return startIndex;
             }
+            // Other prefixes keep the punctuation boundary.
+            return dotBoundary >= 0 ? dotBoundary : startIndex;
         }
         // Check if we hit a stop character
         else if (STOP_CHARACTERS.includes(char)) {
             if (foundPrefix) {
                 return prefixIndex;
             }
-            return startIndex + 1;
+            if (char === '.') {
+                if (dotBoundary < 0) dotBoundary = startIndex + 1;
+                startIndex--;
+                continue;
+            }
+            return dotBoundary >= 0 ? dotBoundary : startIndex + 1;
         }
         // Continue searching backwards
         else {
@@ -88,6 +103,9 @@ function findActiveWordStart(
     // Reached beginning of text
     if (foundPrefix) {
         return prefixIndex;
+    }
+    if (dotBoundary >= 0) {
+        return dotBoundary;
     }
     return (spaceIndex >= 0 ? spaceIndex : startIndex) + 1;
 }

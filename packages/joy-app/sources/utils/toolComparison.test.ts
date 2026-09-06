@@ -99,3 +99,18 @@ describe('compareToolCalls', () => {
         expect(compareToolCalls(tool1, tool2)).toBe(true);
     });
 });
+// #457: an array and an object compared equal when the object was on the
+// left — the array check only ran for `a`.
+describe('compareToolCalls array/object asymmetry (#457)', () => {
+    it('never equates an object with an array, in either order', () => {
+        const obj = { name: 'T', arguments: { items: {} } };
+        const arr = { name: 'T', arguments: { items: [] } };
+        expect(compareToolCalls(obj, arr)).toBe(false);
+        expect(compareToolCalls(arr, obj)).toBe(false);
+
+        const indexed = { name: 'T', arguments: { '0': 'file.ts' } };
+        const list = { name: 'T', arguments: ['file.ts'] };
+        expect(compareToolCalls(indexed, list)).toBe(false);
+        expect(compareToolCalls(list, indexed)).toBe(false);
+    });
+});

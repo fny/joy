@@ -43,9 +43,10 @@ describe('applySuggestion', () => {
             const selection = { start: 10, end: 10 }; // cursor after @use
             const result = applySuggestion(content, selection, '@john_smith');
             
+            // The caret lands AFTER the existing separator (#246).
             expect(result).toEqual({
                 text: 'Hello @john_smith here',
-                cursorPosition: 17
+                cursorPosition: 18
             });
         });
         
@@ -78,9 +79,11 @@ describe('applySuggestion', () => {
             const selection = { start: 11, end: 11 };
             const result = applySuggestion(content, selection, '@john_smith');
             
+            // No second space is inserted, but the caret still moves past the
+            // existing one so typing continues after the token (#246).
             expect(result).toEqual({
                 text: 'Hello @john_smith welcome',
-                cursorPosition: 17
+                cursorPosition: 18
             });
         });
         
@@ -190,5 +193,19 @@ describe('applySuggestion', () => {
                 cursorPosition: 13  // Cursor after the space
             });
         });
+    });
+});
+// #246: completing before an existing separator must leave the caret after it.
+describe('applySuggestion — existing separator (#246)', () => {
+    it('advances the cursor past a space that already follows the completed word', () => {
+        const r = applySuggestion('@fo rest', { start: 3, end: 3 }, '@foo', ['@', ':', '/'], true);
+        expect(r.text).toBe('@foo rest');
+        expect(r.cursorPosition).toBe(5); // after "@foo " — typing x gives "@foo xrest", not "@foox rest"
+    });
+
+    it('keeps the cursor before the following text when no space is requested', () => {
+        const r = applySuggestion('@fo rest', { start: 3, end: 3 }, '@foo', ['@', ':', '/'], false);
+        expect(r.text).toBe('@foo rest');
+        expect(r.cursorPosition).toBe(4);
     });
 });

@@ -34,14 +34,31 @@ function buildResumeInvocation(metadata: ResumeCommandMetadata): string | null {
 }
 
 function buildChangeDirectoryCommand(metadata: ResumeCommandMetadata): string | null {
-    const path = metadata.path?.trim();
-    if (!path) {
+    // Emptiness is checked separately from the value: the saved path is used
+    // EXACTLY as recorded. Trimming it turned "/tmp/project " into another
+    // directory before quoting (#443); only an all-whitespace path counts as
+    // absent.
+    const path = metadata.path;
+    if (!path || path.trim().length === 0) {
         return null;
     }
 
     return isWindows(metadata)
         ? `Set-Location -LiteralPath ${quotePowerShellPath(path)}`
         : `cd ${quotePosixPath(path)}`;
+}
+
+/**
+ * Chain the directory change and the resume invocation so the invocation runs
+ * ONLY when the change succeeded. Joined by a newline (or an unconditional
+ * `;`), a moved/missing project directory failed the `cd` and then started a
+ * resume in whatever directory the shell happened to be in (#444). POSIX uses
+ * `&&`; PowerShell 5.1 has no `&&`, so the invocation is gated on `$?`.
+ */
+function chainConditionally(changeDirectoryCommand: string, invocation: string, windows: boolean): string {
+    return windows
+        ? `${changeDirectoryCommand}; if ($?) { ${invocation} }`
+        : `${changeDirectoryCommand} && ${invocation}`;
 }
 
 export function buildResumeCommandBlock(metadata: ResumeCommandMetadata): ResumeCommandBlock | null {
@@ -51,13 +68,15 @@ export function buildResumeCommandBlock(metadata: ResumeCommandMetadata): Resume
     }
 
     const changeDirectoryCommand = buildChangeDirectoryCommand(metadata);
-    const lines = changeDirectoryCommand
-        ? [changeDirectoryCommand, invocation]
-        : [invocation];
+    if (!changeDirectoryCommand) {
+        return { lines: [invocation], copyText: invocation };
+    }
 
+    // `lines` stays two lines for display; the COPIED text is the conditional
+    // one-liner so a paste can never run the resume after a failed cd (#444).
     return {
-        lines,
-        copyText: lines.join('\n'),
+        lines: [changeDirectoryCommand, invocation],
+        copyText: chainConditionally(changeDirectoryCommand, invocation, isWindows(metadata)),
     };
 }
 
@@ -66,5 +85,5 @@ export function buildResumeCommand(metadata: ResumeCommandMetadata): string | nu
     if (!commandBlock) {
         return null;
     }
-    return commandBlock.lines.join(isWindows(metadata) ? '; ' : ' && ');
+    return commandBlock.copyText;
 }

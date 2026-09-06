@@ -121,7 +121,12 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
         }
     }, [onKeyPress]);
 
+    // Set when React's onChange fired for an imperative update, so the handle
+    // does not notify a second time (#232).
+    const notifiedByEventRef = React.useRef(false);
+
     const handleChange = React.useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        notifiedByEventRef.current = true;
         const text = e.target.value;
         const selection = {
             start: e.target.selectionStart,
@@ -157,16 +162,25 @@ export const MultiTextInput = React.forwardRef<MultiTextInputHandle, MultiTextIn
     React.useImperativeHandle(ref, () => ({
         getText: () => textareaRef.current?.value ?? '',
         setTextAndSelection: (text: string, selection: { start: number; end: number }) => {
-            if (textareaRef.current) {
-                // Directly set value and selection on DOM element
-                textareaRef.current.value = text;
-                textareaRef.current.setSelectionRange(selection.start, selection.end);
+            const el = textareaRef.current;
+            if (!el) return;
+            // Assign through the NATIVE value setter. `el.value = text` goes
+            // through React's instrumented setter, which records the new value
+            // in its tracker, so the input event below looked like a no-op to
+            // React and TextareaAutosize's onChange (its resize hook in
+            // uncontrolled mode) never ran: a restored multiline draft stayed
+            // one line tall and a cleared long draft kept its height (#232).
+            const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            if (nativeSetter) nativeSetter.call(el, text);
+            else el.value = text;
+            el.setSelectionRange(selection.start, selection.end);
 
-                // Trigger React's onChange by dispatching an input event
-                const event = new Event('input', { bubbles: true });
-                textareaRef.current.dispatchEvent(event);
+            // Trigger React's onChange (and the autosize) by dispatching an input event
+            notifiedByEventRef.current = false;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
 
-                // Also call callbacks directly for immediate update
+            // Notify directly only when the event did not reach React (detached node).
+            if (!notifiedByEventRef.current) {
                 onChangeText?.(text);
                 if (onStateChange) {
                     onStateChange({ text, selection });

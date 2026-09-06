@@ -1,6 +1,7 @@
 import * as React from 'react';
-import { Platform, Pressable, ScrollView, View } from 'react-native';
+import { Platform, Pressable, ScrollView, View, type NativeScrollEvent, type NativeSyntheticEvent, type LayoutChangeEvent } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { scrollOffsetToReveal } from './autocomplete/scrollIntoView';
 
 const MAX_HEIGHT = 320;
 
@@ -19,6 +20,20 @@ export const AgentInputAutocomplete = React.memo((props: AgentInputAutocompleteP
     const { theme } = useUnistyles();
     const scrollRef = React.useRef<ScrollView>(null);
 
+    // Native has no readable scrollTop: track the offset from onScroll and the
+    // viewport from onLayout, and drive ScrollView.scrollTo. The old code took
+    // the DOM branch on native too — getScrollableNode returns a truthy numeric
+    // handle there — read undefined scrollTop/clientHeight, and never scrolled
+    // the selected suggestion into view (#194).
+    const scrollOffsetRef = React.useRef(0);
+    const viewportHeightRef = React.useRef(MAX_HEIGHT);
+    const handleScroll = React.useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        scrollOffsetRef.current = e.nativeEvent.contentOffset.y;
+    }, []);
+    const handleLayout = React.useCallback((e: LayoutChangeEvent) => {
+        viewportHeightRef.current = e.nativeEvent.layout.height;
+    }, []);
+
     // Keep the selected item within the visible window when the user
     // arrow-keys through suggestions. itemHeight is enough to compute the
     // target since every row has identical height (the dropdown is fixed
@@ -26,25 +41,24 @@ export const AgentInputAutocomplete = React.memo((props: AgentInputAutocompleteP
     React.useEffect(() => {
         if (selectedIndex < 0 || !scrollRef.current) return;
         const itemTop = selectedIndex * itemHeight;
-        const itemBottom = itemTop + itemHeight;
         const view = scrollRef.current as unknown as {
             scrollTo?: (opts: { y: number; animated?: boolean }) => void;
-            getScrollableNode?: () => HTMLDivElement | null;
+            getScrollableNode?: () => unknown;
         };
         // Web RN exposes the underlying div; we can read scrollTop directly
-        // for tighter control. Native falls back to scrollTo with a guess.
-        const node = view.getScrollableNode?.();
-        if (node) {
-            const visibleTop = node.scrollTop;
-            const visibleBottom = visibleTop + node.clientHeight;
-            if (itemTop < visibleTop) {
-                node.scrollTop = itemTop;
-            } else if (itemBottom > visibleBottom) {
-                node.scrollTop = itemBottom - node.clientHeight;
-            }
+        // for tighter control. Only a REAL scroll element takes this branch.
+        const node = Platform.OS === 'web' ? view.getScrollableNode?.() : null;
+        if (node && typeof node === 'object' && typeof (node as HTMLDivElement).scrollTop === 'number') {
+            const el = node as HTMLDivElement;
+            const target = scrollOffsetToReveal(itemTop, itemHeight, el.scrollTop, el.clientHeight);
+            if (target !== null) el.scrollTop = target;
             return;
         }
-        view.scrollTo?.({ y: itemTop, animated: false });
+        const target = scrollOffsetToReveal(itemTop, itemHeight, scrollOffsetRef.current, viewportHeightRef.current);
+        if (target !== null) {
+            scrollOffsetRef.current = target; // scrollTo is async; a second arrow press must not read the stale offset
+            view.scrollTo?.({ y: target, animated: false });
+        }
     }, [selectedIndex, itemHeight]);
 
     if (suggestions.length === 0) {
@@ -58,6 +72,9 @@ export const AgentInputAutocomplete = React.memo((props: AgentInputAutocompleteP
                 style={{ maxHeight: MAX_HEIGHT }}
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={true}
+                onScroll={handleScroll}
+                scrollEventThrottle={16}
+                onLayout={handleLayout}
             >
                 {suggestions.map((suggestion, index) => (
                     <Pressable

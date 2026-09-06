@@ -13,7 +13,10 @@ import { JoyImage } from "./JoyImage";
 import { AttachmentView } from "./AttachmentView";
 import { ToolView } from "./tools/ToolView";
 import { AgentEvent } from "@/sync/typesRaw";
-import { sync } from '@/sync/sync';
+import { sync, type SendMessageResult } from '@/sync/sync';
+import { Modal } from '@/modal';
+import { useDraftQueueStore } from '@/-session/draftQueue';
+import { errorMessage } from '@/utils/guardAsync';
 import { Option } from './markdown/MarkdownView';
 import { layout } from "./layout";
 import { parseLocalCommandMessage } from './parseLocalCommandMessage';
@@ -25,6 +28,33 @@ import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { getSessionName } from '@/utils/sessionUtils';
 
+
+// Sending a tapped answer option. sendMessage resolves ok:false (relay POST
+// failed, session key unavailable) instead of throwing, and both option
+// handlers used to discard that result — the chosen answer vanished with no
+// error and nothing to retry (#231). A failed send now keeps the answer as a
+// draft in the session's draft strip (send/edit from there) and says so.
+async function sendOptionAnswer(sessionId: string, answer: string): Promise<void> {
+  let result: SendMessageResult;
+  try {
+    result = await sync.sendMessage(sessionId, answer, { source: 'option' });
+  } catch (e) {
+    result = { ok: false, reason: errorMessage(e) };
+  }
+  if (result.ok) return;
+  useDraftQueueStore.getState().add(sessionId, answer, 'draft');
+  Modal.alert(
+    t('errors.sendFailedTitle'),
+    result.reason === t('errors.sessionFull') ? result.reason : t('errors.sendFailedMessage'),
+    [{ text: t('common.ok'), style: 'cancel' }],
+  );
+}
+
+function useOptionPress(sessionId: string) {
+  return React.useCallback((option: Option) => {
+    void sendOptionAnswer(sessionId, option.title);
+  }, [sessionId]);
+}
 
 export const MessageView = React.memo((props: {
   message: Message;
@@ -93,9 +123,7 @@ function UserTextBlock(props: {
   metadata: Metadata | null;
   sessionId: string;
 }) {
-  const handleOptionPress = React.useCallback((option: Option) => {
-    sync.sendMessage(props.sessionId, option.title, { source: 'option' });
-  }, [props.sessionId]);
+  const handleOptionPress = useOptionPress(props.sessionId); // failures are surfaced + retained (#231)
 
   // Chat font size setting: scale the 16/24 bubble text metrics. null at 100%
   // so the static unistyles objects pass through untouched.
@@ -355,9 +383,7 @@ function AgentTextBlock(props: {
   message: AgentTextMessage;
   sessionId: string;
 }) {
-  const handleOptionPress = React.useCallback((option: Option) => {
-    sync.sendMessage(props.sessionId, option.title, { source: 'option' });
-  }, [props.sessionId]);
+  const handleOptionPress = useOptionPress(props.sessionId); // failures are surfaced + retained (#231)
 
   // Hide thinking messages
   if (props.message.isThinking) {

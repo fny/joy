@@ -128,50 +128,29 @@ export const QRCode = React.memo((props: QRCodeProps) => {
                 {/* QR modules with rounded corners */}
                 {modules}
 
-                {/* Top-left locator pattern */}
-                <DiffRect
-                    inner={rrect(rect(moduleSize, moduleSize, 5 * moduleSize, 5 * moduleSize), moduleSize * baseRadius, moduleSize * baseRadius)}
-                    outer={rrect(rect(0, 0, 7 * moduleSize, 7 * moduleSize), moduleSize * (baseRadius + 1), moduleSize * (baseRadius + 1))}
-                    color={foregroundColor}
-                />
-                <RoundedRect
-                    x={2 * moduleSize}
-                    y={2 * moduleSize}
-                    width={3 * moduleSize}
-                    height={3 * moduleSize}
-                    r={moduleSize}
-                    color={foregroundColor}
-                />
-
-                {/* Top-right locator pattern */}
-                <DiffRect
-                    inner={rrect(rect((qrMatrix.size - 7 + 1) * moduleSize, moduleSize, 5 * moduleSize, 5 * moduleSize), moduleSize * baseRadius, moduleSize * baseRadius)}
-                    outer={rrect(rect((qrMatrix.size - 7) * moduleSize, 0, 7 * moduleSize, 7 * moduleSize), moduleSize * (baseRadius + 1), moduleSize * (baseRadius + 1))}
-                    color={foregroundColor}
-                />
-                <RoundedRect
-                    x={(qrMatrix.size - 7 + 2) * moduleSize}
-                    y={2 * moduleSize}
-                    width={3 * moduleSize}
-                    height={3 * moduleSize}
-                    r={moduleSize}
-                    color={foregroundColor}
-                />
-
-                {/* Bottom-left locator pattern */}
-                <DiffRect
-                    inner={rrect(rect(moduleSize, (qrMatrix.size - 7 + 1) * moduleSize, 5 * moduleSize, 5 * moduleSize), moduleSize * baseRadius, moduleSize * baseRadius)}
-                    outer={rrect(rect(0, (qrMatrix.size - 7) * moduleSize, 7 * moduleSize, 7 * moduleSize), moduleSize * (baseRadius + 1), moduleSize * (baseRadius + 1))}
-                    color={foregroundColor}
-                />
-                <RoundedRect
-                    x={2 * moduleSize}
-                    y={(qrMatrix.size - 7 + 2) * moduleSize}
-                    width={3 * moduleSize}
-                    height={3 * moduleSize}
-                    r={moduleSize}
-                    color={foregroundColor}
-                />
+                {/* Finder patterns are SQUARE: rounded rings made the code
+                    detectable but undecodable in OpenCV at 200px and 400px, and
+                    squaring the rings alone restored decoding (#272). */}
+                {[
+                    { x: 0, y: 0 },
+                    { x: (qrMatrix.size - 7) * moduleSize, y: 0 },
+                    { x: 0, y: (qrMatrix.size - 7) * moduleSize },
+                ].map((f, i) => (
+                    <Group key={i}>
+                        <DiffRect
+                            inner={rrect(rect(f.x + moduleSize, f.y + moduleSize, 5 * moduleSize, 5 * moduleSize), 0, 0)}
+                            outer={rrect(rect(f.x, f.y, 7 * moduleSize, 7 * moduleSize), 0, 0)}
+                            color={foregroundColor}
+                        />
+                        <Rect
+                            x={f.x + 2 * moduleSize}
+                            y={f.y + 2 * moduleSize}
+                            width={3 * moduleSize}
+                            height={3 * moduleSize}
+                            color={foregroundColor}
+                        />
+                    </Group>
+                ))}
             </Group>
         </Canvas>
     );

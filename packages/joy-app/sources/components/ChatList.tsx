@@ -215,18 +215,6 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     const orderedItemsRef = React.useRef(orderedItems);
     orderedItemsRef.current = orderedItems;
 
-    // In-session search (Cmd/Ctrl+F): scroll to the row holding a message id.
-    // viewPosition 0.3 places the match comfortably below the header rather
-    // than flush against it. Returns false if the id isn't in the grouped
-    // window so the caller can surface "not in loaded history".
-    React.useImperativeHandle(ref, () => ({
-        scrollToMessageId: (messageId: string) => {
-            const index = orderedItemsRef.current.findIndex((i) => rowContainsMessage(i, messageId));
-            if (index < 0) return false;
-            void flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 });
-            return true;
-        },
-    }), []);
     // Whether the user is pinned within LIVE_THRESHOLD of the end. Starts true:
     // a blur before the first scroll event must not manufacture a 'reading'
     // snapshot out of default-initialized refs.
@@ -358,6 +346,38 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             return next;
         });
     }, []);
+
+    // In-session search (Cmd/Ctrl+F): scroll to the row holding a message id.
+    // viewPosition 0.3 places the match comfortably below the header rather
+    // than flush against it. Returns false if the id isn't in the grouped
+    // window so the caller can surface "not in loaded history".
+    //
+    // A hit inside a COLLAPSED group is revealed first: the group renders its
+    // messages only when expanded, so scrolling to the header alone left the
+    // selected match absent from the visible chat (#203). The scroll runs once
+    // the expanded layout has committed (two frames later).
+    React.useImperativeHandle(ref, () => ({
+        scrollToMessageId: (messageId: string) => {
+            const items = orderedItemsRef.current;
+            const index = items.findIndex((i) => rowContainsMessage(i, messageId));
+            if (index < 0) return false;
+            const row = items[index];
+            const scroll = () => { void flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 }); };
+            if (row.type !== 'message' && collapsedGroupsRef.current.has(row.id)) {
+                manuallyCollapsedRef.current.delete(row.id); // a search reveal is not a manual collapse
+                setCollapsedGroups((prev) => {
+                    if (!prev.has(row.id)) return prev;
+                    const next = new Set(prev);
+                    next.delete(row.id);
+                    return next;
+                });
+                requestAnimationFrame(() => requestAnimationFrame(scroll));
+                return true;
+            }
+            scroll();
+            return true;
+        },
+    }), []);
 
     const keyExtractor = useCallback((item: DisplayItem) => item.id, []);
 

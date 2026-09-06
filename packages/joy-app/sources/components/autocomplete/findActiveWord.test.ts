@@ -363,3 +363,36 @@ describe('getActiveWordQuery', () => {
         expect(getActiveWordQuery('@very_long_username')).toBe('very_long_username');
     });
 });
+// #247: a dot inside an @ file reference is part of the path, not a boundary.
+describe('findActiveWord — dots inside @ file references (#247)', () => {
+    it('keeps the @ word active after an extension is typed', () => {
+        const content = '@src/file.ts';
+        const r = findActiveWord(content, { start: content.length, end: content.length });
+        expect(r?.activeWord).toBe('@src/file.ts');
+        expect(r?.offset).toBe(0);
+    });
+
+    it('keeps the @ word active for a hidden-directory prefix', () => {
+        const content = 'see @.github/workflows';
+        const r = findActiveWord(content, { start: content.length, end: content.length });
+        expect(r?.activeWord).toBe('@.github/workflows');
+        expect(r?.offset).toBe(4);
+    });
+
+    it('still treats a dot as a boundary for other prefixes and plain words', () => {
+        // The dot bounds a '/' word: the active word starts after it, not at 'done'.
+        const slash = 'done./co';
+        expect(findActiveWord(slash, { start: slash.length, end: slash.length })?.offset).toBe(5);
+        const colon = 'x.:sm';
+        expect(findActiveWord(colon, { start: colon.length, end: colon.length })?.activeWord).toBe(':sm');
+        const plain = 'end. word';
+        expect(findActiveWord(plain, { start: plain.length, end: plain.length })).toBeUndefined();
+    });
+
+    it('does not reach back across a dot to an @ in a previous word', () => {
+        const content = '@a.b c.d';
+        // The cursor word is "c.d" (no prefix) — the earlier "@a.b" must not be claimed.
+        const r = findActiveWord(content, { start: content.length, end: content.length });
+        expect(r?.activeWord ?? null).not.toBe('@a.b c.d');
+    });
+});

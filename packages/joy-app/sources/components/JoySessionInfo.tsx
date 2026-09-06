@@ -18,6 +18,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
 import { useSessionStatus, formatPathRelativeToHome, getSessionName, getSessionAvatarId, getResumeCommand } from '@/utils/sessionUtils';
+import { buildResumeCommand } from '@/utils/resumeCommand';
 import { useSessionQuickActions } from '@/hooks/useSessionQuickActions';
 import { useJoyAction } from '@/hooks/useJoyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
@@ -227,11 +228,15 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
     const formatBytes = (b: number) => b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : b >= 1 << 20 ? `${Math.round(b / (1 << 20))} MB` : `${Math.round(b / 1024)} KB`;
 
     // Resume command — stock builder when metadata has the claude session
-    // id, otherwise assembled from the daemon's live record.
+    // id, otherwise assembled from the daemon's live record THROUGH THE SAME
+    // builder: the live cwd was interpolated raw into single quotes, so a path
+    // with an apostrophe ("John's repo") produced an unmatched quote (#229).
     const claudeSessionId = live?.claude_session_id ?? session.metadata?.claudeSessionId;
     const sessionPath = live?.cwd ?? session.metadata?.path;
     const resumeCommand = getResumeCommand(session)
-        ?? (claudeSessionId && sessionPath ? `cd '${sessionPath}' && joy new . --resume ${claudeSessionId}` : null);
+        ?? (claudeSessionId && sessionPath
+            ? buildResumeCommand({ path: sessionPath, os: session.metadata?.os, flavor: session.metadata?.flavor, claudeSessionId })
+            : null);
 
     return (
         <ItemList>

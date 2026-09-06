@@ -35,9 +35,16 @@ function deepEqual(a: any, b: any): boolean {
         return false;
     }
 
+    // An array and a plain object are never equal, in EITHER order. The old
+    // check only ran when `a` was the array, so {items:{}} vs {items:[]} and
+    // {'0':'x'} vs ['x'] compared equal one way round (#457).
+    if (Array.isArray(a) !== Array.isArray(b)) {
+        return false;
+    }
+
     // Handle arrays
     if (Array.isArray(a)) {
-        if (!Array.isArray(b) || a.length !== b.length) {
+        if (a.length !== b.length) {
             return false;
         }
         for (let i = 0; i < a.length; i++) {

@@ -6,6 +6,7 @@ import { Image } from 'expo-image';
 import { AgentInputAttachmentStrip } from './AgentInputAttachmentStrip';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
 import { generateThumbhash } from '@/utils/thumbhash';
+import { getImagesFromClipboard, getImagesFromDrop, fileToAttachmentPreview } from '@/utils/pasteImages.web';
 import { layout } from './layout';
 import { MultiTextInput, KeyPressEvent, MULTI_TEXT_INPUT_FONT_SIZE, MULTI_TEXT_INPUT_LINE_HEIGHT } from './MultiTextInput';
 import { Typography } from '@/constants/Typography';
@@ -652,15 +653,25 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     const sendBlockShakerRef = React.useRef<ShakeInstance>(null);
     const inputRef = React.useRef<MultiTextInputHandle>(null);
 
-    // Forward ref to the MultiTextInput
-    React.useImperativeHandle(ref, () => inputRef.current!, []);
+    // Forward ref to the MultiTextInput as STABLE wrappers that read
+    // inputRef.current at call time. Forwarding the child's handle object once
+    // (empty deps) kept the FIRST handle — MultiTextInput rebuilds its handle
+    // whenever onChangeText/onStateChange change, so imperative clears and
+    // restores notified the obsolete callbacks and the current parent's draft
+    // state went stale (#197).
+    React.useImperativeHandle(ref, () => ({
+        getText: () => inputRef.current?.getText() ?? '',
+        setTextAndSelection: (text, selection) => { inputRef.current?.setTextAndSelection(text, selection); },
+        focus: () => { inputRef.current?.focus(); },
+        blur: () => { inputRef.current?.blur(); },
+    }), []);
 
     // Web paste/drag — intercept image pastes and file drops for the
     // attachment feature. Both handlers funnel through props.onAddImages.
     React.useEffect(() => {
         if (Platform.OS !== 'web' || !props.onAddImages) return;
 
-        const handlePaste = async (e: ClipboardEvent) => {
+        const handlePaste = (e: ClipboardEvent) => {
             // Only handle pastes targeted at a focused text-editable element.
             // The listener is attached to document, so without this guard a
             // paste in the URL bar, another modal, or any focused-elsewhere
@@ -671,19 +682,25 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 || (active instanceof HTMLElement && active.isContentEditable);
             if (!isEditableTarget) return;
 
-            const { getImagesFromClipboard, fileToAttachmentPreview } = await import('@/utils/pasteImages.web');
+            // Inspect the clipboard and preventDefault SYNCHRONOUSLY. The old
+            // handler awaited a dynamic import first; by then the paste's
+            // default action had run, so a clipboard carrying an image plus a
+            // text/HTML alternative (web page, Slack, Figma) attached the image
+            // AND dumped the text into the textarea (#14).
             const files = getImagesFromClipboard(e);
             if (!files.length) return;
             e.preventDefault();
-            const previews = (await Promise.all(
-                files.map((f) => fileToAttachmentPreview(f, generateThumbhash))
-            )).filter(Boolean) as Omit<AttachmentPreview, 'id'>[];
-            if (previews.length) {
-                props.onAddImages!(previews.map((p) => ({
-                    ...p,
-                    id: `paste_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-                })));
-            }
+            void (async () => {
+                const previews = (await Promise.all(
+                    files.map((f) => fileToAttachmentPreview(f, generateThumbhash))
+                )).filter(Boolean) as Omit<AttachmentPreview, 'id'>[];
+                if (previews.length) {
+                    props.onAddImages!(previews.map((p) => ({
+                        ...p,
+                        id: `paste_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                    })));
+                }
+            })();
         };
 
         // dragover must call preventDefault for drop to fire; we gate on
@@ -705,28 +722,33 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
             if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
         };
 
-        const handleDrop = async (e: DragEvent) => {
+        const handleDrop = (e: DragEvent) => {
             if (!isFileDrag(e)) return;
             e.preventDefault();
-            const { getImagesFromDrop, fileToAttachmentPreview } = await import('@/utils/pasteImages.web');
+            // Snapshot the File objects BEFORE any await: once the drop event
+            // has dispatched the browser protects the drag data store and
+            // dataTransfer.files reads empty — the old handler awaited a
+            // dynamic import first and attached nothing (#198).
             const files = getImagesFromDrop(e);
             if (!files.length) return;
-            const previews = (await Promise.all(
-                files.map((f) => fileToAttachmentPreview(f, generateThumbhash))
-            )).filter(Boolean) as Omit<AttachmentPreview, 'id'>[];
-            if (previews.length) {
-                props.onAddImages!(previews.map((p) => ({
-                    ...p,
-                    id: `drop_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-                })));
-            }
+            void (async () => {
+                const previews = (await Promise.all(
+                    files.map((f) => fileToAttachmentPreview(f, generateThumbhash))
+                )).filter(Boolean) as Omit<AttachmentPreview, 'id'>[];
+                if (previews.length) {
+                    props.onAddImages!(previews.map((p) => ({
+                        ...p,
+                        id: `drop_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                    })));
+                }
+            })();
         };
 
-        document.addEventListener('paste', handlePaste as any);
+        document.addEventListener('paste', handlePaste);
         document.addEventListener('dragover', handleDragOver);
         document.addEventListener('drop', handleDrop);
         return () => {
-            document.removeEventListener('paste', handlePaste as any);
+            document.removeEventListener('paste', handlePaste);
             document.removeEventListener('dragover', handleDragOver);
             document.removeEventListener('drop', handleDrop);
         };
@@ -756,9 +778,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     // Use the tracked selection from inputState
     const activeWord = useActiveWord(inputState.text, inputState.selection, props.autocompletePrefixes);
+    // Escape with suggestions open DISMISSES that query: the word stays in the
+    // text, but no suggestions are requested for it until the active word
+    // changes (typing, caret move). The old Escape wrote the same text and
+    // collapsed selection back, which changed nothing — every further Escape
+    // was consumed by the autocomplete branch and never reached Stop (#195).
+    const [dismissedWord, setDismissedWord] = React.useState<string | null>(null);
+    React.useEffect(() => {
+        if (dismissedWord !== null && activeWord !== dismissedWord) setDismissedWord(null);
+    }, [activeWord, dismissedWord]);
+    const liveActiveWord = activeWord !== null && activeWord === dismissedWord ? null : activeWord;
     // Using default options: clampSelection=true, autoSelectFirst=true, wrapAround=true
     // To customize: useActiveSuggestions(activeWord, props.autocompleteSuggestions, { clampSelection: false, wrapAround: false })
-    const [suggestions, selected, moveUp, moveDown] = useActiveSuggestions(activeWord, props.autocompleteSuggestions, { clampSelection: true, wrapAround: true });
+    const [suggestions, selected, moveUp, moveDown] = useActiveSuggestions(liveActiveWord, props.autocompleteSuggestions, { clampSelection: true, wrapAround: true });
 
     // Debug logging
     // React.useEffect(() => {
@@ -880,14 +912,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 handleSuggestionSelect(indexToSelect);
                 return true;
             } else if (event.key === 'Escape') {
-                // Clear suggestions by collapsing selection (triggers activeWord to clear)
-                if (inputRef.current) {
-                    const cursorPos = inputState.selection.start;
-                    inputRef.current.setTextAndSelection(inputState.text, {
-                        start: cursorPos,
-                        end: cursorPos
-                    });
-                }
+                // Dismiss this query; the next Escape falls through to abort (#195).
+                setDismissedWord(activeWord);
                 return true;
             }
         }
@@ -929,7 +955,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
         }
         return false; // Key was not handled
-    }, [suggestions, moveUp, moveDown, selected, handleSuggestionSelect, props.showAbortButton, props.onAbort, isAborting, handleAbortPress, agentInputEnterToSend, props.onSend, props.onPermissionModeChange, availableModes, permissionModeKey, isSendBlocked, handleBlockedSendAttempt, props.isSendDisabled]);
+    }, [suggestions, moveUp, moveDown, selected, handleSuggestionSelect, activeWord, props.showAbortButton, props.onAbort, isAborting, handleAbortPress, agentInputEnterToSend, props.onSend, props.onPermissionModeChange, availableModes, permissionModeKey, isSendBlocked, handleBlockedSendAttempt, props.isSendDisabled]);
 
 
 

@@ -22,9 +22,19 @@ export function getRepoPath(path: string): string {
     return path.slice(0, idx);
 }
 
-/** Extract the worktree name from a worktree path, or null if not a worktree */
+/**
+ * Extract the worktree name from a worktree path, or null if not a worktree.
+ *
+ * The name is the FIRST path component after the marker: a cwd deeper inside
+ * the worktree (`.dev/worktree/feature/packages/app`) and the checkout root
+ * with a trailing slash (`.dev/worktree/feature/`) are the same worktree and
+ * must yield the same name — the raw remainder gave one worktree several
+ * names depending on which directory was supplied (#464).
+ */
 export function getWorktreeName(path: string): string | null {
     const idx = path.indexOf(WORKTREE_PATH_MARKER);
     if (idx === -1) return null;
-    return path.slice(idx + WORKTREE_PATH_MARKER.length);
+    const rest = path.slice(idx + WORKTREE_PATH_MARKER.length);
+    const name = rest.split(/[\/\\]/).find((part) => part.length > 0);
+    return name ?? null;
 }

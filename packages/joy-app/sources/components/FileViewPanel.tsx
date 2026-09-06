@@ -11,6 +11,7 @@ import { Typography } from '@/constants/Typography';
 import { MarkdownView } from '@/components/markdown/MarkdownView';
 import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
+import { isBinaryPath } from '@/utils/binaryFile';
 import { downloadFile } from '@/utils/downloadFile';
 import { sessionReadFile, sessionWriteFile } from '@/sync/ops';
 import { Modal } from '@/modal';
@@ -74,21 +75,6 @@ function getFileLanguage(path: string): string | null {
     return ext ? (map[ext] ?? null) : null;
 }
 
-function isBinaryExtension(path: string): boolean {
-    const ext = path.split('.').pop()?.toLowerCase();
-    const binaryExts = [
-        'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico',
-        'mp4', 'avi', 'mov', 'wmv', 'flv', 'webm',
-        'mp3', 'wav', 'flac', 'aac', 'ogg',
-        'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-        'zip', 'tar', 'gz', 'rar', '7z',
-        'exe', 'dmg', 'deb', 'rpm',
-        'woff', 'woff2', 'ttf', 'otf',
-        'db', 'sqlite', 'sqlite3',
-    ];
-    return ext ? binaryExts.includes(ext) : false;
-}
-
 function decodeBase64ToBytes(base64: string): Uint8Array {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
@@ -150,9 +136,12 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     const language = getFileLanguage(filePath);
     const isMarkdown = language === 'markdown';
     // Renderable = has a source ⇄ preview toggle (md keeps its dedicated
-    // preview; html/csv/tsv go through FileRenderedView). Source (edit) first.
+    // preview; html/csv/tsv/svg go through FileRenderedView). Source (edit)
+    // first. Raster images have no source view — they render from bytes; svg
+    // is XML text with an image preview (#217).
     const renderKind = fileRenderKind(filePath);
-    const isRenderable = renderKind !== null && renderKind !== 'image';
+    const isSvg = renderKind === 'image' && !isRasterImagePath(filePath);
+    const isRenderable = renderKind !== null && (renderKind !== 'image' || isSvg);
     const [imageBase64, setImageBase64] = React.useState<string | null>(null);
 
     const hasChanges = fileState.kind === 'loaded' && editContent !== fileState.content;
@@ -181,20 +170,26 @@ export const FileViewPanel = React.memo(function FileViewPanel({
         };
 
         setImageBase64(null);
-        if (isBinaryExtension(filePath)) {
-            if (isRasterImagePath(filePath)) {
-                guarded(async () => {
-                    const res = await sessionReadFile(sessionId, filePath);
-                    if (stale()) return;
-                    if (res.success && res.content) {
-                        setImageBase64(res.content);
-                        setFileState({ kind: 'binary' }); // not editable — rendered below
-                    } else {
-                        setFileState({ kind: 'error', message: res.error || t('files.failedToRead') });
-                    }
-                }, showReadFailure)();
-                return () => { cancelled = true; };
-            }
+        // Images first, then the shared binary gate (utils/binaryFile), then
+        // text. The panel's own extension list disagreed with the renderer's:
+        // svg was "binary" (never read, never previewed) while webp/avif were
+        // raster images the gate did not know, so they were decoded as text
+        // and never reached the image renderer (#217). Raster bytes go to
+        // imageBase64; svg is loaded as text below and previewed from it.
+        if (isRasterImagePath(filePath)) {
+            guarded(async () => {
+                const res = await sessionReadFile(sessionId, filePath);
+                if (stale()) return;
+                if (res.success && res.content) {
+                    setImageBase64(res.content);
+                    setFileState({ kind: 'binary' }); // not editable — rendered below
+                } else {
+                    setFileState({ kind: 'error', message: res.error || t('files.failedToRead') });
+                }
+            }, showReadFailure)();
+            return () => { cancelled = true; };
+        }
+        if (isBinaryPath(filePath)) {
             setFileState({ kind: 'binary' });
             return;
         }
@@ -248,20 +243,36 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     // and the app is foregrounded (useActiveInterval), so a backgrounded/locked
     // device isn't re-reading the file + hashing it every 5s (battery).
     const originalHash = fileState.kind === 'loaded' ? fileState.originalHash : null;
+    // Polls are ordered: each gets a sequence number and a response commits
+    // only if it is newer than the last ACCEPTED one. Two overlapping reads
+    // (a slow one that saw OLD, a later one that saw NEW and returned first)
+    // used to let the slow one overwrite externalChange with the older
+    // contents, which Reload then installed (#219).
+    const pollSeq = React.useRef(0);
+    const acceptedPollSeq = React.useRef(0);
     useActiveInterval(() => {
         if (!originalHash) return;
         // A poll peeks at the generation without minting one: it must not
         // supersede a save in flight, but its content is dropped if a load,
         // save or reload happened while it was out.
         const gen = currentGen(fileKey);
+        const seq = ++pollSeq.current;
         void (async () => {
             try {
                 const content = await readFileContent(sessionId, filePath);
-                if (!content || !isLatest(fileKey, gen)) return;
+                if (content === null || !isLatest(fileKey, gen)) return;
                 const currentHash = await computeSHA256(content);
                 if (!isLatest(fileKey, gen)) return;
+                if (seq <= acceptedPollSeq.current) return; // an older poll's response (#219)
+                acceptedPollSeq.current = seq;
                 if (currentHash !== originalHash) {
                     setExternalChange(content);
+                } else {
+                    // Disk matches the saved baseline again (the external edit
+                    // was reverted): the warning and the conflict view must
+                    // go, or Reload would install the obsolete snapshot (#221).
+                    setExternalChange(null);
+                    setShowConflictDiff(false);
                 }
             } catch (e) {
                 logError(e); // best-effort poll; the next tick retries
@@ -271,21 +282,27 @@ export const FileViewPanel = React.memo(function FileViewPanel({
 
     const handleReload = React.useCallback(() => {
         if (!externalChange) return;
-        const reloaded = externalChange;
+        const snapshot = externalChange;
         setExternalChange(null);
         setShowConflictDiff(false);
         const gen = nextGen(fileKey);
         guarded(async () => {
-            const hash = await computeSHA256(reloaded);
+            // Reload installs what is on disk NOW, not the poll's snapshot: the
+            // snapshot could be an older overlapping poll's contents (#219) or
+            // a change that has since been reverted (#221).
+            const fresh = await readFileContent(sessionId, filePath);
             if (!isLatest(fileKey, gen)) return;
-            setFileState({ kind: 'loaded', content: reloaded, originalHash: hash });
-            setEditContent(reloaded);
+            if (fresh === null) throw new Error(t('files.failedToRead'));
+            const hash = await computeSHA256(fresh);
+            if (!isLatest(fileKey, gen)) return;
+            setFileState({ kind: 'loaded', content: fresh, originalHash: hash });
+            setEditContent(fresh);
         }, (e) => {
             // The warning bar comes back so the reload can be retried.
-            if (isLatest(fileKey, gen)) setExternalChange(reloaded);
+            if (isLatest(fileKey, gen)) setExternalChange(snapshot);
             alertError()(e);
         })();
-    }, [externalChange, fileKey]);
+    }, [externalChange, fileKey, sessionId, filePath]);
 
     const handleDismissWarning = React.useCallback(() => {
         setExternalChange(null);
