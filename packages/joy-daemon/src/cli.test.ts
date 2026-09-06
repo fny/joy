@@ -234,32 +234,55 @@ const userRow = (seq: number, text: string) => rec(seq, { role: "user", content:
 const ndjson = (lines: unknown[]) => lines.map((l) => JSON.stringify(l) + "\n").join("");
 /** /sessions/:id/events over an in-memory log: `{hello, seq}` then the records after ?after
  *  (or just hello for ?last=0, the CLI's currentSeq probe); a follow stream stays open and
- *  `push` feeds it live. `onConnect` can take over a connection (returns true when it did). */
+ *  `push` feeds it live. `onConnect` can take over a connection (returns true when it did).
+ *  The fixture is driven by what has HAPPENED, never by timers (#626): `opened()` resolves
+ *  once a follow stream is open, `connected(k)` once the k-th /events request has been
+ *  served, `push` once the row is flushed to every open stream's socket, and `drop` ends the
+ *  open follow streams — ordered after whatever was pushed before it. */
 const eventsRoute = (initial: unknown[] = [], opts: { onConnect?: (n: number, res: http.ServerResponse, after: number) => boolean } = {}) => {
   const log: { seq: number }[] = [...(initial as { seq: number }[])];
   const open = new Set<http.ServerResponse>();
   let n = 0;
+  const waiting: Array<{ ready: () => boolean; resolve: () => void }> = [];
+  const until = (ready: () => boolean) => new Promise<void>((resolve) => { if (ready()) resolve(); else waiting.push({ ready, resolve }); });
+  const settle = () => { for (const w of waiting.splice(0)) { if (w.ready()) w.resolve(); else waiting.push(w); } };
   route(`GET /sessions/${SID}/events`, (_q, res, url) => {
     n++;
-    const after = Number(url.searchParams.get("after") ?? 0);
-    if (opts.onConnect?.(n, res, after)) return;
-    res.writeHead(200, { "Content-Type": "application/x-ndjson" });
-    const hello = { hello: true, seq: log.length ? log[log.length - 1].seq : 0 };
-    if (url.searchParams.has("last")) { res.end(ndjson([hello])); return; }
-    res.write(ndjson([hello, ...log.filter((r) => r.seq > after)]));
-    if (url.searchParams.get("follow") === "1") { open.add(res); hanging.add(res); res.on("close", () => open.delete(res)); } else res.end();
+    try {
+      const after = Number(url.searchParams.get("after") ?? 0);
+      if (opts.onConnect?.(n, res, after)) return;
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      const hello = { hello: true, seq: log.length ? log[log.length - 1].seq : 0 };
+      if (url.searchParams.has("last")) { res.end(ndjson([hello])); return; }
+      res.write(ndjson([hello, ...log.filter((r) => r.seq > after)]));
+      if (url.searchParams.get("follow") === "1") { open.add(res); hanging.add(res); res.on("close", () => open.delete(res)); } else res.end();
+    } finally { settle(); }
   });
-  return { push: (r: { seq: number }) => { log.push(r); for (const res of open) res.write(ndjson([r])); }, connections: () => n };
+  const flushed = (res: http.ServerResponse, data: string) => new Promise<void>((r) => { res.write(data, () => r()); });
+  return {
+    /** Append `r` to the log and write it to every open follow stream; resolves once each socket has taken it. */
+    push: (r: { seq: number }) => { log.push(r); return Promise.all([...open].map((res) => flushed(res, ndjson([r])))).then(() => {}); },
+    /** End every open follow stream (after anything pushed before); resolves once each has finished. */
+    drop: () => Promise.all([...open].map((res) => { open.delete(res); hanging.delete(res); return new Promise<void>((r) => { res.end(() => r()); }); })).then(() => {}),
+    opened: () => until(() => open.size > 0),
+    connected: (k: number) => until(() => n >= k),
+    connections: () => n,
+  };
 };
-/** Push `r`, then end the live follow stream once one is open — the drop is
- *  ORDERED after the row (a fixed timer raced the push and the connect: the
- *  stream sometimes ended before the row was written, sometimes never). */
-const pushThenDrop = (ev: { push: (r: { seq: number }) => void }, r: { seq: number }, then?: () => void) => {
-  ev.push(r);
-  const tick = () => { if (hanging.size) { for (const h of hanging) h.end(); hanging.clear(); then?.(); } else setTimeout(tick, 10); };
-  setTimeout(tick, 40);
-};
+/** Push `r`, then end the live follow stream — strictly in that order: wait for a
+ *  follow stream to be open, write the row and wait for the socket to take it, then
+ *  end the stream. No timer anywhere: a fixed delay raced the push against the
+ *  connect under CPU load (the stream sometimes ended before the row was written,
+ *  sometimes before it was even open — #626). */
+const pushThenDrop = async (ev: ReturnType<typeof eventsRoute>, r: { seq: number }) => { await ev.opened(); await ev.push(r); await ev.drop(); };
 const checkRoute = (h: (n: number) => unknown | Handler) => { let n = 0; route(`GET /sessions/${SID}/check`, (q, res, url, body) => { const v = h(++n); return typeof v === "function" ? (v as Handler)(q, res, url, body) : json(res, 200, v); }); };
+/** /check reads busy until `scenario` has run to completion and idle after it: the
+ *  wait's verdict follows the fixture's progress, never a poll count against a clock. */
+const busyUntil = (scenario: () => Promise<void>) => {
+  let done = false;
+  checkRoute(() => ({ state: done ? "idle" : "busy" }));
+  return async () => { await scenario(); done = true; };
+};
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("joy new -m: a rejected first message fails the command (#494)", () => {
@@ -417,8 +440,9 @@ describe("a broken event stream never yields a successful partial answer (#497)"
         json(res, 500, { error: "boom" }); return true; // every reconnect and the catch-up fail
       },
     });
-    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => pushThenDrop(ev, agentText(1, "part one")), 30); }); // the follow stream ends after "part one"
-    checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
+    // the follow stream ends after "part one"; the session reads idle once the first reconnect has failed
+    const play = busyUntil(async () => { await pushThenDrop(ev, agentText(1, "part one")); await ev.connected(3); });
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); void play(); });
     expect(await cmdAsk([SID, "hello", "--no-queue"])).toBe(1);
     expect(log.err.join("\n")).toMatch(/output stream lost after seq 1 .* the reply is incomplete/);
   });
@@ -426,9 +450,10 @@ describe("a broken event stream never yields a successful partial answer (#497)"
   test("the stream drops and is resumed from the last consumed seq: the whole reply, exit 0", async () => {
     sessionsRoute();
     const ev = eventsRoute([]);
-    // the first follow stream ends after "part one"; "part two" lands while disconnected
-    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => pushThenDrop(ev, agentText(1, "part one"), () => setTimeout(() => ev.push(agentText(2, "part two")), 60)), 30); });
-    checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
+    // the first follow stream ends after "part one"; "part two" lands while disconnected;
+    // the session reads idle once the stream has been reopened (after=1)
+    const play = busyUntil(async () => { await pushThenDrop(ev, agentText(1, "part one")); await ev.push(agentText(2, "part two")); await ev.connected(3); });
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); void play(); });
     expect(await cmdAsk([SID, "hello", "--no-queue"])).toBe(0);
     expect(log.out).toEqual(["part one\n\npart two"]);
     expect(ev.connections()).toBeGreaterThan(1);
@@ -446,9 +471,10 @@ describe("a broken event stream never yields a successful partial answer (#497)"
     },
   });
   const reopenScenario = (ev: ReturnType<typeof eventsRoute>) => {
-    // the first follow stream ends after part one; row 2 then exists on the daemon
-    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); setTimeout(() => pushThenDrop(ev, agentText(1, "part one"), () => setTimeout(() => ev.push(agentText(2, "part two")), 40)), 20); });
-    checkRoute((n) => (n < 3 ? { state: "busy" } : { state: "idle" }));
+    // the first follow stream ends after part one; row 2 then exists on the daemon;
+    // the session reads idle once the stream has been reopened (the stalled reconnect)
+    const play = busyUntil(async () => { await pushThenDrop(ev, agentText(1, "part one")); await ev.push(agentText(2, "part two")); await ev.connected(3); });
+    route("POST /send", (_q, res) => { json(res, 200, { ok: true, queued_id: null }); void play(); });
   };
 
   test("a reopened stream that advertises seq 2 and stalls: the catch-up cannot get it either → exit 1, incomplete", async () => {
