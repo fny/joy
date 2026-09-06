@@ -267,6 +267,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // (observed: 61×, including once after terminalization) and the control
   // loop hot-spun on the standing offer.
   const handledCancels = new Set<string>();
+  /** Turn → earliest time to retry a cancel whose interrupt failed. The relay
+   *  re-offers a received cancel instantly while the turn is nonterminal, so
+   *  a busy adapter refusing the interrupt drove claim/receipt/abort at their
+   *  completion rate with no pause (Astra on e9e4ff52, #8). */
+  const cancelRetryAt = new Map<string, number>();
+  const CANCEL_RETRY_MS = 3_000;
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
@@ -1282,6 +1288,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       cancelRequested.delete(turnId);
       activeTurns.delete(turnId);
       handledCancels.delete(turnId);
+      cancelRetryAt.delete(turnId);
     }
   }
 
@@ -1289,6 +1296,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  of a cancel we already handled — the caller uses that to back off. */
   async function handleCancel(offer: ControlOffer, leaseRef: Lease): Promise<boolean> {
     if (handledCancels.has(offer.targetTurnId)) return false;
+    const retryAt = cancelRetryAt.get(offer.targetTurnId);
+    if (retryAt !== undefined) { if (Date.now() < retryAt) return false; cancelRetryAt.delete(offer.targetTurnId); }
     // Mark handled only AFTER the receipt ack lands — a transient /received
     // failure must leave the offer eligible for the relay's re-offer, not
     // suppressed until turn cleanup. (Offers arrive sequentially per claim,
@@ -1312,7 +1321,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // The interrupt did not land: leave this cancel UNHANDLED so the relay's
         // re-offer retries it instead of the log claiming success (#8).
         handledCancels.delete(offer.targetTurnId);
-        log(`cancel ${offer.targetTurnId.slice(0, 8)}: abort failed (${why}) — will retry on the next offer`);
+        cancelRetryAt.set(offer.targetTurnId, Date.now() + CANCEL_RETRY_MS);
+        log(`cancel ${offer.targetTurnId.slice(0, 8)}: abort failed (${why}) — retrying in ${CANCEL_RETRY_MS / 1000}s`);
+        return false; // not new work: let the loop pause instead of spinning on the re-offer
       }
     }
     // The running turn loop observes busy() falling and terminalizes with
