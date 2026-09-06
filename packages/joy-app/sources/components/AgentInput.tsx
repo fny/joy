@@ -1401,7 +1401,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     style={[
                                         styles.sendButton,
                                         isSendBlocked ? styles.sendButtonLocked :
-                                        (abortMode || hasText || props.isSending || showMic)
+                                        (abortMode || hasText || hasImages || props.isSending || showMic)
                                             ? styles.sendButtonActive
                                             : styles.sendButtonInactive
                                     ]}
@@ -1444,7 +1444,11 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 size={15}
                                                 color={theme.colors.textSecondary}
                                             />
-                                        ) : hasText ? (
+                                        ) : (hasText || hasImages) ? (
+                                            // An attached image with no text is a sendable draft:
+                                            // handleSendPress sends it, so the slot must show send,
+                                            // not the microphone that would be tapped to start voice
+                                            // and send the image instead (#196).
                                             <Octicons
                                                 name="arrow-up"
                                                 size={16}
