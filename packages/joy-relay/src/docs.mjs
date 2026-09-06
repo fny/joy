@@ -110,10 +110,45 @@ const redocPage = (spec) => `<!doctype html><html><head><title>joy relay API</ti
 // JOY_RELAY_DOCS_TOKEN in the service env.
 const DOCS_TOKEN = process.env.JOY_RELAY_DOCS_TOKEN || 'farazyashar';
 
+/** JOY_RELAY_TRUST_PROXY: "1"/"true" always honours x-forwarded-proto,
+ *  "0"/"false" never does; unset (the deployed default) uses the shape rule
+ *  in requestScheme. */
+const TRUST_PROXY = parseTrust(process.env.JOY_RELAY_TRUST_PROXY);
+function parseTrust(v) {
+  if (v === undefined || v === '') return undefined;
+  return !/^(0|false|no|off)$/i.test(String(v).trim());
+}
+
+/** The scheme this request arrived on, for the advertised server URL.
+ *  Hard-coding https made a plain-HTTP relay publish a server URL nothing
+ *  served (#617); trusting any x-forwarded-proto let a direct client have the
+ *  spec advertise `bogus://`. So:
+ *    - only `http` / `https` count (first value of a comma list, lowercased);
+ *      anything else falls back to the socket;
+ *    - the header is honoured only when the request looks proxied. In
+ *      production server.mjs listens on plain HTTP on 127.0.0.1 behind Caddy
+ *      (infra/Caddyfile), whose reverse_proxy always sets X-Forwarded-For,
+ *      X-Forwarded-Proto AND X-Forwarded-Host together — so by default we
+ *      require an x-forwarded-for or x-forwarded-host alongside the proto. A
+ *      lone x-forwarded-proto (a curl straight at :3105) is ignored.
+ *      JOY_RELAY_TRUST_PROXY=1 honours the header unconditionally (a proxy
+ *      that only forwards proto); =0 never honours it (no proxy at all).
+ *  Nothing security-relevant hangs off this — it only decides which URL the
+ *  OpenAPI document names as its server. */
+export function requestScheme(req, trustProxy = TRUST_PROXY) {
+  const socketScheme = req.socket?.encrypted ? 'https' : 'http';
+  const h = req.headers ?? {};
+  const forwarded = String(h['x-forwarded-proto'] ?? '').split(',')[0].trim().toLowerCase();
+  if (forwarded !== 'http' && forwarded !== 'https') return socketScheme;
+  const looksProxied = trustProxy === true
+    || (trustProxy === undefined && (h['x-forwarded-for'] !== undefined || h['x-forwarded-host'] !== undefined));
+  return looksProxied ? forwarded : socketScheme;
+}
+
 /** Handle /docs and /openapi.json; returns true when the request was ours.
  *  Runs AFTER the gate (callers check the gate first), so a flipped relay
  *  keys these like everything else. */
-export function handleDocs(req, res, { version, routeTable = null }) {
+export function handleDocs(req, res, { version, routeTable = null, trustProxy = TRUST_PROXY }) {
   const url = req.url ?? '';
   const path = url.split('?')[0];
   if (req.method !== 'GET' || (path !== '/docs' && path !== '/openapi.json')) return false;
@@ -128,11 +163,7 @@ export function handleDocs(req, res, { version, routeTable = null }) {
     res.end(JSON.stringify({ error: 'docs token required (?token=…)' }));
     return true;
   }
-  // The advertised server is the scheme this request actually arrived on: a
-  // trusted proxy's x-forwarded-proto, else the socket itself. Hard-coding
-  // https made a plain-HTTP relay publish a server URL nothing served (#617).
-  const forwarded = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim();
-  const scheme = forwarded || (req.socket?.encrypted ? 'https' : 'http');
+  const scheme = requestScheme(req, trustProxy);
   const host = `${scheme}://${req.headers.host ?? 'joy.voltai.party:4997'}`;
   const spec = buildRelaySpec({ version, host, routeTable });
   if (path === '/openapi.json') {

@@ -14,7 +14,7 @@ import { createTokenAuthority } from '../src/tokens.mjs';
 import { createAccounts } from '../src/accounts.mjs';
 import { createAuth } from '../src/auth.mjs';
 
-let server, base, db, accounts;
+let server, base, db, accounts, tokens;
 let expoCalls;
 let APP;
 
@@ -40,7 +40,7 @@ beforeAll(async () => {
   db = await openDb(':memory:');
   const notify = createNotify();
   const core = createCore(db, notify);
-  const tokens = await createTokenAuthority({ secret: 'test-secret-test-secret', issuers: ['joy'] });
+  tokens = await createTokenAuthority({ secret: 'test-secret-test-secret', issuers: ['joy'] });
   // Fake Expo. A token containing "stall-body" answers 200 and then never
   // finishes its JSON (and ignores the abort signal, like a trickling body);
   // "stall-fetch" never answers at all but honours the signal.
@@ -169,6 +169,73 @@ describe('machine ids (#609)', () => {
 });
 
 describe('push delivery isolation (#608)', () => {
+  it('a non-2xx whose body never finishes is abandoned at the deadline, its connection released, and later devices still notified (real HTTP)', async () => {
+    // A real local "Expo": a 500 with a JSON body that never ends for one
+    // token, a normal ticket for the others. Serial delivery (concurrency 1)
+    // so the stalled device sits in FRONT of the healthy one.
+    const seen = []; const closed = [];
+    const expo = http.createServer((req, res) => {
+      let raw = ''; req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        const to = JSON.parse(raw)[0].to; seen.push(to);
+        res.on('close', () => closed.push(to));
+        if (to.includes('stall-500')) {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.write('{"errors":[{"code":"INTERNAL_SERVER_ERROR","message":"'); // never ends
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ status: 'ok', id: 'ticket' }] }));
+      });
+    });
+    await new Promise((r) => expo.listen(0, '127.0.0.1', r));
+    const expoUrl = `http://127.0.0.1:${expo.address().port}/--/api/v2/push/send`;
+    try {
+      const real = createAccounts(db, tokens, { fetchImpl: (_url, init) => fetch(expoUrl, init), pushTimeoutMs: 300, pushConcurrency: 1 });
+      const who = await loginNew();
+      for (const t of ['ExponentPushToken[stall-500]', 'ExponentPushToken[after-1]', 'ExponentPushToken[after-2]']) {
+        expect((await call('POST', '/joy/v2/push-tokens', { body: { token: t }, token: who.token })).status).toBe(200);
+      }
+      const { rows: [{ account_id: accountId }] } = await db.query(`SELECT account_id FROM push_tokens WHERE token = $1`, ['ExponentPushToken[stall-500]']);
+      const started = Date.now();
+      const r = await real.sendPush(accountId, { title: 'Done' });
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(250); // the stalled body was read up to its deadline …
+      expect(elapsed).toBeLessThan(2_000);          // … and not one moment longer
+      expect(r).toMatchObject({ sent: 2, targeted: 3 });
+      expect(r.errors).toEqual([{ token: 'ExponentPushToken[stall-500]'.slice(0, 24), error: 'timeout' }]);
+      expect(seen).toEqual(['ExponentPushToken[stall-500]', 'ExponentPushToken[after-1]', 'ExponentPushToken[after-2]']);
+      // The abandoned device's connection was torn down with the deadline,
+      // not left pinned open until the peer gives up.
+      const until = Date.now() + 1_000;
+      while (!closed.includes('ExponentPushToken[stall-500]') && Date.now() < until) await new Promise((r) => setTimeout(r, 10));
+      expect(closed).toContain('ExponentPushToken[stall-500]');
+    } finally {
+      expo.closeAllConnections(); await new Promise((r) => expo.close(r));
+    }
+  });
+
+  it('a non-2xx that completes reports Expo\'s request-level error, not just the status', async () => {
+    const expo = http.createServer((req, res) => {
+      req.resume(); req.on('end', () => {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ errors: [{ code: 'PUSH_TOO_MANY_EXPERIENCE_IDS', message: 'nope' }] }));
+      });
+    });
+    await new Promise((r) => expo.listen(0, '127.0.0.1', r));
+    const expoUrl = `http://127.0.0.1:${expo.address().port}/`;
+    try {
+      const real = createAccounts(db, tokens, { fetchImpl: (_url, init) => fetch(expoUrl, init), pushTimeoutMs: 300 });
+      const who = await loginNew();
+      expect((await call('POST', '/joy/v2/push-tokens', { body: { token: 'ExponentPushToken[bad-400]' }, token: who.token })).status).toBe(200);
+      const { rows: [{ account_id: accountId }] } = await db.query(`SELECT account_id FROM push_tokens WHERE token = $1`, ['ExponentPushToken[bad-400]']);
+      const r = await real.sendPush(accountId, { title: 'Done' });
+      expect(r).toMatchObject({ sent: 0, targeted: 1, errors: [{ error: 'HTTP 400 PUSH_TOO_MANY_EXPERIENCE_IDS' }] });
+    } finally {
+      expo.closeAllConnections(); await new Promise((r) => expo.close(r));
+    }
+  });
+
   it('a device whose Expo response stalls times out on its own; every other device is still contacted', async () => {
     for (const t of ['ExponentPushToken[stall-body]', 'ExponentPushToken[stall-fetch]', 'ExponentPushToken[fast-1]', 'ExponentPushToken[fast-2]']) {
       expect((await call('POST', '/joy/v2/push-tokens', { body: { token: t } })).status).toBe(200);
