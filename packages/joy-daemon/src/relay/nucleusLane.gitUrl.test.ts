@@ -2,7 +2,7 @@
 // the `create` op does (#151): the app's "new session from a repository URL"
 // used to bind an agent in an empty directory. A clone that fails is reported
 // as a spawn failure and nothing is launched.
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as http from "node:http";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -78,6 +78,48 @@ describe("#151 gitUrl spawns over the relay", () => {
         relay.pushWork({ deliveryId: "d1b", commandId: "c1", sessionId: "v2g", kind: "spawn_session", ciphertext: JSON.stringify({ v: 1, t: "spawn", cwd, gitUrl: "https://127.0.0.1:1/nobody/repo.git" }) });
         await sleep(1500);
         expect(relay.calls.filter(c => c.path.endsWith("/spawn-failed")).length).toBe(1);
+    }, 30_000);
+
+    it("#549 residual: a `~/…` spawn cwd is canonicalised ONCE — the clone lands in the home path and the agent launches THERE", async () => {
+        const { homedir } = await import("node:os");
+        const { realpathSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+        const { execFileSync } = await import("node:child_process");
+        const { randomBytes } = await import("node:crypto");
+        const { canonicalCwd } = await import("../paths");
+        // A local origin reached through git's url.<base>.insteadOf rewrite (the URL regex refuses bare paths).
+        const root = mkdtempSync(join(tmpdir(), "joy-giturl-549-"));
+        const origin = join(root, "origin"); mkdirSync(origin);
+        const git = (...a: string[]) => execFileSync("git", a, { cwd: origin, stdio: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+        git("init", "-q"); writeFileSync(join(origin, "README"), "local origin\n"); git("add", "."); git("commit", "-qm", "seed");
+        const envKeys = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] as const;
+        const saved = envKeys.map((k) => [k, process.env[k]] as const);
+        Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`, GIT_CONFIG_VALUE_0: "https://local.test/origin" });
+        const raw = `~/joy-giturl-549-${randomBytes(4).toString("hex")}`;
+        const expected = join(realpathSync.native(homedir()), raw.slice(2));
+        const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
+        try {
+            const relay = makeFakeRelay();
+            const url = await relay.listen(); srv = relay.server;
+            const created: any[] = [];
+            const registry: any = {
+                get: () => undefined, create: async (spec: any) => { created.push(spec); return fakeSession("x"); },
+                chatHistory: () => [], listRecords: () => [], saveRecord: () => {},
+            };
+            handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "mg3", log: () => {} });
+            relay.pushWork({ deliveryId: "d1", commandId: "c1", sessionId: "v2tilde", kind: "spawn_session", ciphertext: JSON.stringify({ v: 1, t: "spawn", cwd: raw, agent: "claude", gitUrl: "https://local.test/origin" }) });
+            await until(() => created.length > 0 || relay.calls.some(c => c.path.endsWith("/spawn-failed")));
+            expect(relay.calls.filter(c => c.path.endsWith("/spawn-failed"))).toEqual([]);
+            expect(created).toHaveLength(1);
+            expect(created[0].cwd).toBe(expected);                       // the path create() launches in …
+            expect(created[0].cwd).toBe(canonicalCwd(raw));
+            expect(existsSync(join(expected, ".git"))).toBe(true);       // … is where the checkout is
+            expect(existsSync(join(root, "~"))).toBe(false);             // old code: `<daemon cwd>/~/joy-giturl-…`
+        } finally {
+            cwdSpy.mockRestore();
+            for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+            rmSync(expected, { recursive: true, force: true });
+            rmSync(root, { recursive: true, force: true });
+        }
     }, 30_000);
 
     it("a malformed gitUrl is a clone_failed spawn failure, never a launch", async () => {
