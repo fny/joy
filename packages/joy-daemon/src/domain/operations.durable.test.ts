@@ -3,7 +3,7 @@
 // status moved (#174), and git-URL clones are serialized + attempt-owned so a
 // failed clone can never delete a successful working copy (#547).
 import { describe, it, expect, beforeEach, afterEach, vi, beforeAll, afterAll } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -154,6 +154,24 @@ describe("cloneForSpawn (#547)", () => {
   // git `url.<base>.insteadOf` config passed through the environment.
   const useLocalOrigin = () => Object.assign(process.env, { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`, GIT_CONFIG_VALUE_0: "https://local.test/origin" });
 
+  it("#549 residual: a `~/…` destination clones into the HOME path canonicalCwd names, and that path is returned", async () => {
+    const { homedir } = await import("node:os");
+    const { canonicalCwd } = await import("../paths");
+    const { resolve } = await import("node:path");
+    const { randomBytes } = await import("node:crypto");
+    useLocalOrigin();
+    const raw = `~/joy-clone-549-${randomBytes(4).toString("hex")}`;
+    const expected = join(realpathSync.native(homedir()), raw.slice(2));
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(root);
+    try {
+      await expect(cloneForSpawn("https://local.test/origin", raw)).resolves.toBe(expected);
+      expect(expected).toBe(canonicalCwd(raw));
+      expect(existsSync(join(expected, ".git"))).toBe(true);
+      expect(existsSync(join(resolve(raw), ".git"))).toBe(false);   // old code: `<daemon cwd>/~/joy-clone-…`
+      expect(existsSync(join(root, "~"))).toBe(false);
+    } finally { cwdSpy.mockRestore(); rmSync(expected, { recursive: true, force: true }); }
+  });
+
   it("rejects an invalid URL before touching the filesystem", async () => {
     await expect(cloneForSpawn("not a url", join(root, "dst"))).rejects.toThrow("invalid git url");
     expect(existsSync(join(root, "dst"))).toBe(false);
@@ -200,7 +218,7 @@ describe("cloneForSpawn (#547)", () => {
     const dst = join(root, "empty");
     mkdirSync(dst);
     useLocalOrigin();
-    await expect(cloneForSpawn("https://local.test/origin", dst)).resolves.toBeUndefined();
+    await expect(cloneForSpawn("https://local.test/origin", dst)).resolves.toBe(realpathSync.native(dst));
     expect(existsSync(join(dst, ".git"))).toBe(true);
     expect(existsSync(join(dst, "README"))).toBe(true);
     expect(readdirSync(root).filter((f) => f.includes("joy-clone"))).toEqual([]);
@@ -214,7 +232,7 @@ describe("cloneForSpawn (#547)", () => {
     writeFileSync(join(dst, "WORK.txt"), "keep");
     // Trailing slash, .git suffix, upper-case host, other transport: one repo.
     for (const spelling of ["https://local.test/origin/", "https://LOCAL.test/origin.git", "git@local.test:origin.git", "ssh://git@local.test/origin"]) {
-      await expect(cloneForSpawn(spelling, dst)).resolves.toBeUndefined();
+      await expect(cloneForSpawn(spelling, dst)).resolves.toBe(realpathSync.native(dst));
     }
     expect(existsSync(join(dst, "WORK.txt"))).toBe(true);
   });
