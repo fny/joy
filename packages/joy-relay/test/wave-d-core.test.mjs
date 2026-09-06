@@ -67,6 +67,119 @@ describe('#612 a delayed spawn-failed report cannot undo a bound retry', () => {
     expect((await d.spawnFailed(sid, { reason: 'clone_failed', deliveryId: second.deliveryId })).json).toMatchObject({ applied: true });
     expect((await call('GET', `/joy/v2/sessions/${sid}`)).json).toMatchObject({ sessionState: 'failed', spawnFailure: 'clone_failed' });
   });
+
+  it('a report WITHOUT deliveryId (older daemon) is ambiguous once a retry exists, and cannot fail the retry', async () => {
+    const d = makeDaemon('mach-612c'); await d.acquire();
+    const sid = await spawnSession(d);
+    const first = offerFor(await d.claim('work'), sid, 'spawn_session');
+    await d.received(first.deliveryId);
+    expect((await d.spawnFailed(sid, { reason: 'dir_missing:/nope' })).json).toMatchObject({ applied: true });
+    expect((await call('POST', `/joy/v2/sessions/${sid}/spawn/retry`, { body: { createDir: true } })).status).toBe(200);
+    // Retry accepted, attempt 2 not yet claimed: the only delivery is superseded → ambiguous.
+    expect((await d.spawnFailed(sid, { reason: 'dir_missing:/nope' })).json).toMatchObject({ ok: true, applied: false, reason: 'ambiguous_attempt' });
+    expect((await call('GET', `/joy/v2/sessions/${sid}`)).json.sessionState).toBe('provisioning');
+    // Attempt 2 in flight: attempt 1's late bare report must not fail it.
+    const second = offerFor(await d.claim('work'), sid, 'spawn_session');
+    expect(second).toBeTruthy();
+    await d.received(second.deliveryId);
+    const late = await d.spawnFailed(sid, { reason: 'dir_missing:/nope' });
+    expect(late.status).toBe(200);
+    expect(late.json).toMatchObject({ ok: true, applied: false, reason: 'ambiguous_attempt' });
+    const st = (await call('GET', `/joy/v2/sessions/${sid}`)).json;
+    expect(st.sessionState).toBe('provisioning');
+    expect(st.spawnFailure).toBeNull();
+    // Attempt 2 still binds, and the bound session works.
+    expect((await d.bind(sid, { spawnCommandId: second.commandId, localSessionId: 'w612c', sessionKeyEnvelope: 'k' })).status).toBe(200);
+    expect((await post(sid, { ciphertext: 'hello' })).status).toBe(202);
+    expect(offerFor(await d.claim('work'), sid)).toBeTruthy();
+  });
+
+  it('a single-attempt legacy report (no retry ever) still applies', async () => {
+    const d = makeDaemon('mach-612d'); await d.acquire();
+    const sid = await spawnSession(d);
+    const first = offerFor(await d.claim('work'), sid, 'spawn_session');
+    await d.received(first.deliveryId);
+    expect((await d.spawnFailed(sid, { reason: 'dir_missing:/nope' })).json).toMatchObject({ ok: true, applied: true });
+    expect((await call('GET', `/joy/v2/sessions/${sid}`)).json).toMatchObject({ sessionState: 'failed', spawnFailure: 'dir_missing:/nope' });
+    expect(offerFor(await d.claim('work'), sid, 'spawn_session')).toBeUndefined();
+  });
+});
+
+describe('#613 the event budget is enforced at claim and at start, not only at admission', () => {
+  // Fill the log to an absolute TOTAL (the session already holds its
+  // creation events), with seqs far above the live counter.
+  const fill = async (sid, total) => {
+    const { rows: [{ n }] } = await db.query(`SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [sid]);
+    await db.query(
+      `INSERT INTO session_events (session_id, seq, event_id, kind)
+       SELECT $1, 1000000 + g, 'e' || g, 'output' FROM generate_series(1, $2) AS g`, [sid, total - n]);
+  };
+  const turnRow = (turnId) => db.query(`SELECT * FROM turns WHERE id = $1`, [turnId]).then((r) => r.rows[0]);
+
+  it('a turn admitted under the cap is failed (not offered) once the earlier turn consumed the budget', async () => {
+    const d = makeDaemon('mach-613c'); await d.acquire();
+    const sid = await makeSession(d);
+    await fill(sid, MAX_EVENTS_PER_SESSION - 8);
+    // Both admitted under the cap: A needs 3, B needs 3 more of the 8 left.
+    const a = (await post(sid, { ciphertext: 'A' })).json;
+    const b = (await post(sid, { ciphertext: 'B' })).json;
+    expect(a.turnId && b.turnId).toBeTruthy();
+    // A session under the cap offers normally: A is offered and runs.
+    const offer = offerFor(await d.claim('work'), sid);
+    expect(offer.turnId).toBe(a.turnId);
+    await d.received(offer.deliveryId);
+    await d.submitted(a.turnId);
+    expect((await d.start(a.turnId, { runtimeEventId: randomUUID() })).status).toBe(200);
+    // A's real output facts fill the log until the relay refuses the next one.
+    let stored = 0;
+    for (let i = 0; i < 20; i++) {
+      const r = await d.fact(a.turnId, { type: 'output', ciphertext: 'o' + i, runtimeEventId: randomUUID() });
+      if (r.status === 429) { expect(r.json.error).toBe('session_event_budget_exhausted'); break; }
+      expect(r.status).toBe(200); stored++;
+    }
+    expect(stored).toBeGreaterThan(0);
+    expect((await d.fact(a.turnId, { type: 'terminal', terminalState: 'completed', runtimeEventId: randomUUID() })).status).toBe(200);
+    // B is head now. Nothing of its output could be stored: not offered, failed definitively.
+    expect(offerFor(await d.claim('work'), sid)).toBeUndefined();
+    const turn = (await call('GET', `/joy/v2/sessions/${sid}/turns/${b.turnId}`)).json;
+    expect(turn).toMatchObject({ state: 'terminal', terminalState: 'failed' });
+    expect((await turnRow(b.turnId)).terminal_meta).toEqual({ reason: 'session_event_budget_exhausted' });
+    const msg = (await getMsg(sid, b.messageId)).json;
+    expect(msg.status).toBe('failed');
+    expect(msg.failure.retryable).toBe(false);
+    // Stable: a second claim finds nothing left to fail or offer.
+    expect(offerFor(await d.claim('work'), sid)).toBeUndefined();
+  }, 30_000);
+
+  it('a turn whose budget vanished between claim and start is failed at start; the daemon gets a 409 and its delivery is superseded', async () => {
+    const d = makeDaemon('mach-613d'); await d.acquire();
+    const sid = await makeSession(d);
+    await fill(sid, MAX_EVENTS_PER_SESSION - 8);
+    const b = (await post(sid, { ciphertext: 'B' })).json;
+    const offer = offerFor(await d.claim('work'), sid);
+    expect(offer.turnId).toBe(b.turnId);
+    await d.received(offer.deliveryId);
+    await d.submitted(b.turnId);
+    // Out-of-turn output (a prompt typed at the terminal) eats the reserve.
+    for (let i = 0; i < 20; i++) {
+      const r = await call('POST', `/joy/v2/daemon/sessions/${sid}/facts`,
+        { body: { type: 'output', ciphertext: 't' + i, runtimeEventId: randomUUID() }, headers: d.headers() });
+      if (r.status === 429) break;
+      expect(r.status).toBe(200);
+    }
+    const start = await d.start(b.turnId, { runtimeEventId: randomUUID() });
+    expect(start.status).toBe(409);
+    expect(start.json.error).toBe('session_event_budget_exhausted');
+    // Committed despite the 409: the turn is failed, the message reads failed, the delivery is dead.
+    expect(await turnRow(b.turnId)).toMatchObject({ state: 'terminal', terminal_state: 'failed', terminal_meta: { reason: 'session_event_budget_exhausted' } });
+    expect((await getMsg(sid, b.messageId)).json.status).toBe('failed');
+    expect((await d.received(offer.deliveryId)).status).toBe(409);
+    expect(offerFor(await d.claim('work'), sid)).toBeUndefined();
+    // The daemon's cancel-class follow-up to a refused start replays; the failed terminal stands.
+    expect((await d.fact(b.turnId, { type: 'terminal', terminalState: 'cancelled', runtimeEventId: randomUUID() })).json).toMatchObject({ ok: true, replay: true });
+    expect((await turnRow(b.turnId)).terminal_state).toBe('failed');
+    expect((await call('GET', `/joy/v2/sessions/${sid}`)).json.sessionState).not.toBe('failed'); // the SESSION is not failed, only the turn
+  }, 30_000);
 });
 
 describe('#613 an exhausted session refuses new prompts at admission', () => {
