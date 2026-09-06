@@ -6,7 +6,7 @@
 // real daemon output keeps the shape that test assumes.)
 import { describe, it, expect } from "vitest";
 import nacl from "tweetnacl";
-import { encodeContent, decodeContent, decodePrompt, openAttachmentBytes, sealSessionKey, decodeSpawnSpec, encodeRecord, decodeRecord } from "./nucleusLane";
+import { encodeContent, decodeContent, decodePrompt, openAttachmentBytes, sealSessionKey, decodeSpawnSpec, encodeRecord, decodeRecord, promptRejectReason } from "./nucleusLane";
 
 describe("daemon v2 crypto (real shipped functions)", () => {
     it("content round-trips under a key", () => {
@@ -99,5 +99,29 @@ describe("daemon v2 crypto (real shipped functions)", () => {
         expect(decodeContent(ct, key)).toBeNull();           // a record is not a text payload
         expect(decodeRecord(encodeContent("hi", key), key)).toBeNull(); // and text is not a record
         expect(decodeRecord(encodeRecord(record, null))).toEqual(record);
+    });
+});
+
+describe("sealed sessions accept nothing but authenticated envelopes (#579)", () => {
+    it("plaintext JSON offered to a keyed session is refused, not parsed", () => {
+        const key = nacl.randomBytes(32);
+        const plain = JSON.stringify({ v: 1, t: "plain", text: "injected by the relay" });
+        expect(decodeContent(plain, key)).toBeNull();
+        expect(decodePrompt(plain, key)).toBeNull();
+        expect(decodeRecord(JSON.stringify({ v: 1, t: "record", record: { role: "agent" } }), key)).toBeNull();
+        // the same bytes are fine on a session that has no key (legacy pairing)
+        expect(decodeContent(plain, null)).toBe("injected by the relay");
+        expect(decodePrompt(plain)).toEqual({ text: "injected by the relay", attachments: [] });
+        // and a properly sealed prompt still opens
+        expect(decodePrompt(encodeContent("real", key), key)).toEqual({ text: "real", attachments: [] });
+    });
+
+    it("the turn's failure reason names the class of refusal", () => {
+        const key = nacl.randomBytes(32);
+        const plain = JSON.stringify({ v: 1, t: "plain", text: "x" });
+        expect(promptRejectReason(plain, key)).toBe("plaintext_on_sealed_session");
+        expect(promptRejectReason("v2e1:AAAA", key)).toBe("undecodable_prompt");   // sealed, wrong key / garbage
+        expect(promptRejectReason("v2e1:AAAA", null)).toBe("undecodable_prompt");  // sealed, no key here
+        expect(promptRejectReason("not json", null)).toBe("undecodable_prompt");
     });
 });

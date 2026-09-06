@@ -13,11 +13,12 @@ import { execFile } from "child_process";
 import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import { existsSync } from "fs";
-import { join, delimiter, dirname } from "path";
+import { join, delimiter, dirname, sep, posix } from "path";
 import { machineOps, sessionOps } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
-import { validatePath } from "../domain/fileOps";
+import { validatePath, withPathLock } from "../domain/fileOps";
+import { writeFileAtomicAsync } from "../domain/atomicWrite";
 import { readAgentConfig, writeAgentConfigRaw, applyAgentConfigAssignments, fetchAgentSchema, agentConfigSpec } from "../domain/agentConfig";
 import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/limits";
 
@@ -117,13 +118,41 @@ function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
   });
 }
 
-/** A caller-supplied file path for grep/diff positional args: resolved and
- *  jailed to the session cwd (validatePath), returned RELATIVE-safe. */
+/** A caller-supplied file path for grep/diff/git positional args: jailed to
+ *  the session cwd (validatePath checks containment on the REAL path), then
+ *  handed on AS GIVEN. Git addresses tracked directory entries — a tracked
+ *  symlink is its own object, and canonicalizing `link.txt` to its target
+ *  asked git about a different file: an empty diff for a staged symlink
+ *  change (#603). The lexical form is used when it sits inside the cwd
+ *  itself; a route that leaves the cwd and resolves back in keeps the real
+ *  path, so nothing outside the jail is ever named. */
 function jailed(session: AgentSession, p: string): { ok: true; path: string } | { ok: false; error: string } {
   const v = validatePath(p, session.cwd);
   if (!v.valid || !v.resolvedPath) return { ok: false, error: v.error ?? "invalid path" };
-  return { ok: true, path: v.resolvedPath };
+  const root = session.cwd.replace(/\/+$/, "") || session.cwd;
+  const lexical = v.lexicalPath;
+  const inside = !!lexical && (lexical === root || lexical.startsWith(root + sep));
+  return { ok: true, path: inside ? lexical! : v.resolvedPath };
 }
+
+/** Strict base64 → bytes; null for anything Buffer.from would have silently
+ *  mangled. Buffer.from("%%%", "base64") decodes to ZERO bytes, and a PUT
+ *  with that payload truncated the target file and reported success (#605).
+ *  Standard alphabet, padded, whitespace tolerated; the empty string is a
+ *  deliberately empty file. */
+export function decodeBase64Strict(s: string): Buffer | null {
+  const compact = s.replace(/\s+/g, "");
+  if (compact === "") return Buffer.alloc(0);
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(compact)) return null;
+  const buf = Buffer.from(compact, "base64");
+  // Non-canonical trailing bits ("QR==") survive the regex; the round-trip does not.
+  return buf.toString("base64") === compact ? buf : null;
+}
+
+/** Route parameters are authoritative: a body that also carries `id`/`qid`
+ *  used to win the spread and redirect the operation to another session or
+ *  queue item than the URL named (#599). Body fields first, URL params last. */
+const addressed = (body: Record<string, unknown>, params: Record<string, string>): Record<string, unknown> => ({ ...body, ...params });
 
 interface Ctx {
   registry: SessionRegistry;
@@ -276,11 +305,21 @@ route("GET", "/v2/sessions", async (ctx) => ok({ sessions: await mcall("list", c
 route("POST", "/v2/sessions", async (ctx, _p, body) => ok(await mcall("create", ctx.registry, body)));
 route("DELETE", "/v2/sessions", async (ctx) => ok(await mcall("killAll", ctx.registry, {})));
 route("GET", "/v2/sessions/:id", withSession((_ctx, session) => ok(session.toJSON())));
-route("DELETE", "/v2/sessions/:id", withSession(async (ctx, _s, p) => ok(await mcall("kill", ctx.registry, { id: p.id }))));
+route("DELETE", "/v2/sessions/:id", withSession(async (ctx, _s, p, body) => {
+  // ifStatus (query, or body when one is sent): kill ONLY a session still in
+  // that status. The app's cleanup sweep deletes sessions it believes ended;
+  // one that restarted in between must not be killed by a stale belief (#174).
+  // The kill op answers {ok:false, error:'status_mismatch', status} when the
+  // live status differs; that is a 409 here, not a 404.
+  const ifStatus = ctx.url.searchParams.get("ifStatus") ?? (typeof body.ifStatus === "string" ? body.ifStatus : undefined);
+  const r = await mcall("kill", ctx.registry, { id: p.id, ...(ifStatus ? { ifStatus } : {}) }) as { ok: boolean; error?: string; status?: string };
+  if (r.error === "status_mismatch") return ok({ ok: false, error: "status_mismatch", status: r.status }, 409);
+  return ok(r, r.ok ? 200 : 404);
+}));
 route("POST", "/v2/sessions/:id/restart", async (ctx, p, body) =>
-  ok(await mcall("restart", ctx.registry, { id: p.id, ...body })));
+  ok(await mcall("restart", ctx.registry, addressed(body, p))));
 route("POST", "/v2/sessions/:id/fork", async (ctx, p) => ok(await mcall("fork", ctx.registry, { id: p.id })));
-route("POST", "/v2/sessions/:id/handoff", async (ctx, p, body) => ok(await mcall("handoff", ctx.registry, { id: p.id, ...body })));
+route("POST", "/v2/sessions/:id/handoff", async (ctx, p, body) => ok(await mcall("handoff", ctx.registry, addressed(body, p))));
 route("POST", "/v2/sessions/:id/handback", async (ctx, p) => ok(await mcall("handback", ctx.registry, { id: p.id })));
 route("POST", "/v2/sessions/:id/teleport-export", async (ctx, p) => ok(await mcall("teleportExport", ctx.registry, { id: p.id })));
 route("POST", "/v2/teleport-import", async (ctx, _p, body) => ok(await mcall("teleportImport", ctx.registry, body)));
@@ -308,13 +347,13 @@ route("GET", "/v2/sessions/:id/slash-commands", withSession((ctx, session) => {
 route("GET", "/v2/sessions/:id/queue", withSession(async (ctx, _s, p) =>
   ok(await mcall("queueList", ctx.registry, { id: p.id }))));
 route("POST", "/v2/sessions/:id/queue", withSession(async (ctx, _s, p, body) =>
-  ok(await mcall("queueAdd", ctx.registry, { id: p.id, ...(body as Record<string, unknown>) }))));
+  ok(await mcall("queueAdd", ctx.registry, addressed(body, p)))));
 route("PATCH", "/v2/sessions/:id/queue/:qid", withSession(async (ctx, _s, p, body) =>
-  ok(await mcall("queueEdit", ctx.registry, { id: p.id, qid: p.qid, ...(body as Record<string, unknown>) }))));
+  ok(await mcall("queueEdit", ctx.registry, addressed(body, p)))));
 route("DELETE", "/v2/sessions/:id/queue/:qid", withSession(async (ctx, _s, p) =>
   ok(await mcall("queueCancel", ctx.registry, { id: p.id, qid: p.qid }))));
 route("POST", "/v2/sessions/:id/queue/:qid/move", withSession(async (ctx, _s, p, body) =>
-  ok(await mcall("queueReorder", ctx.registry, { id: p.id, qid: p.qid, ...(body as Record<string, unknown>) }))));
+  ok(await mcall("queueReorder", ctx.registry, addressed(body, p)))));
 route("POST", "/v2/sessions/:id/queue/resume", withSession(async (ctx, _s, p) =>
   ok(await mcall("queueResume", ctx.registry, { id: p.id }))));
 
@@ -404,17 +443,34 @@ route("PUT", "/v2/sessions/:id/files/content", withSession(async (_ctx, session,
   }
   const v = validatePath(body.path, session.cwd);
   if (!v.valid || !v.resolvedPath) return ok({ success: false, error: v.error ?? "invalid path" }, 400);
-  const buf = Buffer.from(body.content, body.encoding === "base64" ? "base64" : "utf8");
+  // Decode BEFORE touching the filesystem: an undecodable payload is a 400
+  // and the existing file stays exactly as it was (#605).
+  const encoding = body.encoding ?? "utf8";
+  if (encoding !== "utf8" && encoding !== "base64") return ok({ success: false, error: "unsupported_encoding" }, 400);
+  let buf: Buffer;
+  if (encoding === "base64") {
+    const decoded = decodeBase64Strict(body.content);
+    if (!decoded) return ok({ success: false, error: "invalid_base64" }, 400);
+    buf = decoded;
+  } else {
+    buf = Buffer.from(body.content, "utf8");
+  }
   try {
-    if (typeof body.expectedHash === "string") {
-      const existing = await fs.readFile(v.resolvedPath).catch(() => null);
-      if (!existing) return ok({ success: false, error: "expectedHash given but file does not exist" }, 409);
-      const h = createHash("sha256").update(existing).digest("hex");
-      if (h !== body.expectedHash) return ok({ success: false, error: "hash_mismatch", actual: h }, 409);
-    }
-    await fs.mkdir(dirname(v.resolvedPath), { recursive: true });
-    await fs.writeFile(v.resolvedPath, buf);
-    return ok({ success: true, hash: createHash("sha256").update(buf).digest("hex"), size: buf.length });
+    // Hash check and write are one critical section per path (#63), and the
+    // write is atomic — a failed replacement leaves the previous file whole
+    // (#539). Same contract as domain/fileOps handleWriteFile.
+    const target = v.resolvedPath; // narrowed once: the closure cannot see the guard above
+    return await withPathLock(target, async () => {
+      if (typeof body.expectedHash === "string") {
+        const existing = await fs.readFile(target).catch(() => null);
+        if (!existing) return ok({ success: false, error: "expectedHash given but file does not exist" }, 409);
+        const h = createHash("sha256").update(existing).digest("hex");
+        if (h !== body.expectedHash) return ok({ success: false, error: "hash_mismatch", actual: h }, 409);
+      }
+      await fs.mkdir(dirname(target), { recursive: true });
+      await writeFileAtomicAsync(target, buf);
+      return ok({ success: true, hash: createHash("sha256").update(buf).digest("hex"), size: buf.length });
+    });
   } catch (e) {
     return ok({ success: false, error: String(e) }, 500);
   }
@@ -472,7 +528,22 @@ route("GET", "/v2/sessions/:id/git/status", withSession(async (_ctx, session) =>
   // larger repository (git otherwise reports the whole worktree).
   const r = await git(session.cwd, ["status", "--porcelain=v2", "--branch", "-z", "--", "."]);
   if (r.code !== 0) return ok({ ok: false, error: r.stderr.trim() || "git failed" });
-  return ok({ ok: true, ...parsePorcelainV2(r.stdout) });
+  const parsed = parsePorcelainV2(r.stdout);
+  // Porcelain paths are relative to the REPOSITORY ROOT; every other path on
+  // this surface (files/*, git/entries) is relative to the session cwd. For a
+  // session in a subdirectory the app fed `sub/tracked.txt` back to
+  // files/content and hit /repo/sub/sub/tracked.txt (#601). --show-prefix is
+  // the cwd's path under the root ("sub/", or "" at the root): strip it, and
+  // express a rename partner from outside the cwd as a relative path.
+  const prefix = (await git(session.cwd, ["rev-parse", "--show-prefix"])).stdout.replace(/\r?\n$/, "");
+  if (prefix) {
+    const rebase = (p: string) => p.startsWith(prefix) ? p.slice(prefix.length) : posix.relative(prefix, p);
+    for (const e of parsed.entries) {
+      e.path = rebase(e.path);
+      if (e.renamedFrom !== undefined) e.renamedFrom = rebase(e.renamedFrom);
+    }
+  }
+  return ok({ ok: true, ...parsed });
 }));
 route("GET", "/v2/sessions/:id/git/entries", withSession(async (ctx, session) => {
   // untracked=1: tracked + untracked-but-not-ignored — what an "All files"
@@ -524,11 +595,11 @@ route("GET", "/v2/sessions/:id/git/diff", withSession(async (ctx, session) => {
 route("GET", "/v2/sessions/:id/terminal", withSession(async (ctx, _s, p) =>
   ok(await mcall("pane", ctx.registry, { id: p.id, color: ctx.url.searchParams.get("color") ?? undefined }))));
 route("PATCH", "/v2/sessions/:id/terminal", withSession(async (ctx, _s, p, body) => {
-  const r = await mcall("resize", ctx.registry, { id: p.id, ...body }) as { error?: string };
+  const r = await mcall("resize", ctx.registry, addressed(body, p)) as { error?: string };
   return ok(r, r.error ? 400 : 200);
 }));
 route("POST", "/v2/sessions/:id/terminal/keys", withSession(async (ctx, _s, p, body) => {
-  const r = await mcall("sendKeys", ctx.registry, { id: p.id, ...body }) as { error?: string };
+  const r = await mcall("sendKeys", ctx.registry, addressed(body, p)) as { error?: string };
   return ok(r, r.error === "empty" ? 400 : 200);
 }));
 
@@ -546,7 +617,9 @@ export async function handleV2(ctx: Ctx): Promise<boolean> {
     const params: Record<string, string> = {};
     r.names.forEach((n, i) => { params[n] = decodeURIComponent(m[i + 1]); });
     let body: Record<string, unknown> = {};
-    if (ctx.method === "POST" || ctx.method === "PUT" || ctx.method === "PATCH") {
+    // DELETE too: the session kill takes an optional {ifStatus} body (#174);
+    // a body-less DELETE parses as {}.
+    if (ctx.method === "POST" || ctx.method === "PUT" || ctx.method === "PATCH" || ctx.method === "DELETE") {
       const parsed = await readJsonBody(ctx.req);
       if (!parsed.ok) { json({ error: parsed.error }, parsed.status); return true; }
       body = parsed.body;

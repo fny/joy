@@ -31,6 +31,7 @@ import { joyRelayAccessKey, joyStateDir } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
 import { OutboundSpool, type SpooledOutput, type SpooledTerminal } from "./outboundSpool";
 import { writeAttachmentToCwd } from "../domain/attachments";
+import { cloneForSpawn } from "../domain/operations";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
@@ -68,10 +69,14 @@ interface ControlOffer { deliveryId: string; commandId: string; sessionId: strin
 
 // ── content codec (the encryption seam — mirrors app sync/v2/api.ts) ───────
 // Sealed wire format: "v2e1:" + b64(nonce24 ‖ secretbox(utf8(json), nonce, key)).
-// Legacy/test format: plain JSON {v:1,t:'plain',text}. decode accepts both so
-// pre-encryption sessions keep working; encode seals whenever a key exists.
-export function decodeContent(ciphertext: string | null | undefined, key?: Uint8Array | null): string | null {
-  if (!ciphertext) return null;
+// Legacy/test format: plain JSON {v:1,t:'plain',text}, accepted ONLY when the
+// session has no key (legacy pairing, no account content key). A session that
+// HAS a key gets nothing but authenticated v2e1 envelopes: a relay that swapped
+// the ciphertext for ordinary JSON used to have its text accepted unverified
+// and dispatched into an otherwise sealed agent session (#579). encode seals
+// whenever a key exists.
+/** Open one envelope to its JSON payload under this policy; null = refused. */
+function openEnvelope(ciphertext: string, key?: Uint8Array | null): any | null {
   if (ciphertext.startsWith("v2e1:")) {
     if (!key) return null; // sealed content without the session key — refuse
     try {
@@ -79,15 +84,21 @@ export function decodeContent(ciphertext: string | null | undefined, key?: Uint8
       const n = tweetnacl.secretbox.nonceLength;
       const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
       if (!pt) return null;
-      const p = JSON.parse(Buffer.from(pt).toString("utf8"));
-      return typeof p.text === "string" ? p.text : null;
+      return JSON.parse(Buffer.from(pt).toString("utf8"));
     } catch { return null; }
   }
-  try {
-    const p = JSON.parse(ciphertext);
-    if (p && typeof p.text === "string") return p.text;
-    return null;
-  } catch { return null; }
+  if (key) return null; // plaintext offered to a SEALED session: unauthenticated — refuse (#579)
+  try { return JSON.parse(ciphertext); } catch { return null; }
+}
+/** Why a prompt was refused, for the turn's terminal fact: the app shows it. */
+export type PromptRejectReason = "undecodable_prompt" | "plaintext_on_sealed_session";
+export function promptRejectReason(ciphertext: string | null | undefined, key?: Uint8Array | null): PromptRejectReason {
+  return key && ciphertext && !ciphertext.startsWith("v2e1:") ? "plaintext_on_sealed_session" : "undecodable_prompt";
+}
+export function decodeContent(ciphertext: string | null | undefined, key?: Uint8Array | null): string | null {
+  if (!ciphertext) return null;
+  const p = openEnvelope(ciphertext, key);
+  return p && typeof p.text === "string" ? p.text : null;
 }
 /** An attachment cited inside a sealed prompt (mirrors app V2Attachment).
  *  `id` is the relay attachment id; `name` is the sender's filename. */
@@ -99,19 +110,7 @@ export interface DecodedPrompt { text: string; attachments: PromptAttachment[] }
  *  GC/validation view — the names live here). */
 export function decodePrompt(ciphertext: string | null | undefined, key?: Uint8Array | null): DecodedPrompt | null {
   if (!ciphertext) return null;
-  let p: any;
-  if (ciphertext.startsWith("v2e1:")) {
-    if (!key) return null;
-    try {
-      const raw = Buffer.from(ciphertext.slice(5), "base64");
-      const n = tweetnacl.secretbox.nonceLength;
-      const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
-      if (!pt) return null;
-      p = JSON.parse(Buffer.from(pt).toString("utf8"));
-    } catch { return null; }
-  } else {
-    try { p = JSON.parse(ciphertext); } catch { return null; }
-  }
+  const p = openEnvelope(ciphertext, key);
   if (!p || typeof p.text !== "string") return null;
   const attachments: PromptAttachment[] = [];
   if (Array.isArray(p.attachments)) {
@@ -150,6 +149,9 @@ export interface SpawnSpec {
   fallbackModel?: string;
   forkSession?: boolean;
   extraArgs?: string;
+  /** Clone (or reuse) this repository into cwd before launching — the same
+   *  contract as the `create` op's gitUrl (#151). */
+  gitUrl?: string;
 }
 
 export function decodeSpawnSpec(ciphertext: string | null | undefined): SpawnSpec | null {
@@ -193,19 +195,7 @@ export function encodeRecord(record: WireRecord, key?: Uint8Array | null): strin
 /** Test/driver counterpart of encodeRecord: the record, or null. */
 export function decodeRecord(ciphertext: string | null | undefined, key?: Uint8Array | null): WireRecord | null {
   if (!ciphertext) return null;
-  let p: any;
-  if (ciphertext.startsWith("v2e1:")) {
-    if (!key) return null;
-    try {
-      const raw = Buffer.from(ciphertext.slice(5), "base64");
-      const n = tweetnacl.secretbox.nonceLength;
-      const pt = tweetnacl.secretbox.open(new Uint8Array(raw.subarray(n)), new Uint8Array(raw.subarray(0, n)), key);
-      if (!pt) return null;
-      p = JSON.parse(Buffer.from(pt).toString("utf8"));
-    } catch { return null; }
-  } else {
-    try { p = JSON.parse(ciphertext); } catch { return null; }
-  }
+  const p = openEnvelope(ciphertext, key);
   return p && p.t === "record" && p.record && typeof p.record.role === "string" ? p.record as WireRecord : null;
 }
 
@@ -391,7 +381,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (budgetExhausted.has(v2)) { spool.remove(entry.id); return; }
         const l = lease;
         if (!l) { await sleep(delay); delay = Math.min(RETRY_MAX_MS, delay * 2); continue; }
-        const ciphertext = encodeRecord(entry.wire, sessionKeys.get(v2));
+        // The key the record was spooled under rides the entry (#582): a
+        // session killed and un-recorded before its output drained used to
+        // lose its key, and "no key" selected PLAINTEXT — a previously sealed
+        // conversation went to the relay in the clear on replay. The live key
+        // wins when the session still has one; the spooled copy covers a
+        // session whose window record is gone; a sealed entry with neither
+        // is dropped, never downgraded.
+        const key = sessionKeys.get(v2) ?? spooledKey(entry);
+        const sealedOnly = entry.sealed === true
+          // An entry from before the flag existed cannot say — on a daemon
+          // that seals, an unknown is treated as sealed rather than leaked.
+          || (entry.sealed === undefined && !!opts.accountContentPublicKey);
+        if (!key && sealedOnly) {
+          log(`record ${entry.runtimeEventId} for ${entry.localId}: sealed session's content key is unavailable — dropped rather than sent in plaintext (#582)`);
+          spool.remove(entry.id);
+          return;
+        }
+        const ciphertext = encodeRecord(entry.wire, key);
         const turn = entry.turnId && activeTurns.get(entry.turnId);
         try {
           if (turn) {
@@ -434,6 +441,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       posting.delete(entry.id);
     }
   }
+  /** The content key a spooled entry was sealed under, if it carries one. */
+  const spooledKey = (entry: SpooledOutput): Uint8Array | undefined => {
+    if (!entry.key) return undefined;
+    try { return new Uint8Array(Buffer.from(entry.key, "base64")); } catch { return undefined; }
+  };
+  /** The sealing identity for a relay session, as the spool persists it (#582). */
+  const sealFor = (v2SessionId: string): { sealed: boolean; key?: string } => {
+    const k = sessionKeys.get(v2SessionId);
+    return k ? { sealed: true, key: Buffer.from(k).toString("base64") } : { sealed: false };
+  };
   function forwardRecord(localId: string, wire: WireRecord, recLocalId?: string): void {
     // The app's user row IS the relay's turn.queued event; lane-dispatched
     // prompts enqueue with mirrorToRelay:false, and the claude tailer only
@@ -444,6 +461,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const entry: SpooledOutput = {
       kind: "output", id: randomUUID(), localId, v2SessionId, turnId: turnEntry?.[0] ?? null, wire,
       runtimeEventId: recLocalId ? `rec:${recLocalId}` : `rec:${bootNonce}:${randomUUID()}`, at: Date.now(),
+      // Bound: persist the key beside the record now (#582). Unbound: the
+      // bind stamps it (spool.bind) once the session has a row and a key.
+      ...(v2SessionId ? sealFor(v2SessionId) : {}),
     };
     // Durable before anything else — adapters checkpoint on return. When the
     // disk refuses, say so: RelaySession.outboundPersistDegraded holds the
@@ -456,7 +476,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   /** Records spooled before a session was bound: give them their relay id
    *  and send them (in order) now that a card exists. */
   function flushUnbound(localId: string, v2SessionId: string): void {
-    const hits = spool.bind(localId, v2SessionId);
+    const hits = spool.bind(localId, v2SessionId, sealFor(v2SessionId));
     if (!hits.length) return;
     // At boot the spool may also hold OLDER, already-bound records for this
     // session: replaySpool schedules everything in spool order, so only
@@ -557,7 +577,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       if (e.kind === "output") {
         if (!e.v2SessionId) {
           const v2 = boundByLocal.get(e.localId);
-          if (v2) e.v2SessionId = v2;
+          if (v2) { e.v2SessionId = v2; Object.assign(e, sealFor(v2)); }
           else if (!registry.get(e.localId) || Date.now() - e.at > 24 * 3_600_000) {
             // Nothing will ever bind this: the session is gone (a probe, a
             // killed-before-bind scratch session) or it has waited a day.
@@ -819,6 +839,26 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       let session = prior ? registry.get(prior) : undefined;
       if (session && session.status === "ended") session = undefined;
       if (session) spawning.add(localId = session.id);
+      if (!session && spec.gitUrl) {
+        // git-URL spawn: the relay path never cloned — the app's "new session
+        // from a repository URL" launched the agent in an empty directory
+        // (#151). Same validation + clone as the `create` op, BEFORE any id is
+        // reserved: a clone that fails is a spawn failure the app can show,
+        // and the agent is never launched.
+        const gitUrl = spec.gitUrl.trim();
+        // cloneForSpawn validates the URL and throws a user-facing message
+        // ("invalid git url", "git clone failed: …") on any failure.
+        let cloneError: string | null = null;
+        try { await cloneForSpawn(gitUrl, spec.cwd); } catch (e) { cloneError = e instanceof Error ? e.message : String(e); }
+        if (cloneError !== null) {
+          abandonedSpawns.add(offer.commandId);
+          try {
+            await api("POST", `/daemon/sessions/${offer.sessionId}/spawn-failed`, { reason: `clone_failed:${cloneError}` }, leaseRef);
+          } catch (e2) { log(`spawn ${offer.sessionId.slice(0, 8)}: failed to report clone_failed: ${String(e2)}`); }
+          log(`spawn ${offer.sessionId.slice(0, 8)}: clone of ${gitUrl} failed — ${cloneError}`);
+          return;
+        }
+      }
       if (!session) {
         // Choose the local id NOW and persist the intent BEFORE create(): a
         // crash between create and the intent write left the relay's spawn
@@ -977,19 +1017,22 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       let sess: AgentSession = session;
       turnLocalId = session.id;
       const relive = () => { sess = registry.get(sess.id) ?? sess; };
-      const prompt = decodePrompt(offer.ciphertext, sessionKeys.get(offer.sessionId));
+      const promptKey = sessionKeys.get(offer.sessionId);
+      const prompt = decodePrompt(offer.ciphertext, promptKey);
       if (prompt === null) {
         // Sealed with a key this daemon does not hold (a record rewrite, a
-        // rotation it missed). Left queued, it blocked every later message
-        // on the session behind it — for good (fny 867b15eb, 2026-09-04).
-        // Fail it with the reason instead: the app shows it, the user
-        // re-sends, the rest drains.
+        // rotation it missed) — or PLAINTEXT offered to a sealed session,
+        // which nothing authenticated (#579). Left queued, it blocked every
+        // later message on the session behind it — for good (fny 867b15eb,
+        // 2026-09-04). Fail it with the reason instead: the app shows it,
+        // the user re-sends, the rest drains. Never dispatched.
+        const reason = promptRejectReason(offer.ciphertext, promptKey);
         await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
         await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
-          meta: { reason: "undecodable_prompt" },
+          meta: { reason },
         }, leaseRef);
-        log(`turn ${turnId.slice(0, 8)}: undecodable prompt → failed`);
+        log(`turn ${turnId.slice(0, 8)}: ${reason.replace(/_/g, " ")} → failed`);
         return;
       }
       await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);

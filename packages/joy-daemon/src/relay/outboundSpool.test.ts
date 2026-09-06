@@ -42,3 +42,30 @@ describe("OutboundSpool", () => {
     expect(new OutboundSpool(path).size).toBe(0);
   });
 });
+
+describe("OutboundSpool sealing identity (#582)", () => {
+  it("bind stamps the relay id AND the sealing identity; both survive a reopen", () => {
+    const dir = mkdtempSync(join(tmpdir(), "spool-"));
+    const path = join(dir, "s.json");
+    const s = new OutboundSpool(path);
+    s.add(out("1", "loc1", null));
+    s.add(out("2", "loc2", null));
+    const hits = s.bind("loc1", "v2x", { sealed: true, key: "a2V5a2V5" });
+    expect(hits.map((h) => h.id)).toEqual(["1"]);
+    expect(hits[0]).toMatchObject({ v2SessionId: "v2x", sealed: true, key: "a2V5a2V5" });
+    // a plaintext (legacy) session binds as explicitly unsealed
+    s.bind("loc2", "v2y", { sealed: false });
+    const again = new OutboundSpool(path).all() as SpooledOutput[];
+    expect(again.find((e) => e.id === "1")).toMatchObject({ sealed: true, key: "a2V5a2V5" });
+    expect(again.find((e) => e.id === "2")).toMatchObject({ sealed: false });
+    expect((again.find((e) => e.id === "2") as SpooledOutput).key).toBeUndefined();
+  });
+
+  it("an entry spooled already bound keeps the identity it was added with", () => {
+    const dir = mkdtempSync(join(tmpdir(), "spool-"));
+    const path = join(dir, "s.json");
+    const s = new OutboundSpool(path);
+    s.add({ ...out("1", "loc1", "v2a"), sealed: true, key: "a2V5" });
+    expect(new OutboundSpool(path).all()[0]).toMatchObject({ sealed: true, key: "a2V5" });
+  });
+});
