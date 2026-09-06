@@ -73,8 +73,9 @@ export default React.memo(function FilesScreen() {
     }, [searchQuery, gitStatusFiles, sessionId, isLoading]);
 
     const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
-        // Deleted files: shake and don't navigate
-        if ('status' in file && file.status === 'deleted') {
+        // Deleted files, and rows whose name is not valid UTF-8 (no addressable
+        // path — shown by display text only): shake and don't navigate.
+        if ('status' in file && (file.status === 'deleted' || file.unaddressable)) {
             shakerRefs.current.get(file.fullPath)?.shake();
             return;
         }
