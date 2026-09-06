@@ -35,7 +35,7 @@ export type CodexEffect =
   | { kind: "wire"; record: WireRecord; localId: string }
   | { kind: "thinking"; value: boolean }
   | { kind: "receipt"; uuid: string; turn: string }
-  | { kind: "confirmDispatch"; clientId: string }
+  | { kind: "confirmDispatch"; clientId: string; turn: string }
   /** A completed userMessage: the session decides (from the ids it dispatched)
    *  whether this is its own echo or a prompt typed in the attached TUI (#78). */
   | { kind: "userMessage"; clientId: string; text: string; turn: string; localId: string }
@@ -271,7 +271,7 @@ export class CodexNormalizer {
         // is user-row-then-turn-start and the app's positional grouper
         // mis-brackets a user message that lands inside the turn.)
         const clientId = str(item.clientId) || str(item.clientUserMessageId);
-        return clientId ? [{ kind: "confirmDispatch", clientId }] : [];
+        return clientId ? [{ kind: "confirmDispatch", clientId, turn: joyTurn }] : [];
       }
       case "commandExecution":
         return this.#toolStart(joyTurn, core, TOOL_BASH, { command: str(item.command), cwd: str(item.cwd) });

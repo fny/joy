@@ -16,6 +16,7 @@ import { createRelaySession, type RelayClient, type RelaySession } from "../rela
 import { CommandRegistry } from "./commands.ts";
 import { Session, type ChatMessage, type SessionDeps, type QueuedItem } from "../claude/session";
 import { ledgerFor } from "./ledger";
+import { queueFor } from "./queueFacade";
 import type { AgentSession } from "./agentSession";
 import { CodexSession, type CodexInit } from "../codex/codexSession";
 import { OpencodeSession } from "../opencode/opencodeSession";
@@ -179,7 +180,10 @@ export class SessionRegistry {
     } finally {
       this.#replacing.delete(id);
     }
-    for (const q of carried) next.enqueue(q.text, { id: q.id, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible });
+    // Legacy adapters hand their undispatched prompts over here; a
+    // coordinator-driven session's queued rows simply stay in the ledger and
+    // the replacement's driver takes them (R6).
+    for (const q of carried) queueFor(next).accept(q.text, { id: q.id, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible });
     if (carried.length) process.stderr.write(`[restart] ${id}: ${carried.length} queued prompt(s) carried to the replacement\n`);
     return next;
   }

@@ -54,7 +54,7 @@ test("all wire records in a turn share the codex turn id (used directly)", () =>
 test("userMessage echo → confirmDispatch by clientId (no wire record)", () => {
   const effects = run(CAPTURE);
   const confirms = effects.filter((e) => e.kind === "confirmDispatch");
-  expect(confirms).toEqual([{ kind: "confirmDispatch", clientId: "joy-local-1" }]);
+  expect(confirms).toEqual([{ kind: "confirmDispatch", clientId: "joy-local-1", turn: expect.any(String) }]);
 });
 
 test("thinking toggles on active status and off at turn end", () => {
