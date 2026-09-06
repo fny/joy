@@ -44,6 +44,14 @@ describe('sendKey — relay idempotency keys', () => {
         sendSucceeded('s7', ka);                // A's delayed success
         expect(beginSend('s7', 'B')).toBe(kb);  // unchanged B replays, no third command
     });
+    it('a retried send counts as begun at the retry, so its success retires older failures', () => {
+        const ka = beginSend('s9', 'A');
+        const kb = beginSend('s9', 'B');        // A and B concurrent
+        sendFailed('s9', ka); sendFailed('s9', kb); // both acks lost
+        expect(beginSend('s9', 'B')).toBe(kb);  // user keeps B, retries it…
+        sendSucceeded('s9', kb);                // …and it lands
+        expect(beginSend('s9', 'A')).not.toBe(ka); // typing A again later is a new message
+    });
     it('the per-scope cap evicts only failed entries', () => {
         const pending = beginSend('s8', 'keep');
         for (let i = 0; i < 60; i++) sendFailed('s8', beginSend('s8', `f${i}`));
