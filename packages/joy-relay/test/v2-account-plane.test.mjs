@@ -3,7 +3,7 @@
 // needs NOTHING outside /joy/v2 — this suite pins that contract.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
-import { generateKeyPairSync, sign, randomBytes } from 'node:crypto';
+import { createHmac, createPublicKey, diffieHellman, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import { createNotify } from '../src/notify.mjs';
@@ -11,7 +11,7 @@ import { createV2Router } from '../src/v2.mjs';
 import { createTunnel } from '../src/tunnel.mjs';
 import { createAttachments } from '../src/attachments.mjs';
 import { createTokenAuthority } from '../src/tokens.mjs';
-import { createAccounts } from '../src/accounts.mjs';
+import { createAccounts, PAIRING_PROOF_LABEL } from '../src/accounts.mjs';
 import { createAuth } from '../src/auth.mjs';
 
 let server, base, db, core, notify, tokens, accounts;
@@ -159,13 +159,33 @@ describe('login + tokens', () => {
 
 describe('pairing', () => {
   const ephemeral = () => randomBytes(32).toString('base64');
+  /** A terminal requester with a REAL X25519 key: since #127 the pickup must
+   *  prove possession of the private half (see wave-f-pairing.test.mjs). */
+  const X25519_SPKI = Buffer.from('302a300506032b656e032100', 'hex');
+  function requester() {
+    const kp = generateKeyPairSync('x25519');
+    const pub = kp.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+    return {
+      publicKey: pub.toString('base64'),
+      proof: ({ challenge, relayPublicKey }) => {
+        const relayPub = Buffer.from(relayPublicKey, 'base64');
+        const shared = diffieHellman({
+          privateKey: kp.privateKey,
+          publicKey: createPublicKey({ key: Buffer.concat([X25519_SPKI, relayPub]), format: 'der', type: 'spki' }),
+        });
+        return createHmac('sha256', shared).update(Buffer.concat([Buffer.from(PAIRING_PROOF_LABEL), Buffer.from(challenge, 'base64'), pub, relayPub])).digest('base64');
+      },
+    };
+  }
 
   it('terminal: request → pending → response → authorized with token + sealed blob', async () => {
-    const pk = ephemeral();
+    const term = requester();
+    const pk = term.publicKey;
     const nf = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
     expect(nf.json).toEqual({ status: 'not_found', supportsV2: false });
     const req = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk, supportsV2: true } });
-    expect(req.json).toEqual({ state: 'requested' });
+    expect(req.json).toMatchObject({ state: 'requested' });
+    expect(req.json.challenge).toBeTruthy();
     const pending = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
     expect(pending.json).toEqual({ status: 'pending', supportsV2: true });
     // answering needs auth
@@ -174,7 +194,7 @@ describe('pairing', () => {
     expect(ans.json).toEqual({ success: true });
     // first write wins
     await call('POST', '/joy/v2/auth/response', { token: OTHER.token, body: { publicKey: pk, response: 'sealed-2' } });
-    const poll = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
+    const poll = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk, proof: term.proof(req.json) } });
     expect(poll.json.state).toBe('authorized');
     expect(poll.json.response).toBe('sealed-1');
     // the minted token belongs to the ANSWERING account
@@ -182,18 +202,19 @@ describe('pairing', () => {
     expect(me.json.id).toBe((await call('GET', '/joy/v2/account/profile')).json.id);
     const done = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
     expect(done.json.status).toBe('authorized');
-    // The answer is collected ONCE (#70): a second poll — anyone who saw the
-    // public key in the QR — gets neither the token nor the sealed blob.
+    // Anyone who saw the public key in the QR — a poll without the proof —
+    // gets neither the token nor the sealed blob (#70, #127).
     const again = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
-    expect(again.json).toMatchObject({ state: 'consumed', error: 'pairing_answer_already_collected' }); // legible, #607
+    expect(again.json).toMatchObject({ state: 'proof_required', error: 'proof_required' }); // legible
     expect(again.json.token).toBeUndefined();
+    expect(again.json.response).toBeUndefined();
   });
 
   it('account flavour is independent of terminal flavour; unknown keys 404 on response', async () => {
     const pk = ephemeral();
     expect((await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'x' } })).status).toBe(404);
     const req = await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
-    expect(req.json).toEqual({ state: 'requested' });
+    expect(req.json).toMatchObject({ state: 'requested' });
     // a terminal-flavoured answer does not satisfy the account request
     expect((await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'x' } })).status).toBe(404);
     const ans = await call('POST', '/joy/v2/auth/account/response', { body: { publicKey: pk, response: 'sealed-acct' } });

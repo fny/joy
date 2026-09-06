@@ -90,13 +90,15 @@ const backdate = (pk, column, interval) =>
 
 describe('pairing expiry (#610)', () => {
   it('the sweep keeps a freshly answered request whose QR is older than a day', async () => {
+    // Account flavour: its proof-less pickup still delivers (the terminal
+    // flavour would answer proof_required here, #127); the clocks are the same.
     const pk = ephemeral();
-    await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
-    expect((await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'sealed' } })).json).toEqual({ success: true });
+    await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
+    expect((await call('POST', '/joy/v2/auth/account/response', { body: { publicKey: pk, response: 'sealed' } })).json).toEqual({ success: true });
     // Answered a moment ago (updated_at fresh), created a day and more ago.
     await backdate(pk, 'created_at', '25 hours');
     await accounts.sweepPairings();
-    const poll = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
+    const poll = await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
     expect(poll.json.state).toBe('authorized');
     expect(poll.json.response).toBe('sealed');
   });
@@ -135,21 +137,24 @@ describe('pairing expiry (#610)', () => {
 });
 
 describe('one-shot pairing answer stays one-shot, legibly (#607, by design per #70)', () => {
+  // The legacy (proof-less) pickup survives on the ACCOUNT flavour until the
+  // app's requester sends proofs; the terminal flavour now demands the proof
+  // and answers `proof_required` instead (#127, wave-f-pairing.test.mjs).
   it('a second poll after collection names the condition and what to do, without re-issuing credentials', async () => {
     const pk = ephemeral();
-    await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
-    await call('POST', '/joy/v2/auth/response', { body: { publicKey: pk, response: 'sealed' } });
-    const first = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
+    await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
+    await call('POST', '/joy/v2/auth/account/response', { body: { publicKey: pk, response: 'sealed' } });
+    const first = await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
     expect(first.json.state).toBe('authorized');
     expect(first.json.token).toBeTruthy();
-    const again = await call('POST', '/joy/v2/auth/request', { token: null, body: { publicKey: pk } });
+    const again = await call('POST', '/joy/v2/auth/account/request', { token: null, body: { publicKey: pk } });
     expect(again.status).toBe(200); // existing clients switch on `state`
     expect(again.json).toMatchObject({ state: 'consumed', error: 'pairing_answer_already_collected' });
     expect(typeof again.json.consumedAt).toBe('number');
     expect(again.json.message).toMatch(/start a new pairing/);
     expect(again.json.token).toBeUndefined();
     expect(again.json.response).toBeUndefined();
-    const st = await call('GET', `/joy/v2/auth/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
+    const st = await call('GET', `/joy/v2/auth/account/request/status?publicKey=${encodeURIComponent(pk)}`, { token: null });
     expect(st.json).toMatchObject({ status: 'authorized', consumed: true });
   });
 });

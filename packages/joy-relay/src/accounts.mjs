@@ -4,10 +4,24 @@
 // relay never sees an account secret; it only proves a device holds one
 // (ed25519 challenge) or was handed one (a pairing response sealed by an
 // already-authorized device).
-import { createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
+import {
+  createHmac, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync,
+  randomBytes, randomUUID, timingSafeEqual, verify,
+} from 'node:crypto';
 import { ApiError } from './core.mjs';
 
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+// X25519 DER prefixes (RFC 8410) for the pairing proof of possession (#127).
+const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex');
+const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
+/** Domain separator of the pairing proof — a WIRE CONSTANT shared with the
+ *  daemon's requester (packages/joy-daemon/src/relay/pairing.ts). */
+export const PAIRING_PROOF_LABEL = 'joy-pairing-proof-v1';
+/** Pairing flavours whose pickup REQUIRES the proof. `terminal` is the
+ *  daemon (updated in step); `account` is the app's restore flow, which
+ *  keeps the legacy one-shot pickup until its requester learns the proof —
+ *  a proof it does send is verified and unlocks the same retryable pickup. */
+const PROOF_REQUIRED_KINDS = new Set(['terminal']);
 const KEY_LEN = 32;
 const PAIRING_TTL_MS = 24 * 60 * 60 * 1000;
 /** An ANSWERED request lives this long: enough for the requester's next poll
@@ -31,6 +45,59 @@ function decodeKey(b64) {
 }
 const keyHex = (buf) => buf.toString('hex').toUpperCase();
 const ms = (d) => (d instanceof Date ? d : new Date(d)).getTime();
+
+// ── pairing proof of possession (#127) ───────────────────────────────────────
+// The requester's key is X25519 (it is what the answer is sealed to), so it
+// cannot sign. Possession is proven by key agreement instead: the relay keeps
+// a per-request X25519 keypair and a nonce; the requester presents
+//   proof = HMAC-SHA256(X25519(requesterPriv, relayPub),
+//                      label || challenge || requesterPub || relayPub)
+// which only the holder of the private half can compute and the relay can
+// check with its own private half. Bound to the request by the nonce.
+
+/** A fresh relay-side keypair + nonce for one request (stored on the row). */
+function newPairingHandshake() {
+  const kp = generateKeyPairSync('x25519');
+  return {
+    challenge: randomBytes(32).toString('base64'),
+    relaySecret: Buffer.from(kp.privateKey.export({ format: 'jwk' }).d, 'base64url').toString('base64'),
+  };
+}
+const relayPrivateKeyOf = (relaySecretB64) =>
+  createPrivateKey({ key: Buffer.concat([X25519_PKCS8_PREFIX, Buffer.from(relaySecretB64, 'base64')]), format: 'der', type: 'pkcs8' });
+const relayPublicKeyOf = (relaySecretB64) =>
+  createPublicKey(relayPrivateKeyOf(relaySecretB64)).export({ format: 'der', type: 'spki' }).subarray(-32);
+
+/** The proof a requester holding `requesterPriv` (raw 32 bytes) must present
+ *  for a request whose handshake is (`challenge`, `relayPub`). Exported for
+ *  tests — the daemon computes the same thing with tweetnacl.scalarMult. */
+export function pairingProofFor({ requesterPriv, requesterPub, relayPub, challenge }) {
+  const priv = createPrivateKey({ key: Buffer.concat([X25519_PKCS8_PREFIX, requesterPriv]), format: 'der', type: 'pkcs8' });
+  const pub = createPublicKey({ key: Buffer.concat([X25519_SPKI_PREFIX, relayPub]), format: 'der', type: 'spki' });
+  const shared = diffieHellman({ privateKey: priv, publicKey: pub });
+  return createHmac('sha256', shared)
+    .update(Buffer.concat([Buffer.from(PAIRING_PROOF_LABEL), Buffer.from(challenge, 'base64'), requesterPub, relayPub]))
+    .digest();
+}
+
+/** True when `proofB64` is the proof for `row` from the holder of the
+ *  private half of `requesterPub`. A malformed key or proof is simply false. */
+function pairingProofValid(row, requesterPub, proofB64) {
+  if (typeof proofB64 !== 'string' || !proofB64) return false;
+  try {
+    const priv = relayPrivateKeyOf(row.relay_secret);
+    const relayPub = createPublicKey(priv).export({ format: 'der', type: 'spki' }).subarray(-32);
+    const pub = createPublicKey({ key: Buffer.concat([X25519_SPKI_PREFIX, requesterPub]), format: 'der', type: 'spki' });
+    const shared = diffieHellman({ privateKey: priv, publicKey: pub });
+    const expected = createHmac('sha256', shared)
+      .update(Buffer.concat([Buffer.from(PAIRING_PROOF_LABEL), Buffer.from(row.challenge, 'base64'), requesterPub, relayPub]))
+      .digest();
+    const given = Buffer.from(proofB64, 'base64');
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  } catch {
+    return false;
+  }
+}
 
 /** Settle `p`, or reject as soon as `signal` aborts — for reads that do not
  *  honour the fetch signal themselves (a trickling response body). */
@@ -127,17 +194,18 @@ export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIM
   // The requester (a daemon being paired, or a new device restoring an
   // account) posts an ephemeral X25519 public key and polls; an authorized
   // device answers with the account secret SEALED to that key. The relay
-  // stores the sealed blob and, once answered, mints the requester a token.
-  async function pairingRequest(kind, { publicKey, supportsV2 }) {
-    const hex = keyHex(decodeKey(publicKey));
-    // The answer is handed out ONCE, inside the same transaction that marks it
-    // consumed. Anyone who saw the public key (it is in the QR the app shows)
-    // could otherwise poll after the real requester and be minted a bearer
-    // for the account, repeatedly, for 24 hours (issue #70). Possession of
-    // the private key is still not proven — the sealed blob is useless
-    // without it, but the TOKEN was not — so the window is now one poll.
+  // stores the sealed blob and, once answered, mints the requester a token —
+  // to the holder of the ephemeral PRIVATE key, proven by `proof` (#127).
+  //
+  // Every response that carries no credentials carries the handshake
+  // (`challenge`, `relayPublicKey`) the proof is computed over, so a
+  // requester that lost the creation reply can still build one.
+  async function pairingRequest(kind, { publicKey, supportsV2, proof }) {
+    const pk = decodeKey(publicKey);
+    const hex = keyHex(pk);
+    const proofRequired = PROOF_REQUIRED_KINDS.has(kind);
     const row = await db.tx(async (t) => {
-      const { rows: [existing] } = await t.query(
+      let { rows: [existing] } = await t.query(
         `SELECT * FROM auth_requests WHERE kind = $1 AND public_key = $2`, [kind, hex]);
       if (existing) {
         // Enforced on READ too — the sweep is hourly, and an answer must not
@@ -147,39 +215,81 @@ export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIM
           await t.query(`DELETE FROM auth_requests WHERE id = $1`, [existing.id]);
           return { expired: true };
         }
-        if (existing.response && existing.response_account_id && !existing.consumed_at) {
+        if (!existing.challenge || !existing.relay_secret) {
+          // A row from before the proof existed: give it a handshake now.
+          const hs = newPairingHandshake();
+          ({ rows: [existing] } = await t.query(
+            `UPDATE auth_requests SET challenge = $1, relay_secret = $2 WHERE id = $3 RETURNING *`,
+            [hs.challenge, hs.relaySecret, existing.id]));
+        }
+        // A proof that is offered is always checked — a wrong one is an
+        // authentication failure, never silently "no proof".
+        const proven = proof !== undefined && proof !== null;
+        if (proven && !pairingProofValid(existing, pk, proof)) return { badProof: true };
+        if (!existing.response || !existing.response_account_id) return existing; // unanswered
+        if (proven) {
+          // Possession proven: the answer is collectable again and again
+          // until its window closes — a reply lost in transit is retried,
+          // not re-paired. Only the private key's holder can get here, so
+          // repeat pickup is not the replay of #70.
+          await t.query(
+            `UPDATE auth_requests SET consumed_at = COALESCE(consumed_at, now()), proven_at = COALESCE(proven_at, now()) WHERE id = $1`,
+            [existing.id]);
+          return { ...existing, deliver: true };
+        }
+        if (proofRequired) return { ...existing, proofRequired: true };
+        // Legacy pickup (no proof, flavour that does not require one yet):
+        // the answer is handed out ONCE, inside the same transaction that
+        // marks it consumed. Anyone who saw the public key (it is in the QR
+        // the app shows) could otherwise poll after the real requester and
+        // be minted a bearer, repeatedly, for 24 hours (#70).
+        if (!existing.consumed_at) {
           await t.query(`UPDATE auth_requests SET consumed_at = now(), updated_at = now() WHERE id = $1`, [existing.id]);
           return { ...existing, deliver: true };
         }
         return existing;
       }
+      const hs = newPairingHandshake();
       const { rows: [created] } = await t.query(
-        `INSERT INTO auth_requests (id, kind, public_key, supports_v2) VALUES ($1, $2, $3, $4) RETURNING *`,
-        [newId('r'), kind, hex, supportsV2 === true]);
+        `INSERT INTO auth_requests (id, kind, public_key, supports_v2, challenge, relay_secret) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [newId('r'), kind, hex, supportsV2 === true, hs.challenge, hs.relaySecret]);
       return created;
     });
     if (row.expired) return { state: 'expired' };
+    if (row.badProof) throw new ApiError(401, 'invalid_proof');
     if (row.deliver) {
       return { state: 'authorized', token: tokens.mint(row.response_account_id, { session: row.id }), response: row.response };
     }
+    const handshake = { challenge: row.challenge, relayPublicKey: relayPublicKeyOf(row.relay_secret).toString('base64') };
+    if (row.proofRequired) {
+      // Answered, but this poll did not prove it holds the private key — an
+      // observer of the QR lands here and gets nothing it did not have.
+      return {
+        state: 'proof_required',
+        error: 'proof_required',
+        message: 'This pairing is approved; present `proof` (HMAC over the challenge, keyed by X25519 with the relay key) to collect it.',
+        ...handshake,
+      };
+    }
     if (row.consumed_at) {
-      // BY DESIGN, not a bug (#607 / #70): the credentials are handed out
-      // exactly once, and a requester whose authorized reply was lost in
-      // transit cannot collect them again — re-opening that window would
-      // re-open the replay attack #70 closed (anyone who saw the QR could be
-      // minted a bearer). The trade-off is a rare re-pair instead of a
-      // silent account takeover. What we owe the requester is LEGIBILITY:
-      // a specific code, the moment it happened, and what to do next, so a
-      // CLI or app can explain rather than spin.
+      // Legacy pickup, BY DESIGN (#607 / #70): without a proof the
+      // credentials are handed out exactly once, and a requester whose
+      // authorized reply was lost in transit cannot collect them again —
+      // re-opening that window would re-open the replay attack #70 closed
+      // (anyone who saw the QR could be minted a bearer). What we owe the
+      // requester is LEGIBILITY: a specific code, the moment it happened,
+      // and what to do next. A requester that CAN prove possession retries
+      // with `proof` instead (the handshake rides along for that).
       return {
         state: 'consumed',
         error: 'pairing_answer_already_collected',
         consumedAt: ms(row.consumed_at),
         message: 'This pairing answer was already collected — by an earlier poll from this device whose reply was lost, ' +
           'or by someone else who saw the code. It cannot be re-issued; start a new pairing.',
+        ...handshake,
       };
     }
-    return { state: 'requested' };
+    return { state: 'requested', ...handshake };
   }
 
   /** Unanswered past PAIRING_TTL (from creation) or answered past
