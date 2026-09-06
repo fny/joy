@@ -150,3 +150,93 @@ describe('parseMarkdownBlock - joy tags', () => {
         expect(JSON.stringify(blocks)).not.toContain('joy-bg');
     });
 });
+
+describe('parseMarkdownBlock - escaped pipes (#262)', () => {
+    it('keeps an escaped pipe inside one cell, in headers and rows', () => {
+        const blocks = parseMarkdown('| a\\|b | c |\n|---|---|\n| x\\|y | either |');
+        expect(blocks).toEqual([{
+            type: 'table',
+            headers: [spans('a|b'), spans('c')],
+            rows: [[spans('x|y'), spans('either')]],
+        }]);
+    });
+
+    it('a lone backslash that does not precede a pipe is ordinary text', () => {
+        const blocks = parseMarkdown('| a | b |\n|---|---|\n| C:\\dir | 2 |');
+        expect(blocks[0]).toEqual({ type: 'table', headers: [spans('a'), spans('b')], rows: [[spans('C:\\dir'), spans('2')]] });
+    });
+});
+
+describe('parseMarkdownBlock - fence lengths (#263)', () => {
+    it('a four-backtick fence contains a triple-backtick example and closes on its own fence', () => {
+        const md = ['````markdown', '```js', 'x()', '```', '````', 'after'].join('\n');
+        expect(parseMarkdown(md)).toEqual([
+            { type: 'code-block', language: 'markdown', content: '```js\nx()\n```' },
+            { type: 'text', content: spans('after') },
+        ]);
+    });
+
+    it('a longer closing fence still closes a shorter opener', () => {
+        expect(parseMarkdown('```\ncode\n`````\ntail')).toEqual([
+            { type: 'code-block', language: null, content: 'code' },
+            { type: 'text', content: spans('tail') },
+        ]);
+    });
+
+    it('an unterminated fence swallows the rest (streaming), as before', () => {
+        expect(parseMarkdown('```ts\nlet a = 1;\nlet b = 2;')).toEqual([
+            { type: 'code-block', language: 'ts', content: 'let a = 1;\nlet b = 2;' },
+        ]);
+    });
+});
+
+describe('parseMarkdownBlock - inline options blocks (#264)', () => {
+    it('an inline block keeps the text after the closer', () => {
+        const md = '<joy-options><joy-option>Yes</joy-option><joy-option>No</joy-option></joy-options>\nBecause reasons.';
+        expect(parseMarkdown(md)).toEqual([
+            { type: 'options', items: ['Yes', 'No'] },
+            { type: 'text', content: spans('Because reasons.') },
+        ]);
+    });
+
+    it('a closer sharing a line with the last option, followed by text on that line', () => {
+        const md = '<joy-options>\n<joy-option>A</joy-option></joy-options> Pick one.\n\nMore.';
+        expect(parseMarkdown(md)).toEqual([
+            { type: 'options', items: ['A'] },
+            { type: 'text', content: spans('Pick one.') },
+            { type: 'text', content: spans('More.') },
+        ]);
+    });
+
+    it('an unterminated block mid-stream yields the options seen so far', () => {
+        expect(parseMarkdown('<joy-options>\n<joy-option>A</joy-option>\n<joy-option>B')).toEqual([
+            { type: 'options', items: ['A'] },
+        ]);
+    });
+
+    it('the one-tag-per-line form is unchanged', () => {
+        const md = 'Q?\n\n<joy-options>\n<joy-option>Alpha</joy-option>\n<joy-option>Beta</joy-option>\n</joy-options>\n\nTail.';
+        expect(parseMarkdown(md)).toEqual([
+            { type: 'text', content: spans('Q?') },
+            { type: 'options', items: ['Alpha', 'Beta'] },
+            { type: 'text', content: spans('Tail.') },
+        ]);
+    });
+});
+
+describe('parseMarkdownBlock - blank-separated tables (#265)', () => {
+    it('two tables separated by a blank line stay two tables', () => {
+        const md = '| A | B |\n|---|---|\n| 1 | 2 |\n\n| C | D |\n|---|---|\n| 3 | 4 |';
+        expect(parseMarkdown(md)).toEqual([
+            { type: 'table', headers: [spans('A'), spans('B')], rows: [[spans('1'), spans('2')]] },
+            { type: 'table', headers: [spans('C'), spans('D')], rows: [[spans('3'), spans('4')]] },
+        ]);
+    });
+
+    it('blank lines between rows of one table still fold into it', () => {
+        const md = '| A | B |\n|---|---|\n\n| 1 | 2 |\n\n| 3 | 4 |';
+        expect(parseMarkdown(md)).toEqual([
+            { type: 'table', headers: [spans('A'), spans('B')], rows: [[spans('1'), spans('2')], [spans('3'), spans('4')]] },
+        ]);
+    });
+});
