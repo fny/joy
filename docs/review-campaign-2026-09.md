@@ -342,6 +342,26 @@ app.
   the ledger. C2 coordinator started in a worktree; daemon round-two and
   voice round-two residual agents in flight.
 
+- 2026-09-08 (C2 + E residuals) — voice round two (235fb05b: stop awaits
+  every recorder release, bounded context ledger retired on hang-up),
+  parser round two (87badd7d: options regions parsed once under the budget,
+  bare-URL parens in one pass, quoted filenames as one link) and the E8
+  residuals (1eee9592: persisted spawn intents wired through both retry
+  paths, versioned AES carrier, post-dispatch terminal failures are
+  unknown, sodium byte ownership at card/spawn-spec, picker latch gone).
+  Wave C2 phases 1–2 merged (341b615b: `src/domain/coordinator.ts` with
+  the R1–R20 state table, Codex driver, `queueFacade.ts`); phases 3–4
+  (lane, OpenCode/pi/agy drivers) continue in the worktree; the Claude
+  driver waits for the hooks residual round (617dc734 regressions:
+  subagent identity, ingress fence, SessionEnd contract, hook-owned
+  readiness). Astra's C-round partials #120/#587/#61/#597 were already on
+  main (6c737d7b, 057f8012); only a docs note landed (85e9fd7f). E4 query
+  layer review: 20 issues verified fixed; three contract regressions
+  (trailing versions, removal ownership, budget reclaim) plus the file
+  mutation ordering, ops retry classification, machine-read four-state
+  adapters, git projections and stray catalog/probe reads are in three
+  parallel residual rounds. New low: #622 parseTable quadratic.
+
 ## Won't-fix criteria
 
 An issue is closed as won't-fix when it is low severity and all of: no data
