@@ -11,7 +11,6 @@ function useDeepEqual<T>(selector: (state: StorageState) => T): (state: StorageS
     };
 }
 import { Session, Machine, GitStatus, isJoyDaemonSource } from "./storageTypes";
-import type { GitStatusFiles } from "./gitStatusFiles";
 import type { ProjectFilesList } from "./projectFiles";
 import { createReducer, reducer, reconcileSentSeqs, ReducerState, advanceDeliveryStage, bindTurnToLocal, forgetLocalMessage } from "./reducer/reducer";
 import { reconcileMachineMetadata } from "./machineReconcile";
@@ -191,11 +190,10 @@ interface StorageState {
     sessionListViewData: SessionListViewItem[] | null;
     sessionMessages: Record<string, SessionMessages>;
     sessionMessageMru: string[];  // session ids, most-recently-viewed first (for memory eviction)
-    pathGitStatus: Record<string, GitStatus | null>;        // keyed by "machineId:path"
-    pathGitStatusFiles: Record<string, GitStatusFiles | null>; // keyed by "machineId:path"
+    // Git status and file contents are RESOURCES (sync/gitStatusResource,
+    // sync/fileContents on sync/resource), not store slots.
     pathProjectFiles: Record<string, ProjectFilesList | null>;  // keyed by "machineId:path"
     pathExpandedDirs: Record<string, string[]>;                 // All Files: open folders, keyed by "machineId:path" (survives navigation)
-    sessionFileCache: Record<string, Record<string, { content: string | null; diff: string | null; isBinary: boolean; cachedAt: number }>>;
     machines: Record<string, Machine>;
     socketStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     socketLastConnectedAt: number | null;
@@ -248,12 +246,9 @@ interface StorageState {
     applySettingsRaw: (settings: Settings) => void;
     applyLocalSettings: (settings: Partial<LocalSettings>) => void;
     applyProfile: (profile: Profile) => void;
-    applyGitStatus: (pathKey: string, status: GitStatus | null) => void;
-    applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => void;
     applyProjectFiles: (pathKey: string, files: ProjectFilesList | null) => void;
     setExpandedDirs: (pathKey: string, dirs: string[]) => void;
     getSessionPathKey: (sessionId: string) => string | null;
-    applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => void;
     applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => void;
     isMutableToolCall: (sessionId: string, callId: string) => boolean;
     setSocketStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
@@ -421,48 +416,6 @@ function buildSessionListViewDataInner(
     return listData;
 }
 
-// ── Cached-file LRU ─────────────────────────────────────────────────────────
-// sessionFileCache holds decoded file contents + diffs the file viewer has
-// fetched. Cap the total payload so browsing many/large files can't grow it
-// unbounded; evict least-recently-cached entries (by cachedAt) when over.
-const FILE_CACHE_MAX_BYTES = 20 * 1024 * 1024; // 20 MB
-
-type FileCacheEntry = { content: string | null; diff: string | null; isBinary: boolean; cachedAt: number };
-type FileCacheBySession = Record<string, Record<string, FileCacheEntry>>;
-
-const fileCacheEntryBytes = (e: FileCacheEntry) => (e.content?.length ?? 0) + (e.diff?.length ?? 0);
-
-function pruneFileCache(cache: FileCacheBySession, cap: number): FileCacheBySession {
-    const entries: { sid: string; fp: string; bytes: number; cachedAt: number }[] = [];
-    let total = 0;
-    for (const sid of Object.keys(cache)) {
-        for (const fp of Object.keys(cache[sid])) {
-            const bytes = fileCacheEntryBytes(cache[sid][fp]);
-            total += bytes;
-            entries.push({ sid, fp, bytes, cachedAt: cache[sid][fp].cachedAt });
-        }
-    }
-    if (total <= cap) return cache;
-    entries.sort((a, b) => a.cachedAt - b.cachedAt); // oldest first
-    const removeBySession = new Map<string, Set<string>>();
-    for (const e of entries) {
-        if (total <= cap) break;
-        total -= e.bytes;
-        if (!removeBySession.has(e.sid)) removeBySession.set(e.sid, new Set());
-        removeBySession.get(e.sid)!.add(e.fp);
-    }
-    const next: FileCacheBySession = {};
-    for (const sid of Object.keys(cache)) {
-        const toRemove = removeBySession.get(sid);
-        if (!toRemove) { next[sid] = cache[sid]; continue; }
-        const kept: Record<string, FileCacheEntry> = {};
-        for (const fp of Object.keys(cache[sid])) {
-            if (!toRemove.has(fp)) kept[fp] = cache[sid][fp];
-        }
-        if (Object.keys(kept).length > 0) next[sid] = kept;
-    }
-    return next;
-}
 
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
@@ -485,11 +438,8 @@ export const storage = create<StorageState>()((set, get) => {
         sessionListViewData: null,
         sessionMessages: {},
         sessionMessageMru: [],
-        pathGitStatus: {},
-        pathGitStatusFiles: {},
         pathProjectFiles: {},
         pathExpandedDirs: {},
-        sessionFileCache: {},
         socketStatus: 'connecting', // cold start is "connecting", not "no connection" (#11)
         socketLastConnectedAt: null,
         socketLastDisconnectedAt: null,
@@ -1154,45 +1104,6 @@ export const storage = create<StorageState>()((set, get) => {
                 profile
             };
         }),
-        applyGitStatus: (pathKey: string, status: GitStatus | null) => set((state) => {
-            // Short-circuit no-op writes, like applyGitStatusFiles. gitStatusSync
-            // stamps lastUpdatedAt: Date.now() on every parse, so an unchanged repo
-            // would otherwise push a fresh reference each fetch → git-badge
-            // subscribers re-render and FilesSidebar (keyed on lastUpdatedAt) fires
-            // a redundant getGitStatusFiles RPC. Compare ignoring lastUpdatedAt.
-            const prev = state.pathGitStatus[pathKey] ?? null;
-            if (prev === status || (prev && status && equal(
-                { ...prev, lastUpdatedAt: 0 }, { ...status, lastUpdatedAt: 0 }
-            ))) {
-                return state;
-            }
-            return {
-                ...state,
-                pathGitStatus: {
-                    ...state.pathGitStatus,
-                    [pathKey]: status
-                }
-            };
-        }),
-        applyGitStatusFiles: (pathKey: string, files: GitStatusFiles | null) => set((state) => {
-            // Short-circuit on no-op writes. gitStatusSync.invalidate fires on every
-            // mutable-tool message and on every update-session, but most of those
-            // don't actually change the file set. Without this guard, every fetch
-            // produces a fresh object reference, the useSessionGitStatusFiles
-            // subscription fires, and AllFilesDiffView nukes its scroll position
-            // and re-runs every git diff. fast-deep-equal handles arrays + nested
-            // objects so we don't have to enumerate fields.
-            if (equal(state.pathGitStatusFiles[pathKey] ?? null, files)) {
-                return state;
-            }
-            return {
-                ...state,
-                pathGitStatusFiles: {
-                    ...state.pathGitStatusFiles,
-                    [pathKey]: files
-                }
-            };
-        }),
         applyProjectFiles: (pathKey: string, files: ProjectFilesList | null) => set((state) => ({
             ...state,
             pathProjectFiles: {
@@ -1207,16 +1118,6 @@ export const storage = create<StorageState>()((set, get) => {
                 [pathKey]: dirs
             }
         })),
-        applyFileCache: (sessionId: string, filePath: string, content: string | null, diff: string | null, isBinary: boolean) => set((state) => {
-            const withNew: FileCacheBySession = {
-                ...state.sessionFileCache,
-                [sessionId]: {
-                    ...(state.sessionFileCache[sessionId] || {}),
-                    [filePath]: { content, diff, isBinary, cachedAt: Date.now() }
-                }
-            };
-            return { ...state, sessionFileCache: pruneFileCache(withNew, FILE_CACHE_MAX_BYTES) };
-        }),
         applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => set((state) => ({
             ...state,
             nativeUpdateStatus: status
@@ -1452,8 +1353,6 @@ export const storage = create<StorageState>()((set, get) => {
             // Remove session messages if they exist
             const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
             
-            const { [sessionId]: _fileCache, ...remainingFileCache } = state.sessionFileCache;
-
             // Clear drafts, permission modes, model modes, effort levels from persistent storage
             const drafts = loadSessionDrafts();
             delete drafts[sessionId];
@@ -1478,7 +1377,6 @@ export const storage = create<StorageState>()((set, get) => {
                 ...state,
                 sessions: remainingSessions,
                 sessionMessages: remainingSessionMessages,
-                sessionFileCache: remainingFileCache,
                 sessionListViewData
             };
         }),
@@ -1646,20 +1544,6 @@ export function useSocketStatus() {
     })));
 }
 
-export function useSessionGitStatus(sessionId: string): GitStatus | null {
-    return storage(useShallow((state) => {
-        const pathKey = state.getSessionPathKey(sessionId);
-        return pathKey ? state.pathGitStatus[pathKey] ?? null : null;
-    }));
-}
-
-export function useSessionGitStatusFiles(sessionId: string): GitStatusFiles | null {
-    return storage(useShallow((state) => {
-        const pathKey = state.getSessionPathKey(sessionId);
-        return pathKey ? state.pathGitStatusFiles[pathKey] ?? null : null;
-    }));
-}
-
 export function useSessionProjectFiles(sessionId: string): ProjectFilesList | null {
     return storage(useShallow((state) => {
         const pathKey = state.getSessionPathKey(sessionId);
@@ -1673,10 +1557,6 @@ export function useSessionExpandedDirs(sessionId: string): string[] {
         const pathKey = state.getSessionPathKey(sessionId);
         return pathKey ? state.pathExpandedDirs[pathKey] ?? EMPTY_EXPANDED_DIRS : EMPTY_EXPANDED_DIRS;
     }));
-}
-
-export function useSessionFileCache(sessionId: string, filePath: string) {
-    return storage(useShallow((state) => state.sessionFileCache[sessionId]?.[filePath] ?? null));
 }
 
 export function useRealtimeStatus(): 'disconnected' | 'connecting' | 'connected' | 'error' {

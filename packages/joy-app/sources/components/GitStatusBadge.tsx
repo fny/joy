@@ -1,9 +1,9 @@
 import React from 'react';
 import { View, Text } from 'react-native';
 import Octicons from '@expo/vector-icons/Octicons';
-import { useSessionGitStatus } from '@/sync/storage';
+import { useSessionGitStatus } from '@/sync/gitStatusResource';
 import { GitStatus } from '@/sync/storageTypes';
-import { knownLines } from '@/sync/gitStatusFiles';
+import { knownLines } from '@/sync/gitStatusModel';
 import { useUnistyles } from 'react-native-unistyles';
 
 // Custom hook to check if git status should be shown (always true if git repo exists)

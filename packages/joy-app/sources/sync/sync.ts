@@ -30,7 +30,7 @@ import { profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
 import { parseToken } from '@/utils/parseToken';
 import { log } from '@/log';
-import { gitStatusSync } from './gitStatusSync';
+import { clearGitStatusForSession, invalidateGitStatus } from './gitStatusResource';
 import { AsyncLock } from '@/utils/lock';
 import type { AttachmentPreview } from './attachmentTypes';
 import { Modal } from '@/modal';
@@ -315,8 +315,8 @@ class Sync {
         // Voice: the focused session is where spoken requests go.
         voiceHooks.onSessionFocus(sessionId);
 
-        // Also invalidate git status sync for this session
-        gitStatusSync.getSync(sessionId).invalidate();
+        // Also refresh the project's git status resource for this session
+        invalidateGitStatus(sessionId);
     }
 
     // Forward-sync for the open-session backstop repair loop. Refreshes BOTH the
@@ -651,7 +651,7 @@ class Sync {
         this.recentSendAt.delete(sessionId);
         this.unopenableStrikes.delete(sessionId);
         this.fetchGen.forget(sessionId);
-        gitStatusSync.clearForSession(sessionId);
+        clearGitStatusForSession(sessionId);
         storage.getState().deleteSession(sessionId);
     }
 
@@ -1648,8 +1648,8 @@ if (typeof globalThis !== 'undefined') {
         },
         send: (sid: string, text: string) => sync.sendMessage(sid, text, { source: 'chat' }),
         gitFiles: async (sid: string) => {
-            const { getGitStatusFiles } = await import('./gitStatusFiles');
-            return getGitStatusFiles(sid);
+            const { fetchGitStatusFiles } = await import('./gitStatusResource');
+            return fetchGitStatusFiles(sid);
         },
         gitStatus: async (sid: string) => {
             const ctx = sync.machineCtx(sid);

@@ -293,7 +293,7 @@ export class ResourceStore {
         return (spec?.equal ?? equal)(a, b);
     }
 
-    private supersede(internal: Internal<unknown>): void {
+    private supersede<T>(internal: Internal<T>): void {
         internal.gen++;
         internal.controller?.abort();
         internal.controller = null;
@@ -315,7 +315,7 @@ export class ResourceStore {
     }
 
     private run<T>(internal: Internal<T>, spec: ResourceSpec<T>): Promise<ResourceEntry<T>> {
-        this.supersede(internal as Internal<unknown>);
+        this.supersede(internal);
         const gen = internal.gen;
         const controller = new AbortController();
         internal.controller = controller;
