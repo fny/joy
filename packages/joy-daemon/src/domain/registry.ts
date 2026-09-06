@@ -29,7 +29,7 @@ import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowReco
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
-import { claimTranscript, claimedTranscriptPaths, type TranscriptClaim } from "./transcriptClaims";
+import { claimTranscript, claimProject, claimedTranscriptPaths, transcriptClaims, type TranscriptClaim } from "./transcriptClaims";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -148,6 +148,7 @@ export class SessionRegistry {
     if (!existing) return;
     existing.end("restart");
     this.#sessions.delete(id);
+    this.#settleContinuationClaims();
     await existing.awaitExit?.();
   }
 
@@ -252,6 +253,9 @@ export class SessionRegistry {
   }
 
   list(): AgentSession[] {
+    // An import's ownership check reads sessions then claims: settle the
+    // continuation reservations first so it sees the freshest of both.
+    this.#settleContinuationClaims();
     return [...this.#sessions.values()].filter(s => !this.#isKilled(s));
   }
 
@@ -299,11 +303,19 @@ export class SessionRegistry {
   #sessionDeps(): SessionDeps {
     return {
       relayClient: this.relayClient,
-      broadcast: (event, data) => this.broadcast(event, data),
+      broadcast: (event, data) => {
+        this.broadcast(event, data);
+        // Anything a session reports (a bound transcript's first entry, an
+        // end) may be the moment a continuation reservation settles.
+        this.#settleContinuationClaims();
+      },
       addChatMessage: (msg) => this.addChatMessage(msg),
       onRelayAttached: this.#onRelayAttached,
+      // A sibling tailing the file, or an import replacing it right now: a
+      // discovering session must not bind either.
       isTranscriptClaimed: (path, selfId) =>
-        [...this.#sessions.values()].some(s => s.id !== selfId && s.transcriptPath === path && s.status !== "ended"),
+        [...this.#sessions.values()].some(s => s.id !== selfId && s.transcriptPath === path && s.status !== "ended")
+        || transcriptClaims(path).some(c => c.mode === "replace"),
     };
   }
 
@@ -335,11 +347,40 @@ export class SessionRegistry {
       // launch must not keep refusing imports of a file it never took.
       this.#transcriptClaims.get(id)?.release();
       this.#transcriptClaims.delete(id);
+      // A continuation's reservation outlives the create (its Session owns
+      // no path visibly until it binds) — but not an aborted one.
+      this.#settleContinuationClaims();
     }
   }
   #creating = new Set<string>();
   /** Bind claims taken by in-flight creates, by session id (see create's finally). */
   #transcriptClaims = new Map<string, TranscriptClaim>();
+  /** Reservations held for `--continue` launches, by session id: the newest
+   *  project transcript (what Claude continues) or, with none to select, the
+   *  whole project dir. Held past the create until the Session binds its real
+   *  transcriptPath — then narrowed to that file for the session's life —
+   *  or ends; see #settleContinuationClaims. */
+  #continuationClaims = new Map<string, TranscriptClaim>();
+  #settleContinuationClaims(): void {
+    for (const [id, claim] of this.#continuationClaims) {
+      const s = this.#sessions.get(id);
+      if (!s || s.status === "ended") {
+        // Aborted before registering, or over: nothing to reserve for.
+        claim.release();
+        this.#continuationClaims.delete(id);
+        continue;
+      }
+      const bound = s.transcriptPath;
+      if (!bound || bound === claim.path) continue;
+      // Bound: narrow the launch-window reservation to the file it turned
+      // out to be. A live replace claim there (an import that won the race
+      // for a file this launch did not select) cannot be refused any more —
+      // the visible transcriptPath is what refuses imports from here on.
+      claim.release();
+      const narrowed = claimTranscript(bound, `session:${id}`, "bind");
+      if (narrowed) this.#continuationClaims.set(id, narrowed); else this.#continuationClaims.delete(id);
+    }
+  }
   /** Ids whose restart is currently running its replacement create (see create). */
   #replacing = new Set<string>();
   async #createInner(opts: CreateSessionOpts, id: string, cwd: string): Promise<AgentSession> {
@@ -579,6 +620,24 @@ export class SessionRegistry {
         if (!bind) throw new Error(`transcript ${pinnedTranscript} is being replaced by a teleport import; retry once it finishes`);
         this.#transcriptClaims.set(id, bind);
       }
+    } else if (opts.continue) {
+      // `--continue` names no file: Claude picks the project's most recent
+      // conversation at launch. Resolve it the way Claude will — the newest
+      // transcript in the canonical project dir — and reserve THAT; with
+      // nothing to select, reserve the whole project dir, so an import
+      // cannot land a transcript there that the launch would then continue.
+      // Either reservation is refused while an import replaces the file (or
+      // any file in the dir), and it is held past this create: the Session
+      // owns no path visibly until it binds, and a reservation released here
+      // reopened the same gap to imports. Narrowed to the bound file once it
+      // binds, released when it ends (#settleContinuationClaims).
+      const projectDir = cwdToTranscriptDir(cwd);
+      const selected = findLatestTranscript(projectDir, 0);
+      const reservation = selected
+        ? claimTranscript(selected, `session:${id}`, "bind")
+        : claimProject(projectDir, `session:${id}`);
+      if (!reservation) throw new Error(`transcript ${selected ?? `in ${projectDir}`} is being replaced by a teleport import; retry once it finishes`);
+      this.#continuationClaims.set(id, reservation);
     }
     // Flag list builder, parameterized on whether --continue is included.
     const buildFlags = (withContinue: boolean): string[] => {

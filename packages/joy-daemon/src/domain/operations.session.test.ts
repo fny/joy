@@ -26,7 +26,7 @@ import { saveHandoffJob, loadHandoffJob } from "./handoff";
 import { cwdToTranscriptDir } from "../claude/transcript";
 import { parseJoyCommand } from "../claude/session";
 import { withPathLock } from "./fileOps";
-import { claimTranscript, transcriptClaims, resetTranscriptClaims } from "./transcriptClaims";
+import { claimTranscript, claimProject, transcriptClaims, resetTranscriptClaims } from "./transcriptClaims";
 
 const op = (name: string) => machineOps.find((o) => o.rpcName === name)!;
 let home: string;
@@ -355,6 +355,43 @@ describe("same-machine teleport into another folder (#550)", () => {
     expect(r2.ok).toBe(true);
     expect(create).toHaveBeenCalledTimes(1);
     expect(transcriptClaims(target)).toEqual([]);                                    // released with the import, success or not
+    expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
+  });
+
+  it("#550 residual: a --continue launch in flight is an owner — of the transcript it selected, or of the whole project dir when there was none to select — and an import in progress refuses either reservation", async () => {
+    const { readFileSync } = await import("node:fs");
+    const dst = join(home, "project-g"); mkdirSync(dst);
+    const dir = cwdToTranscriptDir(dst); mkdirSync(dir, { recursive: true }); cleanupDirs.push(dir);
+    const sid = "abc-5507"; const target = join(dir, `${sid}.jsonl`);
+    writeFileSync(target, "CONTINUED BY AN IN-FLIGHT LAUNCH\n");
+    const create = vi.fn(async () => ({ id: "fa005511", toJSON: () => ({}) }));
+    const reg = { list: () => [], listRecords: () => [], create } as never;
+    // create({continue:true}) resolved the newest project transcript and reserved it (no Session in list() yet).
+    const selected = claimTranscript(target, "session:fa005512", "bind")!;
+    const r1 = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r1.error).toMatch(/belongs to a session whose transcript is/);           // old code: ok:true, the continued file overwritten under the launch
+    expect(readFileSync(target, "utf8")).toBe("CONTINUED BY AN IN-FLIGHT LAUNCH\n");
+    selected.release();
+    // A continuation with nothing to select reserved the whole project dir: an
+    // import of ANY transcript into it is refused until the reservation settles.
+    const project = claimProject(dir, "session:fa005513")!;
+    const sid2 = "abc-5508";
+    const r2 = (await op("joy-teleport-import").handler(reg, { cwd: dst, claudeSessionId: sid2, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r2.error).toMatch(/belongs to a session whose transcript is/);
+    expect(existsSync(join(dir, `${sid2}.jsonl`))).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+    project.release();
+    // Settled: the import proceeds, and while it holds the destination neither
+    // reservation a continuation would take can be granted.
+    const inFlight = vi.fn(async () => {
+      expect(claimTranscript(join(dir, `${sid2}.jsonl`), "session:fa005514", "bind")).toBeNull();
+      expect(claimProject(dir, "session:fa005514")).toBeNull();
+      return { id: "fa005515", toJSON: () => ({}) };
+    });
+    const r3 = (await op("joy-teleport-import").handler({ list: () => [], listRecords: () => [], create: inFlight } as never, { cwd: dst, claudeSessionId: sid2, transcriptBase64: b64 }, { via: "rpc" })) as Record<string, unknown>;
+    expect(r3.ok).toBe(true);
+    expect(inFlight).toHaveBeenCalledTimes(1);
+    expect(transcriptClaims(join(dir, `${sid2}.jsonl`))).toEqual([]);
     expect(readdirSync(dir).filter((f) => f.includes("joy-import"))).toEqual([]);
   });
 
