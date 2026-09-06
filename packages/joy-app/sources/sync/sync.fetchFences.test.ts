@@ -77,6 +77,7 @@ describe('forgetSession (#406)', () => {
             StaleFetchError,
             storage: { getState: () => ({ deleteSession: () => { removed = true; } }) },
             gitStatusSync: { clearForSession: () => { } },
+            clearGitStatusForSession: () => { }, // E4: the git resource replaced gitStatusSync
         });
         const x = baseInstance(Sync);
         x.sessionLastSeq.set('A', 100);
