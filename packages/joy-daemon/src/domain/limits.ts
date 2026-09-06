@@ -16,7 +16,7 @@
 //     windows: used_percent + window_minutes + resets_in_seconds/resets_at);
 //     exactly what the /status TUI renders. Read locally, no API call.
 
-import { readFileSync, readdirSync, existsSync } from "fs";
+import { readFileSync, readdirSync, existsSync, statSync } from "fs";
 import { join } from "path";
 import { homedir, platform } from "os";
 import { execSync } from "child_process";
@@ -67,12 +67,19 @@ export interface ClaudeLimits {
 
 // The endpoint rate-limits aggressively; poll ~3min max. Cache both success
 // and failure (a 429 retried every tap makes it worse).
-let claudeCache: { at: number; result: { ok: true; limits: ClaudeLimits } | { ok: false; error: string } } | null = null;
+type ClaudeLimitsResult = { ok: true; limits: ClaudeLimits } | { ok: false; error: string };
+let claudeCache: { at: number; result: ClaudeLimitsResult } | null = null;
+// The ONE refresh in flight. Callers arriving while it runs await the same
+// promise: two taps after the cache expired used to hit the endpoint twice,
+// and the later one's 429 overwrote the success and was served for three
+// minutes (#545). One refresh → one cache update.
+let claudeInflight: Promise<ClaudeLimitsResult> | null = null;
 const CLAUDE_CACHE_MS = 3 * 60 * 1000;
 
-export async function fetchClaudeLimits(): Promise<{ ok: true; limits: ClaudeLimits } | { ok: false; error: string }> {
+export async function fetchClaudeLimits(): Promise<ClaudeLimitsResult> {
   if (claudeCache && Date.now() - claudeCache.at < CLAUDE_CACHE_MS) return claudeCache.result;
-  const compute = async (): Promise<{ ok: true; limits: ClaudeLimits } | { ok: false; error: string }> => {
+  if (claudeInflight) return claudeInflight;
+  const compute = async (): Promise<ClaudeLimitsResult> => {
     const token = claudeOauthToken();
     if (!token) return { ok: false, error: "no Claude Code OAuth credentials on this machine (~/.claude/.credentials.json)" };
     const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
@@ -87,9 +94,11 @@ export async function fetchClaudeLimits(): Promise<{ ok: true; limits: ClaudeLim
     if (!res.ok) return { ok: false, error: `usage endpoint HTTP ${res.status}` };
     return { ok: true, limits: await res.json() as ClaudeLimits };
   };
-  const result = await compute().catch((e) => ({ ok: false as const, error: String(e) }));
-  claudeCache = { at: Date.now(), result };
-  return result;
+  claudeInflight = compute()
+    .catch((e) => ({ ok: false as const, error: String(e) }))
+    .then((result) => { claudeCache = { at: Date.now(), result }; return result; })
+    .finally(() => { claudeInflight = null; });
+  return claudeInflight;
 }
 
 /** One normalized quota row for the app (see joy-app settings/limits). */
@@ -124,10 +133,14 @@ export function claudeLimitRows(raw: unknown): ClaudeLimitRow[] {
     if (!w || typeof w !== "object" || typeof w.utilization !== "number") continue;
     rows.push({ id, kind: "window", usedPercent: w.utilization, resetsAt: w.resets_at ?? null, scope: id.includes("opus") ? "Opus" : id.includes("sonnet") ? "Sonnet" : undefined, unit: "percent" });
   }
-  const list = Array.isArray(r.limits) ? (r.limits as Array<Record<string, unknown>>) : [];
-  for (const e of list) {
-    const scope = (e.scope as { model?: { display_name?: string | null } | null } | null | undefined)?.model?.display_name;
-    if (!scope || typeof e.percent !== "number") continue;
+  const list = Array.isArray(r.limits) ? (r.limits as unknown[]) : [];
+  for (const raw of list) {
+    // Every entry is server data: a null row or a numeric display_name used
+    // to throw here and lose the whole response's valid rows (#544).
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Record<string, unknown>;
+    const scope = (e.scope as { model?: { display_name?: unknown } | null } | null | undefined)?.model?.display_name;
+    if (typeof scope !== "string" || !scope.trim() || typeof e.percent !== "number") continue;
     rows.push({
       id: `${String(e.kind ?? "scoped")}:${scope.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
       kind: "window", usedPercent: e.percent,
@@ -153,19 +166,21 @@ export interface CodexLimits {
   observedAt?: string;
 }
 
-/** Newest-first rollout files, bounded — sessions/YYYY/MM/DD/*.jsonl sorts
- *  lexically everywhere, so descending directory walks give newest first. */
-function newestRollouts(root: string, max: number): string[] {
+/** Newest-CREATED rollout files first — sessions/YYYY/MM/DD/*.jsonl sorts
+ *  lexically everywhere, so descending directory walks give newest first.
+ *  Bounded by BOTH a file count and a day count so a long-running rollout
+ *  from earlier in the week is still a candidate on a busy day. */
+function newestRollouts(root: string, opts: { minFiles: number; minDays: number }): string[] {
   const out: string[] = [];
+  let days = 0;
   const desc = (dir: string) => { try { return readdirSync(dir).sort().reverse(); } catch { return []; } };
   for (const y of desc(root)) {
     for (const m of desc(join(root, y))) {
       for (const d of desc(join(root, y, m))) {
+        if (out.length >= opts.minFiles && days >= opts.minDays) return out;
+        days++;
         for (const f of desc(join(root, y, m, d))) {
-          if (f.endsWith(".jsonl")) {
-            out.push(join(root, y, m, d, f));
-            if (out.length >= max) return out;
-          }
+          if (f.endsWith(".jsonl")) out.push(join(root, y, m, d, f));
         }
       }
     }
@@ -173,23 +188,52 @@ function newestRollouts(root: string, max: number): string[] {
   return out;
 }
 
-/** Default root honours $CODEX_HOME — the store the running codex writes (#546). */
+/** The last rate_limits event in one rollout, or null. */
+function lastRateLimitEvent(file: string): { limits: CodexLimits; at: number } | null {
+  let text: string;
+  try { text = readFileSync(file, "utf-8"); } catch { return null; }
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"rate_limits"')) continue;
+    try {
+      const e = JSON.parse(lines[i]);
+      const rl = e?.payload?.rate_limits ?? e?.rate_limits;
+      if (rl && typeof rl === "object") {
+        const ts = typeof e?.timestamp === "string" ? Date.parse(e.timestamp) : NaN;
+        return {
+          limits: { primary: rl.primary, secondary: rl.secondary, observedAt: e?.timestamp },
+          // No usable timestamp → the file's mtime is the best bound on when it was written.
+          at: Number.isFinite(ts) ? ts : (() => { try { return statSync(file).mtimeMs; } catch { return 0; } })(),
+        };
+      }
+    } catch { /* keep scanning */ }
+  }
+  return null;
+}
+
+/** How many recently-MODIFIED rollouts to read. The newest observation must
+ *  live in one of the most recently written files (a file's mtime is never
+ *  older than its last event), so this only needs to cover the number of
+ *  codex sessions plausibly writing at once. */
+const CODEX_READ_MAX = 8;
+
+/** Default root honours $CODEX_HOME — the store the running codex writes (#546).
+ *  Picks the newest OBSERVATION across recently modified rollouts, not the
+ *  first event in the newest-created file: a long-running session from
+ *  yesterday keeps recording fresh quota while a session created today may
+ *  have gone quiet hours ago, and the old walk returned the stale figure —
+ *  or, past five newer files, never looked at the live rollout at all (#543). */
 export function readCodexLimits(root = codexSessionsDir()): { ok: true; limits: CodexLimits } | { ok: false; error: string } {
   if (!existsSync(root)) return { ok: false, error: `no ${root} on this machine` };
-  for (const file of newestRollouts(root, 5)) {
-    let text: string;
-    try { text = readFileSync(file, "utf-8"); } catch { continue; }
-    const lines = text.split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i].includes('"rate_limits"')) continue;
-      try {
-        const e = JSON.parse(lines[i]);
-        const rl = e?.payload?.rate_limits ?? e?.rate_limits;
-        if (rl && typeof rl === "object") {
-          return { ok: true, limits: { primary: rl.primary, secondary: rl.secondary, observedAt: e?.timestamp } };
-        }
-      } catch { /* keep scanning */ }
-    }
+  const candidates = newestRollouts(root, { minFiles: 60, minDays: 7 })
+    .map((file) => { try { return { file, mtime: statSync(file).mtimeMs }; } catch { return null; } })
+    .filter((c): c is { file: string; mtime: number } => c !== null)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, CODEX_READ_MAX);
+  let best: { limits: CodexLimits; at: number } | null = null;
+  for (const { file } of candidates) {
+    const obs = lastRateLimitEvent(file);
+    if (obs && (!best || obs.at > best.at)) best = obs;
   }
-  return { ok: false, error: "no rate_limits events in recent codex sessions" };
+  return best ? { ok: true, limits: best.limits } : { ok: false, error: "no rate_limits events in recent codex sessions" };
 }

@@ -131,25 +131,95 @@ export interface JoyTagParse {
   text: string;                                      // tags stripped
 }
 
-const TITLE_RE = /<joy-title[^>]*value="([^"]+)"[^>]*\/?>/gi;
-const NOTIFY_RE = /<joy-notify[^>]*message="([^"]+)"(?:[^>]*detail="([^"]*)")?[^>]*\/?>/gi;
+// One tag grammar, attributes parsed separately — a fixed `message="…"
+// (…detail="…")?` order dropped a detail written BEFORE message (#529).
+const TAG_RE = /<joy-(title|notify)\b([^>]*?)\/?>/gi;
+const ATTR_RE = /([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
 
-/** Parse + strip <joy-title> and <joy-notify> from a block of agent text. */
+function attributes(s: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of s.matchAll(ATTR_RE)) out[m[1].toLowerCase()] = m[2] ?? m[3] ?? "";
+  return out;
+}
+
+/**
+ * [start, end) offsets of Markdown code in `raw`: fenced blocks (``` or ~~~,
+ * whole lines, an unclosed fence runs to the end) and inline code spans (a
+ * backtick run closed by an equal-length run on the same line). Tags inside
+ * these are DOCUMENTATION — an agent explaining the syntax with a fenced
+ * example used to retitle the session and push "Example push" (#528). The
+ * instructions say "not inside a code block"; the parser now agrees.
+ */
+function codeRanges(raw: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let pos = 0;
+  let fence: { ch: string; len: number; start: number } | null = null;
+  for (const line of raw.split("\n")) {
+    const end = pos + line.length;
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (f && f[1][0] === fence.ch && f[1].length >= fence.len && /^\s*$/.test(line.slice(f[0].length))) {
+        ranges.push([fence.start, end]);
+        fence = null;
+      }
+    } else if (f) {
+      fence = { ch: f[1][0], len: f[1].length, start: pos };
+    } else {
+      const runs: Array<{ at: number; len: number }> = [];
+      for (const m of line.matchAll(/`+/g)) runs.push({ at: m.index!, len: m[0].length });
+      for (let i = 0; i < runs.length; i++) {
+        const close = runs.findIndex((r, j) => j > i && r.len === runs[i].len);
+        if (close < 0) continue;
+        ranges.push([pos + runs[i].at, pos + runs[close].at + runs[close].len]);
+        i = close;
+      }
+    }
+    pos = end + 1;
+  }
+  if (fence) ranges.push([fence.start, raw.length]);
+  return ranges;
+}
+
+/** Parse + strip <joy-title> and <joy-notify> from a block of agent text.
+ *  Tags inside Markdown code are left in place, verbatim (#528). */
 export function parseJoyTags(raw: string): JoyTagParse {
   if (!raw.includes("<joy-")) return { title: null, notifies: [], text: raw };
+  const code = codeRanges(raw);
+  const inCode = (i: number) => code.some(([s, e]) => i >= s && i < e);
   let title: string | null = null;
-  for (const m of raw.matchAll(TITLE_RE)) title = m[1].trim() || title;
   const notifies: JoyTagParse["notifies"] = [];
-  for (const m of raw.matchAll(NOTIFY_RE)) {
-    const headline = m[1].trim();
-    if (headline) notifies.push({ headline, detail: (m[2] ?? "").trim() || null });
+  const spans: Array<[number, number]> = []; // control tags to strip, in document order
+  for (const m of raw.matchAll(TAG_RE)) {
+    const start = m.index!;
+    if (inCode(start)) continue;
+    spans.push([start, start + m[0].length]);
+    const a = attributes(m[2]);
+    if (m[1].toLowerCase() === "title") {
+      title = (a.value ?? "").trim() || title; // last non-empty wins
+    } else {
+      const headline = (a.message ?? "").trim();
+      if (headline) notifies.push({ headline, detail: (a.detail ?? "").trim() || null });
+    }
   }
-  const text = raw
-    .split("\n")
-    .filter((l) => !/^\s*<joy-(?:title|notify)\b[^>]*\/?>\s*$/i.test(l))
-    .join("\n")
-    .replace(TITLE_RE, "")
-    .replace(NOTIFY_RE, "")
-    .trim();
-  return { title, notifies, text };
+  // Strip the control tags; a line left with nothing but whitespace by a
+  // removal disappears entirely (a tag on its own line leaves no blank row).
+  const lines: string[] = [];
+  let pos = 0;
+  for (const line of raw.split("\n")) {
+    const end = pos + line.length;
+    let out = "";
+    let cursor = pos;
+    let removed = false;
+    for (const [s, e] of spans) {
+      if (e <= pos || s >= end) continue;
+      out += raw.slice(cursor, Math.max(s, pos));
+      cursor = Math.min(e, end);
+      removed = true;
+    }
+    out += raw.slice(cursor, end);
+    if (removed) out = out.replace(/[ \t]+$/, "");
+    if (!(removed && out.trim() === "")) lines.push(out);
+    pos = end + 1;
+  }
+  return { title, notifies, text: lines.join("\n").trim() };
 }

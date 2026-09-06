@@ -1,8 +1,8 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { sniffMimeAndExt, formatPasteFilename, safeAttachmentFilename, writeAttachmentToCwd } from "./attachments";
+import { sniffMimeAndExt, formatPasteFilename, safeAttachmentFilename, writeAttachmentToCwd, writeAttachmentExclusive } from "./attachments";
 
 test("sniffMimeAndExt: detects PNG magic", () => {
   // PNG magic: 89 50 4E 47 0D 0A 1A 0A
@@ -100,4 +100,27 @@ test("safeAttachmentFilename: avoids clobbering an existing file", () => {
   const second = safeAttachmentFilename(dir, "data.json");
   expect(second).not.toBe("data.json");
   expect(second).toMatch(/^data-[0-9a-f]{4}\.json$/);
+});
+
+test("writeAttachmentToCwd: a dangling symlink is never followed — the upload lands beside it (#530)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  const outside = mkdtempSync(join(tmpdir(), "joy-att-outside-"));
+  symlinkSync(join(outside, "planted.txt"), join(dir, "report.txt")); // dangling: existsSync says false
+  const ref = writeAttachmentToCwd(dir, new TextEncoder().encode("payload"), "report.txt");
+  expect(existsSync(join(outside, "planted.txt"))).toBe(false);
+  expect(ref).toMatch(/^\.\/report-[0-9a-f]{4}\.txt$/);
+  expect(readFileSync(join(dir, ref!.slice(2)), "utf8")).toBe("payload");
+});
+
+test("writeAttachmentExclusive: a collision retries with a fresh name and never truncates the earlier file (#530)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "joy-att-"));
+  writeFileSync(join(dir, "data.txt"), "first");
+  const names = ["data.txt", "data.txt", "data-1.txt"];
+  let i = 0;
+  const written = writeAttachmentExclusive(dir, new TextEncoder().encode("second"), () => names[i++]);
+  expect(written).toBe("data-1.txt");
+  expect(readFileSync(join(dir, "data.txt"), "utf8")).toBe("first");
+  expect(readFileSync(join(dir, "data-1.txt"), "utf8")).toBe("second");
+  // a generator that never yields a free name gives up loudly instead of looping
+  expect(() => writeAttachmentExclusive(dir, new Uint8Array([1]), () => "data.txt")).toThrow(/free name/);
 });

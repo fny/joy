@@ -82,20 +82,49 @@ function addUsage(t: Tok, model: string, u: Record<string, any>): void {
   }
 }
 
+function addTok(dst: Tok, src: Tok): void {
+  dst.input += src.input;
+  dst.output += src.output;
+  dst.cacheRead += src.cacheRead;
+  dst.cacheWrite += src.cacheWrite;
+  dst.cost += src.cost;
+  dst.calls += src.calls;
+}
+
+/** One API call: the assistant message.id with its FINAL usage, priced. */
+interface Msg {
+  id: string;
+  /** YYYY-MM-DD local, "" when the entry had no parseable timestamp. */
+  day: string;
+  model: string;
+  tok: Tok;
+}
+
 interface FileAgg {
+  path: string;
   mtimeMs: number;
   size: number;
+  /** File creation time (0 where the filesystem has none) — the ownership
+   *  order for history shared across files (#491). */
+  birthtimeMs: number;
   /** Parent session id — directory name for subagents/, filename otherwise. */
   sessionId: string;
+  /** <session>/subagents/agent-*.jsonl — carries no cwd of its own (#493). */
+  subagent: boolean;
   project: string;
   firstTs: number;
   lastTs: number;
-  /** `${YYYY-MM-DD} ${model}` → tokens */
-  perDayModel: Map<string, Tok>;
+  /** One per distinct message.id in this file. The identity is KEPT (not
+   *  folded into per-day totals at parse time) so computeUsage can dedupe the
+   *  same API call appearing in several files (#491). */
+  msgs: Msg[];
   /** YYYY-MM-DD → user prompt count */
   perDayTurns: Map<string, number>;
-  tools: Map<string, number>;
-  mcp: Map<string, number>;
+  /** `${YYYY-MM-DD} ${tool}` → calls — per day so a date-ranged query can
+   *  drop the out-of-range ones (#490). */
+  perDayTools: Map<string, number>;
+  /** `${YYYY-MM-DD} ${mcp server}` → calls (#490). */
+  perDayMcp: Map<string, number>;
 }
 
 function localDay(ts: string): string {
@@ -104,19 +133,36 @@ function localDay(ts: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-async function parseFile(path: string, sessionId: string): Promise<FileAgg> {
+/** Is this user entry a prompt the person typed (or pasted), as opposed to a
+ *  tool_result, an isMeta wrapper, or a CLI/system envelope whose text starts
+ *  with a tag (`<command-name>`, `<local-command-stdout>`, …)? Those were
+ *  counted as turns and inflated the prompt totals (#492). Mirrors
+ *  isUserPromptLine in transcript.ts, plus image prompts. */
+function isRealPrompt(e: Record<string, any>): boolean {
+  if (e.isMeta) return false;
+  const c = e.message?.content;
+  const realText = (s: unknown) => typeof s === "string" && s.trim().length > 0 && !s.trim().startsWith("<");
+  if (typeof c === "string") return realText(c);
+  if (!Array.isArray(c)) return false;
+  return c.some((b: any) => b?.type === "image" || (b?.type === "text" && realText(b.text)));
+}
+
+async function parseFile(path: string, sessionId: string, subagent: boolean): Promise<FileAgg> {
   const st = statSync(path);
   const agg: FileAgg = {
+    path,
     mtimeMs: st.mtimeMs,
     size: st.size,
+    birthtimeMs: st.birthtimeMs,
     sessionId,
+    subagent,
     project: "",
     firstTs: Infinity,
     lastTs: 0,
-    perDayModel: new Map(),
+    msgs: [],
     perDayTurns: new Map(),
-    tools: new Map(),
-    mcp: new Map(),
+    perDayTools: new Map(),
+    perDayMcp: new Map(),
   };
 
   // message.id → final usage (entries for the same message repeat usage;
@@ -144,41 +190,34 @@ async function parseFile(path: string, sessionId: string): Promise<FileAgg> {
         if (t < agg.firstTs) agg.firstTs = t;
         if (t > agg.lastTs) agg.lastTs = t;
       }
-      if (!agg.project && typeof e.cwd === "string") agg.project = e.cwd;
+      if (!agg.project && typeof e.cwd === "string" && e.cwd) agg.project = e.cwd;
       // Tool calls are counted across ALL entries — each entry carries the
-      // message's new content block, so blocks never repeat.
+      // message's new content block, so blocks never repeat. Keyed by the
+      // entry's day so a ranged query can filter them (#490).
       if (Array.isArray(msg.content)) {
+        const day = localDay(ts);
         for (const block of msg.content) {
           if (block?.type !== "tool_use" || typeof block.name !== "string") continue;
           const mcpMatch = /^mcp__([^_]+(?:_[^_]+)*?)__/.exec(block.name);
-          if (mcpMatch) agg.mcp.set(mcpMatch[1], (agg.mcp.get(mcpMatch[1]) ?? 0) + 1);
-          else agg.tools.set(block.name, (agg.tools.get(block.name) ?? 0) + 1);
+          if (mcpMatch) agg.perDayMcp.set(`${day} ${mcpMatch[1]}`, (agg.perDayMcp.get(`${day} ${mcpMatch[1]}`) ?? 0) + 1);
+          else agg.perDayTools.set(`${day} ${block.name}`, (agg.perDayTools.get(`${day} ${block.name}`) ?? 0) + 1);
         }
       }
       if (msg.usage && typeof msg.id === "string" && typeof msg.model === "string" && msg.model !== "<synthetic>") {
         messages.set(msg.id, { model: msg.model, usage: msg.usage, day: localDay(ts) });
       }
     } else if (e.type === "user" && e.isSidechain !== true && msg.role === "user") {
-      // Real prompts have string content (or a text block); tool results are
-      // arrays of tool_result blocks.
-      const c = msg.content;
-      const isPrompt = typeof c === "string" || (Array.isArray(c) && c.some((b: any) => b?.type === "text"));
-      if (isPrompt) {
+      if (isRealPrompt(e)) {
         const day = localDay(ts);
         if (day) agg.perDayTurns.set(day, (agg.perDayTurns.get(day) ?? 0) + 1);
       }
     }
   }
 
-  for (const { model, usage, day } of messages.values()) {
-    if (!day) continue;
-    const key = `${day} ${model}`;
-    let t = agg.perDayModel.get(key);
-    if (!t) {
-      t = zeroTok();
-      agg.perDayModel.set(key, t);
-    }
-    addUsage(t, model, usage as Record<string, any>);
+  for (const [id, { model, usage, day }] of messages) {
+    const tok = zeroTok();
+    addUsage(tok, model, usage as Record<string, any>);
+    agg.msgs.push({ id, day, model, tok });
   }
 
   return agg;
@@ -196,13 +235,14 @@ const fileCache = new Map<string, FileAgg>();
 // lazily on the first computeUsage, saved whenever a compute actually parsed
 // files. A background refresh (see server.ts) recomputes every 2h so the cache
 // is warm before anyone asks.
-const CACHE_FORMAT = 1;
+// 2: per-message identities + per-day tools/mcp + subagent/birthtime fields
+//    (#490 #491 #493) — a format-1 cache is simply discarded and re-parsed.
+const CACHE_FORMAT = 2;
 
-type FileAggJson = Omit<FileAgg, "perDayModel" | "perDayTurns" | "tools" | "mcp"> & {
-  perDayModel: Array<[string, Tok]>;
+type FileAggJson = Omit<FileAgg, "perDayTurns" | "perDayTools" | "perDayMcp"> & {
   perDayTurns: Array<[string, number]>;
-  tools: Array<[string, number]>;
-  mcp: Array<[string, number]>;
+  perDayTools: Array<[string, number]>;
+  perDayMcp: Array<[string, number]>;
 };
 
 function usageCachePath(): string {
@@ -219,10 +259,10 @@ function loadDiskCacheOnce(): void {
     for (const [path, j] of Object.entries(raw.files)) {
       fileCache.set(path, {
         ...j,
-        perDayModel: new Map(j.perDayModel),
+        path,
         perDayTurns: new Map(j.perDayTurns),
-        tools: new Map(j.tools),
-        mcp: new Map(j.mcp),
+        perDayTools: new Map(j.perDayTools),
+        perDayMcp: new Map(j.perDayMcp),
       });
     }
   } catch { /* no cache yet, or unreadable — cold parse repopulates it */ }
@@ -234,10 +274,9 @@ function saveDiskCache(): void {
     for (const [path, agg] of fileCache) {
       files[path] = {
         ...agg,
-        perDayModel: [...agg.perDayModel],
         perDayTurns: [...agg.perDayTurns],
-        tools: [...agg.tools],
-        mcp: [...agg.mcp],
+        perDayTools: [...agg.perDayTools],
+        perDayMcp: [...agg.perDayMcp],
       };
     }
     mkdirSync(joyStateDir(), { recursive: true });
@@ -251,8 +290,8 @@ function saveDiskCache(): void {
   }
 }
 
-function listTranscripts(root: string): Array<{ path: string; sessionId: string }> {
-  const out: Array<{ path: string; sessionId: string }> = [];
+function listTranscripts(root: string): Array<{ path: string; sessionId: string; subagent: boolean }> {
+  const out: Array<{ path: string; sessionId: string; subagent: boolean }> = [];
   if (!existsSync(root)) return out;
   for (const proj of readdirSync(root)) {
     const projDir = join(root, proj);
@@ -265,13 +304,13 @@ function listTranscripts(root: string): Array<{ path: string; sessionId: string 
     for (const entry of entries) {
       const p = join(projDir, entry);
       if (entry.endsWith(".jsonl")) {
-        out.push({ path: p, sessionId: entry.slice(0, -6) });
+        out.push({ path: p, sessionId: entry.slice(0, -6), subagent: false });
       } else {
         // <sessionId>/subagents/agent-*.jsonl — attribute to the parent session
         const subDir = join(p, "subagents");
         if (!existsSync(subDir)) continue;
         for (const sub of readdirSync(subDir)) {
-          if (sub.endsWith(".jsonl")) out.push({ path: join(subDir, sub), sessionId: entry });
+          if (sub.endsWith(".jsonl")) out.push({ path: join(subDir, sub), sessionId: entry, subagent: true });
         }
       }
     }
@@ -321,7 +360,7 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   }
   const aggs: FileAgg[] = [];
   let parsed = 0;
-  for (const { path, sessionId } of files) {
+  for (const { path, sessionId, subagent } of files) {
     let st;
     try {
       st = statSync(path);
@@ -333,7 +372,7 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
       aggs.push(cached);
       continue;
     }
-    const agg = await parseFile(path, sessionId);
+    const agg = await parseFile(path, sessionId, subagent);
     fileCache.set(path, agg);
     aggs.push(agg);
     parsed++;
@@ -342,6 +381,28 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   // an all-cache-hits query costs a stat sweep, no rewrite.
   if (parsed > 0 && !q.root) saveDiskCache();
 
+  // Project per SESSION, resolved before any per-file aggregation (#493): a
+  // subagent transcript has no cwd, so keyed on its own file it landed in a
+  // blank "" project with half the session's cost while the parent's project
+  // stayed undercounted. The main file's cwd wins; any file's cwd is the
+  // fallback; the file's own (empty) value is never used when the session
+  // has a better answer.
+  const sessionProject = new Map<string, string>();
+  for (const agg of aggs) if (!agg.subagent && agg.project) sessionProject.set(agg.sessionId, agg.project);
+  for (const agg of aggs) if (agg.project && !sessionProject.has(agg.sessionId)) sessionProject.set(agg.sessionId, agg.project);
+
+  // OWNERSHIP of a message.id shared by several files (#491): a fork,
+  // --resume into a new file, or an imported transcript carries a copy of the
+  // history it started from, message ids and usage included — one API call,
+  // two files. Global totals count it once. For per-session attribution the
+  // OLDEST file (creation time, then mtime where the filesystem keeps no
+  // birthtime, then path for determinism) owns the message: that is the
+  // conversation that actually paid for the call, and a fork is charged only
+  // for what it added. Turns have no API identity and stay per file.
+  const created = (a: FileAgg) => (a.birthtimeMs > 0 ? a.birthtimeMs : a.mtimeMs);
+  aggs.sort((a, b) => created(a) - created(b) || a.mtimeMs - b.mtimeMs || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const owned = new Set<string>();
+
   const total = zeroTok();
   const daily = new Map<string, { cost: number; calls: number }>();
   const models = new Map<string, Tok>();
@@ -349,23 +410,22 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
   const sessions = new Map<string, UsageReport["sessions"][number] & { _models: Map<string, number>; _firstTs: number }>();
   const tools = new Map<string, number>();
   const mcp = new Map<string, number>();
+  const inRange = (day: string) => day >= q.fromDay && day <= q.toDay;
+  /** Split a `${day} ${name}` key. */
+  const splitKey = (key: string): [string, string] => [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
 
   for (const agg of aggs) {
+    const project = sessionProject.get(agg.sessionId) ?? "";
     let inRangeCost = 0;
     let inRangeCalls = 0;
     const sessionModels = new Map<string, number>();
 
-    for (const [key, tok] of agg.perDayModel) {
-      const day = key.slice(0, key.indexOf(" "));
-      const model = key.slice(key.indexOf(" ") + 1);
-      if (day < q.fromDay || day > q.toDay) continue;
+    for (const { id, day, model, tok } of agg.msgs) {
+      if (owned.has(id)) continue; // already charged to an older file (#491)
+      owned.add(id);
+      if (!day || !inRange(day)) continue;
 
-      total.input += tok.input;
-      total.output += tok.output;
-      total.cacheRead += tok.cacheRead;
-      total.cacheWrite += tok.cacheWrite;
-      total.cost += tok.cost;
-      total.calls += tok.calls;
+      addTok(total, tok);
       inRangeCost += tok.cost;
       inRangeCalls += tok.calls;
 
@@ -379,34 +439,29 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
         mt = zeroTok();
         models.set(model, mt);
       }
-      mt.input += tok.input;
-      mt.output += tok.output;
-      mt.cacheRead += tok.cacheRead;
-      mt.cacheWrite += tok.cacheWrite;
-      mt.cost += tok.cost;
-      mt.calls += tok.calls;
+      addTok(mt, tok);
 
       sessionModels.set(model, (sessionModels.get(model) ?? 0) + tok.cost);
     }
 
     if (inRangeCalls === 0) continue;
 
-    const proj = projects.get(agg.project) ?? { cost: 0, calls: 0, sessions: new Set<string>() };
+    const proj = projects.get(project) ?? { cost: 0, calls: 0, sessions: new Set<string>() };
     proj.cost += inRangeCost;
     proj.calls += inRangeCalls;
     proj.sessions.add(agg.sessionId);
-    projects.set(agg.project, proj);
+    projects.set(project, proj);
 
     let turns = 0;
     for (const [day, n] of agg.perDayTurns) {
-      if (day >= q.fromDay && day <= q.toDay) turns += n;
+      if (inRange(day)) turns += n;
     }
 
     let s = sessions.get(agg.sessionId);
     if (!s) {
       s = {
         id: agg.sessionId,
-        project: agg.project,
+        project,
         startedAt: "",
         cost: 0,
         calls: 0,
@@ -420,13 +475,19 @@ export async function computeUsage(q: UsageQuery): Promise<UsageReport> {
     s.cost += inRangeCost;
     s.calls += inRangeCalls;
     s.turns += turns;
-    // Subagent files carry no real project/start; let the main file win.
     if (agg.firstTs < s._firstTs) s._firstTs = agg.firstTs;
-    if (!s.project && agg.project) s.project = agg.project;
     for (const [m, c] of sessionModels) s._models.set(m, (s._models.get(m) ?? 0) + c);
 
-    for (const [name, n] of agg.tools) tools.set(name, (tools.get(name) ?? 0) + n);
-    for (const [name, n] of agg.mcp) mcp.set(name, (mcp.get(name) ?? 0) + n);
+    // Tools/MCP obey the same day range as the tokens (#490): they used to be
+    // lifetime-per-file, so "today" reported every tool the session ever ran.
+    for (const [key, n] of agg.perDayTools) {
+      const [day, name] = splitKey(key);
+      if (inRange(day)) tools.set(name, (tools.get(name) ?? 0) + n);
+    }
+    for (const [key, n] of agg.perDayMcp) {
+      const [day, name] = splitKey(key);
+      if (inRange(day)) mcp.set(name, (mcp.get(name) ?? 0) + n);
+    }
   }
 
   const sessionList = [...sessions.values()].map(s => ({

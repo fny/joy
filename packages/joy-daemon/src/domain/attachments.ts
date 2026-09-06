@@ -13,9 +13,16 @@
 // file type keeps its original (sanitized) name so the agent can read or
 // reference it by a meaningful path.
 
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync, lstatSync } from "node:fs";
 import { join, basename, extname } from "node:path";
 import { randomBytes } from "node:crypto";
+
+/** Is there ANY directory entry at `p` — a file, a directory, or a symlink
+ *  whether or not its target exists? existsSync follows symlinks, so a
+ *  dangling one read as "free" and the write went through it (#530). */
+function entryExists(p: string): boolean {
+  try { lstatSync(p); return true; } catch { return false; }
+}
 
 export type ClaudeImageMime = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 
@@ -72,8 +79,8 @@ export function safeAttachmentFilename(cwd: string, name: string | undefined): s
   if (!base || base === "." || base === "..") {
     base = formatPasteFilename("bin");
   }
-  // Don't clobber an existing file: insert a short id before the extension.
-  if (existsSync(join(cwd, base))) {
+  // Don't clobber an existing entry: insert a short id before the extension.
+  if (entryExists(join(cwd, base))) {
     const ext = extname(base);
     const stem = ext ? base.slice(0, -ext.length) : base;
     base = `${stem}-${randomBytes(2).toString("hex")}${ext}`;
@@ -91,11 +98,30 @@ export function writeAttachmentToCwd(cwd: string, bytes: Uint8Array, name?: stri
   if (bytes.length === 0) return null;
   const sniffed = sniffMimeAndExt(bytes);
   // Known image format → paste-* filename (keeps the established convention).
-  // Anything else → keep the original (sanitized) name.
-  const filename = sniffed ? formatPasteFilename(sniffed.ext) : safeAttachmentFilename(cwd, name);
-  const absPath = join(cwd, filename);
-  writeFileSync(absPath, bytes);
+  // Anything else → keep the original (sanitized) name. Each attempt draws a
+  // fresh name, so a collision on the 4-hex suffix simply retries.
+  const filename = writeAttachmentExclusive(cwd, bytes, () => sniffed ? formatPasteFilename(sniffed.ext) : safeAttachmentFilename(cwd, name));
   // Bare relative path on its own line, as agreed: claude code interactive
   // resolves these against the session cwd.
   return `./${filename}`;
+}
+
+/**
+ * Create the attachment EXCLUSIVELY (`wx` = O_CREAT|O_EXCL): the kernel
+ * refuses if any entry — including a symlink, dangling or not — already
+ * sits at that name, so the write can never follow a link out of cwd nor
+ * truncate an earlier upload whose generated suffix collided (#530). On
+ * EEXIST the next candidate name is tried; returns the name that landed.
+ */
+export function writeAttachmentExclusive(cwd: string, bytes: Uint8Array, nextName: () => string, maxAttempts = 8): string {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const filename = nextName();
+    try {
+      writeFileSync(join(cwd, filename), bytes, { flag: "wx" });
+      return filename;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+  }
+  throw new Error(`attachment: no free name in ${cwd} after ${maxAttempts} attempts`);
 }
