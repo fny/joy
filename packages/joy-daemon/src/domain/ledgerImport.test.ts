@@ -265,3 +265,92 @@ test("ENOSPC after seven bytes during the window-record strip leaves the record 
   l.close();
 });
 
+// ── review 7652e686: malformed ROWS / FIELDS fail the source like a malformed envelope ──
+
+test("a queue file whose array holds a malformed entry is a FAILED import: nothing committed (not even the valid sibling), file kept, no marker, session quarantined, not done; a repair imports it", () => {
+  write("queue-abcdef12.json", [{ id: "fine", text: "kept together", createdAt: 1, source: "rpc", mirrorToRelay: true, visible: true }, { id: "accepted", text: 77 }]);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([{ file: "queue-abcdef12.json", error: "malformed: queue item 1: text must be a non-empty string", sessionId: "abcdef12" }]);
+  expect(r.quarantine).toEqual(["abcdef12"]);
+  expect(r.files).toEqual([]);
+  expect(l.listCommands("abcdef12")).toEqual([]);
+  expect(l.getImportSource("queue-abcdef12.json")).toBeNull();
+  expect(existsSync(join(dir, "queue-abcdef12.json"))).toBe(true);
+  expect(existsSync(join(dir, "imported-v1"))).toBe(false);
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Still failed next boot while the file is as it was.
+  expect(importLegacyState(l, dir, { sealsContent: false }).quarantine).toEqual(["abcdef12"]);
+  // Repaired by hand: both rows import in order, the file moves, the import completes.
+  write("queue-abcdef12.json", [{ id: "fine", text: "kept together", createdAt: 1 }, { id: "accepted", text: "77" }]);
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(r2.quarantine).toEqual([]);
+  expect(l.listPending("abcdef12").map((c) => [c.id, c.text])).toEqual([["fine", "kept together"], ["accepted", "77"]]);
+  expect(existsSync(join(dir, "imported-v1", "queue-abcdef12.json"))).toBe(true);
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("every semantically required queue / codex-inbound field is checked: a prompt without text, a non-string clientId, a missing id, a non-numeric seq, a non-object entry", () => {
+  const cases: Array<[string, string, unknown, string]> = [
+    ["codex-inbound-aaaa0004.json", "aaaa0004", [{ clientId: "c", state: "queued" }], "malformed: codex inbound item 0: text must be a string"],
+    ["codex-inbound-aaaa0005.json", "aaaa0005", [{ clientId: "ok", text: "fine", state: "queued" }, { clientId: 5, state: "delivered" }], "malformed: codex inbound item 1: clientId must be a non-empty string"],
+    ["queue-aaaa0001.json", "aaaa0001", [{ text: "no id" }], "malformed: queue item 0: id must be a non-empty string"],
+    ["queue-aaaa0002.json", "aaaa0002", [{ id: "x", text: "ok", seq: "5" }], "malformed: queue item 0: seq must be a number"],
+    ["queue-aaaa0003.json", "aaaa0003", ["junk"], "malformed: queue item 0: not an object"],
+  ];
+  for (const [name, , doc] of cases) write(name, doc);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual(cases.map(([file, sessionId, , error]) => ({ file, error, sessionId })));
+  expect(r.quarantine).toEqual(cases.map(([, sessionId]) => sessionId));
+  expect(l.db.prepare("SELECT COUNT(*) AS n FROM commands").get()).toEqual({ n: 0 }); // aaaa0005's valid first entry rolled back with its file
+  expect(listLegacyFiles(dir)).toEqual(cases.map(([name]) => name));
+  expect(l.getMeta("import_v1")).toBeNull();
+  l.close();
+});
+
+test("a window record whose execution field is malformed (a string offset) is neither imported nor stripped; its session is quarantined until the record is repaired", () => {
+  const file = join(dir, "window-abcdef12.json");
+  const original = JSON.stringify({ launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: "100" } });
+  writeFileSync(file, original);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([{ file: "window-abcdef12.json", error: "malformed: transcriptCheckpoint: offset must be a non-negative number", sessionId: "abcdef12" }]);
+  expect(r.quarantine).toEqual(["abcdef12"]);
+  expect(r.files).toEqual([]);
+  expect(readFileSync(file, "utf8")).toBe(original); // not stripped
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")).toBeNull();
+  expect(l.getMeta("import_v1")).toBeNull();
+  // Still quarantined next boot while the record is as it was.
+  expect(importLegacyState(l, dir, { sealsContent: false }).quarantine).toEqual(["abcdef12"]);
+  expect(readFileSync(file, "utf8")).toBe(original);
+  // Repaired: the checkpoint lands, the field is stripped, the import completes.
+  writeFileSync(file, JSON.stringify({ launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: 100 } }));
+  const r2 = importLegacyState(l, dir, { sealsContent: false });
+  expect(r2.failed).toEqual([]);
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")).toMatchObject({ ref: "/t", offset: 100 });
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ launchCwd: "/repo" });
+  expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("a malformed sibling field blocks the whole record (a valid checkpoint next to a handoffJob without a path); a null field is simply absent", () => {
+  const file = join(dir, "window-abcdef12.json");
+  const original = JSON.stringify({ launchCwd: "/repo", transcriptCheckpoint: { path: "/t", offset: 5 }, handoffJob: { role: "source" } });
+  writeFileSync(file, original);
+  write("window-abcdef13.json", { launchCwd: "/other", transcriptCheckpoint: null, opencodeDeliveredThrough: "msg_1" });
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([{ file: "window-abcdef12.json", error: "malformed: handoffJob: path must be a non-empty string", sessionId: "abcdef12" }]);
+  expect(r.quarantine).toEqual(["abcdef12"]);
+  expect(readFileSync(file, "utf8")).toBe(original);
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")).toBeNull();
+  expect(l.getJob("abcdef12")).toBeNull();
+  expect(l.getCheckpoint("abcdef13", "opencode_msg")?.ref).toBe("msg_1");
+  expect(JSON.parse(readFileSync(join(dir, "window-abcdef13.json"), "utf8"))).toEqual({ launchCwd: "/other" });
+  expect(l.getMeta("import_v1")).toBeNull();
+  l.close();
+});
+

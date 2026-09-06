@@ -475,7 +475,12 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   ledger's cursor. An unreadable or malformed source is a FAILED import:
   left in place, retried next boot, and its session is quarantined
   (`registry.quarantine`: not recovered, `create`/`restart({id})` refused)
-  until it imports. Settlements obey the current-owner rule:
+  until it imports — and "malformed" is judged per row/field, not per
+  envelope (review 7652e686): a queue or codex-inbound entry without a
+  string id/text (or with a non-numeric seq) fails its whole file with
+  nothing committed, and a window record whose execution field has the
+  wrong shape (`transcriptCheckpoint.offset: "100"`) is neither imported
+  nor stripped until repaired. Settlements obey the current-owner rule:
   `settleAttempt`/`confirmDelivery` change the command only when the claimed
   generation is the session's current one AND the attempt is the command's
   newest; anything else is recorded as a `stale_settlement` observation on
