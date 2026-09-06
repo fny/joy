@@ -212,6 +212,23 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   schema above, which carries the repo-relative identity as well. Tracked symlinks keep their own
   identity; containment is checked on the real path (#603). Body identifiers
   never override the URL's session/queue-item id (#599).
+- A relay row deleted behind a live session (card PATCH 404, facts POST 404,
+  or a boot-time GET 404 on a recovered record) unbinds the session and
+  re-announces it under a fresh row, so a session deleted from the app while
+  its daemon was unreachable never keeps running invisibly (#120). A turn the
+  adapter itself ended as failed/cancelled terminalizes as such (#584).
+- Push notifications are content-free by default (`Finished`, `Permission
+  needed`, `Clarification needed`); `JOY_PUSH_SNIPPETS=1` opts the reply
+  snippet and AI title back in (#118). Machine metadata is merged with a
+  compare-and-set on a fresh read, never overwriting an app-side rename (#61).
+- Tunnel executor: the sealed request path is resolved against the local
+  base (`/`-rooted, same origin, no userinfo) or answered 400 `bad_path`
+  (#119); every relay call carries `x-joy-relay-key` so flipping the gate does
+  not kill the tunnel plane (#82). Pairing sends the perimeter key derived
+  from the account secret and accepts base64url backup codes (#586 #64).
+- Local event routes stream their opening history with drain-aware pacing
+  (10 s deadline) before the bounded live feed, so a large history reaches a
+  reading client and a stalled one is dropped (#597).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
   `/status`, or the daemon.json pid whose command line and start time match;
   a stale record is removed without signalling (#495). The single-daemon lock
