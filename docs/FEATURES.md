@@ -137,10 +137,19 @@ every relay; machines register per account.
   is the verdict (`completed` → answered; `failed`/`cancelled`/`interrupted`
   → error with the daemon's reason), never a global idle, a failed queue read
   or an id missing from a listing; the reply is the records of the runtime
-  turn attributed to the command (the daemon's `runtimeTurnId`, or for claude
-  the first turn started after the send), so the tail of the turn it queued
-  behind — even one still emitting when the prompt was mirrored early — and
-  the next turn's output are not part of the reply (#498).
+  turn the daemon attributed to the command (`runtimeTurnId`: codex, opencode
+  and pi name their turns; claude's session names the transcript turn the
+  dispatch opened), never a turn guessed from the record order, so the tail
+  of the turn it queued behind — even one still emitting when the prompt was
+  mirrored early — an EARLIER queued message's turn and the next turn's
+  output are not part of the reply; a completed command the daemon could not
+  attribute is an explicit attribution `error`, and one the runtime started
+  no turn for (a handled `/title`, a slash command claude took) is answered
+  with an empty reply, not another turn's tail (#498). Also: a deadline that
+  trips while the finish is being verified complete is `timeout`, never a
+  partial `answered` (#497); `joy stop` treats an exit-0 `systemctl show` /
+  `launchctl list` with no MainPID= line / job dictionary as an unknown
+  inspection, not an unsupervised daemon (#502).
   `joy new -m` fails with the send's exit code when the first message is not
   accepted (the id is still printed, shell-quoted retry guidance on stderr, #494). A message sent from inside a joy session is wrapped by the daemon in
   `<joy-message from="joy:<id>" reply-to="joy:<id>">` and shown in the chat as

@@ -35,10 +35,20 @@ export interface QueueFacade {
 }
 export interface CommandInfo {
   id: string; text: string; createdAt: number; state: CommandState; terminalReason: string | null;
-  /** The runtime's own turn id for this command's accepted attempt — the
-   *  `turn` its records carry — once the runtime named it (codex, opencode,
-   *  pi); null before that, or for an adapter that never does (claude). */
+  /** The attempt the state describes — the latest one: the delivered attempt
+   *  of a running / completed command, the terminal one of a failed or
+   *  interrupted command. null while the command is still queued. */
+  attemptId: string | null;
+  /** The runtime's own turn id for that attempt — the `turn` its records
+   *  carry — once the runtime named it (codex, opencode, pi name their turns
+   *  in the echo; claude's session names the transcript turn its dispatch
+   *  opened, #498); null before that. */
   runtimeTurnId: string | null;
+  /** Did the runtime start a turn for that attempt at all (a `turn_started`
+   *  observation)? A command with none — a slash / `!` command the runtime
+   *  handled, a message the daemon handled itself — has no runtime output to
+   *  attribute: its completion IS its result. */
+  turnStarted: boolean;
   attempts: number;
 }
 export interface WaitResult { state: CommandState | null; reason?: string }
@@ -84,8 +94,10 @@ export function queueFor(session: Pick<AgentSession, "id">, coordinator: Session
         const row = coordinator.command(cid);
         if (!row || row.sessionId !== id) return null;
         const attempts = coordinator.ledger.attemptsForCommand(cid);
+        const attempt = attempts.length ? attempts[attempts.length - 1] : null;
         const turn = [...attempts].reverse().find((a) => a.runtimeTurnId)?.runtimeTurnId ?? null;
-        return { id: row.id, text: row.text, createdAt: row.createdAt, state: row.state, terminalReason: row.terminalReason, runtimeTurnId: turn, attempts: attempts.length };
+        const turnStarted = attempt !== null && coordinator.ledger.listObservations(id, "turn_started").some((o) => o.attemptId === attempt.id);
+        return { id: row.id, text: row.text, createdAt: row.createdAt, state: row.state, terminalReason: row.terminalReason, attemptId: attempt?.id ?? null, runtimeTurnId: turn, turnStarted, attempts: attempts.length };
       },
       waitFor: async (cid, states, opts) => {
         if (!owned(cid)) return { state: null };

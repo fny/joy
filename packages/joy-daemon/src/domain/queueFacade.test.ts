@@ -89,20 +89,25 @@ test("every facade lookup / mutation refuses a command id owned by another sessi
 });
 
 test("command(id): the durable row with its terminal reason and the runtime turn its attempt bound (#498); another session's id is null", async () => {
-  session("a"); session("b");
+  const da = session("a"); session("b");
   const qa = queueFor({ id: "a" }, coord);
   const qb = queueFor({ id: "b" }, coord);
   const head = qa.accept("a-head");     // submitting: the driver never answers
   const queued = qa.accept("a-queued");
   await settle();
-  expect(qa.command(head.id)).toMatchObject({ id: head.id, text: "a-head", state: "submitting", terminalReason: null, runtimeTurnId: null, attempts: 1 });
-  expect(qa.command(queued.id)).toMatchObject({ state: "queued", attempts: 0 });
+  expect(qa.command(head.id)).toMatchObject({ id: head.id, text: "a-head", state: "submitting", terminalReason: null, runtimeTurnId: null, turnStarted: false, attempts: 1 });
+  expect(qa.command(queued.id)).toMatchObject({ state: "queued", attemptId: null, attempts: 0 });
   expect(qb.command(head.id)).toBeNull();
   expect(qa.command("nope")).toBeNull();
-  // the runtime names the turn on the attempt: the facade reports it
+  // the runtime names the turn on the attempt: the facade reports it, with the attempt's identity
   const attempt = ledger.latestAttempt(head.id)!;
+  expect(qa.command(head.id)?.attemptId).toBe(attempt.id);
   ledger.setAttemptTurn(attempt.id, "T-runtime");
   expect(qa.command(head.id)?.runtimeTurnId).toBe("T-runtime");
+  // a turn the runtime started for the attempt is visible as such (#498: a
+  // completed command with none has no runtime output to attribute)
+  da.emit({ kind: "turn_started", runtimeTurnId: "T-runtime" });
+  expect(qa.command(head.id)).toMatchObject({ attemptId: attempt.id, runtimeTurnId: "T-runtime", turnStarted: true });
   // a terminal row keeps its reason
   expect(qa.cancel(queued.id)).toBe(true);
   await settle();
