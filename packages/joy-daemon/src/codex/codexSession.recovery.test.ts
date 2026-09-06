@@ -177,6 +177,39 @@ test("#513: rejoining a live orphan mid-turn restores the active turn — busy, 
   s.end("killed");
 });
 
+test("#513: a rejoined in-progress turn whose items came back partial is STILL the active one — busy, thinking, Stop interrupts it by id; its buffered completion frees the session", async () => {
+  H.history = { thread: { id: "TH", turns: [
+    { id: "T-live", status: "inProgress", itemsView: "partial", items: [] },
+  ] } };
+  H.busyTurn = "T-live";
+  // The orphan's own tail lands while the read is pending: it is buffered,
+  // flushed after reconcile, and completes the restored turn.
+  H.onThreadRead = (client) => {
+    client.notify({ method: "item/completed", params: { threadId: "TH", turnId: "T-live", item: { type: "agentMessage", id: "msg-tail", text: "the tail" } } });
+  };
+  const { relay, thinking, sent } = fakeRelay();
+  const { s, client } = await started("rec-513-partial", { relay, rejoin: true });
+  expect(s.busy()).toBe(true);
+  expect(s.toJSON().busy).toBe(true);
+  expect(thinking.at(-1)).toBe(true);
+  expect(queueFor(s).state()).toMatchObject({ busy: true, provenance: "terminal" });
+  // Content availability does not decide activity: Stop names the live turn.
+  expect(await s.abort()).toEqual({ ok: true });
+  expect(H.interrupts).toEqual(["T-live"]);
+  // The buffered live text went out under the turn's bracket, not as a stray row.
+  expect(sent.map((x) => x.t)).toEqual(["turn-start", "text"]);
+  expect(sent[1]).toMatchObject({ text: "the tail", localId: "codex:TH:turn:T-live:item:agentMessage:0:text" });
+  // The orphan's real completion frees the session.
+  H.busyTurn = null;
+  client.notify({ method: "turn/completed", params: { threadId: "TH", turn: { id: "T-live", status: "interrupted" } } });
+  expect(s.busy()).toBe(false);
+  expect(thinking.at(-1)).toBe(false);
+  expect(sent.at(-1)?.t).toBe("turn-end");
+  // The deferred turn is never checkpointed as delivered (#518 still holds).
+  expect(ledger().getCheckpoint("rec-513-partial", "codex_turn")?.ref ?? null).toBeNull();
+  s.end("killed");
+});
+
 test("#515: ending a session whose thread is active clears busy for busy() and toJSON()", async () => {
   const { relay } = fakeRelay();
   const { s, client } = await started("rec-515", { relay });

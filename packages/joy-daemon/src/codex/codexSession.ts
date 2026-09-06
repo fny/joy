@@ -774,12 +774,19 @@ export class CodexSession implements AgentSession {
       // Nor anything AFTER it: a later terminal turn's ack used to advance
       // the high-water past this gap, and the next recovery skipped this
       // turn's output for good once its full items were available (#518).
-      if (view && view !== "full") {
+      // A TERMINAL deferred turn is left alone entirely (no bracket for
+      // content that is not here yet). An IN-PROGRESS one still falls
+      // through to the status handling below: whether the runtime is active
+      // is a fact about the turn, not about its item availability — the
+      // rejoined session read idle and Stop had nothing to interrupt when
+      // the live turn's items came back partial (#513).
+      const deferred = !!view && view !== "full";
+      if (deferred) {
         process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay; the delivered mark holds below it\n`);
         if (!this.#deferredFloor || tid < this.#deferredFloor) this.#deferredFloor = tid;
-        continue;
+        if (status !== "inProgress") continue;
       }
-      const items = Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : [];
+      const items = deferred ? [] : (Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : []);
       // What replay is about to emit, by content, for the live-buffer flush (#519).
       const ordinals = new Map<string, number>();
       this.#historyItems.set(tid, items.map((item) => {
