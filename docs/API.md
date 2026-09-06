@@ -398,7 +398,18 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   stopped through `systemctl --user stop` / `launchctl unload` — a direct
   SIGTERM was undone by `Restart=always` / `KeepAlive` three seconds later
   while `stop` reported success (#502); a failing supervisor stop is exit 1
-  and nothing is signalled. Only a detached daemon gets the signal directly. The single-daemon lock
+  and nothing is signalled. Only a detached daemon gets the signal directly.
+  The supervisor inspection is three-valued: owns the pid / answered and does
+  not (inactive or absent unit or job, `launchctl` 113) / the inspection
+  itself failed. A failed inspection is NOT "no supervisor" (#502 residual):
+  `joy stop` then reads independent evidence, strongest first — the launch
+  mode the daemon recorded in daemon.json (`launcher`: `systemd` | `launchd`
+  | `detached`, from INVOCATION_ID / XPC_SERVICE_NAME; `joy start` strips
+  those markers so a daemon started from a service-hosted shell still records
+  `detached`), the pid's `/proc/<pid>/cgroup` (a unit's process sits in
+  `…/joy-daemon.service`), then whether the unit file / plist is installed.
+  With none of it, `stop` exits 1 with "could not determine whether the
+  daemon is supervised" and signals nothing. The single-daemon lock
   is an SQLite `BEGIN IMMEDIATE` on `daemon.lock.db` — OS-backed, released
   when the process dies, nothing to reclaim; `daemon.lock` is an informational
   pidfile (#589). Node ≥ 22.13.

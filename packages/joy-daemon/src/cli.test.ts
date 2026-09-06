@@ -9,7 +9,8 @@ import * as http from "node:http";
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
 delete process.env.JOY_SESSION_ID;
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, cmdStop, cmdNew, cmdAsk, cmdWaitIdle } = await import("./cli");
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle } = await import("./cli");
+const { launcherFromEnv } = await import("./daemonLauncher");
 const { joyStateDir } = await import("./paths");
 
 // ── a fake daemon: the CLI finds it through daemon.json in the (isolated) state dir ──
@@ -65,11 +66,83 @@ describe("joy stop under a supervisor (#502)", () => {
     expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("4242", () => {}) })).toEqual({ kind: "systemd", unit: "joy-daemon.service" });
     expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("0", () => {}) })).toBeNull();     // unit inactive / not installed
     expect(detectSupervisor(4242, { platform: "linux", run: fakeRun("999", () => {}) })).toBeNull();   // some other daemon under the unit
-    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toBeNull(); // no systemctl
+    // An inspection that FAILS is not "no supervisor" (#502 residual): it is unknown.
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/systemctl --user show joy-daemon.service exited 1/) });
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: null, stdout: "" }) })).toMatchObject({ kind: "unknown" }); // no systemctl binary
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "garbage\n" }) })).toMatchObject({ kind: "unknown" });
     const launchd = (out: string, status = 0) => ({ platform: "darwin", run: () => ({ status, stdout: out }) });
     expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))?.kind).toBe("launchd");
     expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running
-    expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded
+    expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded: launchctl's own definitive answer
+    expect(detectSupervisor(4242, launchd("", 1))).toMatchObject({ kind: "unknown" }); // launchctl itself failed
+  });
+
+  describe("a failed supervisor inspection (#502 residual)", () => {
+    const failing = (cmd: string, args: string[]) => (cmd === "systemctl" && args.includes("stop")) ? { status: 0, stdout: "" } : { status: 1, stdout: "" };
+    const withLauncher = (launcher?: string) => writeFileSync(join(joyStateDir(), "daemon.json"), JSON.stringify({ token: "tok", pid: 4242, port: daemonPort, startedAt: Date.now(), version: "test", ...(launcher ? { launcher } : {}) }));
+
+    test("systemctl show fails, no independent evidence: nothing is signalled, exit 1 with the reason", async () => {
+      route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
+      const actions: string[] = [];
+      const code = await cmdStop({ platform: "linux", run: (_c, args) => { actions.push(args.join(" ")); return failing(_c, args); }, kill: () => { actions.push("SIGTERM"); }, exists: () => false, cgroupOf: () => null });
+      expect(code).toBe(1);
+      expect(actions).not.toContain("SIGTERM");
+      expect(actions.some((a) => a.includes(" stop "))).toBe(false);
+      expect(log.out.join("\n")).toMatch(/could not determine whether the daemon is supervised \(systemctl --user show joy-daemon.service exited 1\) — nothing signalled/);
+    });
+
+    test("systemctl show fails but the unit file is installed: stopped through systemctl, never signalled", async () => {
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const killed: number[] = [];
+      const run = (cmd: string, args: string[]) => { const r = failing(cmd, args); if (args.includes("stop")) alive = false; return r; };
+      const code = await cmdStop({ platform: "linux", run, kill: (pid) => { killed.push(pid); }, exists: (p) => p.endsWith("/.config/systemd/user/joy-daemon.service"), cgroupOf: () => null });
+      expect(code).toBe(0);
+      expect(killed).toEqual([]);
+      expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+    });
+
+    test("daemon.json records a detached launch: the daemon's own word beats an installed unit file — SIGTERM directly", async () => {
+      withLauncher("detached");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const killed: string[] = [];
+      const code = await cmdStop({ platform: "linux", run: failing, kill: (_p, sig) => { killed.push(sig); alive = false; }, exists: () => true, cgroupOf: () => null });
+      expect(code).toBe(0);
+      expect(killed).toEqual(["SIGTERM"]);
+    });
+
+    test("daemon.json records a systemd launch: stopped through the unit", async () => {
+      withLauncher("systemd");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const killed: string[] = [];
+      const run = (cmd: string, args: string[]) => { const r = failing(cmd, args); if (args.includes("stop")) alive = false; return r; };
+      expect(await cmdStop({ platform: "linux", run, kill: (_p, sig) => { killed.push(sig); }, exists: () => false, cgroupOf: () => null })).toBe(0);
+      expect(killed).toEqual([]);
+      expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+    });
+
+    test("the kernel's cgroup settles it either way", () => {
+      const deps = { platform: "linux", run: failing, kill: () => {}, exists: () => false };
+      const inUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/joy-daemon.service\n";
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => inUnit }, null)).toMatchObject({ kind: "supervised", supervisor: { kind: "systemd", unit: "joy-daemon.service" }, evidence: expect.stringContaining("cgroup") });
+      const inScope = "0::/user.slice/user-1000.slice/session-3.scope\n";
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => inScope }, null)).toMatchObject({ kind: "unsupervised", evidence: expect.stringContaining("cgroup") });
+      // a unit file alone (no cgroup, no launcher) still means "stop through the owner"
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => null, exists: () => true }, null)).toMatchObject({ kind: "supervised" });
+      expect(resolveOwnership(4242, { ...deps, cgroupOf: () => null }, null)).toMatchObject({ kind: "unknown" });
+      // the supervisor's own answer needs no evidence
+      expect(resolveOwnership(4242, { ...deps, run: fakeRun("0", () => {}) }, { launcher: "systemd" })).toMatchObject({ kind: "unsupervised", evidence: expect.stringContaining("does not run this pid") });
+    });
+
+    test("launcherFromEnv: what the daemon records", () => {
+      expect(launcherFromEnv({ INVOCATION_ID: "abc" }, "linux")).toBe("systemd");
+      expect(launcherFromEnv({}, "linux")).toBe("detached");
+      expect(launcherFromEnv({ XPC_SERVICE_NAME: "vip.faraz.joy-daemon" }, "darwin")).toBe("launchd");
+      expect(launcherFromEnv({ XPC_SERVICE_NAME: "0" }, "darwin")).toBe("detached");
+      expect(launcherFromEnv({ INVOCATION_ID: "abc" }, "darwin")).toBe("detached"); // a foreign marker means nothing on the other platform
+    });
   });
 
   test("a systemd-supervised daemon is stopped through systemctl, never signalled directly", async () => {
