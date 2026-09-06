@@ -30,7 +30,7 @@ import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
 import { OutboxSender, type PostResult } from "./outbox";
-import { ledgerFor, LedgerWriteError, type NewOutbound, type OutboxRow } from "../domain/ledger";
+import { ledgerFor, LedgerWriteError, type JobRow, type NewOutbound, type OutboxRow } from "../domain/ledger";
 import { writeAttachmentToCwd } from "../domain/attachments";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
@@ -775,14 +775,27 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function reconcileOrphans(rows: Array<{ sessionId: string; daemonId: string; state: string; localSessionId?: string | null }>): Promise<void> {
     const l = lease;
     if (!l) return;
+    // Replacement rows whose archive is still owed (#120): the persisted
+    // intents go first, on every boot pass and refresh, and keep their own
+    // backoff loop between passes.
+    const settled = await retryPendingArchives();
+    if (pendingArchives.size > 0) scheduleArchiveRetry();
     for (const s of rows) {
       if (s.daemonId !== machineId || !s.localSessionId) continue;
       if (s.state !== "active" && s.state !== "starting") continue;
-      if (registry.get(s.localSessionId)) continue; // live (or ended-but-known: its own publisher tells the truth)
+      if (settled.has(s.sessionId) || pendingArchives.has(s.sessionId)) continue; // just archived above, or owed to the retry loop
+      // A live handle is skipped, and so is an ended-but-known one (its own
+      // publisher tells the truth). A KILLED handle is different: the
+      // registry retains it for bookkeeping only, its card publisher is gone
+      // (cardMetadata null) — a row it still owns is as orphaned as one with
+      // no handle at all, and skipping it left a replacement row `starting`
+      // forever (Astra on b2aa492d, #120).
+      const known = registry.get(s.localSessionId);
+      if (known && !isKilledHandle(known)) continue;
       const rec = registry.listRecords().find((x) => x.id === s.localSessionId);
       const key = sessionKeys.get(s.sessionId) ?? null;
       const card = {
-        path: rec?.launchCwd ?? "",
+        path: rec?.launchCwd ?? known?.cwd ?? "",
         host: hostname(),
         machineId,
         joy__state: "archived",
@@ -1541,6 +1554,94 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // unkillable card (Astra on 4a69e55c, #120).
   const stillLive = (session: AgentSession): boolean =>
     registry.get(session.id) === session && (session.status === "active" || session.status === "starting");
+  /** A handle the registry keeps after a kill (dedup/recovery bookkeeping):
+   *  not live, not listed, no card publisher of its own. */
+  const isKilledHandle = (s: AgentSession): boolean => s.status === "ended" && s.endReason === "killed";
+
+  // ── Archiving a replacement row nobody will ever own (#120) ──────────────
+  // A session killed while its announce was in flight leaves the relay
+  // holding a row for a session that no longer exists; its owner daemon is
+  // us, so nothing else can archive it. The archive used to be ONE attempt:
+  // a transient failure (503, lane down) logged and dropped the intent, and
+  // reconcileOrphans then skipped the row because the registry still held
+  // the killed handle — the row stayed `starting`, unowned, for good (Astra
+  // on b2aa492d). The intent is now a ledger job (keyed by the RELAY row, so
+  // forgetting the local session's rows does not forget it), retried with
+  // backoff until the relay confirms — or reports the row gone/settled —
+  // across lane restarts too: every boot pass and refresh runs the owed
+  // archives before it sweeps orphans.
+  const ARCHIVE_JOB_KIND = "archive_relay_row";
+  const ARCHIVE_RETRY_MIN_MS = 2_000;
+  const ARCHIVE_RETRY_MAX_MS = 60_000;
+  interface ArchiveRowJob { v2SessionId: string; localSessionId: string; card: Record<string, unknown>; keyB64: string | null }
+  const pendingArchives = new Map<string, ArchiveRowJob>();
+  const archiveAttempts = new Map<string, number>();
+  let archiveRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  const archiveJobId = (v2SessionId: string) => `archive:${v2SessionId}`;
+  /** Merge the persisted intents into the working set (a previous lane
+   *  generation's, or this one's after a restart). */
+  function loadPersistedArchives(): void {
+    let jobs: JobRow[] = [];
+    try { jobs = ledger.listJobs(ARCHIVE_JOB_KIND); } catch { return; }
+    for (const j of jobs) {
+      const p = j.payload as Partial<ArchiveRowJob> | null;
+      if (!p || typeof p.v2SessionId !== "string" || typeof p.localSessionId !== "string" || !p.card || typeof p.card !== "object") continue;
+      if (!pendingArchives.has(p.v2SessionId)) pendingArchives.set(p.v2SessionId, { v2SessionId: p.v2SessionId, localSessionId: p.localSessionId, card: p.card as Record<string, unknown>, keyB64: typeof p.keyB64 === "string" ? p.keyB64 : null });
+    }
+  }
+  /** One attempt. True once the intent is settled: the relay took the
+   *  archive, or the row is gone / already terminal — nothing left to do. */
+  async function runArchiveJob(job: ArchiveRowJob): Promise<boolean> {
+    const l = lease;
+    if (!l) return false;
+    const key = job.keyB64 ? new Uint8Array(Buffer.from(job.keyB64, "base64")) : null;
+    try {
+      await withTimeout(api("PATCH", `/daemon/sessions/${job.v2SessionId}`, { encryptedMetadata: sealCard(job.card, key), state: "archived" }, l), 15_000);
+      log(`archived replacement row ${job.v2SessionId.slice(0, 8)} for ended session ${job.localSessionId}`);
+    } catch (e) {
+      if (!isRowGone(e) && !sessionGone(e)) {
+        const n = (archiveAttempts.get(job.v2SessionId) ?? 0) + 1;
+        archiveAttempts.set(job.v2SessionId, n);
+        log(`archive ${job.v2SessionId.slice(0, 8)} failed (attempt ${n}, will retry): ${e instanceof Error ? e.message : e}`);
+        return false;
+      }
+      log(`archive ${job.v2SessionId.slice(0, 8)}: row already gone or settled — nothing to do`);
+    }
+    pendingArchives.delete(job.v2SessionId);
+    archiveAttempts.delete(job.v2SessionId);
+    try { ledger.deleteJob(archiveJobId(job.v2SessionId)); } catch { /* re-run settles it again, harmlessly */ }
+    return true;
+  }
+  /** Run every owed archive once; returns the row ids settled this pass. */
+  async function retryPendingArchives(): Promise<Set<string>> {
+    loadPersistedArchives();
+    const settled = new Set<string>();
+    for (const job of [...pendingArchives.values()]) {
+      if (stopped) break;
+      if (await runArchiveJob(job)) settled.add(job.v2SessionId);
+    }
+    return settled;
+  }
+  /** Back off from the youngest owed row's attempt count (2s … 60s). */
+  function scheduleArchiveRetry(): void {
+    if (stopped || archiveRetryTimer || pendingArchives.size === 0) return;
+    const attempts = Math.min(...[...pendingArchives.keys()].map((v2) => archiveAttempts.get(v2) ?? 0));
+    const delay = Math.min(ARCHIVE_RETRY_MAX_MS, ARCHIVE_RETRY_MIN_MS * 2 ** Math.max(0, attempts - 1));
+    archiveRetryTimer = setTimeout(() => {
+      archiveRetryTimer = null;
+      void retryPendingArchives().then(() => scheduleArchiveRetry(), () => scheduleArchiveRetry());
+    }, delay);
+    archiveRetryTimer.unref?.();
+  }
+  /** Persist the intent FIRST (a crash between the POST and the PATCH must
+   *  not lose it), try once now, and leave the rest to the retry loop. */
+  async function archiveReplacementRow(job: ArchiveRowJob): Promise<void> {
+    pendingArchives.set(job.v2SessionId, job);
+    try { ledger.putJob({ id: archiveJobId(job.v2SessionId), sessionId: job.v2SessionId, kind: ARCHIVE_JOB_KIND, payload: job }); }
+    catch (e) { log(`archive ${job.v2SessionId.slice(0, 8)}: intent not persisted (${e instanceof Error ? e.message : e}) — retrying in memory only`); }
+    if (!(await runArchiveJob(job))) scheduleArchiveRetry();
+  }
+
   async function announceLocalSession(session: AgentSession): Promise<void> {
     if (!lease || boundByLocal.has(session.id) || announcing.has(session.id)) return;
     if (!stillLive(session)) return;
@@ -1595,8 +1696,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         log(`${session.id}: ended while being announced — archiving the replacement row ${v2.slice(0, 8)}`);
         if (key) sessionKeys.set(v2, key);
         const card = { path: session.cwd, host: hostname(), machineId, joy__state: "archived", joy__sessionId: session.id, v2: { sessionId: v2, relay: relayUrl, localSessionId: session.id } };
-        try { await withTimeout(api("PATCH", `/daemon/sessions/${v2}`, { encryptedMetadata: sealCard(card, key), state: "archived" }, lease), 15_000); }
-        catch (e) { log(`archive ${v2.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`); }
+        await archiveReplacementRow({ v2SessionId: v2, localSessionId: session.id, card, keyB64: key ? Buffer.from(key).toString("base64") : null });
         return;
       }
       if (key) sessionKeys.set(v2, key);

@@ -245,6 +245,10 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   schema above, which carries the repo-relative identity as well. Tracked symlinks keep their own
   identity; containment is checked on the real path (#603). Body identifiers
   never override the URL's session/queue-item id (#599).
+- `POST /joy/v2/machines` accepts an optional `expectedMetadataVersion`;
+  a different current version answers 409 `metadata_version_mismatch` and
+  writes nothing (the daemon's key repair re-reads and retries, bounded), so
+  an app rename between the daemon's read and its write is never lost (#61).
 - A relay row deleted behind a live session (card PATCH 404, facts POST 404,
   or a boot-time GET 404 on a recovered record) unbinds the session and
   re-announces it under a fresh row, so a session deleted from the app while

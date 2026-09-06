@@ -384,6 +384,8 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   // Machines: sealed metadata + daemonState with CAS versions; presence is
   // derived from lease liveness (see accounts.liveness).
   route('GET', '/machines', {}, async (ctx) => accounts.listMachines(ctx.accountId));
+  // POST replaces the sealed blob; with `expectedMetadataVersion` it is a
+  // conditional replace (409 metadata_version_mismatch on any other version).
   route('POST', '/machines', {}, async (ctx, m, body) => accounts.upsertMachine(ctx.accountId, body));
   route('GET', '/machines/([\\w.-]+)', {}, async (ctx, m) => accounts.getMachine(ctx.accountId, m[1]));
   route('PATCH', '/machines/([\\w.-]+)', {}, async (ctx, m, body) => accounts.patchMachine(ctx.accountId, m[1], body));

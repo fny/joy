@@ -28,10 +28,32 @@ const EVENT_HISTORY_DRAIN_DEADLINE_MS = 10_000;
  *  ITEM can be the whole serialized chat (12 MiB in the #597 reproduction):
  *  written in one res.write() it sits in the response buffer entire before
  *  any drain check, so the advertised pending-bytes bound held for every
- *  item but the first (Astra on 4a69e55c). Items are cut into byte chunks
- *  of this size — a byte slice of the UTF-8 encoding, so the stream and its
- *  SSE/NDJSON framing arrive unchanged. */
+ *  item but the first (Astra on 4a69e55c). Items are ENCODED into byte
+ *  chunks of this size — whole characters only, so the stream and its
+ *  SSE/NDJSON framing arrive unchanged. The encoding is incremental: a
+ *  `Buffer.from(item)` of the whole frame, then sliced, kept the entire
+ *  12 MiB backing store alive behind every pending 64 KiB slice while a
+ *  stalled response awaited drain (Astra on b2aa492d) — now no more than
+ *  one chunk plus one history item is resident per stream. */
 const EVENT_HISTORY_WRITE_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Frame an SSE event whose data is a JSON array, one element at a time. The
+ * bytes are exactly `event: <name>\ndata: ${JSON.stringify([...items])}\n\n`,
+ * but no whole-array string is ever built: the /events opening `history`
+ * frame is the largest allocation on this surface (12 MiB for a full chat),
+ * and building it per client, per connect, is what the incremental encoder
+ * in streamHistoryThenFollow is there to avoid (#597 residual).
+ */
+export function* sseJsonArrayEvent(event: string, items: Iterable<unknown>): Generator<string> {
+  yield `event: ${event}\ndata: [`;
+  let first = true;
+  for (const item of items) {
+    yield (first ? "" : ",") + (JSON.stringify(item) ?? "null");
+    first = false;
+  }
+  yield "]\n\n";
+}
 
 /**
  * Stream a long-lived event response: the opening history first, with REAL
@@ -61,7 +83,8 @@ export async function streamHistoryThenFollow(opts: {
   const { res, label } = opts;
   const maxBytes = opts.maxBufferedBytes ?? EVENT_CLIENT_MAX_BUFFERED_BYTES;
   const drainMs = opts.drainDeadlineMs ?? EVENT_HISTORY_DRAIN_DEADLINE_MS;
-  const chunkBytes = Math.max(1, opts.historyChunkBytes ?? EVENT_HISTORY_WRITE_CHUNK_BYTES);
+  // ≥ 4: the widest UTF-8 sequence must fit an empty chunk, else no progress.
+  const chunkBytes = Math.max(4, opts.historyChunkBytes ?? EVENT_HISTORY_WRITE_CHUNK_BYTES);
   let unsubscribe: () => void = () => {};
   const drop = (why: string) => {
     unsubscribe();
@@ -89,23 +112,47 @@ export async function streamHistoryThenFollow(opts: {
     const cleanup = () => { clearTimeout(timer); res.off("drain", ok); res.off("close", gone); res.off("error", gone); };
     res.on("drain", ok); res.on("close", gone); res.on("error", gone);
   });
-  for (const item of opts.history) {
-    // Bounded writes: an item larger than the chunk goes out as byte slices,
-    // each one a drain checkpoint, so the pending bytes never exceed the
-    // socket's high-water mark plus one chunk — whatever the item's size.
-    const bytes = Buffer.from(item, "utf8");
-    for (let off = 0; off < bytes.length; off += chunkBytes) {
-      if (res.destroyed) { unsubscribe(); return; }
-      if (!res.write(bytes.subarray(off, off + chunkBytes))) {
-        if (!(await drained())) {
-          if (!res.destroyed) drop(`did not drain the opening history within ${drainMs}ms`);
-          else unsubscribe();
-          return;
-        }
+  // Bounded writes: the history is UTF-8 encoded straight into fixed-size
+  // chunks (whole characters only — encodeInto never splits a surrogate pair
+  // or a multi-byte sequence), each chunk a drain checkpoint, so the pending
+  // bytes never exceed the socket's high-water mark plus one chunk — whatever
+  // an item's size. Each chunk is its own allocation (never the shared pool,
+  // never a slice of a whole-frame buffer): what a pending write retains is
+  // that chunk and nothing more.
+  const encoder = new TextEncoder();
+  let chunk = Buffer.allocUnsafeSlow(chunkBytes);
+  let filled = 0;
+  // Send the filled chunk; false → this response is over (destroyed, or it
+  // did not drain in time and was dropped).
+  const flush = async (): Promise<boolean> => {
+    if (filled === 0) {
+      if (res.destroyed) { unsubscribe(); return false; }
+      return true;
+    }
+    const out = chunk.subarray(0, filled);
+    chunk = Buffer.allocUnsafeSlow(chunkBytes);
+    filled = 0;
+    if (res.destroyed) { unsubscribe(); return false; }
+    if (!res.write(out)) {
+      if (!(await drained())) {
+        if (!res.destroyed) drop(`did not drain the opening history within ${drainMs}ms`);
+        else unsubscribe();
+        return false;
       }
     }
+    return true;
+  };
+  for (const item of opts.history) {
+    let pos = 0;
+    while (pos < item.length) {
+      const { read, written } = encoder.encodeInto(pos === 0 ? item : item.slice(pos), chunk.subarray(filled));
+      pos += read;
+      filled += written;
+      // Chunk full (or the next character does not fit its remainder): ship it.
+      if (pos < item.length && !(await flush())) return;
+    }
   }
-  if (res.destroyed) { unsubscribe(); return; }
+  if (!(await flush())) return;
   if (!opts.subscribe) { res.end(); return; }
   // Hand over: what arrived meanwhile, then live records, all bounded.
   const write = boundedWriter(res, maxBytes, () => {
@@ -345,10 +392,12 @@ export function startHttpServer(opts: {
       });
       // The opening history is the largest write of all: streamed with
       // backpressure, then live events through the bound (#597, Wave B).
-      const opening = [
-        `event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`,
-        `event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`,
-      ];
+      // The chat rows are framed one record at a time (sseJsonArrayEvent):
+      // the whole-array string was a 12 MiB allocation per connecting client.
+      const opening = (function* () {
+        yield* sseJsonArrayEvent("history", registry.chatHistory());
+        yield `event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`;
+      })();
       await streamHistoryThenFollow({
         res, history: opening, label: "/events", ...eventStream,
         subscribe: (fn) => registry.subscribeSse((s) => fn(s)),

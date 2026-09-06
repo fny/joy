@@ -157,6 +157,38 @@ test("an identical assertion after a FAILED publish is the retry, not a duplicat
   expect(calls).toBe(2);
 });
 
+test("a FAILED start publish leaves the card dirty: the next identical assertion is the retry (#587 residual)", async () => {
+  // Astra on b2aa492d: dirty started false and start() only ever cleared it,
+  // so a card born with currentModelCode=A whose start publish failed deduped
+  // updateModelCode(A) against the unpublished snapshot — one attempt, ever.
+  let calls = 0;
+  registerV2CardPublisher(ID, async () => { if (++calls === 1) throw new Error("start failed"); });
+  const s = new RelaySession({ client: {} as any, relaySessionId: ID, metadata: { currentModelCode: "model-A" } });
+  s.start();
+  await new Promise((r) => setImmediate(r));
+  expect(calls).toBe(1);
+  expect(s.lastPublishOk).toBe(false);
+  await s.updateModelCode("model-A");
+  expect(calls).toBe(2);
+  expect(s.lastPublishOk).toBe(true);
+  await s.updateModelCode("model-A");     // now the relay has it: redundant again
+  expect(calls).toBe(2);
+});
+
+test("start() is snapshot-aware: it publishes inside the chain, never landing an older card after a newer merge (#587)", async () => {
+  const published: Array<Record<string, unknown>> = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  registerV2CardPublisher(ID, async (m) => { published.push({ ...m }); await gate; });
+  const s = new RelaySession({ client: {} as any, relaySessionId: ID, metadata: { currentModelCode: "A" } });
+  void s.updateModelCode("B");            // occupies the chain
+  s.start();                              // used to publish {A} concurrently, out of order
+  release();
+  await s.updateSummary("t");
+  expect(published.map((m) => m.currentModelCode)).toEqual(["B", "B", "B"]);
+  expect(s.lastPublishOk).toBe(true);
+});
+
 test("redundant writes are still skipped (control)", async () => {
   const published: unknown[] = [];
   registerV2CardPublisher(ID, (m) => { published.push(m); });
@@ -229,8 +261,10 @@ function fakeMachineRelay(machineKey: Uint8Array) {
     }
     if (url.pathname === "/joy/v2/machines" && method === "POST") {
       const blob = open(body.metadata);
-      writes.push({ method, blob });
-      // Like the relay's upsert: an unchanged blob keeps the version.
+      writes.push({ method, blob, expected: body.expectedMetadataVersion });
+      // Like the relay's upsert: with a precondition, any other version is
+      // refused outright; an unchanged blob keeps the version.
+      if (body.expectedMetadataVersion !== undefined && body.expectedMetadataVersion !== row.version) return json(409, { error: "metadata_version_mismatch" });
       if (body.metadata !== stored()) row.version++;
       row.metadata = blob; row.raw = body.metadata; row.dataKey = body.dataEncryptionKey;
       return json(200, { machine: { id: "m-61", metadataVersion: row.version, daemonStateVersion: 7 } });
@@ -317,6 +351,52 @@ test("a no-data-key repair goes through the CAS write first: an app rename betwe
     expect(methods.filter((m) => m === "PATCH").length).toBeGreaterThanOrEqual(1);
     expect(methods[methods.length - 1]).toBe("POST");    // the key POST comes AFTER the CAS write…
     expect(relay.writes[relay.writes.length - 1].blob.displayName).toBe("B"); // …carrying the same, fresh blob
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("a rename between the CAS write and the key-repair POST is kept: the POST is conditional, the loop re-reads (#61 residual)", async () => {
+  // Astra on b2aa492d: the repair's POST had no precondition, so a rename
+  // landing AFTER the CAS write but BEFORE the POST was replaced by the
+  // stale blob (version 3 → 4, logged, returned true).
+  const key = new Uint8Array(32).fill(10);
+  const relay = fakeMachineRelay(key);
+  relay.row.dataKey = null;
+  let renamed = false;
+  vi.stubGlobal("fetch", async (input: any, init?: any) => {
+    if (init?.method === "POST" && !renamed) { renamed = true; relay.row.metadata = { ...relay.row.metadata, displayName: "B" }; relay.row.version++; }
+    return relay.fetchImpl(input, init);
+  });
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(true);
+    expect(relay.row.metadata.displayName).toBe("B");
+    expect(relay.row.metadata.homeDir).toBe("/h");
+    expect(relay.row.dataKey).toBeTruthy();
+    // CAS, refused POST, re-read → CAS carrying "B", accepted POST at the version that CAS produced.
+    expect(relay.writes.map((w) => w.method)).toEqual(["PATCH", "POST", "PATCH", "POST"]);
+    expect(relay.writes[1].expected).toBe(2);
+    expect(relay.writes[3].expected).toBe(4);
+    expect(relay.writes[3].blob.displayName).toBe("B");
+    expect(relay.row.version).toBe(4);
+  } finally { vi.unstubAllGlobals(); }
+});
+
+test("a repair that keeps losing the race gives up after its bounded retries, replacing nothing (#61 residual)", async () => {
+  const key = new Uint8Array(32).fill(11);
+  const relay = fakeMachineRelay(key);
+  relay.row.dataKey = null;
+  let renames = 0;
+  vi.stubGlobal("fetch", async (input: any, init?: any) => {
+    if (init?.method === "POST") { renames++; relay.row.metadata = { ...relay.row.metadata, displayName: `B${renames}` }; relay.row.version++; }
+    return relay.fetchImpl(input, init);
+  });
+  try {
+    const client = new RelayClient(relay.creds as any);
+    expect(await client.getOrCreateMachine({ homeDir: "/h" })).toBe(false);
+    expect(relay.writes.filter((w) => w.method === "POST").every((w) => typeof w.expected === "number")).toBe(true);
+    expect(relay.row.metadata.displayName).toBe(`B${renames}`); // the app's latest name stands
+    expect(relay.row.dataKey).toBeNull();                       // no key landed over a stale blob
+    expect(relay.writes.length).toBeLessThanOrEqual(8);         // 4 rounds of CAS + refused POST
   } finally { vi.unstubAllGlobals(); }
 });
 

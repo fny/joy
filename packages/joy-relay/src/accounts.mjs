@@ -267,17 +267,28 @@ export function createAccounts(db, tokens, { fetchImpl, pushTimeoutMs = PUSH_TIM
   }
 
   /** Upsert: the daemon's full sealed blob replaces the stored one (version
-   *  bump); a new daemonState lands only when the caller sends one. */
-  async function upsertMachine(accountId, { id, metadata, daemonState, dataEncryptionKey }) {
+   *  bump); a new daemonState lands only when the caller sends one.
+   *  `expectedMetadataVersion` (optional) makes the replace conditional: a
+   *  row at any other metadata version — or no row at all — answers 409
+   *  metadata_version_mismatch and nothing changes. The daemon's key repair
+   *  sends the version its own CAS write produced, so an app rename that
+   *  lands in between is never replaced (Astra on b2aa492d, #61); callers
+   *  omitting the field keep the unconditional replace. */
+  async function upsertMachine(accountId, { id, metadata, daemonState, dataEncryptionKey, expectedMetadataVersion }) {
     // "." and ".." pass the character class but vanish under URL path
     // normalisation, so such a machine could be created and listed yet never
     // fetched, patched, deleted or tunnelled to (#609). Dots INSIDE a name
     // stay legal (host.local).
     if (typeof id !== 'string' || !/^[\w.-]{1,128}$/.test(id) || id === '.' || id === '..') throw new ApiError(400, 'bad_machine_id');
     if (typeof metadata !== 'string') throw new ApiError(400, 'missing_metadata');
+    const expectVersion = expectedMetadataVersion === undefined || expectedMetadataVersion === null ? null : Number(expectedMetadataVersion);
+    if (expectVersion !== null && !Number.isInteger(expectVersion)) throw new ApiError(400, 'bad_expected_metadata_version');
     const row = await db.tx(async (t) => {
       const { rows: [existing] } = await t.query(`SELECT * FROM machines WHERE id = $1`, [id]);
       if (existing && existing.account_id !== accountId) throw new ApiError(403, 'machine_owned_elsewhere');
+      if (expectVersion !== null && (!existing || Number(existing.metadata_version) !== expectVersion)) {
+        throw new ApiError(409, 'metadata_version_mismatch');
+      }
       if (!existing) {
         const { rows: [created] } = await t.query(
           `INSERT INTO machines (id, account_id, metadata, metadata_version, daemon_state, daemon_state_version, data_encryption_key)

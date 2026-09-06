@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "node:http";
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-http-test-"));
-import { startHttpServer, streamHistoryThenFollow } from "./http";
+import { startHttpServer, streamHistoryThenFollow, sseJsonArrayEvent } from "./http";
 import * as http from "node:http";
 import { RelaySession, encodeTextEvent, forgetRecords } from "../relay/relay";
 
@@ -135,9 +135,17 @@ test("one oversized history item never sits in the response buffer whole: pendin
   expect(Buffer.byteLength(item)).toBeGreaterThan(12 * 1024 * 1024);
   const cap = 8 * 1024 * 1024;
   let peak = 0; let subs = 0; let unsubscribed = 0; let closed = false;
+  let peakWrite = 0; let peakBacking = 0;
   const srv = http.createServer((_req, res) => {
     const write = res.write.bind(res);
-    (res as any).write = (...args: any[]) => { const ok = (write as any)(...args); peak = Math.max(peak, res.writableLength); return ok; };
+    (res as any).write = (...args: any[]) => {
+      const buf = args[0] as Buffer;
+      peakWrite = Math.max(peakWrite, buf.length);
+      // The residual (Astra on b2aa492d): each 64 KiB slice used to be a view
+      // over the whole 12 MiB frame's ArrayBuffer, retained per pending write.
+      peakBacking = Math.max(peakBacking, buf.buffer.byteLength);
+      const ok = (write as any)(...args); peak = Math.max(peak, res.writableLength); return ok;
+    };
     res.on("close", () => { closed = true; });
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     void streamHistoryThenFollow({
@@ -155,6 +163,8 @@ test("one oversized history item never sits in the response buffer whole: pendin
   await sleep(1_200);
   expect(peak).toBeLessThan(cap);
   expect(peak).toBeLessThan(1024 * 1024);           // high-water mark + one 64 KiB chunk, not the whole frame
+  expect(peakWrite).toBeLessThanOrEqual(64 * 1024);
+  expect(peakBacking).toBeLessThanOrEqual(64 * 1024); // a chunk owns its allocation: no whole-frame buffer behind it
   expect(closed).toBe(true);                         // dropped at the drain deadline
   expect(subs).toBe(1); expect(unsubscribed).toBeGreaterThanOrEqual(1); // drop() and the close listener both unsubscribe (idempotent)
   sock.destroy();
@@ -179,3 +189,37 @@ test("a client that never reads is dropped at the drain deadline instead of park
   expect(await closed).toBe(true);
   expect(received).toBeLessThan(12 * 1024 * 1024);
 }, 20_000);
+
+test("history chunks never split a multi-byte character or a surrogate pair; the frame arrives byte-identical (#597 residual)", async () => {
+  // Chunks of 5 bytes against 2-, 3- and 4-byte sequences: every boundary
+  // falls inside some character unless the encoder stops at whole ones.
+  const text = "aé€🙂é🙂€aa€🙂🙂éé€a".repeat(200);
+  const rows = Array.from({ length: 50 }, (_, i) => ({ id: String(i), role: "assistant", content: text, session_id: SID }));
+  const expected = `event: history\ndata: ${JSON.stringify(rows)}\n\n` + "hello 🙂\n";
+  // One oversized string item AND per-record generator items go through the same encoder.
+  const history = (function* () { yield* sseJsonArrayEvent("history", rows); yield "hello 🙂\n"; })();
+  const writes: number[] = [];
+  const srv = http.createServer((_req, res) => {
+    const write = res.write.bind(res);
+    (res as any).write = (...args: any[]) => { writes.push((args[0] as Buffer).length); return (write as any)(...args); };
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    void streamHistoryThenFollow({ res, history, label: "test-utf8", subscribe: null, historyChunkBytes: 5 });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  const p = (srv.address() as any).port as number;
+  const r = await fetch(`http://127.0.0.1:${p}/events`);
+  const got = Buffer.from(await r.arrayBuffer());
+  expect(got.toString("utf8")).toBe(expected);
+  expect(got.length).toBe(Buffer.byteLength(expected));
+  expect(Math.max(...writes)).toBeLessThanOrEqual(5);
+  expect(writes.length).toBeGreaterThan(got.length / 5 - 1);   // chunked, not one write per item
+  await new Promise<void>((r) => srv.close(() => r()));
+}, 20_000);
+
+test("sseJsonArrayEvent frames exactly like JSON.stringify of the whole array, without building it", () => {
+  const rows = [{ a: 1 }, { b: "x\ny" }, { c: [1, 2] }];
+  expect([...sseJsonArrayEvent("history", rows)].join("")).toBe(`event: history\ndata: ${JSON.stringify(rows)}\n\n`);
+  expect([...sseJsonArrayEvent("history", [])].join("")).toBe("event: history\ndata: []\n\n");
+  // Elements JSON cannot represent become null, as in the array form.
+  expect([...sseJsonArrayEvent("x", [undefined, 1])].join("")).toBe(`event: x\ndata: ${JSON.stringify([undefined, 1])}\n\n`);
+});
