@@ -67,24 +67,17 @@ test("a fresh empty lock is a creation in progress: occupied, not stale (#589)",
   release();
 });
 
-test("reclaiming a stale lock never unlinks a newer owner that landed meanwhile (#589)", () => {
+test("the OS lock is the exclusion: a second acquirer fails while the first holds it, and succeeds after release (#589)", () => {
   const lock = tmpLock();
-  const stale = "99999\nstale-nonce\n1\n";
-  const fresh = "424242\nfresh-nonce\n2\n";
-  writeFileSync(lock, stale);
-  const isAlive = (pid: number) => {
-    if (pid === 99999) {
-      // Between our judgement ("99999 is dead") and our reclaim, another
-      // starter reclaimed it first and published ITS lock.
-      writeFileSync(lock, fresh);
-      return false;
-    }
-    return pid === 424242;
-  };
-  expect(() => acquireSingleton(lock, { isAlive })).toThrow(SingletonError);
-  // The newer owner's lock is exactly where it was — we did not eat it.
-  expect(readFileSync(lock, "utf8")).toBe(fresh);
-  expect(readdirSync(dirname(lock)).filter((f) => f.includes(".reclaim.") || f.endsWith(".tmp"))).toEqual([]);
+  const release = acquireSingleton(lock);
+  // A stale-looking pidfile cannot fool a second acquirer into "reclaiming":
+  // the SQLite lock, not the file, decides.
+  expect(() => acquireSingleton(lock, { isAlive: () => false })).toThrow(SingletonError);
+  expect(readFileSync(lock, "utf8").split("\n")[0]).toBe(String(process.pid));
+  release();
+  const again = acquireSingleton(lock);
+  again();
+  expect(readdirSync(dirname(lock)).filter((f) => f.endsWith(".tmp") || f.includes(".reclaim"))).toEqual([]);
 });
 
 test("two starters racing for a free lock: exactly one wins (#589)", () => {

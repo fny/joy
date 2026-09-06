@@ -173,9 +173,10 @@ the whole surface; unknown paths are 404 — there is no upstream.
   never override the URL's session/queue-item id (#599).
 - `joy stop` signals only a verified daemon: the pid from an authenticated
   `/status`, or the daemon.json pid whose command line and start time match;
-  a stale record is removed without signalling (#495). The singleton lock is
-  written whole and linked into place; an in-progress creation counts as
-  occupied (#589).
+  a stale record is removed without signalling (#495). The single-daemon lock
+  is an SQLite `BEGIN IMMEDIATE` on `daemon.lock.db` — OS-backed, released
+  when the process dies, nothing to reclaim; `daemon.lock` is an informational
+  pidfile (#589). Node ≥ 22.13.
 
 - Usage cache warmer: boot + every 2h (`server.ts`).
 - Resource alerts: RAM/disk ≥90% (5min sampling) and claude/codex quota ≥90%
