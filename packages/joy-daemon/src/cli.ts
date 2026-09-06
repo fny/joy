@@ -5,7 +5,7 @@
 // this CLI finds and authenticates to it — one daemon (and one state dir,
 // tmux server, service unit) per relay; --relay picks which one.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, rmSync, readlinkSync, realpathSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, fchmodSync, rmSync, readlinkSync, realpathSync } from "fs";
 import { join, dirname, resolve, basename, sep, isAbsolute } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
@@ -16,6 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 import { launchdPlist } from "./launchdPlist";
 import { shellQuote } from "./domain/quote";
+import { mkdirSecure, SECRET_FILE_MODE } from "./domain/secretFile";
 import { SUPERVISOR_ENV, processStartId, type DaemonLauncher } from "./daemonLauncher";
 
 // --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
@@ -184,6 +185,19 @@ async function cmdList(): Promise<number> {
   return 0;
 }
 
+/** The state dir and daemon.log a `joy start` daemon writes into, created and
+ *  opened owner-only (#48). The log carries every session's stderr — titles,
+ *  cwds, error paths — and used to come up with the umask default (0666 in a
+ *  0777 dir under `umask 000`) until the daemon itself tightened the dir on
+ *  boot. `open(…, mode)` is masked by the umask, so an already-existing loose
+ *  log is fchmod'd as well. */
+export function openDaemonLog(stateDir: string = STATE_DIR, logFile: string = LOG_FILE): number {
+  mkdirSecure(stateDir);
+  const fd = openSync(logFile, "a", SECRET_FILE_MODE);
+  try { fchmodSync(fd, SECRET_FILE_MODE); } catch { /* not ours — the 0700 dir is the belt */ }
+  return fd;
+}
+
 async function cmdStart(): Promise<number> {
   if (await probe()) {
     const st = readState();
@@ -196,8 +210,7 @@ async function cmdStart(): Promise<number> {
     console.log(`${bad} daemon source not found at ${SERVER_TS} — reinstall @fny/joy-daemon`);
     return 1;
   }
-  mkdirSync(STATE_DIR, { recursive: true });
-  const out = openSync(LOG_FILE, "a");
+  const out = openDaemonLog();
   // A `joy start` daemon is detached whatever shell it was started from: an
   // agent pane under the systemd unit inherits INVOCATION_ID, and the daemon
   // would record itself as service-launched (#502) — strip the supervisor

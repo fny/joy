@@ -3,7 +3,7 @@
 // and the whole thing is idempotent under a crash mid-import.
 import { test, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Ledger } from "./ledger";
@@ -617,5 +617,21 @@ test("with every record readable, an outbound entry whose v2 session no record m
   expect(logs.some((s) => s.includes("v2-outbound entry orphan has no local session (v2 v2-gone) — dropped"))).toBe(true);
   expect(existsSync(join(dir, "imported-v1", "v2-outbound.json"))).toBe(true);
   expect(l.getMeta("import_v1")).toBe("done");
+  l.close();
+});
+
+test("the window-record strip rewrites a 0644 record owner-only: v2SessionKey stays, the mode does not (#48 residual)", () => {
+  const file = join(dir, "window-abcdef12.json");
+  writeFileSync(file, JSON.stringify({ id: "abcdef12", launchCwd: "/repo", v2SessionId: "v2x", v2SessionKey: "s".repeat(44), transcriptCheckpoint: { path: "/t", offset: 10 } }));
+  chmodSync(file, 0o644);
+  expect(statSync(file).mode & 0o7777).toBe(0o644);
+  const l = Ledger.open(dir);
+  const r = importLegacyState(l, dir, { sealsContent: false });
+  expect(r.failed).toEqual([]);
+  expect(r.unmoved).toEqual([]);
+  expect(statSync(file).mode & 0o7777).toBe(0o600);
+  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ id: "abcdef12", launchCwd: "/repo", v2SessionId: "v2x", v2SessionKey: "s".repeat(44) });
+  expect(l.getCheckpoint("abcdef12", "claude_transcript")).toMatchObject({ ref: "/t", offset: 10 });
+  expect(readdirSync(dir).filter((n) => n.startsWith(".window-"))).toEqual([]); // no temp left behind
   l.close();
 });

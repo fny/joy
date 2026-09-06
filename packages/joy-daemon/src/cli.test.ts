@@ -1,7 +1,7 @@
 // CLI helpers that decide WHAT to launch and WHAT to signal. Pure functions
 // exported from cli.ts; the module's main() is gated off under vitest.
 import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, readFileSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, readFileSync, statSync, chmodSync, closeSync, writeSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import type { ProcessIdentity } from "./cli";
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
 delete process.env.JOY_SESSION_ID;
-const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, execMatches, processIdentity, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn } = await import("./cli");
+const { resolvePkgDir, looksLikeJoyDaemon, verifyDaemonPid, serverEntryOf, execMatches, processIdentity, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn, openDaemonLog } = await import("./cli");
 const { launcherFromEnv, processStartId } = await import("./daemonLauncher");
 const { joyStateDir } = await import("./paths");
 
@@ -1076,3 +1076,33 @@ describe("joy stop never signals a pid that is not the daemon (#495, live proces
   });
 });
 
+
+describe("joy start opens the state dir and daemon.log owner-only (#48 residual)", () => {
+  const mode = (p: string) => statSync(p).mode & 0o7777;
+  let umask: number;
+  beforeAll(() => { umask = process.umask(0); }); // the most permissive process: nothing may lean on the umask
+  afterAll(() => { process.umask(umask); });
+
+  test("under umask 000 the CLI's real opener creates a 0700 dir and a 0600 log, and the descriptor appends", () => {
+    const state = join(mkdtempSync(join(tmpdir(), "joy-cli-log-")), "state");
+    const log = join(state, "daemon.log");
+    const fd = openDaemonLog(state, log);
+    try { writeSync(fd, "[server] boot\n"); } finally { closeSync(fd); }
+    expect(mode(state)).toBe(0o700);
+    expect(mode(log)).toBe(0o600);
+    expect(readFileSync(log, "utf8")).toBe("[server] boot\n");
+  });
+
+  test("an already-existing 0666 log in a 0777 dir (an older CLI's) is tightened at open time, content kept", () => {
+    const state = join(mkdtempSync(join(tmpdir(), "joy-cli-log-")), "state");
+    mkdirSync(state, { mode: 0o777 }); chmodSync(state, 0o777);
+    const log = join(state, "daemon.log");
+    writeFileSync(log, "old lines\n"); chmodSync(log, 0o666);
+    expect(mode(log)).toBe(0o666);
+    const fd = openDaemonLog(state, log);
+    try { writeSync(fd, "new line\n"); } finally { closeSync(fd); }
+    expect(mode(state)).toBe(0o700);
+    expect(mode(log)).toBe(0o600);
+    expect(readFileSync(log, "utf8")).toBe("old lines\nnew line\n");
+  });
+});

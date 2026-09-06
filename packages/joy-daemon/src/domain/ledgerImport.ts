@@ -58,7 +58,7 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { Ledger, LedgerWriteError, type CommandState, type NewOutbound } from "./ledger";
-import { writeFileAtomic } from "./atomicWrite";
+import { writeSecretFileAtomic } from "./secretFile";
 import type { HandoffJob } from "./handoff";
 
 export interface ImportFailure { file: string; error: string; sessionId?: string }
@@ -225,7 +225,9 @@ export function importLegacyState(ledger: Ledger, stateDir: string, opts: Import
     // is replaced atomically or not at all. A failed rewrite leaves the old
     // fields in place; importRecordFields ignores them once the ledger has
     // its checkpoint, and the strip is retried next boot.
-    try { writeFileAtomic(rec.path, JSON.stringify(stripped)); }
+    // Through the secret writer (#48): the record keeps v2SessionKey, and
+    // preserveMode would carry a 0644 an older daemon wrote onto the rewrite.
+    try { writeSecretFileAtomic(rec.path, JSON.stringify(stripped)); }
     catch (e) { report.unmoved.push(file); log(`[ledger-import] ${file}: fields imported but the record could not be rewritten (${errMsg(e)}) — record left complete, stripped next boot`); }
     report.files.push(file);
   }

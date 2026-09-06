@@ -13,6 +13,7 @@
 // replaced by a 0600 inode) rather than preserved.
 
 import fs from "node:fs";
+import { join } from "node:path";
 import { writeFileAtomic, type AtomicWriteResult } from "./atomicWrite";
 
 /** Owner-only file: secrets, keys, prompt text. */
@@ -41,4 +42,19 @@ export function writeSecretFileAtomic(path: string, data: string | Uint8Array): 
  *  the driver created, a log opened elsewhere). Best effort. */
 export function chmodSecretQuiet(path: string): void {
   try { fs.chmodSync(path, SECRET_FILE_MODE); } catch { /* missing / not ours */ }
+}
+
+/** Boot-time pass over a secret-bearing directory an older daemon or CLI left
+ *  loose: the directory goes 0700 and every regular file directly inside it
+ *  0600 — the `*.replaced` credential generations `joy auth` renamed aside
+ *  (rename keeps the old mode, so a 0644 access.key stayed 0644 as a backup),
+ *  a daemon.log the CLI opened with the umask default, window records written
+ *  before the rule. Not recursive (the state dir is a child of the credential
+ *  dir and gets its own pass); symlinks are left alone. A missing directory
+ *  is nothing to do. Best effort throughout: a boot never fails on a chmod. */
+export function tightenSecretDir(dir: string): void {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  mkdirSecure(dir);
+  for (const e of entries) if (e.isFile()) chmodSecretQuiet(join(dir, e.name));
 }
