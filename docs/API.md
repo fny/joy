@@ -77,7 +77,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-status` | GET /status | Daemon + sessions snapshot |
 | `joy-notify` | POST /notify | Push notification to all devices |
 | `joy-send` | POST /send | Deliver text to a session (queue-routed). `from` (`joy:<id>` \| `cli` \| `app` \| `cron:<name>`) + optional `replyTo` make the DAEMON wrap the text in `<joy-message from=… reply-to=…>` and stamp `meta.from` on the mirrored record — the sender's own wrapper is stripped, a `joy:` sender must exist here. `exclusive` keeps the old refuse-if-busy scripting contract. Returns `queued_id`. Acceptance is durable: if the queue spool cannot be persisted the op returns `not_durable` (HTTP 503) and nothing is acknowledged or mirrored (#551; same for `queueAdd` and handoff notes) |
-| `joy-check` | GET /sessions/:id/check | `idle` \| `busy` (busySince) \| `needs_input` (held approvals, or a `<joy-options>` question) \| `ended`, plus queue depth and permissionMode — the one computation behind `joy check`/`wait`/`ask` |
+| `joy-check` | GET /sessions/:id/check | `idle` \| `busy` (busySince) \| `needs_input` (held approvals, a hook-reported `waiting` {kind, tool?, since} — claude's permission prompt / elicitation — or a `<joy-options>` question) \| `ended`, plus queue depth and permissionMode — the one computation behind `joy check`/`wait`/`ask` |
 | `joy-approvals` / `joy-approvals-answer` | GET/POST /sessions/:id/approvals | Held tool-call approvals (codex) and `{requestId, decision: allow\|deny}` |
 | `joy-env-list` / `joy-env-set` / `joy-env-unset` | GET /env · POST /env · DELETE /env/:name | The sealed environment store (`~/.joy/env.sealed`, AES-GCM under the machine key): names only out, values in; applied to `process.env` at boot and before EVERY spawn so all four agents inherit it. Also on the tunnel as `/v2/env` |
 | (stream) | GET /sessions/:id/events?after=&last=&follow=1 | NDJSON of the session's adapter records (`{seq, at, record}` — text, tool calls, turn lifecycle+usage, user rows with `meta.from`); first line `{hello, seq}`. Backs `joy events`, `wait`, `ask` |
@@ -112,7 +112,7 @@ annotations are incremental (permissive objects where absent).
 | `deleteFile` | POST /sessions/:id/deleteFile | Unlink one file (no trash). Files only — directories refused |
 | `listDirectory` / `getDirectoryTree` | POST /sessions/:id/… | FS browsing |
 | `ripgrep` / `difftastic` | POST /sessions/:id/… | Search / diff helpers. Argv is jailed: only an allow-list of options passes, path operands are validated against the cwd (+ read roots), option-like arguments that smuggle paths (`-f`, `--pre`, `-L`, `--ignore-file`, `-`) are refused (#537) |
-| `joy-hook` | POST /sessions/:id/hook | Claude hook events (PreCompact → "compacting" status) |
+| `joy-hook` | POST /sessions/:id/hook | Claude Code hook ingress (`event` + optional `session_id, transcript_path, prompt, prompt_id, message, source, trigger, permission_mode, notification_type, end_reason, error_type, tool_name, stop_hook_active`). Events: SessionStart, SessionEnd, UserPromptSubmit, Stop, StopFailure, PostToolUse, PermissionRequest, SubagentStop, Notification, PreCompact. The first event flips the session's hook-authority latch (FEATURES.md "Cross-cutting invariants") |
 | `compacting` | POST /sessions/:id/compacting | Hook-driven status flip |
 
 ## In-band slash commands (daemon-intercepted, never reach the model verbatim)
