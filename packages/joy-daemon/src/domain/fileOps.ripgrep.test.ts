@@ -11,6 +11,33 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleRipgrep, jailToolArgs, runTool } from "./fileOps";
+import { pidAlive } from "./bounded";
+
+/** kill -0: is `pid` still there (a reaped process is not)? Polls briefly
+ *  because init reaps a re-parented grandchild a moment after SIGKILL. */
+async function waitGone(pid: number, ms = 3_000): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (!pidAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return !pidAlive(pid);
+}
+/** Live libuv handles of the kinds a tool run creates. */
+function toolHandles(): number {
+  return process.getActiveResourcesInfo().filter((k) => k === "PipeWrap" || k === "ProcessWrap").length;
+}
+/** The handle count once it has stopped changing (an earlier test's pipes
+ *  can still be closing), so a before/after comparison is meaningful. */
+async function quiescentHandles(): Promise<number> {
+  let last = toolHandles();
+  for (let stable = 0; stable < 5;) {
+    await new Promise((r) => setTimeout(r, 40));
+    const now = toolHandles();
+    if (now === last) stable++; else { stable = 0; last = now; }
+  }
+  return last;
+}
 
 let dir: string;
 beforeEach(() => {
@@ -61,6 +88,28 @@ describe("handleRipgrep with no path operand (#538)", () => {
     const withPath = jailToolArgs("rg", ["needle", "src"], dir);
     expect(withPath.ok && withPath.pathOperands).toEqual(["src"]);
   });
+
+  it("a pattern that merely looks like --files is still a search (-e --files)", async () => {
+    // The mode is decided by the option parser: `--files` here is the VALUE
+    // of -e, so the run is a search and gets the default operand — it used
+    // to be read off the raw argv, so no `.` was appended and rg answered
+    // "no matches" from its closed stdin (#538 residual).
+    writeFileSync(join(dir, "src", "flag.txt"), "use --files to list\n");
+    const jailed = jailToolArgs("rg", ["-e", "--files"], dir);
+    expect(jailed.ok && jailed.mode).toBe("search");
+    const inline = jailToolArgs("rg", ["--regexp=--files"], dir);
+    expect(inline.ok && inline.mode).toBe("search");
+    const r = await handleRipgrep(dir, { args: ["-e", "--files"] } as never);
+    expect(r.success).toBe(true);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("flag.txt");
+    expect(r.stdout).toContain("use --files to list");
+    // And a real --files stays a listing (no operand injected, no pattern).
+    const list = jailToolArgs("rg", ["--files"], dir);
+    expect(list.ok && list.mode).toBe("list");
+    const clustered = jailToolArgs("rg", ["-ie", "--files"], dir);
+    expect(clustered.ok && clustered.mode).toBe("search");
+  }, 20_000);
 });
 
 describe("jailed tool runs are bounded (#538)", () => {
@@ -68,6 +117,39 @@ describe("jailed tool runs are bounded (#538)", () => {
     const r = await runTool("/bin/sh", ["-c", "sleep 30"], dir, undefined, 300);
     expect(r.timedOut).toBe(true);
     expect(r.exitCode).not.toBe(0);
+  }, 20_000);
+
+  it("terminates the whole process group, grandchild included, before settling", async () => {
+    // A shell whose background grandchild ignores SIGTERM and keeps the
+    // pipes open. Signalling only the direct child left that grandchild
+    // alive and writing after `timedOut` (#538 residual); the group kill
+    // must escalate to SIGKILL and the result must not arrive until the
+    // descendant is gone — with no pipe or process handle left behind.
+    const before = await quiescentHandles();
+    const started = Date.now();
+    // The grandchild ignores TERM (the disposition survives exec) and holds
+    // the inherited pipes without writing, so only SIGKILL ends it — a
+    // write would die of SIGPIPE once the pipes are destroyed and prove less.
+    const r = await runTool(
+      "/bin/sh",
+      ["-c", "sh -c 'trap \"\" TERM; exec sleep 30' & echo \"pid=$!\"; wait"],
+      dir, undefined, 300,
+    );
+    expect(r.timedOut).toBe(true);
+    expect(r.exitCode).toBe(-1);
+    // Settled only after the grace period ran out and SIGKILL was sent.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2_300);
+    const m = /pid=(\d+)/.exec(r.stdout);
+    expect(m, r.stdout).not.toBeNull();
+    const grandchild = Number(m![1]);
+    // kill -0 on the grandchild: gone when the promise settled (the short
+    // poll only covers init reaping the already-killed, re-parented process).
+    expect(await waitGone(grandchild, 500)).toBe(true);
+    // Nothing retained: the destroyed pipes and the process handle close on
+    // the next turns of the loop.
+    const settledBy = Date.now() + 2_000;
+    while (toolHandles() > before && Date.now() < settledBy) await new Promise((res) => setTimeout(res, 20));
+    expect(toolHandles()).toBe(before);
   }, 20_000);
 
   it("does not flag a run that finished in time", async () => {
