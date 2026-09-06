@@ -491,7 +491,7 @@ export class SessionCoordinator {
     }, "cancel");
     const after = this.#emitCommand(commandId);
     const actor = this.#actors.get(row.sessionId);
-    if (after?.state === "cancelling" && actor) this.#scheduleInterrupt(actor, commandId, 0);
+    if (after?.state === "cancelling" && row.state !== "cancelling" && actor) this.#scheduleInterrupt(actor, commandId, 0); // once, on the transition: a repeated cancel does not re-fire the interrupt
     if (actor) this.#pump(actor.sessionId);
     return { kind: after?.state === "cancelled" ? "cancelled" : "cancelling", state: after?.state ?? null };
   }

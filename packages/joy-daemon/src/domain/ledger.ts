@@ -778,6 +778,10 @@ export class Ledger {
   sessionsWithOutbound(): string[] {
     return this.#all("SELECT DISTINCT session_id FROM outbox WHERE acked_at IS NULL ORDER BY session_id").map((r) => r.session_id as string);
   }
+  /** Was a row with this runtime event id ever committed (acked or not)? */
+  hasOutboundEvent(runtimeEventId: string): boolean {
+    return !!this.#get("SELECT 1 AS x FROM outbox WHERE runtime_event_id=?", runtimeEventId);
+  }
   hasTerminalFor(relayTurnId: string): boolean {
     return !!this.#get("SELECT 1 AS x FROM outbox WHERE kind='terminal' AND relay_turn_id=? AND acked_at IS NULL", relayTurnId);
   }

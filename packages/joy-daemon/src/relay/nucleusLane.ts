@@ -4,9 +4,11 @@
 // onto the SAME session machinery every other transport uses:
 //
 //   spawn_session offer → registry.create() → bind (spawnCommandId)
-//   prompt offer        → session.enqueue() → busy()/chat-log observation
-//                          → output facts (per assistant message) → terminal
-//   cancel offer        → session.abort() → terminal(cancelled)
+//   prompt offer        → coordinator.accept(relayTurnId) → wait(running) →
+//                          /start → output facts → wait(terminal) → terminal
+//                          (the command's state IS the turn's outcome)
+//   cancel offer        → coordinator.cancel(command) → the interrupt is
+//                          retried until confirmed → terminal(cancelled)
 //
 // Each message travels exactly one lane (the one it was posted on), so a
 // prompt is never delivered twice.
@@ -30,17 +32,15 @@ import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, type WireRecord } from "./relay";
 import { OutboxSender, type PostResult } from "./outbox";
-import { ledgerFor, LedgerWriteError, type NewOutbound, type OutboxRow } from "../domain/ledger";
+import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
+import { coordinatorFor } from "../domain/coordinator";
 import { writeAttachmentToCwd } from "../domain/attachments";
-import { queueFor } from "../domain/queueFacade";
+import { queueFor, isTerminal, type LegacyWaitEnv } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
-const POLL_MS = 500;              // chat-log / busy() observation cadence
-const IDLE_DEBOUNCE_POLLS = 3;    // busy() must stay false this long = turn over
-const DISPATCH_TIMEOUT_MS = 60_000;
 const TURN_CAP_MS = 30 * 60_000;  // hard stop: a turn stuck past this is interrupted
 const ACQUIRE_RETRY_MS = 60_000;
 
@@ -263,28 +263,29 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // v2 sessionId → content key. Generated at spawn, persisted in the window
   // record, reloaded on restart. Absent entry = plaintext (legacy) session.
   const sessionKeys = new Map<string, Uint8Array>();
-  // turnIds currently executing here (guards the received→submitted re-offer
-  // window) and turnIds a control-lane cancel has targeted.
+  const coordinator = coordinatorFor(ledger);
+  // turnIds with a live loop here (guards the received→submitted re-offer
+  // window and the boot resume pass).
   const inFlight = new Set<string>();
-  const cancelRequested = new Set<string>();
-  // Executing turns: what cancel/cleanup needs to stop LOCAL work too —
-  // terminalizing the relay alone leaves a queued prompt to fire later.
-  const activeTurns = new Map<string, { localId: string; queuedId: string | null; lease: Lease; started?: boolean; outcome?: string }>();
+  // Executing turns → the local session + the command that carries them:
+  // output rows are tagged with their turn, and a cancel for a turn whose
+  // adapter is still legacy (claude) needs the item to pluck.
+  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; cancelled: boolean }>();
+  // Turns whose attachments are still being materialized: the one window
+  // before the command row exists, so a cancel there aborts the preparation.
+  const preparing = new Map<string, () => void>();
+  // Legacy adapters only: the adapter's own verdict on the running turn
+  // (its turn-end status), read by the pre-C2 wait heuristics (#584).
+  const legacyOutcome = new Map<string, string>();
   // local session id → v2 session id (the inverse of `bound`), for the
   // record sink, which only knows the local id.
   const boundByLocal = new Map<string, string>();
-  // Cancels already acted on, keyed by target turn. The relay re-offers an
-  // outstanding cancel command every control claim until the turn
+  // Cancels for turns with NO command row and no loop here (a legacy
+  // adapter's turn after a restart), keyed by target turn: the relay
+  // re-offers an outstanding cancel every control claim until the turn
   // terminalizes — without this dedup the SAME abort fired dozens of times
-  // (observed: 61×, including once after terminalization) and the control
-  // loop hot-spun on the standing offer.
+  // (observed: 61×). Turns with a row dedupe on the durable cancel flag.
   const handledCancels = new Set<string>();
-  /** Turn → earliest time to retry a cancel whose interrupt failed. The relay
-   *  re-offers a received cancel instantly while the turn is nonterminal, so
-   *  a busy adapter refusing the interrupt drove claim/receipt/abort at their
-   *  completion rate with no pause (Astra on e9e4ff52, #8). */
-  const cancelRetryAt = new Map<string, number>();
-  const CANCEL_RETRY_MS = 3_000;
   // Turns we can't run (no local session / undecodable) — logged once, not
   // per re-offer, so a stranded turn doesn't spam the journal every claim.
   const notedSkips = new Set<string>();
@@ -584,7 +585,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // solely because no cancel was requested — a provider error the adapter
     // had already reported as failed was relayed as a success.
     const ev = (wire.content as { data?: { ev?: { t?: string; status?: string } } } | undefined)?.data?.ev;
-    if (turnEntry && turnEntry[1].started && ev?.t === "turn-end" && typeof ev.status === "string") turnEntry[1].outcome = ev.status;
+    if (turnEntry && turnEntry[1].started && ev?.t === "turn-end" && typeof ev.status === "string") legacyOutcome.set(localId, ev.status);
     const row: NewOutbound = {
       sessionId: localId, kind: "output", body: wire,
       runtimeEventId: recLocalId ? `rec:${recLocalId}` : `rec:${bootNonce}:${randomUUID()}`,
@@ -1169,42 +1170,56 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // the turn (submitted → failed) instead of dispatching a truncated ask.
       let text = prompt.text;
       const writtenAttachments: string[] = [];
+      const dropFiles = () => { for (const abs of writtenAttachments.splice(0)) { try { unlinkSync(abs); } catch { /* already gone */ } } };
       if (prompt.attachments.length) {
         // The relay validated + pinned the OUTER id list (the offer); the
         // sealed citations are what the sender meant. Only their intersection
         // is trusted: a citation the relay never saw for this session is
         // refused rather than fetched on account scope alone.
-        // Register the turn NOW so a control-lane cancel that lands during
-        // the download has something to mark; the prompt is checked against
-        // cancelRequested again right before it is enqueued (#77).
-        activeTurns.set(turnId, { localId: sess.id, queuedId: null, lease: leaseRef });
+        // The download is the one window before the command row exists: a
+        // control-lane cancel that lands during it aborts the preparation
+        // here (nothing is ever accepted, the files come back out); from the
+        // accept on, a cancel is the coordinator's durable flag (#77).
+        let cancelledWhilePreparing = false;
+        preparing.set(turnId, () => { cancelledWhilePreparing = true; });
         const authorized = new Set((offer.attachments ?? []).map((x) => x.id));
         const paths: string[] = [];
-        const written: string[] = writtenAttachments;
         // Half-materialized prompts are worse than none — a failed turn must
         // not leave files the agent never heard about in the cwd.
         const fail = async (reason: string, a: PromptAttachment) => {
-          for (const abs of written) { try { unlinkSync(abs); } catch { /* already gone */ } }
+          dropFiles();
           await postTerminal(turnId, sess.id, {
             type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason, attachmentId: a.id },
           }, leaseRef);
           log(`turn ${turnId.slice(0, 8)}: ${reason} (${a.name}) → failed`);
         };
-        for (const a of prompt.attachments) {
-          if (!authorized.has(a.id)) return fail("attachment_not_authorized", a);
-          let path: string | null = null;
-          let reason = "attachment_fetch_failed";
-          try {
-            const sealed = await fetchAttachment(a.id);
-            const bytes = openAttachmentBytes(sealed, sessionKeys.get(offer.sessionId));
-            if (bytes) { reason = "attachment_write_failed"; path = writeAttachmentToCwd(sess.cwd, bytes, a.name); }
-            else reason = "attachment_open_failed";
-          } catch (e) {
-            log(`turn ${turnId.slice(0, 8)}: attachment ${a.id.slice(0, 8)} (${a.name}): ${(e as Error).message}`);
+        try {
+          for (const a of prompt.attachments) {
+            if (!authorized.has(a.id)) return fail("attachment_not_authorized", a);
+            let path: string | null = null;
+            let reason = "attachment_fetch_failed";
+            try {
+              const sealed = await fetchAttachment(a.id);
+              if (cancelledWhilePreparing) break;
+              const bytes = openAttachmentBytes(sealed, sessionKeys.get(offer.sessionId));
+              if (bytes) { reason = "attachment_write_failed"; path = writeAttachmentToCwd(sess.cwd, bytes, a.name); }
+              else reason = "attachment_open_failed";
+            } catch (e) {
+              log(`turn ${turnId.slice(0, 8)}: attachment ${a.id.slice(0, 8)} (${a.name}): ${(e as Error).message}`);
+            }
+            if (cancelledWhilePreparing) break;
+            if (!path) return fail(reason, a);
+            paths.push(path);
+            writtenAttachments.push(join(sess.cwd, path.slice(2)));
           }
-          if (!path) return fail(reason, a);
-          paths.push(path);
-          written.push(join(sess.cwd, path.slice(2)));
+        } finally { preparing.delete(turnId); }
+        if (cancelledWhilePreparing) {
+          // Cancelled while we were preparing it: never accepted, and the
+          // files we materialized for it come back out.
+          dropFiles();
+          await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "cancelled_before_enqueue" } }, leaseRef);
+          log(`turn ${turnId.slice(0, 8)}: cancelled before enqueue → cancelled`);
+          return;
         }
         const uncited = [...authorized].filter((id) => !prompt.attachments.some((a) => a.id === id));
         if (uncited.length) log(`turn ${turnId.slice(0, 8)}: ${uncited.length} offered attachment(s) not cited in the sealed prompt — ignored`);
@@ -1212,57 +1227,42 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         log(`turn ${turnId.slice(0, 8)}: materialized ${paths.length} attachment(s) in ${sess.cwd}`);
       }
 
-      // (declared above the attachment block so the cancel path can clean up)
-      // Watermark the chat log BEFORE dispatch: everything the session's
-      // agent says after this point belongs to this turn.
-      const history = registry.chatHistory();
-      let watermark = history.length ? Number(history[history.length - 1].id) : -1;
+      // The command row carries the relay turn: a re-offer dedupes on it and
+      // every later line for this turn names the session AND the command, so
+      // "turn X completed" can be tied to the message it carried.
+      legacyOutcome.delete(sess.id);
+      const accepted = queueFor(sess).accept(text, { source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: turnId, relayCommandId: offer.commandId });
+      activeTurns.set(turnId, { localId: sess.id, commandId: accepted.id, lease: leaseRef, started: false, cancelled: false });
+      const tag = `turn ${turnId.slice(0, 8)} [${sess.id}/${accepted.id}]`;
 
-      if (cancelRequested.has(turnId)) {
-        // Cancelled while we were preparing it (attachments): never enqueue,
-        // and take back the files we materialized for it.
-        for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } }
-        await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "cancelled_before_enqueue" } }, leaseRef);
-        log(`turn ${turnId.slice(0, 8)}: cancelled before enqueue → cancelled`);
-        return;
-      }
-      // The command row carries the relay turn: a coordinator-driven session
-      // dedupes a re-offer on it and its terminal can be tied back to it.
-      const queued = queueFor(sess).accept(text, { source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: turnId, relayCommandId: offer.commandId });
-      activeTurns.set(turnId, { localId: sess.id, queuedId: queued?.id ?? null, lease: leaseRef });
-      if (cancelRequested.has(turnId) && queued?.id) { try { queueFor(sess).cancel(queued.id); } catch { /* stub adapters */ } }
-      // Every later line for this turn names the session AND the local queue
-      // item, so "turn X completed" can be tied to the message it carried.
-      const tag = `turn ${turnId.slice(0, 8)} [${sess.id}/${queued?.id ?? "?"}]`;
-
-      // A joy-owned slash command (/title, /steer, …) is executed by enqueue and
-      // never queued, so there is no dispatch to wait for. Close the turn now:
-      // parked in the gates below it would sit until some UNRELATED activity
-      // flipped busy(), then hold the session's relay execution slot with every
-      // later message stuck behind it (live 2026-09-03).
-      if (queued?.handled === "command") {
+      // A joy-owned slash command (/title, /joy-prompt, …) is executed at
+      // accept time and never dispatched, so there is no delivery to wait
+      // for. Close the turn now: parked in the gates below it would hold the
+      // session's relay execution slot with every later message stuck
+      // behind it (live 2026-09-03).
+      if (accepted.handled === "command") {
         try {
           await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
         } catch (e) {
           if ((e as { status?: number }).status === 409) {
             // The relay refuses the start (cancelled): a /joy-prompt may have
-            // enqueued its reinjection already — pluck it, then say cancelled.
-            const rein = (queued as { reinjectionId?: string }).reinjectionId;
+            // queued its reinjection already — cancel it, then say cancelled.
+            const rein = accepted.reinjectionId;
             let plucked = false;
             if (rein) { try { plucked = queueFor(sess).cancel(rein); } catch { /* stub adapters */ } }
-            // A reinjection that was already admitted (cancelQueued found
-            // nothing) is interrupted like an ordinary rejected start. A command
-            // that enqueued no work (/title) aborts nothing — that interrupted an
+            // A reinjection already admitted (nothing left to pluck) is
+            // interrupted like an ordinary rejected start. A command that
+            // queued no work (/title) aborts nothing — that interrupted an
             // unrelated terminal-started turn (Astra on 995abbf6).
             if (rein && !plucked) { try { await sess.abort(); } catch { /* pane teardown */ } }
-            for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } }
+            dropFiles();
             await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: sessionGone(e) ?? "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
             log(`${tag}: /start refused for a handled command (${sessionGone(e) ?? "cancelled"}) → cancelled`);
             return;
           }
           throw e;
         }
-                await postTerminal(turnId, sess.id, {
+        await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "completed", runtimeEventId: randomUUID(),
           meta: { reason: "handled_as_command" },
         }, leaseRef);
@@ -1270,188 +1270,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         return;
       }
       log(`${tag}: prompt staged (chars=${text.length})`);
-
-      /** Terminalize the relay AND stop the local work — a failed turn whose
-       *  prompt stays queued locally would execute later anyway (and again
-       *  on a human retry). cancelQueued is claude-precise; the other
-       *  adapters stub it (their inbound can't be plucked), so abort() is
-       *  the fallback hammer when the turn already started. */
-      const failTurn = async (reason: string, { abortLocal = false } = {}) => {
-        try { if (queued?.id) queueFor(sess).cancel(queued.id); } catch { /* stub adapters */ }
-        if (abortLocal) { try { await sess.abort(); } catch { /* pane teardown */ } }
-        await postTerminal(turnId, sess.id, {
-          type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
-          meta: { reason },
-        }, leaseRef);
-        log(`${tag}: ${reason} → failed`);
-      };
-      // Chat rows carry session_id = the LOCAL id for codex/opencode/pi but
-      // the CLAUDE TRANSCRIPT UUID for claude (and that uuid can change on
-      // resume) — match either, reading claudeSessionId live each time.
-      const isOurs = (m: { session_id?: string }) =>
-        m.session_id === sess.id || (!!sess.claudeSessionId && m.session_id === sess.claudeSessionId);
-      // Peek (without consuming) for assistant output past the watermark —
-      // the cross-adapter "the agent is actually doing something" signal.
-      const activitySince = () => registry.chatHistory().some((m) =>
-        Number(m.id) > watermark && isOurs(m as { session_id?: string }) && m.role === "assistant");
-
-      // Phase A — OUR prompt reaches the agent.
-      //
-      // The authoritative signal is the adapter's per-item delivery state, when
-      // it has one (claude): it answers about THIS message. The old heuristic
-      // asked `pendingCount === 0 || busy()`, and for claude busy() is true from
-      // ENQUEUE onward — so A passed instantly on our own staging, B passed on
-      // the same flag, and C then terminalized `completed` the moment the
-      // session went idle. A prompt that never got typed was reported to the
-      // relay as a finished turn: silent loss, seen live 2026-09-03 (`turn
-      // 7a017583 completed` with no `[dispatch] typed` line for its item).
-      //
-      // Adapters with no per-item tracking (codex/opencode/pi) keep the
-      // heuristic — pendingCount is the one queue signal all of them fill.
-      const qid = queued?.id ?? null;
-      const itemState = (): string => (qid ? queueFor(sess).itemState(qid) : "unknown");
-      const tracked = itemState() !== "unknown";
-      // A message legitimately queued behind a long turn must NOT time out, so
-      // the tracked path waits as long as the turn itself may run.
-      const dispatchDeadline = Date.now() + (tracked ? TURN_CAP_MS : DISPATCH_TIMEOUT_MS);
-      let deliveryProven = false;
-      for (;;) {
-        relive();
-        const qs = queueFor(sess).state();
-        if (qs.paused) return failTurn("queue_paused");
-        if (tracked) {
-          const st = itemState();
-          if (st === "delivered") { deliveryProven = true; break; }
-          if (st === "unknown") {
-            // The item left the queue without recording an outcome — a confirm
-            // path we don't know about. NEVER hang on that: fall back to the
-            // flag heuristic for this turn. (Waiting instead parked turns in
-            // `dispatching` for the full cap and wedged the session — my own
-            // regression, caught live 2026-09-03 within the hour.)
-            log(`${tag}: delivery state lost — falling back to activity signals`);
-            break;
-          }
-          if (st === "cancelled") {
-            // Plucked locally (a cancel, an abort, a session teardown). The
-            // prompt will never run — say so instead of reporting `completed`.
-            await postTerminal(turnId, sess.id, {
-              type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(),
-              meta: { reason: "prompt_cancelled_locally" },
-            }, leaseRef);
-            log(`${tag}: prompt cancelled before delivery → cancelled`);
-            return;
-          }
-          if (st === "failed") {
-            // The harness answered and refused the prompt (opencode 4xx/5xx):
-            // terminal, and it must not be retried on unrelated intake (#79).
-            await postTerminal(turnId, sess.id, {
-              type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
-              meta: { reason: "prompt_rejected_by_agent" },
-            }, leaseRef);
-            log(`${tag}: prompt rejected by the agent → failed`);
-            return;
-          }
-        } else if (qs.pendingCount === 0 || sess.busy()) break;
-        if (Date.now() > dispatchDeadline) return failTurn("dispatch_timeout");
-        await sleep(POLL_MS);
-      }
-
-      // Phase B — evidence the turn is RUNNING before we tell the relay so.
-      // A proven delivery IS that evidence: the message was typed, submitted and
-      // echo-confirmed. Otherwise fall back to the flags — codex/opencode/pi flip
-      // busy() (= thinking) asynchronously after the harness accepts the submit,
-      // and without this gate a turn read "completed" in one debounce window
-      // before the agent ever started.
-      if (deliveryProven) {
-        log(`${tag}: started (delivery confirmed)`);
-      } else {
-        const startDeadline = Date.now() + 180_000;
-        for (;;) {
-          relive();
-          if (cancelRequested.has(turnId)) {
-            // Restarted before the agent ever started on it: the prompt died
-            // with the process. Say cancelled now, not no_agent_activity in
-            // three minutes.
-            await postTerminal(turnId, sess.id, {
-              type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(),
-              meta: { reason: "restarted_before_start" },
-            }, leaseRef);
-            log(`${tag}: restarted before start → cancelled`);
-            return;
-          }
-          if (sess.busy()) { log(`${tag}: started (busy)`); break; }
-          if (activitySince()) { log(`${tag}: started (agent output)`); break; }
-          if (queueFor(sess).state().paused) return failTurn("queue_paused");
-          if (Date.now() > startDeadline) return failTurn("no_agent_activity");
-          await sleep(POLL_MS);
-        }
-      }
-      try {
-        await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
-      } catch (e) {
-        const st = (e as { status?: number }).status;
-        if (st === 409) {
-          // The relay refuses the start — typically turn_cancelled from a
-          // cancellation that beat the control offer here. The prompt is
-          // already admitted locally: pluck it and abort, then say cancelled
-          // (Astra, #77).
-          // Same for session_archived / session_failed (#614): the session is
-          // over, the admitted prompt is plucked, and the in-flight
-          // (dispatching) turn is closed with a `cancelled` terminal — the
-          // relay leaves executing turns to their owner. Never `failed`.
-          if (queued?.id) { try { queueFor(sess).cancel(queued.id); } catch { /* stub adapters */ } }
-          try { await sess.abort(); } catch { /* pane teardown */ }
-          for (const abs of writtenAttachments) { try { unlinkSync(abs); } catch { /* already gone */ } } // the prompt never runs: its files go too
-          await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: sessionGone(e) ?? "start_rejected", detail: (e as Error).message.slice(0, 200) } }, leaseRef);
-          log(`${tag}: /start refused (${(e as Error).message}) → admitted prompt plucked + aborted → cancelled`);
-          return;
-        }
-        throw e;
-      }
-      { const t = activeTurns.get(turnId); if (t) t.started = true; } // adapter verdicts count from here (#584)
-
-      // Observe until the session has been idle for IDLE_DEBOUNCE_POLLS
-      // consecutive polls. The turn's CONTENT no longer comes from here: the
-      // adapter records (text, tool calls, turn lifecycle + usage) flow
-      // through forwardRecord as they are produced; the chat log is only the
-      // cross-adapter activity signal that keeps the watermark honest.
-      const capDeadline = Date.now() + TURN_CAP_MS;
-      let idlePolls = 0;
-      for (;;) {
-        relive();
-        for (const m of registry.chatHistory()) {
-          const id = Number(m.id);
-          if (id > watermark) watermark = id;
-        }
-        if (queueFor(sess).state().paused) return failTurn("queue_paused");
-        if (cancelRequested.has(turnId) && sess !== session) break; // replaced under us: over
-        if (sess.busy()) idlePolls = 0;
-        else if (++idlePolls >= IDLE_DEBOUNCE_POLLS) break;
-        if (Date.now() > capDeadline) {
-          // Stop the REAL agent too — reporting interrupted while the agent
-          // keeps burning would be a lie with a bill attached.
-          try { await sess.abort(); } catch { /* pane teardown */ }
-                    await postTerminal(turnId, sess.id, {
-            type: "terminal", terminalState: "interrupted", runtimeEventId: randomUUID(),
-            meta: { reason: "turn_cap" },
-          }, leaseRef);
-          log(`${tag}: 30min cap → interrupted (agent aborted)`);
-          return;
-        }
-        await sleep(POLL_MS);
-      }
-
-      // Idle says execution STOPPED; the adapter's turn-end says how (#584).
-      const outcome = activeTurns.get(turnId)?.outcome;
-      const terminalState = cancelRequested.has(turnId) ? "cancelled"
-        : outcome === "failed" ? "failed"
-        : outcome === "cancelled" ? "cancelled"
-        : "completed";
-      const meta = terminalState !== "completed" && !cancelRequested.has(turnId) ? { reason: `agent_reported_${outcome}` } : undefined;
-      await postTerminal(turnId, sess.id, {
-        type: "terminal", terminalState, runtimeEventId: randomUUID(), ...(meta ? { meta } : {}),
-      }, leaseRef);
-      log(`${tag} ${terminalState}${meta ? ` (${meta.reason})` : ""}`);
+      await driveTurn(turnId, sess.id, accepted.id, leaseRef, { startPosted: false, dropFiles, tag });
     } catch (e) {
       log(`turn ${turnId.slice(0, 8)} error: ${String(e)}`);
       // Best-effort: leave the relay a terminal instead of a forever-running
@@ -1465,51 +1284,192 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       } catch { /* covered by lease-expiry orphaning */ }
     } finally {
       inFlight.delete(turnId);
-      cancelRequested.delete(turnId);
       activeTurns.delete(turnId);
       handledCancels.delete(turnId);
-      cancelRetryAt.delete(turnId);
     }
   }
+
+  /** The turn's terminal fact from the command's state: failed stays
+   *  failed, interrupted stays interrupted (#463); the command's terminal
+   *  reason is the fact's `meta.reason`. */
+  const terminalBody = (state: CommandState, reason?: string | null): Record<string, unknown> => ({
+    type: "terminal", terminalState: state, runtimeEventId: randomUUID(),
+    ...(state !== "completed" && reason ? { meta: { reason } } : {}),
+  });
+
+  /** Drive an accepted command's relay turn to its terminal: wait for the
+   *  command to run (its delivery is proven by the driver's echo — no
+   *  "busy()" guess, no 180 s activity gate), POST /start, wait for the
+   *  terminal state and post it. The states are the ledger's, so this loop
+   *  can be resumed from the row after a daemon restart (R13). */
+  async function driveTurn(turnId: string, localId: string, commandId: string, leaseRef: Lease, opts: { startPosted: boolean; dropFiles?: () => void; tag: string }): Promise<void> {
+    const { tag } = opts;
+    const sessionNow = () => registry.get(localId);
+    // `queueFor` on the CURRENT object under the id (a restart replaces it);
+    // without one, the command is still the coordinator's.
+    const q = () => queueFor(sessionNow() ?? ({ id: localId } as AgentSession));
+    const env: LegacyWaitEnv = {
+      session: sessionNow,
+      outcome: () => legacyOutcome.get(localId),
+      cancelled: () => activeTurns.get(turnId)?.cancelled === true,
+    };
+    const finish = async (state: CommandState, reason?: string | null) => {
+      if (state !== "completed") opts.dropFiles?.();
+      await postTerminal(turnId, localId, terminalBody(state, reason), leaseRef);
+      log(`${tag} ${state}${state !== "completed" && reason ? ` (${reason})` : ""}`);
+    };
+    if (!opts.startPosted) {
+      // Phase A — OUR prompt reaches the agent and its turn is running. A
+      // message legitimately queued behind a long turn must not time out,
+      // so the wait is as long as the turn itself may run.
+      const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: TURN_CAP_MS, legacy: env });
+      if (r.state === null) return finish("failed", "command_lost");
+      if (isTerminal(r.state)) return finish(r.state, r.reason);
+      if (r.state !== "running") {
+        // Still not delivered at the cap: nothing will run it now.
+        q().cancel(commandId);
+        try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
+        return finish("failed", "dispatch_timeout");
+      }
+      log(`${tag}: started (delivery confirmed)`);
+      try {
+        await api("POST", `/daemon/turns/${turnId}/start`, { runtimeEventId: randomUUID() }, leaseRef);
+      } catch (e) {
+        const st = (e as { status?: number }).status;
+        if (st === 409) {
+          // The relay refuses the start — typically turn_cancelled from a
+          // cancellation that beat the control offer here, or the session
+          // is over (#614). The prompt is running locally: cancel it (the
+          // coordinator interrupts and retries) and say cancelled — never
+          // `failed`; the relay leaves executing turns to their owner.
+          q().cancel(commandId);
+          try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
+          await finish("cancelled", sessionGone(e) ?? "start_rejected");
+          log(`${tag}: /start refused (${(e as Error).message}) → cancelled locally`);
+          return;
+        }
+        throw e;
+      }
+    }
+    { const t = activeTurns.get(turnId); if (t) t.started = true; } // adapter verdicts count from here (#584)
+
+    // Phase C — the command's terminal IS the turn's: completed/failed from
+    // the runtime's turn-end, cancelled once the interrupt is confirmed,
+    // interrupted on idle-without-terminal, a restart or a kill (#463).
+    const done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: TURN_CAP_MS, legacy: env });
+    if (done.state === null) return finish("failed", "command_lost");
+    if (!isTerminal(done.state)) {
+      // Stop the REAL agent too — reporting interrupted while the agent
+      // keeps burning would be a lie with a bill attached.
+      q().cancel(commandId);
+      try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
+      await finish("interrupted", "turn_cap");
+      log(`${tag}: 30min cap → interrupted (agent aborted)`);
+      return;
+    }
+    await finish(done.state, done.reason);
+  }
+
+  /** A relay turn the ledger still carries for a session with no loop here
+   *  (the previous daemon accepted it): pick it up where its state says. */
+  async function resumeTurn(row: CommandRow, leaseRef: Lease): Promise<void> {
+    const turnId = row.relayTurnId!;
+    if (inFlight.has(turnId)) return;
+    inFlight.add(turnId);
+    const started = row.state === "running" || row.state === "cancelling";
+    activeTurns.set(turnId, { localId: row.sessionId, commandId: row.id, lease: leaseRef, started, cancelled: false });
+    const tag = `turn ${turnId.slice(0, 8)} [${row.sessionId}/${row.id}]`;
+    log(`${tag}: resumed from the ledger (${row.state})`);
+    try {
+      await driveTurn(turnId, row.sessionId, row.id, leaseRef, { startPosted: started, tag });
+    } catch (e) {
+      log(`${tag} error: ${String(e)}`);
+      try { await postTerminal(turnId, row.sessionId, { type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason: "lane_error", detail: String(e).slice(0, 300) } }, leaseRef); } catch { /* lease-expiry orphaning */ }
+    } finally {
+      inFlight.delete(turnId);
+      activeTurns.delete(turnId);
+      handledCancels.delete(turnId);
+    }
+  }
+
+  /** Boot (R13): every relay turn the ledger holds for a coordinator-driven
+   *  session gets its loop back, and a terminal reached while no loop was
+   *  alive (a kill, a restart's interrupted{restart}) gets its terminal row.
+   *  The row's id is the stable `term:<turn>`, so this never doubles one. */
+  function resumeLedgerTurns(leaseRef: Lease): void {
+    const sessions = (registry as { list?: () => AgentSession[] }).list?.() ?? [];
+    for (const s of sessions) {
+      if (s.enqueue) continue; // a legacy adapter's relay turns died with the previous daemon
+      for (const row of ledger.listCommands(s.id)) {
+        if (!row.relayTurnId) continue;
+        if (isTerminalState(row.state)) {
+          if (!ledger.hasOutboundEvent(`term:${row.relayTurnId}`)) void postTerminal(row.relayTurnId, s.id, terminalBody(row.state, row.terminalReason), leaseRef);
+          continue;
+        }
+        if (!inFlight.has(row.relayTurnId)) void resumeTurn(row, leaseRef);
+      }
+    }
+  }
+  /** Is a relay turn's command still pending in the ledger (a worker here)? */
+  const pendingLedgerTurn = (turnId: string): boolean => { const r = ledger.commandForRelayTurn(turnId); return !!r && !isTerminalState(r.state); };
 
   /** Returns true when this offer was NEW (acted on), false for a re-offer
    *  of a cancel we already handled — the caller uses that to back off. */
   async function handleCancel(offer: ControlOffer, leaseRef: Lease): Promise<boolean> {
-    if (handledCancels.has(offer.targetTurnId)) return false;
-    const retryAt = cancelRetryAt.get(offer.targetTurnId);
-    if (retryAt !== undefined) { if (Date.now() < retryAt) return false; cancelRetryAt.delete(offer.targetTurnId); }
+    const turnId = offer.targetTurnId;
     // Mark handled only AFTER the receipt ack lands — a transient /received
     // failure must leave the offer eligible for the relay's re-offer, not
-    // suppressed until turn cleanup. (Offers arrive sequentially per claim,
-    // so the check-then-mark gap cannot double-fire within one loop.)
+    // suppressed until turn cleanup.
     await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
-    handledCancels.add(offer.targetTurnId);
-    cancelRequested.add(offer.targetTurnId);
+    // A turn with a command row: the cancel is the row's durable flag (R9).
+    // Queued → cancelled at once; running → cancelling, the coordinator
+    // interrupts and retries until the runtime confirms (R10). A re-offer of
+    // a cancel already requested is not new work.
+    const row = ledger.commandForRelayTurn(turnId);
+    if (row) {
+      if (isTerminalState(row.state)) return false;
+      const fresh = row.cancelRequestedAt == null;
+      if (!fresh) return false;
+      const r = coordinator.cancel(row.id);
+      const ctx = activeTurns.get(turnId);
+      if (ctx) ctx.cancelled = true;
+      log(`cancel ${turnId.slice(0, 8)}: ${row.id} ${r.kind}`);
+      return true;
+    }
+    // Still materializing attachments: abort the preparation (never accepted).
+    const prep = preparing.get(turnId);
+    if (prep) { prep(); log(`cancel ${turnId.slice(0, 8)}: aborted during attachment download`); return true; }
+    // A legacy adapter's turn: pluck the queued item, then abort the session.
+    const ctx = activeTurns.get(turnId);
+    if (ctx) {
+      if (ctx.cancelled) return false;
+      ctx.cancelled = true;
+      const s = registry.get(ctx.localId);
+      if (s) {
+        if (ctx.commandId) { try { queueFor(s).cancel(ctx.commandId); } catch { /* stub adapters */ } }
+        let aborted = false; let why = "";
+        try { const r = await s.abort(); aborted = r.ok !== false; why = r.error ?? ""; } catch (e) { why = e instanceof Error ? e.message : String(e); }
+        if (!aborted) {
+          // The interrupt did not land: leave this cancel UNHANDLED so the
+          // relay's re-offer retries it instead of the log claiming success (#8).
+          ctx.cancelled = false;
+          log(`cancel ${turnId.slice(0, 8)}: abort failed (${why}) — the re-offer retries`);
+          return false;
+        }
+        log(`cancel ${turnId.slice(0, 8)}: queued plucked + abort sent`);
+      }
+      return true;
+    }
+    // A turn we are NOT running (a legacy adapter restarted mid-turn): abort
+    // whatever the session is doing, once; the turn resolves when it is
+    // reconciled or retried.
+    if (handledCancels.has(turnId)) return false;
+    handledCancels.add(turnId);
     const session = localSession(offer.sessionId);
     if (session) {
-      // Pluck the still-queued prompt FIRST (claude-precise; stubbed
-      // elsewhere) so an early cancel can't leave it to fire later, then
-      // abort whatever is actually running.
-      const ctx = activeTurns.get(offer.targetTurnId);
-      if (ctx?.queuedId) { try { queueFor(session).cancel(ctx.queuedId); } catch { /* stub adapters */ } }
-      let aborted = false;
-      let why = "";
-      try { const r = await session.abort(); aborted = r.ok !== false; why = r.error ?? ""; } catch (e) { why = e instanceof Error ? e.message : String(e); }
-      if (aborted) {
-        log(`cancel ${offer.targetTurnId.slice(0, 8)}: queued plucked + abort sent`);
-      } else {
-        // The interrupt did not land: leave this cancel UNHANDLED so the relay's
-        // re-offer retries it instead of the log claiming success (#8).
-        handledCancels.delete(offer.targetTurnId);
-        cancelRetryAt.set(offer.targetTurnId, Date.now() + CANCEL_RETRY_MS);
-        log(`cancel ${offer.targetTurnId.slice(0, 8)}: abort failed (${why}) — retrying in ${CANCEL_RETRY_MS / 1000}s`);
-        return false; // not new work: let the loop pause instead of spinning on the re-offer
-      }
+      try { const r = await session.abort(); if (r.ok === false) { handledCancels.delete(turnId); return false; } }
+      catch { /* pane teardown */ }
     }
-    // The running turn loop observes busy() falling and terminalizes with
-    // 'cancelled' (cancelRequested). A cancel for a turn we are NOT running
-    // (daemon restarted mid-turn) is acked and resolves when the turn is
-    // reconciled or retried.
     return true;
   }
 
@@ -1630,17 +1590,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
   }
 
-  // A session being restarted in place: its running relay turn(s) must end
-  // as cancelled, not "completed" (the old object's busy() drops to false).
-  // Turns whose queue item moves to the replacement (`keep`) stay alive —
-  // the turn loop re-resolves the session object by local id each poll.
-  (registry as { setTurnCanceller?: (fn: (localId: string, keep: ReadonlySet<string>) => void) => void }).setTurnCanceller?.((localId, keep) => {
-    for (const [turnId, t] of activeTurns) {
-      if (t.localId !== localId) continue;
-      if (t.queuedId && keep.has(t.queuedId)) continue;
-      cancelRequested.add(turnId);
-    }
-  });
+  // A session restarted in place: its running command ends interrupted
+  // {restart} in the coordinator's retire (a legacy adapter's turn is caught
+  // by the wait emulation seeing the object replaced) — the turn loop reads
+  // the state; nothing here has to guess from busy().
   // A daemon-created session (fork, teleport, a handoff target) can be bound
   // on demand instead of waiting for the next announce pass.
   (registry as { setAnnouncer?: (fn: (s: AgentSession) => Promise<void>) => void }).setAnnouncer?.((s) => announceLocalSession(s));
@@ -1712,13 +1665,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           const ex = (st?.execution as { state?: string; turnId?: string } | undefined);
           const turnId = ex?.turnId;
           if (!turnId || !ex?.state || !["dispatching", "running", "cancelling"].includes(ex.state)) continue;
-          if (inFlight.has(turnId) || activeTurns.has(turnId) || ledger.hasTerminalFor(turnId)) continue;
+          if (inFlight.has(turnId) || activeTurns.has(turnId) || ledger.hasTerminalFor(turnId) || pendingLedgerTurn(turnId)) continue;
           seen.add(turnId);
           const n = (noWorkerSeen.get(turnId) ?? 0) + 1;
           noWorkerSeen.set(turnId, n);
           if (n < 2 || !lease) continue;
           // Re-check after the await: a claim may have started it meanwhile.
-          if (inFlight.has(turnId) || activeTurns.has(turnId)) { noWorkerSeen.delete(turnId); continue; }
+          if (inFlight.has(turnId) || activeTurns.has(turnId) || pendingLedgerTurn(turnId)) { noWorkerSeen.delete(turnId); continue; }
           try {
             await api("POST", `/daemon/turns/${turnId}/reconcile`, { resolution: "terminal", terminalState: "interrupted", meta: { reason: "no_local_worker" } }, lease);
             log(`released turn ${turnId.slice(0, 8)} on ${row.sessionId.slice(0, 8)}: executing on the relay, no worker here → interrupted`);
@@ -1750,6 +1703,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           await refreshBindings();
           bootReady = true; // bindings + content keys loaded: the outbox may send
           sender.start(); // every session with unacked rows resumes from the ledger — in order
+          resumeLedgerTurns(lease!); // relay turns the ledger still carries get their loops back (R13)
           announced = false;
         }
         const leaseRef = lease!;
