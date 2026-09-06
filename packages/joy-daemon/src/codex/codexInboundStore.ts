@@ -9,9 +9,10 @@
 // On recovery, thread/read's userMessage items tell us which clientIds already
 // landed; the rest are resent.
 
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from "fs";
+import { existsSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
+import { writeFileAtomic } from "../domain/atomicWrite";
 
 /** delivered = ownership only: the echo proved delivery but the checkpoint
  *  could not be saved, so the spool keeps the clientId; never dispatched. */
@@ -42,15 +43,13 @@ export function loadCodexInbound(id: string, baseDir = joyStateDir()): CodexInbo
   } catch { return []; }
 }
 
-/** Atomic tmp+rename. Returns false on failure so the caller can refuse to
- *  advance the relay cursor (a swallowed write = a lost message on crash). */
+/** Atomic replace through the shared primitive (Wave B adoption of the A2
+ *  helper: fsync'd temp + rename, previous spool intact on any failure, no
+ *  stray .tmp). Returns false on failure so the caller can refuse to advance
+ *  the relay cursor (a swallowed write = a lost message on crash). */
 export function saveCodexInbound(id: string, items: CodexInboundItem[], baseDir = joyStateDir()): boolean {
   try {
-    mkdirSync(baseDir, { recursive: true });
-    const p = fileFor(id, baseDir);
-    const tmp = `${p}.tmp`;
-    writeFileSync(tmp, JSON.stringify(items));
-    renameSync(tmp, p);
+    writeFileAtomic(fileFor(id, baseDir), JSON.stringify(items));
     return true;
   } catch (e) {
     process.stderr.write(`[codex-inbound] save failed for ${id}: ${e}\n`);

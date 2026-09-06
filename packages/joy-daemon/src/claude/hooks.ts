@@ -26,6 +26,7 @@ import { execPath } from "node:process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { joyStateDir } from "../paths";
+import { shellJoin } from "../domain/quote";
 
 // The generic hook script. Reads the hook payload from stdin, forwards a
 // compact subset to POST /sessions/$JOY_SESSION_ID/hook. Daemon coordinates
@@ -108,8 +109,11 @@ export function ensureHookSettings(): string {
     if (stamp !== hookStamp() || !existsSync(hookPath) || !existsSync(settingsPath)) {
       writeFileSync(hookPath, HOOK_SCRIPT);
       // Run via the daemon's own node (absolute path) so the hook works
-      // regardless of the login shell's PATH. Quote both paths for spaces.
-      const command = `"${execPath}" "${hookPath}"`;
+      // regardless of the login shell's PATH. Claude runs the command through
+      // a shell, so both paths are shell-quoted as LITERAL words: double
+      // quotes still expanded `$`, backticks and `\` inside a JOY_HOME_DIR
+      // such as /tmp/joy-$X and sent every hook to the wrong script (#470).
+      const command = shellJoin([execPath, hookPath]);
       const entry = [{ matcher: "", hooks: [{ type: "command", command }] }];
       const settings = {
         hooks: {

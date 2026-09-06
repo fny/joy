@@ -20,6 +20,7 @@ import { readFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir, platform } from "os";
 import { execSync } from "child_process";
+import { codexSessionsDir } from "../codex/codexHome";
 
 // ── claude ───────────────────────────────────────────────────────────────────
 
@@ -172,8 +173,9 @@ function newestRollouts(root: string, max: number): string[] {
   return out;
 }
 
-export function readCodexLimits(root = join(homedir(), ".codex", "sessions")): { ok: true; limits: CodexLimits } | { ok: false; error: string } {
-  if (!existsSync(root)) return { ok: false, error: "no ~/.codex/sessions on this machine" };
+/** Default root honours $CODEX_HOME — the store the running codex writes (#546). */
+export function readCodexLimits(root = codexSessionsDir()): { ok: true; limits: CodexLimits } | { ok: false; error: string } {
+  if (!existsSync(root)) return { ok: false, error: `no ${root} on this machine` };
   for (const file of newestRollouts(root, 5)) {
     let text: string;
     try { text = readFileSync(file, "utf-8"); } catch { continue; }

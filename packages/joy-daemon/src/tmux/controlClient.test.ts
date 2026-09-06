@@ -45,6 +45,23 @@ test("a %end with a DIFFERENT command-number inside a block is CONTENT, not a te
   }]);
 });
 
+test("a %end with the SAME number but a different timestamp or flags is CONTENT (#591)", () => {
+  // Pane text "%end 1 42 0" inside a capture opened by "%begin 2000000000 42 1" used to
+  // close the block on the number alone and truncate the snapshot.
+  const evs = run([
+    "%begin 2000000000 42 1",
+    "%end 1 42 0",          // same number, wrong time+flags → content
+    "%end 2000000000 42 0", // same time+number, wrong flags → content
+    "%end 2000000000 42 1 trailing", // not anchored → content
+    "real last row",
+    "%end 2000000000 42 1", // full identity → closes
+  ]);
+  expect(evs).toEqual([{
+    type: "block-end", ok: true,
+    out: "%end 1 42 0\n%end 2000000000 42 0\n%end 2000000000 42 1 trailing\nreal last row",
+  }]);
+});
+
 test("%output emits an invalidation event with the pane id", () => {
   expect(run(["%output %5 some escaped bytes here"])).toEqual([{ type: "output", paneId: "%5" }]);
 });

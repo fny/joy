@@ -11,10 +11,7 @@
 import { join } from "path";
 import { joyStateDir } from "../paths";
 
-/** POSIX single-quote a value for safe shell interpolation. */
-function shq(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
+import { shellQuote as shq } from "../domain/quote"; // one quoting helper (#470 family)
 
 /** A one-line shell command the tmux window runs: wait for the socket, then
  *  attach a `codex --remote` TUI resumed onto the thread. Loops on exit but
