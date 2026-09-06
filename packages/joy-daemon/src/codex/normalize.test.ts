@@ -245,7 +245,7 @@ test("#522: the same transient id under two turns never shares a mapping, even a
 // next turn/started. It used to be stamped with the CURRENT turn, so its
 // localId became the next turn's `commandExecution:0:tool-end` — and the next
 // turn's real completion then deduped away as a replay.
-test("late tool completion stays on the turn that started it, not the next turn", () => {
+test("#523: a late tool completion (its turn ended with the tool open, the next turn has its own tool) stays on the turn that started it — the next turn's completion id is untouched", () => {
   const n = new CodexNormalizer(() => "x");
   n.setThreadId("TH");
   const wire = (effs: CodexEffect[]) => effs.filter((e) => e.kind === "wire") as Array<{ localId: string; record: any }>;
@@ -267,7 +267,7 @@ test("late tool completion stays on the turn that started it, not the next turn"
   expect(end2[0].record.content.data.turn).toBe(T2);
 });
 
-test("late tool completion WITHOUT a turnId still resolves to the turn that started the item", () => {
+test("#523: a late tool completion WITHOUT a turnId still resolves to the turn that started the item", () => {
   const n = new CodexNormalizer(() => "x");
   n.setThreadId("TH");
   n.handle({ method: "turn/started", params: { turn: { id: T1 } } });

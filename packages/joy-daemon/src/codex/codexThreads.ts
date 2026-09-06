@@ -26,13 +26,22 @@ const FIRST_LINE_MAX = 64 * 1024;
 function readFirstLine(path: string): string | null {
   return withFd(path, "r", (fd) => {
     const buf = Buffer.alloc(FIRST_LINE_MAX);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    const chunk = buf.subarray(0, n);
-    const nl = chunk.indexOf(0x0a);
-    if (nl >= 0) return chunk.subarray(0, nl).toString("utf8");
-    // No newline in the bound: a one-line file (n < cap) is that line; a
-    // longer head is not a session_meta line.
-    return n < buf.length ? chunk.toString("utf8") : null;
+    // A read may legally return FEWER bytes than asked (a short read) without
+    // being at EOF; taking one as the whole head made a valid rollout look
+    // like a newline-less line and "continue" skipped every matching thread
+    // (Astra on 4a69e55c). Keep reading into the same bound until a newline,
+    // a real EOF (0 bytes) or the bound is full.
+    let n = 0;
+    while (n < buf.length) {
+      const got = fs.readSync(fd, buf, n, buf.length - n, n);
+      if (got <= 0) break;
+      const nl = buf.subarray(n, n + got).indexOf(0x0a);
+      if (nl >= 0) return buf.subarray(0, n + nl).toString("utf8");
+      n += got;
+    }
+    // No newline in the bound: a one-line file (EOF before the cap) is that
+    // line; a longer head is not a session_meta line.
+    return n < buf.length ? buf.subarray(0, n).toString("utf8") : null;
   });
 }
 
