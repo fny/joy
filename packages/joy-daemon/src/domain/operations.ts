@@ -750,13 +750,17 @@ export const machineOps: MachineOp[] = [
       const dir = cwdToTranscriptDir(cwd);
       mkdirSync(dir, { recursive: true });
       const target = join(dir, `${sid}.jsonl`);
-      // Never clobber a conversation a session HERE is bound to (a same-box
-      // teleport into the same folder). A file no session owns — an earlier
-      // import's leftover, or the same conversation teleported again — is
-      // replaced: the fork already took what it needed from it, and refusing
-      // made every retry fail (codex review, 2026-09-04).
-      const owned = registry.list().some((s) => s.transcriptPath === target || s.claudeSessionId === sid)
-        || registry.listRecords().some((r) => r.claudeSessionId === sid);
+      // Never clobber a conversation a session HERE is bound to IN THIS
+      // FOLDER (a same-box teleport into the same folder). A same-box
+      // teleport into ANOTHER folder is the supported same-machine fork
+      // (#550): the source keeps its own transcript under its own project
+      // dir and the copy continues under a new id, so a session owning the
+      // conversation elsewhere is no conflict. A file no session owns — an
+      // earlier import's leftover, or the same conversation teleported
+      // again — is replaced: the fork already took what it needed from it,
+      // and refusing made every retry fail (codex review, 2026-09-04).
+      const owned = registry.list().some((s) => s.transcriptPath === target || (s.claudeSessionId === sid && canonicalCwd(s.cwd) === cwd))
+        || registry.listRecords().some((r) => r.claudeSessionId === sid && canonicalCwd(r.launchCwd) === cwd);
       if (owned) return { error: `conversation ${sid.slice(0, 8)} belongs to a session in ${cwd} on this machine` };
       writeFileSync(target, Buffer.from(b64, "base64"));
       // Continue under a NEW claude id (--fork-session): the source keeps its
