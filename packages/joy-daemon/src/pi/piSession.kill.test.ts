@@ -20,7 +20,7 @@ const deps = { relayClient: null, broadcast: () => {}, addChatMessage: () => {} 
 test("forceKill on a detached pi session: unlink + tombstone both refused → recordTerminated() is false; a repeat kill retries and clears it", async () => {
   const { PiSession } = await import("./piSession");
   const { saveWindowRecord, loadWindowRecord } = await import("../domain/windowRecord");
-  const { defaultStateDir } = await import("../domain/receipts");
+  const { joyStateDir: defaultStateDir } = await import("../paths");
   const defaultRecordFile = (sid: string) => join(defaultStateDir(), `window-${sid}.json`);
   const id = "p1a2b3c4";
   expect(saveWindowRecord(id, { launchCwd: home, agent: "pi", piSettings: { sessionId: "x" } })).toBe(true);

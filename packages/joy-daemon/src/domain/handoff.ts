@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import type { AgentSession } from "./agentSession";
 import { saveWindowRecord, listWindowRecords, type HandoffJob } from "./windowRecord";
+import { LedgerWriteError, SessionEndedError } from "./ledger";
 import { joySessionDir } from "../paths";
 import { findCodexRollout, findPiSessionFile } from "./forkHarness";
 
@@ -189,25 +190,27 @@ export class HandoffNotDurableError extends Error {
   }
 }
 
-/** Queue the note prompt with requireDurable (#542) and bounded retries.
+/** Queue the note prompt (durable by contract, #542) with bounded retries.
  *
- *  Both delivery points used to call enqueue() without requireDurable: a busy
- *  target whose spool write failed kept the prompt in memory only, the job
- *  published success and cleared its record, and a daemon crash then lost
+ *  Both delivery points used to call enqueue() without requiring durability:
+ *  a busy target whose spool write failed kept the prompt in memory only, the
+ *  job published success and cleared its record, and a daemon crash then lost
  *  the ONLY copy of the handoff note's delivery — with no job left to redo it.
- *  Now the spool must land before the job advances. A transient failure
- *  (ENOSPC clearing, a slow disk) is retried on a short schedule; when every
- *  attempt fails the caller keeps the job persisted so the next daemon boot
- *  (resumeHandoffJobs) delivers it. */
+ *  enqueue now returns only after the ledger commits. A transient commit
+ *  failure (ENOSPC clearing, a slow disk) is retried on a short schedule; when
+ *  every attempt fails the caller keeps the job persisted so the next daemon
+ *  boot (resumeHandoffJobs) delivers it. An ended session is not retried. */
 async function enqueueDurably(s: AgentSession, text: string, retryMs: readonly number[]): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; ; attempt++) {
     if (s.status === "ended") throw new Error(`session ${s.id} ended before the note could be queued`);
     try {
-      s.enqueue(text, { source: "rpc", mirrorToRelay: true, requireDurable: true });
+      s.enqueue(text, { source: "rpc", mirrorToRelay: true });
       return;
     } catch (e) {
       lastError = e;
+      if (e instanceof SessionEndedError) throw new Error(`session ${s.id} ended before the note could be queued`);
+      if (!(e instanceof LedgerWriteError)) throw e;
       if (attempt >= retryMs.length) break;
       process.stderr.write(`[handoff] ${s.id}: durable enqueue failed (${e instanceof Error ? e.message : e}); retry ${attempt + 1}/${retryMs.length} in ${retryMs[attempt]}ms\n`);
       await new Promise((r) => setTimeout(r, retryMs[attempt]));

@@ -30,19 +30,11 @@ import {
   type JoyLoginInfo,
   type JoyDialogInfo,
 } from "../relay/relay.ts";
-import {
-  initDeliveryState,
-  recordInboundReceipt,
-  recordOutboundReceipt,
-  recordReceived,
-  consumeReceived,
-  type DeliveryState,
-  type DeliverySource,
-} from "../domain/receipts";
+import type { DeliverySource } from "../domain/agentSession";
+import { ledgerFor, type Ledger, NON_TERMINAL_STATES, StaleCommandError, StaleGenerationError } from "../domain/ledger";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
 import { saveWindowRecord, loadWindowRecord, deleteWindowRecord } from "../domain/windowRecord";
-import { saveQueue, loadQueue, clearQueue } from "../domain/queueStore";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
@@ -145,6 +137,9 @@ export interface ChatMessage {
 /** Capabilities a Session needs from its environment, injected by the registry. */
 export interface SessionDeps {
   relayClient: RelayClient | null;
+  /** The durable acceptance ledger (domain/ledger.ts). Absent → the process's
+   *  ledger for the current state dir (ledgerFor()). */
+  ledger?: Ledger;
   broadcast(event: string, data: unknown): void;
   addChatMessage(msg: ChatMessage): void;
   /** Called when a relay session is attached — the place to register session-scoped ops.
@@ -545,6 +540,9 @@ export interface QueuedItem extends QueuedMessage {
    *  late echo can still match them (#31); the re-dispatch (or a cancel/edit)
    *  neutralizes those stale twins right before it records fresh ones. */
   requeued?: boolean;
+  /** In-memory only. The ledger attempt this dispatch made (recordAttempt);
+   *  settled on confirm / timeout / cancel. */
+  attemptId?: string;
 }
 
 /** Delivery outcome of ONE queued item, by id. The v2 lane needs proof that
@@ -747,7 +745,15 @@ export class Session {
   // --continue backfill cap (bytes). Unlike --resume the file isn't known at
   // create, so the cap is applied ONCE when the transcript binds (startTailer).
   #backfillCapBytes = 0;
-  #delivery: DeliveryState | null = null;
+  // The durable acceptance ledger: every queue mutation, dispatch attempt,
+  // echo receipt and forwarded-uuid receipt lives there (domain/ledger.ts).
+  // `#generation` fences this object's writes: after a restart the same id
+  // belongs to the replacement and a late write from here is refused (#481).
+  #ledger: Ledger;
+  #generation: number;
+  // Positive cache in front of ledger.hasReceipt for transcript uuids this
+  // process already handled (bounded; the ledger is the truth).
+  #uuidSeen = new Set<string>();
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
@@ -877,20 +883,31 @@ export class Session {
     if (!rec?.lastAiTitle && this.#lastAiTitle) {
       saveWindowRecord(this.id, { lastAiTitle: this.#lastAiTitle });
     }
+    this.#deps = deps;
+    this.#ledger = deps.ledger ?? ledgerFor();
+    // A new generation per object: the previous one (a crashed daemon's, or
+    // the retired object's) closes and its in-flight dispatches become an
+    // explicit `unknown` — Claude re-dispatches those, as it always has (a
+    // typed-but-unconfirmed prompt is retyped; a late echo of the first
+    // typing still matches its attempt and is not mirrored as a duplicate).
+    this.#generation = this.#ledger.openGeneration(this.id, "claude");
     // Reload any queue items a previous daemon left undelivered (B1). They
     // drain on the first idle exactly like freshly queued messages.
-    const persisted = loadQueue(this.id);
-    if (persisted.length > 0 && this.status !== "ended") {
-      this.#queue = persisted.map(r => ({
+    const rows = this.#ledger.listPending(this.id);
+    if (rows.length > 0 && this.status !== "ended") {
+      for (const r of rows) if (r.state !== "queued") this.#ledger.transition(r.id, NON_TERMINAL_STATES, "queued");
+      this.#queue = rows.map(r => ({
         id: r.id, text: r.text, createdAt: r.createdAt,
         source: (r.source as QueuedItem["source"]) ?? "rpc",
-        mirrorToRelay: r.mirrorToRelay !== false,
-        seq: r.seq, visible: r.visible !== false,
+        mirrorToRelay: r.mirrorToRelay,
+        seq: r.seq ?? undefined, visible: r.visible,
       }));
-      process.stderr.write(`[queue-store] ${this.id}: restored ${persisted.length} undelivered item(s) from disk\n`);
+      process.stderr.write(`[queue-store] ${this.id}: restored ${rows.length} undelivered item(s) from the ledger\n`);
     }
-    this.#deps = deps;
   }
+
+  /** Test/diagnostic access to the session's ledger generation. */
+  get ledgerGeneration(): number { return this.#generation; }
 
   get relayAttached(): boolean {
     return this.#relay !== null;
@@ -1063,12 +1080,7 @@ export class Session {
     // and calls back here once that row is durably appended. Registered
     // before anything below can queue rows, and it flushes acks buffered
     // from a restart drain that outran this attach.
-    rs.setReceiptSink((r) => {
-      const delivery = this.#ensureDelivery();
-      if (delivery && this.relaySessionId) {
-        recordOutboundReceipt(delivery, this.relaySessionId, { uuid: r.uuid, turn: r.turn, at: Date.now() });
-      }
-    });
+    rs.setReceiptSink((r) => { this.#noteUuid(r.uuid); });
     // Reconcile the model mirror. A model change seen while no relay was
     // attached (daemon-restart replay) sets currentModel WITHOUT mirroring it,
     // and the change-gate means it never re-fires for the same model — the app
@@ -1135,7 +1147,6 @@ export class Session {
     if (this.#tasksPushTimer) { clearTimeout(this.#tasksPushTimer); this.#tasksPushTimer = null; }
     if (this.#taskReconcileTimer) { clearInterval(this.#taskReconcileTimer); this.#taskReconcileTimer = null; }
     this.#turn5xxStatus = null;
-    this.#delivery = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#drainRetry) { clearTimeout(this.#drainRetry); this.#drainRetry = null; }
     this.#clearDirtyRecheck();
@@ -1148,11 +1159,15 @@ export class Session {
     void this.#relay?.updateDialog(null);
     this.#clearSubmitTimer();
     this.#cancelSteerSubmit();
-    for (const q of this.#queue) this.#recordOutcome(q.id, "cancelled");
+    // An ended session will never deliver: everything still staged is
+    // cancelled in the ledger — except on a restart, whose replacement takes
+    // the queued rows (takeQueuedForRestart already plucked them from memory).
+    if (reason !== "restart") for (const q of this.#queue) this.#recordOutcome(q.id, "cancelled");
     if (this.#dispatchInFlight) this.#recordOutcome(this.#dispatchInFlight.id, "cancelled");
     this.#queue = [];
     this.#dispatchInFlight = null;
-    clearQueue(this.id); // an ended session will never deliver — drop the spool
+    try { this.#ledger.closeGeneration(this.id, this.#generation, reason); }
+    catch (e) { process.stderr.write(`[${this.id}] ledger closeGeneration failed: ${e instanceof Error ? e.message : e}\n`); }
 
     this.status = "ended";
     this.endReason = reason;
@@ -1261,6 +1276,10 @@ export class Session {
       || this.#queue.length > 0;
   }
 
+  /** The terminal outcome of a queue item, committed to the ledger (delivered
+   *  = command completed + its attempt done; cancelled = command cancelled +
+   *  attempt superseded). The in-memory map is only a cache. A ledger failure
+   *  is logged, never thrown: the callers are confirm/teardown paths. */
   #recordOutcome(id: string, outcome: "delivered" | "cancelled"): void {
     this.#itemOutcome.set(id, outcome);
     if (this.#itemOutcome.size > 200) {
@@ -1269,6 +1288,19 @@ export class Session {
         if (this.#itemOutcome.size <= 150) break;
       }
     }
+    try {
+      if (outcome === "delivered") {
+        // A plain prompt confirmed by a hook / dialog / turn start still gets
+        // a transcript echo later: its attempt stays awaiting so that echo
+        // pairs with it (never mirrored as a duplicate bubble, #483). A
+        // command (`!bash`, `/slash`) never echoes as user text — settle now.
+        const text = this.#ledger.getCommand(id)?.text ?? "";
+        const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
+        this.#ledger.confirmDelivery(id, [], { settleAttempts: isCommand });
+      } else this.#ledger.transition(id, NON_TERMINAL_STATES, "cancelled", { terminalReason: "cancelled" });
+    } catch (e) {
+      process.stderr.write(`[${this.id}] ledger outcome ${outcome} for ${id} failed: ${e instanceof Error ? e.message : e}\n`);
+    }
   }
 
   /** Delivery state of one queued item — see QueueItemState. */
@@ -1276,7 +1308,52 @@ export class Session {
     if (this.#dispatchInFlight?.id === id) return "pending";
     if (this.#queue.some((q) => q.id === id)) return "pending";
     if (this.#carried.has(id)) return "pending"; // moved to the restart replacement
-    return this.#itemOutcome.get(id) ?? "unknown";
+    const cached = this.#itemOutcome.get(id);
+    if (cached) return cached;
+    const row = this.#ledger.getCommand(id);
+    if (!row || row.sessionId !== this.id) return "unknown";
+    switch (row.state) {
+      case "completed": return "delivered";
+      case "cancelled": case "interrupted": return "cancelled";
+      case "failed": return "failed";
+      default: return "pending"; // staged in the ledger (a replacement's, or not yet loaded)
+    }
+  }
+
+  /** Has this transcript uuid already been handled (mirrored or matched)?
+   *  Cache first, then the ledger's retained receipt. */
+  #hasUuid(uuid: string): boolean {
+    if (this.#uuidSeen.has(uuid)) return true;
+    return this.#ledger.hasReceipt(this.id, "transcript_uuid", uuid);
+  }
+  /** Remember a handled transcript uuid: in the cache now, in the ledger durably. */
+  #noteUuid(uuid: string, extra: { commandId?: string; attemptId?: string } = {}): void {
+    this.#uuidSeen.add(uuid);
+    if (this.#uuidSeen.size > 2000) { for (const u of this.#uuidSeen) { this.#uuidSeen.delete(u); if (this.#uuidSeen.size <= 1500) break; } }
+    try { this.#ledger.addReceipt(this.id, { kind: "transcript_uuid", ref: uuid, commandId: extra.commandId, attemptId: extra.attemptId }); }
+    catch (e) { process.stderr.write(`[${this.id}] receipt for ${uuid} failed: ${e instanceof Error ? e.message : e}\n`); }
+  }
+  /** Stage an item in the ledger (the acceptance) — throws when it cannot be
+   *  committed: LedgerWriteError (disk) or SessionEndedError (#553). */
+  #accept(item: QueuedItem, origin: string): { deduped: "none" | "pending" | "receipt"; id: string; existing?: QueuedItem } {
+    const r = this.#ledger.acceptCommand({
+      sessionId: this.id, id: item.id, text: item.text, origin, source: item.source, seq: item.seq,
+      visible: item.visible, mirrorToRelay: item.mirrorToRelay, createdAt: item.createdAt,
+    });
+    if (r.deduped === "none") return { deduped: "none", id: r.id };
+    const existing = r.row ? { id: r.row.id, text: r.row.text, createdAt: r.row.createdAt, source: r.row.source as DeliverySource, mirrorToRelay: r.row.mirrorToRelay, seq: r.row.seq ?? undefined, visible: r.row.visible } : undefined;
+    return { deduped: r.deduped, id: r.id, existing };
+  }
+  /** The in-flight item goes back to the head of the queue: its attempt is
+   *  settled (`unknown` keeps it matchable for a late echo, #31;
+   *  `superseded` retires it) and the ledger row returns to queued. */
+  #unstage(item: QueuedItem, attemptOutcome: "unknown" | "superseded"): void {
+    try {
+      if (item.attemptId) { this.#ledger.settleAttempt(item.attemptId, attemptOutcome, { command: null }); if (attemptOutcome === "superseded") item.attemptId = undefined; }
+      this.#ledger.transition(item.id, ["submitting", "accepted", "unknown"], "queued");
+    } catch (e) {
+      process.stderr.write(`[${this.id}] ledger unstage ${item.id} failed: ${e instanceof Error ? e.message : e}\n`);
+    }
   }
 
   /** Ids handed to a restart replacement (takeQueuedForRestart): still
@@ -1317,7 +1394,7 @@ export class Session {
    * app already has the bubble); /send passes {mirrorToRelay:true,visible:false};
    * 5xx retry passes {visible:false}.
    */
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean; id?: string }): QueuedMessage {
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; id?: string }): QueuedMessage {
     // Joy-owned commands are handled HERE — before the text is queued or reaches Claude.
     //   /steer <msg>  type <msg> straight into the pane and submit it now, BYPASSING the
     //                 queue + its idle gate, so it lands immediately (mid-turn if a turn
@@ -1367,18 +1444,6 @@ export class Session {
       this.#dlog(`handled ${cmd.name} as a joy command — nothing queued`);
       return { id: crypto.randomUUID().slice(0, 8), text, createdAt: Date.now(), handled: "command" };
     }
-    // Seq-dedupe (codex review finding 2): the confirmed-cursor contract
-    // creates a benign crash window — spool written, cursor not yet
-    // persisted, restart re-pulls the same seq. The spool itself is the
-    // dedupe: an item with this seq is already staged.
-    if (opts?.seq != null) {
-      const dup = this.#queue.find((q) => q.seq === opts.seq)
-        ?? (this.#dispatchInFlight?.seq === opts.seq ? this.#dispatchInFlight : undefined);
-      if (dup) {
-        process.stderr.write(`[queue] ${this.id}: dedupe re-pulled seq=${opts.seq} (already staged as ${dup.id})\n`);
-        return { id: dup.id, text: dup.text, createdAt: dup.createdAt };
-      }
-    }
     const item: QueuedItem = {
       id: opts?.id ?? crypto.randomUUID().slice(0, 8),
       text,
@@ -1388,17 +1453,27 @@ export class Session {
       seq: opts?.seq,
       visible: opts?.visible ?? true,
     };
-    this.#queue.push(item);
-    const durable = this.#broadcastQueue();
-    if (opts?.requireDurable && !durable) {
-      // Inbound relay contract: no durable spool = no ack. Unstage and throw
-      // so the pull loop HALTS with its cursor at the last confirmed row and
-      // retries this seq next tick, instead of consuming a message that only
-      // ever existed in memory.
-      this.#queue = this.#queue.filter((q) => q.id !== item.id);
-      this.#broadcastQueue();
-      throw new Error("queue spool write failed — message not durably staged");
+    // Acceptance = the ledger commit. It throws (nothing staged, no ack) when
+    // the commit fails or the session has ended (#551, #553). Dedupe lives
+    // there too: a re-pulled seq / a carried id already staged returns the
+    // same item (#516 — a seq already DELIVERED is acked without re-running).
+    const accepted = this.#accept(item, opts?.seq != null ? "relay" : "local");
+    if (accepted.deduped !== "none") {
+      const dup = this.#queue.find((q) => q.id === accepted.id)
+        ?? (this.#dispatchInFlight?.id === accepted.id ? this.#dispatchInFlight : undefined)
+        ?? accepted.existing;
+      process.stderr.write(`[queue] ${this.id}: dedupe ${accepted.deduped === "receipt" ? "already-delivered" : "re-pulled"} ${item.seq != null ? `seq=${item.seq}` : `id=${item.id}`} (staged as ${accepted.id})\n`);
+      if (accepted.deduped === "pending" && dup && !this.#queue.includes(dup) && this.#dispatchInFlight?.id !== dup.id && !this.#carried.has(dup.id)) {
+        // Staged in the ledger (a previous object's row) but not in this
+        // object's memory: adopt it so it drains.
+        this.#queue.push(dup);
+        this.#broadcastQueue();
+        this.#maybeDrainQueue();
+      }
+      return { id: accepted.id, text: dup?.text ?? text, createdAt: dup?.createdAt ?? item.createdAt };
     }
+    this.#queue.push(item);
+    this.#broadcastQueue();
     this.#dlog(`queued ${item.id} (src=${item.source} chars=${item.text.length}${item.seq != null ? ` seq=${item.seq}` : ""}) queue=${this.#queue.length} gate: ${this.#holdReason()}`);
     this.#maybeDrainQueue(); // drains immediately if Claude is idle
     return { id: item.id, text: item.text, createdAt: item.createdAt };
@@ -1431,7 +1506,7 @@ export class Session {
       // prematurely time out the message once it RE-dispatches after the steer.
       if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
       this.#queue.unshift(this.#dispatchInFlight);
-      this.#neutralizePending(this.#dispatchInFlight.text);
+      this.#unstage(this.#dispatchInFlight, "superseded");
       this.#dispatchInFlight = null;
       this.#broadcastQueue();
     }
@@ -1452,15 +1527,21 @@ export class Session {
       // concatenate into one garbled submit. Fall back to the queue head + the
       // input_dirty banner, the same recovery path the dispatch gate uses.
       const pane = await this.#captureBox();
-      const parked = (): QueuedItem => ({
-        id: crypto.randomUUID().slice(0, 8),
-        text,
-        createdAt: Date.now(),
-        source: opts.source,
-        mirrorToRelay: opts.mirrorToRelay ?? true,
-        seq: opts.seq,
-        visible: false,
-      });
+      // Parked = accepted in the ledger as a queued command at the head.
+      const parked = (): QueuedItem => {
+        const item: QueuedItem = {
+          id: crypto.randomUUID().slice(0, 8),
+          text,
+          createdAt: Date.now(),
+          source: opts.source,
+          mirrorToRelay: opts.mirrorToRelay ?? true,
+          seq: opts.seq,
+          visible: false,
+        };
+        const a = this.#accept(item, "steer");
+        this.#ledger.reorderCommand(a.id, 0);
+        return a.existing ?? item;
+      };
       // A steer needs a LIVE input box to land in. With a dialog up (permission
       // prompt, AskUserQuestion, "Switch model?", the trust dialog) there is no
       // box: the digits of the steer text select options and its Enter
@@ -1504,10 +1585,14 @@ export class Session {
             if (this.status === "ended") { resolve(); return; } // dead session — nothing to deliver to
             const e = await this.#tmux.key(this.tmuxWindow, "Enter");
             if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
-            const delivery = this.#ensureDelivery();
-            if (delivery && this.relaySessionId) {
-              delivery.pending.push({ seq: opts.seq, text: typed, source: opts.source, at: Date.now() });
-              recordReceived(delivery, this.relaySessionId, typed, Date.now());
+            // The Enter landed: record the steer as a submitted command so
+            // its transcript echo matches (not mirrored as a duplicate) and
+            // survives a restart the way a queued dispatch's attempt does.
+            try {
+              const a = this.#ledger.acceptCommand({ sessionId: this.id, text, origin: "steer", source: opts.source, seq: opts.seq, visible: false, mirrorToRelay: opts.mirrorToRelay });
+              if (a.deduped === "none" || a.row?.state === "queued") this.#ledger.recordAttempt(a.id, this.#generation, typed, "steer");
+            } catch (err) {
+              process.stderr.write(`[${this.id}] steer: ledger record failed: ${err instanceof Error ? err.message : err}\n`);
             }
             if (opts.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
             resolve();
@@ -1547,9 +1632,10 @@ export class Session {
   editQueued(id: string, text: string): boolean {
     const m = this.#queue.find(q => q.id === id);
     if (!m) return false; // already dispatched or unknown
-    // A timed-out item still has receipt twins recorded for its OLD text
-    // (#31); the new text will record its own on dispatch.
-    if (m.requeued) { this.#neutralizePending(m.text); m.requeued = false; }
+    // A timed-out item still has its attempt awaiting a late echo of its OLD
+    // text (#31); retire that — the new text makes its own attempt on dispatch.
+    if (m.requeued) { this.#unstage(m, "superseded"); m.requeued = false; }
+    if (!this.#ledger.editCommand(id, text)) return false; // no longer queued in the ledger (delivered by another route)
     m.text = text;
     this.#broadcastQueue();
     return true;
@@ -1559,7 +1645,7 @@ export class Session {
     const i = this.#queue.findIndex(q => q.id === id);
     if (i >= 0) {
       const [item] = this.#queue.splice(i, 1);
-      if (item.requeued) this.#neutralizePending(item.text); // its stale twins will never match now (#31)
+      if (item.requeued) this.#unstage(item, "superseded"); // its stale attempt will never match now (#31)
       this.#recordOutcome(id, "cancelled");
       this.#broadcastQueue();
       return true;
@@ -1577,8 +1663,7 @@ export class Session {
     if (inflight && inflight.id === id && this.#dispatchSubmittedAt === null) {
       this.#clearSubmitTimer();
       if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-      this.#neutralizePending(inflight.text);
-      this.#recordOutcome(id, "cancelled");
+      this.#recordOutcome(id, "cancelled"); // settles its attempt as superseded too
       this.#dispatchInFlight = null;
       this.#dispatchExtends = 0;
       this.#dlog(`cancelled ${id} before its submit landed`);
@@ -1595,6 +1680,7 @@ export class Session {
     const [m] = this.#queue.splice(from, 1);
     const to = Math.max(0, Math.min(this.#queue.length, Math.floor(toIndex)));
     this.#queue.splice(to, 0, m);
+    this.#ledger.reorderCommand(id, to);
     this.#broadcastQueue();
     return true;
   }
@@ -1696,32 +1782,22 @@ export class Session {
   }
 
   clearQueue(): void {
+    for (const q of this.#queue) this.#recordOutcome(q.id, "cancelled");
     this.#queue = [];
     this.#broadcastQueue();
   }
 
-  /** Returns whether the spool persisted — the inbound path's durable ack. */
-  #broadcastQueue(): boolean {
-    // FENCE (#481): a retired instance never writes the spool. After
-    // end("restart") the SAME session id belongs to the replacement, which
-    // already persisted the prompts carried over to it; a late write from this
-    // object (a dispatch whose awaited tmux write failed after the restart)
-    // would overwrite that file with a cancelled item and the next daemon
-    // restart would restore the cancelled prompt and lose the carried one.
-    // end() already cleared this object's queue and spool, so there is nothing
-    // truthful left for it to persist — report "not durable".
-    if (this.status === "ended") return false;
+  /** Publish the queue state (debug SSE + the app's card). Persistence is
+   *  NOT here any more: every mutation commits to the ledger at the point it
+   *  happens, so there is no whole-array rewrite and no "saved?" boolean. */
+  #broadcastQueue(): void {
+    // A retired instance publishes nothing: after end("restart") the SAME
+    // session id belongs to the replacement (#481).
+    if (this.status === "ended") return;
     const state = this.queueState();
     this.#deps.broadcast("queue_update", { session_id: this.claudeSessionId, ...state });
     // Push to the app via session metadata so it doesn't have to poll.
     void this.#relay?.updateQueue(state);
-    // Persist undelivered items (in-flight first — it's undelivered until its
-    // confirm rebroadcasts without it), so a daemon restart can't eat queued
-    // messages (B1: the pull cursor persists ahead of delivery).
-    return saveQueue(this.id, [
-      ...(this.#dispatchInFlight ? [this.#dispatchInFlight] : []),
-      ...this.#queue,
-    ].map(q => ({ id: q.id, text: q.text, createdAt: q.createdAt, source: q.source, mirrorToRelay: q.mirrorToRelay, seq: q.seq, visible: q.visible })));
   }
 
   /**
@@ -1974,11 +2050,33 @@ export class Session {
     if (!this.#canDrain()) return; // final re-check before committing the dispatch
 
     const next = this.#queue.shift()!;
-    // A timed-out item kept its receipt twins so a LATE echo could still match
-    // (#31). Now that it is really being re-typed, drop those stale twins first:
-    // #typeIntoTmux records fresh ones, and two pending entries for one text
-    // would leave a dangling `received` that swallows a later identical prompt.
-    if (next.requeued) { this.#neutralizePending(next.text); next.requeued = false; }
+    // A timed-out item kept its attempt awaiting a LATE echo (#31). Now that
+    // it is really being re-typed, retire that attempt first: the fresh one
+    // below is what the echo pairs with.
+    if (next.requeued) { this.#unstage(next, "superseded"); next.requeued = false; }
+    // The dispatch attempt is COMMITTED before a single key is sent: a crash
+    // between the type and the echo is then an explicit unknown outcome the
+    // next generation reconciles, never a prompt that vanished. The ledger
+    // refuses an item whose cancel landed meanwhile (#77/#35) and an item
+    // another route already delivered — both are dropped here, not typed.
+    try {
+      next.attemptId = this.#ledger.recordAttempt(next.id, this.#generation, flattenForMatch(next.text), "dispatch").id;
+    } catch (e) {
+      if (e instanceof StaleGenerationError) return; // retired: the replacement owns the queue (#481)
+      if (e instanceof StaleCommandError) {
+        this.#dlog(`dispatch ${next.id} skipped — ${e.message}`);
+        this.#itemOutcome.set(next.id, this.#ledger.getCommand(next.id)?.state === "completed" ? "delivered" : "cancelled");
+        this.#broadcastQueue();
+        this.#armDrainRetry(0);
+        return;
+      }
+      // The ledger refused the write: the item stays queued (nothing was
+      // typed) and the queue pauses like any other dispatch failure.
+      this.#queue.unshift(next);
+      this.#pauseDispatch("dispatch_failed");
+      process.stderr.write(`[queue] dispatch ledger write failed for ${this.id}: ${e instanceof Error ? e.message : e}\n`);
+      return;
+    }
     this.#dispatchInFlight = next; // whole item — timeout re-queues it intact
     this.#broadcastQueue();
     // OWNERSHIP CHECK for everything after the awaited write (#481). While the
@@ -2003,6 +2101,7 @@ export class Session {
         return;
       }
       // Send failed outright — put it back at the head and pause.
+      this.#unstage(next, "superseded"); // nothing reached the pane: no echo will ever match this attempt
       this.#queue.unshift(next);
       this.#dispatchInFlight = null;
       this.#pauseDispatch("dispatch_failed");
@@ -2162,6 +2261,7 @@ export class Session {
     this.#dispatchInFlight = null;
     this.#clearSubmitTimer();
     inflight.requeued = true;
+    this.#unstage(inflight, "unknown"); // attempt stays matchable for the late echo (#31)
     this.#queue.unshift(inflight);
     this.#pauseDispatch("dispatch_timeout");
     process.stderr.write(`[queue] dispatch for ${this.id} never echoed — paused\n`);
@@ -2288,8 +2388,8 @@ export class Session {
       this.#clearSubmitTimer();
       if (this.#dispatchInFlight) {
         if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
-        this.#neutralizePending(this.#dispatchInFlight.text);
-        this.#recordOutcome(this.#dispatchInFlight.id, "cancelled");
+        this.#recordOutcome(this.#dispatchInFlight.id, "cancelled"); // its attempt is retired with it: no echo will come
+
         this.#dispatchInFlight = null;
         this.#broadcastQueue();
       }
@@ -2471,24 +2571,18 @@ export class Session {
     const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
     const fresh = entryTimeMs >= this.#tailBoundAt - 60_000;
     if (uuid && this.#relay && this.relaySessionId) {
-      const delivery = this.#ensureDelivery();
-      if (delivery) {
-        if (delivery.forwardedUuids.has(uuid) || this.#pendingNoteUuids.has(uuid)) return false;
-        // In-memory dedupe NOW (this process won't re-emit) in a set SEPARATE
-        // from the persisted forwardedUuids: recordOutboundReceipt is
-        // idempotent on that set, so pre-adding the uuid there made the
-        // server-ack receipt callback a no-op and the note's receipt was never
-        // saved — every restart before the next checkpoint replayed the same
-        // /model output or bash card with fresh event ids (#484). The
-        // PERSISTED receipt is stamped by #emitAgentNote and written on ack;
-        // a crash between emit and ack re-emits on replay: at-least-once,
-        // matching the assistant path.
-        this.#pendingNoteUuids.add(uuid);
-        if (this.#pendingNoteUuids.size > 500) {
-          for (const u of this.#pendingNoteUuids) { this.#pendingNoteUuids.delete(u); if (this.#pendingNoteUuids.size <= 400) break; }
-        }
-        this.#nextNoteReceipt = uuid;
+      if (this.#hasUuid(uuid) || this.#pendingNoteUuids.has(uuid)) return false;
+      // In-memory dedupe NOW (this process won't re-emit) in a set SEPARATE
+      // from the persisted receipt: the ledger receipt is stamped by
+      // #emitAgentNote and written on the relay's ack; pre-recording it here
+      // would make the ack a no-op and the note's receipt would never be
+      // saved (#484). A crash between emit and ack re-emits on replay:
+      // at-least-once, matching the assistant path.
+      this.#pendingNoteUuids.add(uuid);
+      if (this.#pendingNoteUuids.size > 500) {
+        for (const u of this.#pendingNoteUuids) { this.#pendingNoteUuids.delete(u); if (this.#pendingNoteUuids.size <= 400) break; }
       }
+      this.#nextNoteReceipt = uuid;
     }
     return fresh;
   }
@@ -2587,19 +2681,6 @@ export class Session {
     void this.#relay?.updateRetry(null);
   }
 
-  #ensureDelivery(): DeliveryState | null {
-    if (!this.relaySessionId) return null;
-    if (!this.#delivery) this.#delivery = initDeliveryState(this.relaySessionId);
-    return this.#delivery;
-  }
-
-  /**
-   * Drop the pending-match entry + persisted `received` backstop for `text`.
-   * Called when a dispatch times out (re-queued for re-type) or mismatches — its
-   * #typeIntoTmux already recorded a pending+received twin keyed on the typed
-   * (newline-collapsed) form, and leaving that behind would (a) double up on
-   * re-dispatch and (b) wrongly suppress a later identical prompt as a self-echo.
-   */
   /** A LOCAL slash command echoes as <command-name> markup — never as plain
    *  text, and the CLI fires no UserPromptSubmit for it. A daemon dispatch of
    *  "/goal clear" therefore executed fine but was never CONFIRMED: the echo
@@ -2615,9 +2696,8 @@ export class Session {
     if (!echoedCmd || !inflight || inflight.text.trim().split(/\s+/)[0] !== echoedCmd) return;
     process.stderr.write(`[queue] ${this.id} command echo confirmed dispatch (${echoedCmd})\n`);
     this.#clearSubmitTimer();
-    // No plain-text echo will EVER come for this dispatch — drop its
-    // pending entry now or it would suppress a later identical send.
-    this.#neutralizePending(inflight.text);
+    // No plain-text echo will EVER come for this dispatch — its attempt is
+    // settled by the outcome (done), so it cannot match a later identical send.
     this.#recordOutcome(inflight.id, "delivered");
     this.#dispatchInFlight = null;
     this.#dispatchExtends = 0;
@@ -2649,15 +2729,6 @@ export class Session {
     this.#maybeDrainQueue();
   }
 
-  #neutralizePending(text: string): void {
-    const delivery = this.#delivery;
-    if (!delivery || !this.relaySessionId) return;
-    const typed = flattenForMatch(text);
-    const i = delivery.pending.findIndex(p => p.text === typed);
-    if (i >= 0) delivery.pending.splice(i, 1);
-    consumeReceived(delivery, this.relaySessionId, typed, Date.now());
-  }
-
   /**
    * Type `text` into the pane PRESERVING newlines: one `literal` per line with a C-j
    * (a real in-box linefeed, NOT a submit) between them. A single-line message is one
@@ -2678,48 +2749,18 @@ export class Session {
 
   /** Type a message into the pane + record receipt + bump thinking. */
   async #typeIntoTmux(text: string, opts: SendOptions): Promise<void> {
-    const delivery = this.#ensureDelivery();
-    // Commands (`!bash`, `/slash`) never produce a user-text transcript entry —
-    // their synthetic wrappers are suppressed — so they must NOT go on the
-    // pending-match queue, where they'd never match and would block the next
-    // real message's match, mirroring it as a duplicate.
-    const isCommand = /^\s*!/.test(text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(text);
-    const tracked = !!delivery && !isCommand;
-    // Dedup key: the flattened (newline→space) form. We type REAL newlines into the
-    // pane (#typeLines), so Claude echoes a multi-line user message — but we record +
-    // match the flattened form on both sides (flattenForMatch on the echo too) so that
-    // echo still pairs with this send and isn't mirrored as a duplicate. The relay
-    // mirror uses the original `text` (newlines intact) so the app shows it verbatim.
-    const typed = flattenForMatch(text);
-    // Keep a reference to THIS pending entry so a rollback below removes exactly it —
-    // not whatever happens to be last. Between the push and the awaited type, another
-    // path (a transcript echo match, or abort's #neutralizePending) can splice the
-    // array, so `.pop()` could drop the wrong entry.
-    const pendingEntry = tracked ? { seq: opts.seq, text: typed, source: opts.source, at: Date.now() } : null;
-    if (pendingEntry) {
-      delivery!.pending.push(pendingEntry);
-      // Persisted backstop: remember we sent this text so its transcript echo is
-      // never mirrored as a duplicate, even if the pending queue is lost to a
-      // restart.
-      recordReceived(delivery!, this.relaySessionId!, typed, Date.now());
-    }
+    // The dispatch attempt (runtime_ref = the flattened text the echo is
+    // matched on — we type REAL newlines, Claude echoes them multi-line, both
+    // sides flatten) was committed by #drainOnce before this call. Commands
+    // (`!bash`, `/slash`) never produce a user-text echo; their attempts are
+    // settled by the command/bash echo or dialog confirms instead.
     // No pre-clear: the drain gate only dispatches into a box it has confirmed EMPTY
     // (clearing any leftover with the verified C-u loop first), so a C-u here is redundant — and
     // a control char right before the C-j burst is exactly what paste-detection folded
     // into the message as a stray \x15. Type goes over control mode (or spawn while
-    // disconnected) IN ORDER via the FIFO; on failure roll back + throw so the drain
-    // re-queues + retries.
+    // disconnected) IN ORDER via the FIFO; on failure throw so the drain re-queues
+    // (and retires the attempt: nothing reached the pane, no echo will match it).
     if (!(await this.#typeLines(text))) {
-      if (pendingEntry) {
-        const i = delivery!.pending.indexOf(pendingEntry); // splice THIS entry, not the last one
-        if (i >= 0) delivery!.pending.splice(i, 1);
-        // Also neutralize the persisted `received` backstop recorded above — the
-        // text never reached the pane, so no echo will consume it. Leaving it
-        // stacked meant the re-dispatch recorded a SECOND one, the echo consumed
-        // only one, and the dangling 15-min entry silently swallowed a later
-        // identical message typed directly in the pane.
-        consumeReceived(delivery!, this.relaySessionId!, typed, Date.now());
-      }
       throw new Error("tmux send-keys failed");
     }
     // Submit on a delay — NOT back-to-back. The fast send-keys -l burst reads as a
@@ -3335,7 +3376,8 @@ export class Session {
           const i = this.#queue.findIndex((q) => flattenForMatch(q.text) === flat);
           if (i >= 0) {
             process.stderr.write(`[hook] ${this.id} UserPromptSubmit dropped queued duplicate ${this.#queue[i].id}\n`);
-            this.#queue.splice(i, 1);
+            const [dup] = this.#queue.splice(i, 1);
+            this.#recordOutcome(dup.id, "delivered"); // the text ran — by another route
             this.#broadcastQueue();
           }
         }
@@ -3926,26 +3968,26 @@ export class Session {
       // queue. Identical messages are matched sequentially: two "yes" sends
       // pair with two "yes" transcript entries in order.
       const uuid = typeof entry.uuid === "string" ? entry.uuid : "";
-      const delivery = this.#relay && uuid ? this.#ensureDelivery() : null;
-      if (delivery && this.relaySessionId) {
+      if (this.#relay && uuid) {
         // We type real newlines but record the flattened form (see #typeIntoTmux), and
         // Claude echoes the message multi-line — so MATCH on the flattened echo. `content`
-        // itself (newlines intact) is kept for the inbound receipt + retry text below.
+        // itself (newlines intact) is kept for the retry text below.
         const matchContent = flattenForMatch(content);
-        // Match anywhere in the queue (not just the front) so an out-of-order or
-        // stale entry can't block a real match.
-        const idx = delivery.pending.findIndex((p) => p.text === matchContent);
-        if (idx >= 0) {
-          const matched = delivery.pending.splice(idx, 1)[0];
-          recordInboundReceipt(delivery, this.relaySessionId, {
-            seq: matched.seq, uuid, text: content, source: matched.source, at: Date.now(),
-          });
-          // #typeIntoTmux records BOTH a pending entry and a persisted `received`
-          // backstop. Now that pending matched, drop the backstop twin too — else
-          // it dangles for 15 min and a later identical message typed directly in
-          // the pane finds no pending match, hits this stale `received`, and gets
-          // wrongly swallowed (the app's history loses a real "yes"/"continue").
-          consumeReceived(delivery, this.relaySessionId, matchContent, Date.now());
+        // Match against the ledger's attempts awaiting evidence for this text —
+        // oldest first, so identical texts pair in submission order. Attempts
+        // are persisted, so a restart between the type and the echo (the old
+        // in-memory pending queue's blind spot) still pairs the echo with its
+        // send instead of mirroring it back as a duplicate bubble.
+        const attempt = this.#ledger.matchAttemptByRef(this.id, matchContent);
+        if (attempt) {
+          // The echo, its uuid receipt and the seq receipt commit together with
+          // the command's terminal outcome (delivered) — one transaction.
+          const cmd = this.#ledger.getCommand(attempt.commandId);
+          const receipts = [{ kind: "transcript_uuid", ref: uuid }, ...(cmd?.seq != null ? [{ kind: "seq", ref: String(cmd.seq) }] : [])];
+          try { this.#ledger.confirmDelivery(attempt.commandId, receipts, { attemptId: attempt.id }); }
+          catch (e) { process.stderr.write(`[${this.id}] echo confirm for ${attempt.commandId} failed: ${e instanceof Error ? e.message : e}\n`); }
+          this.#uuidSeen.add(uuid);
+          this.#itemOutcome.set(attempt.commandId, "delivered");
           // codex-4: record the prompt for 5xx auto-retry BEFORE returning —
           // app/queue/RPC sends match here and used to skip the #lastUserText
           // assignment below, so #fireRetry had nothing to re-send.
@@ -3965,35 +4007,30 @@ export class Session {
           // resume, otherwise tapping "resume" would deliver it twice. Guarded
           // to the wedged state so a genuine duplicate send (same text queued
           // while another is in flight) is never swallowed.
-          if (!this.#dispatchInFlight && this.#queuePaused && this.#pauseReason === "dispatch_timeout") {
-            const head = this.#queue[0];
-            if (head && flattenForMatch(head.text) === matchContent) {
-              this.#queue.shift();
-              this.resumeQueue();
-            }
+          // Late-echo self-heal, generalized: a copy of this command still
+          // waiting in the queue (re-queued after a timeout, or restored by
+          // a restart) would run the prompt a second time — drop it, and
+          // lift a dispatch_timeout pause that was waiting for exactly this.
+          const dupAt = this.#queue.findIndex((q) => q.id === attempt.commandId);
+          if (dupAt >= 0) {
+            this.#queue.splice(dupAt, 1);
+            if (!this.#dispatchInFlight && this.#queuePaused && this.#pauseReason === "dispatch_timeout") this.resumeQueue();
+            else this.#broadcastQueue();
           }
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
-        // No queue match. Before assuming this was typed directly in the pane,
-        // check the PERSISTED received-text backstop: if the app sent this text
-        // recently, the pending match was just lost (e.g. a daemon restart) —
-        // suppress it instead of mirroring a duplicate.
-        if (!delivery.forwardedUuids.has(uuid)) {
-          if (consumeReceived(delivery, this.relaySessionId, matchContent, Date.now())) {
-            recordInboundReceipt(delivery, this.relaySessionId, {
-              uuid, text: content, source: "relay", at: Date.now(),
-            });
-          } else {
-            // Unmatched = direct input (pane view, `tmux attach`, …). Trust the log: it's a
-            // real message Claude received, so mirror it to every client. Single user, one
-            // device at a time → no concurrent writes to Claude's one input box → no
-            // collision that could garble a dispatch into a mismatched echo, so an unmatched
-            // entry is never a corrupted app send (that's why there's no longer a
-            // dispatch_mismatch suppress+pause here). Any in-flight dispatch is left
-            // untouched: its own clean echo matches later, or the dispatch echo timeout re-queues it.
-            this.#relay!.send(encodeUserMessage(content, entryTimeMs, isCompactSummary ? { isCompactSummary: true } : undefined));
-            this.#relay!.stampReceiptOnLastQueued({ uuid, turn: "" });
-          }
+        // No attempt match: the persisted attempts already cover the restart
+        // case the old in-memory pending queue + `received` backstop existed for.
+        if (!this.#hasUuid(uuid)) {
+          // Unmatched = direct input (pane view, `tmux attach`, …). Trust the log: it's a
+          // real message Claude received, so mirror it to every client. Single user, one
+          // device at a time → no concurrent writes to Claude's one input box → no
+          // collision that could garble a dispatch into a mismatched echo, so an unmatched
+          // entry is never a corrupted app send (that's why there's no longer a
+          // dispatch_mismatch suppress+pause here). Any in-flight dispatch is left
+          // untouched: its own clean echo matches later, or the dispatch echo timeout re-queues it.
+          this.#relay!.send(encodeUserMessage(content, entryTimeMs, isCompactSummary ? { isCompactSummary: true } : undefined));
+          this.#relay!.stampReceiptOnLastQueued({ uuid, turn: "" });
         }
       }
       // The prompt to re-send if this turn 5xx-fails — but never machine text
@@ -4039,10 +4076,7 @@ export class Session {
       if (blocks.length > 0) this.#turn5xxStatus = null;
       const entryUuid = typeof entry.uuid === "string" ? entry.uuid : "";
       // Skip if we've already forwarded this transcript entry (recovery case).
-      if (this.#relay && entryUuid) {
-        const delivery = this.#ensureDelivery();
-        if (delivery?.forwardedUuids.has(entryUuid)) return;
-      }
+      if (this.#relay && entryUuid && this.#hasUuid(entryUuid)) return;
       // Agent-authored push (<joy-notify/>): explicit "worth a notification" —
       // long task done, input needed. Freshness-gated so a backfill/replay of
       // history can never re-fire old notifications (the forwardedUuids skip

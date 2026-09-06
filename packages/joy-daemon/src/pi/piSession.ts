@@ -23,7 +23,7 @@ import {
   type RelaySession,
 } from "../relay/relay";
 import type { AgentSession } from "../domain/agentSession";
-import type { DeliverySource } from "../domain/receipts";
+import type { DeliverySource } from "../domain/agentSession";
 import type { SessionStatus, SessionRecord, QueuedMessage, QueueState, SessionDeps } from "../claude/session";
 import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { titleFromPrompt } from "../opencode/opencodeSession";
@@ -356,7 +356,7 @@ export class PiSession implements AgentSession {
 
   busy(): boolean { return this.#thinking; }
 
-  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean; requireDurable?: boolean }): QueuedMessage {
+  enqueue(text: string, opts?: { source?: DeliverySource; mirrorToRelay?: boolean; seq?: number; visible?: boolean }): QueuedMessage {
     const at = Date.now();
     // /title — joy-level, never forwarded (mirrors the opencode contract).
     const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());

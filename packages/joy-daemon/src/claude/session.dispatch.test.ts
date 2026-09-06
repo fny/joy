@@ -9,6 +9,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { Session, isSystemPromptEntry, paneShowsLoginForm } from "./session";
 import { saveWindowRecord, loadWindowRecord } from "../domain/windowRecord";
+import { ledgerFor } from "../domain/ledger";
 import type { TmuxDriver } from "../tmux/driver";
 
 let home: string;
@@ -422,5 +423,56 @@ test("#482 the code is typed only into the live login form (a chat pane with the
   await settle(500);
   expect(st.typed.join("")).not.toContain("secret-code-123");
   expect(st.keys).not.toContain("Enter");
+  s.end("killed");
+});
+
+// ── ledger (C1): persisted attempts replace the in-memory pending queue ──────
+
+test("C1 a restart between the type and the echo: the echo pairs with the persisted attempt — no duplicate bubble, no re-run", async () => {
+  vi.useFakeTimers();
+  const id = uid("crash-echo");
+  const a = mkSession(id, fakeTmux({ pane: READY }).driver, { claudeSessionId: "sid" });
+  const ra = relayStub("rs-" + id);
+  a.attachRelay(ra.rs, true);
+  const item = a.enqueue("survive the crash", { mirrorToRelay: false, visible: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);        // typed + Enter; attempt committed
+  const ledger = ledgerFor();
+  expect(ledger.getCommand(item.id)?.state).toBe("submitting");
+  // "crash": the object is dropped without end(); the next daemon opens its generation.
+  const b = mkSession(id, fakeTmux({ pane: READY }).driver, { claudeSessionId: "sid" });
+  const rb = relayStub("rs-" + id);
+  b.attachRelay(rb.rs, true);
+  // The old attempt is an explicit unknown; the command is queued again (a
+  // typed-but-unconfirmed prompt is retyped, as it always has been)…
+  expect(ledger.attemptsForCommand(item.id).map((x) => x.state)).toEqual(["unknown"]);
+  expect(b.queueState().pendingCount).toBe(1);
+  // …but the FIRST typing's echo arrives: it matches the persisted attempt,
+  // is not mirrored as a user bubble, and the re-dispatch of the same text is
+  // dropped instead of running the prompt twice.
+  b.onTranscriptEntry({ type: "user", uuid: "u-crash-echo", message: { role: "user", content: "survive the crash" } } as any);
+  expect(rb.userRows()).toHaveLength(0);
+  expect(ledger.getCommand(item.id)).toMatchObject({ state: "completed", terminalReason: "delivered" });
+  expect(ledger.hasReceipt(id, "transcript_uuid", "u-crash-echo")).toBe(true);
+  await vi.advanceTimersByTimeAsync(1500);
+  expect(b.queueItemState(item.id)).toBe("delivered");
+  expect(b.queueState().pendingCount).toBe(0);
+  a.end("killed"); b.end("killed");
+});
+
+test("C1 a cancel that lands before the dispatch is honoured by the ledger: the row is cancelled, never typed (#77/#35)", async () => {
+  vi.useFakeTimers();
+  const { st, driver } = fakeTmux({ pane: GENERATING });   // busy: nothing drains yet
+  const s = mkSession(uid("cancel-first"), driver, { claudeSessionId: "sid" });
+  const item = s.enqueue("do not run", { mirrorToRelay: false, visible: false, source: "rpc" });
+  const ledger = ledgerFor();
+  // The cancel reaches the ledger by another path (a control-lane cancel on a
+  // replacement, a late callback) — the in-memory copy is still queued.
+  ledger.requestCancel(item.id);
+  st.pane = READY;
+  s.resumeQueue();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(st.typed.join("")).not.toContain("do not run");
+  expect(s.queueItemState(item.id)).toBe("cancelled");
+  expect(ledger.getCommand(item.id)?.state).toBe("cancelled");
   s.end("killed");
 });
