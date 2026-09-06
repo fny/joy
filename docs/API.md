@@ -261,13 +261,24 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   driver's interrupt is retried with backoff until the runtime confirms
   (turn end, `interrupted`, idle) and after five tries is flagged
   `unresolved` (snapshot `unresolvedCancels`, journal line) instead of being
-  reported cancelled; a session-wide interrupt (OpenCode, pi) is withheld
-  while uncancelled work would be collateral and resolves with the turn's
-  own end; late evidence for a cancelled row (a tombstone) interrupts the
-  turn it names through that SAME scheduler — withheld while other work
-  runs, one op per command at a time (a second echo coalesces), retried on
-  the cancel budget, dropped once an id-less turn end / idle / interrupt
-  says the run is over. **Observation fencing**: an echo / turn start /
+  reported cancelled; a session-wide interrupt (OpenCode, pi, Claude's
+  Escape) is withheld while uncancelled work would be collateral — a
+  running or accepted command, a submission whose verdict is still out
+  (`submitting` / `unknown`), or a foreign turn other than the one the
+  interrupt is for — and resolves with the turn's own end (the protected
+  state is re-read after every wait, so a submission that began meanwhile
+  is protected too); late evidence for a cancelled row (a tombstone)
+  interrupts the turn it names through that SAME scheduler — withheld while
+  other work runs, one op per command at a time (a second echo coalesces),
+  retried on the cancel budget, dropped once an id-less turn end / idle /
+  interrupt says the run is over. The pump is serialized against it in the
+  other direction as well: while a session-wide interrupt is outstanding no
+  new pane submission or `prepare` gate wait starts — the pump waits for its
+  verdict and re-plans from the ledger (an interrupt that starts during a
+  gate wait is awaited after it, and the head is gated again). `abortRunning`
+  is the one caller that stops a foreign turn on purpose: a withheld
+  per-command op there is no verdict, and the session-wide interrupt goes
+  out for the runtime itself. **Observation fencing**: an echo / turn start /
   turn end / interrupt moves a command only when the attempt it names was
   made for the row's current payload version (an older attempt of the same
   text that landed after all is this command's delivery — at-least-once),
