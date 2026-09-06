@@ -25,7 +25,7 @@ import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
 import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
 import { ledgerFor } from "./domain/ledger";
-import { mkdirSecure, writeSecretFileAtomic } from "./domain/secretFile";
+import { mkdirSecure, writeSecretFileAtomic, tightenSecretDir } from "./domain/secretFile";
 import { launcherFromEnv, processStartId } from "./daemonLauncher";
 import { importLegacyState } from "./domain/ledgerImport";
 
@@ -117,6 +117,12 @@ function writeDaemonState(port: number): void {
 // Written before listen so a racing CLI sees it; with a dynamic port (0) the
 // onListening rewrite below fills in the real one and the CLI polls until then.
 writeDaemonState(PORT);
+// What this boot inherited loose (#48): credential generations `joy auth`
+// renamed to *.replaced (rename keeps their old 0644), a daemon.log an older
+// CLI opened with the umask default, window records written before the
+// rule. Once per boot; the write sites keep them 0600 from here on.
+tightenSecretDir(joyRelayCredsDir());
+tightenSecretDir(STATE_DIR);
 
 // The durable acceptance ledger (domain/ledger.ts): opened before anything
 // recovers or accepts work, with the one-time import of the legacy per-file

@@ -367,10 +367,20 @@ export class BoundedTail {
   constructor(maxBytes = 16 * 1024) { this.maxBytes = Math.max(1, maxBytes); }
   push(chunk: Buffer | string): void {
     const b = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
-    const joined = this.#buf.length ? Buffer.concat([this.#buf, b]) : Buffer.from(b);
-    if (joined.length <= this.maxBytes) { this.#buf = joined; return; }
-    this.#dropped += joined.length - this.maxBytes;
-    this.#buf = joined.subarray(joined.length - this.maxBytes);
+    // The retained tail is ALWAYS a fresh allocation of at most maxBytes (#69
+    // residual): a subarray of the concatenation — or of the caller's chunk —
+    // is a view that pins the whole backing ArrayBuffer (a 48 MiB chunk stayed
+    // live behind a 16 KiB "tail" until clear()). Buffer.concat / Buffer.from
+    // copy, so the caller's memory is free the moment it drops it.
+    if (b.length >= this.maxBytes) {
+      // The chunk alone fills the window: everything retained so far falls out.
+      this.#dropped += this.#buf.length + (b.length - this.maxBytes);
+      this.#buf = Buffer.from(b.subarray(b.length - this.maxBytes));
+      return;
+    }
+    const drop = Math.max(0, this.#buf.length + b.length - this.maxBytes);
+    this.#dropped += drop;
+    this.#buf = Buffer.concat([drop ? this.#buf.subarray(drop) : this.#buf, b]);
   }
   /** Bytes discarded because they fell out of the window. */
   get droppedBytes(): number { return this.#dropped; }

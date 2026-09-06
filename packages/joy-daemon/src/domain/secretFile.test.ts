@@ -7,10 +7,10 @@
 // from), inside a state dir with the same. These assert the modes at the
 // write sites, including on a REWRITE of a file an older daemon left loose.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, statSync, writeFileSync, chmodSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, lstatSync, writeFileSync, chmodSync, mkdirSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdirSecure, writeSecretFileAtomic, SECRET_FILE_MODE, SECRET_DIR_MODE } from "./secretFile";
+import { mkdirSecure, writeSecretFileAtomic, tightenSecretDir, SECRET_FILE_MODE, SECRET_DIR_MODE } from "./secretFile";
 import { saveWindowRecord, loadWindowRecord } from "./windowRecord";
 import { Ledger } from "./ledger";
 
@@ -69,5 +69,47 @@ describe("the ledger is owner-only (#48)", () => {
         if (existsSync(sib)) expect(mode(sib)).toBe(SECRET_FILE_MODE);
       }
     } finally { ledger.close(); }
+  });
+});
+
+describe("the boot-time pass over inherited loose files (#48 residual)", () => {
+  it("tightens 0644 credential backups (*.replaced) and the dir itself; leaves subdirs and symlink targets alone; a missing dir is a no-op", () => {
+    const creds = join(dir, "relays", "joy.example_4997");
+    mkdirSync(creds, { recursive: true, mode: 0o755 });
+    chmodSync(creds, 0o755);
+    // what `joy auth` renamed aside on a box that paired before the rule — rename keeps the mode
+    writeFileSync(join(creds, "access.key.replaced"), JSON.stringify({ token: "old-bearer", encryption: { machineKey: "mk" } }));
+    chmodSync(join(creds, "access.key.replaced"), 0o644);
+    writeFileSync(join(creds, "settings.json.replaced"), "{}");
+    chmodSync(join(creds, "settings.json.replaced"), 0o664);
+    writeFileSync(join(creds, "access.key"), "{}", { mode: 0o600 });
+    const state = join(creds, "state");
+    mkdirSync(state, { mode: 0o755 }); chmodSync(state, 0o755);
+    const outside = join(dir, "outside.txt");
+    writeFileSync(outside, "not ours"); chmodSync(outside, 0o644);
+    symlinkSync(outside, join(creds, "link"));
+
+    tightenSecretDir(creds);
+
+    expect(mode(creds)).toBe(SECRET_DIR_MODE);
+    expect(mode(join(creds, "access.key.replaced"))).toBe(SECRET_FILE_MODE);
+    expect(mode(join(creds, "settings.json.replaced"))).toBe(SECRET_FILE_MODE);
+    expect(mode(join(creds, "access.key"))).toBe(SECRET_FILE_MODE);
+    expect(mode(state)).toBe(0o755); // not recursive — the state dir gets its own pass
+    expect(mode(outside)).toBe(0o644); // a symlink is skipped, its target untouched
+    expect(lstatSync(join(creds, "link")).isSymbolicLink()).toBe(true);
+    expect(() => tightenSecretDir(join(dir, "never-created"))).not.toThrow();
+    expect(existsSync(join(dir, "never-created"))).toBe(false);
+  });
+
+  it("tightens a daemon.log and window records an older daemon left 0644 in the state dir", () => {
+    const state = join(dir, "state");
+    mkdirSync(state, { mode: 0o775 }); chmodSync(state, 0o775);
+    writeFileSync(join(state, "daemon.log"), "[server] hi\n"); chmodSync(join(state, "daemon.log"), 0o666);
+    writeFileSync(join(state, "window-aabbccdd.json"), JSON.stringify({ v2SessionKey: "k" })); chmodSync(join(state, "window-aabbccdd.json"), 0o644);
+    tightenSecretDir(state);
+    expect(mode(state)).toBe(SECRET_DIR_MODE);
+    expect(mode(join(state, "daemon.log"))).toBe(SECRET_FILE_MODE);
+    expect(mode(join(state, "window-aabbccdd.json"))).toBe(SECRET_FILE_MODE);
   });
 });
