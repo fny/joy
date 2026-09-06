@@ -17,6 +17,7 @@ import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
 import { StatusDot } from './StatusDot';
 import { useActiveWord } from './autocomplete/useActiveWord';
+import { AutocompleteDismissal, dismissalAt, isDismissalActive } from './autocomplete/dismissal';
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
 import { FloatingOverlay } from './FloatingOverlay';
@@ -779,15 +780,18 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     // Use the tracked selection from inputState
     const activeWord = useActiveWord(inputState.text, inputState.selection, props.autocompletePrefixes);
     // Escape with suggestions open DISMISSES that query: the word stays in the
-    // text, but no suggestions are requested for it until the active word
-    // changes (typing, caret move). The old Escape wrote the same text and
-    // collapsed selection back, which changed nothing — every further Escape
-    // was consumed by the autocomplete branch and never reached Stop (#195).
-    const [dismissedWord, setDismissedWord] = React.useState<string | null>(null);
+    // text, but no suggestions are requested for it until the text or the
+    // caret changes (typing anywhere, caret move). The old Escape wrote the
+    // same text and collapsed selection back, which changed nothing — every
+    // further Escape was consumed by the autocomplete branch and never reached
+    // Stop (#195). The dismissal is keyed on text + caret, not on the active
+    // word string: "/co /co" dismissed at caret 3 reopens at caret 7.
+    const [dismissal, setDismissal] = React.useState<AutocompleteDismissal | null>(null);
+    const dismissed = isDismissalActive(dismissal, inputState.text, inputState.selection);
     React.useEffect(() => {
-        if (dismissedWord !== null && activeWord !== dismissedWord) setDismissedWord(null);
-    }, [activeWord, dismissedWord]);
-    const liveActiveWord = activeWord !== null && activeWord === dismissedWord ? null : activeWord;
+        if (dismissal !== null && !dismissed) setDismissal(null);
+    }, [dismissal, dismissed]);
+    const liveActiveWord = dismissed ? null : activeWord;
     // Using default options: clampSelection=true, autoSelectFirst=true, wrapAround=true
     // To customize: useActiveSuggestions(activeWord, props.autocompleteSuggestions, { clampSelection: false, wrapAround: false })
     const [suggestions, selected, moveUp, moveDown] = useActiveSuggestions(liveActiveWord, props.autocompleteSuggestions, { clampSelection: true, wrapAround: true });
@@ -913,7 +917,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                 return true;
             } else if (event.key === 'Escape') {
                 // Dismiss this query; the next Escape falls through to abort (#195).
-                setDismissedWord(activeWord);
+                setDismissal(dismissalAt(inputState.text, inputState.selection));
                 return true;
             }
         }
@@ -955,7 +959,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
         }
         return false; // Key was not handled
-    }, [suggestions, moveUp, moveDown, selected, handleSuggestionSelect, activeWord, props.showAbortButton, props.onAbort, isAborting, handleAbortPress, agentInputEnterToSend, props.onSend, props.onPermissionModeChange, availableModes, permissionModeKey, isSendBlocked, handleBlockedSendAttempt, props.isSendDisabled]);
+    }, [suggestions, moveUp, moveDown, selected, handleSuggestionSelect, inputState.text, inputState.selection, props.showAbortButton, props.onAbort, isAborting, handleAbortPress, agentInputEnterToSend, props.onSend, props.onPermissionModeChange, availableModes, permissionModeKey, isSendBlocked, handleBlockedSendAttempt, props.isSendDisabled]);
 
 
 

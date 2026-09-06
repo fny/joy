@@ -5,7 +5,7 @@ import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { useSessionMessages } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { reconcileSearchCursor } from './searchCursor';
+import { nextSearchCursor } from './searchCursor';
 
 export interface SessionSearchBarProps {
     sessionId: string;
@@ -60,21 +60,20 @@ export const SessionSearchBar = React.memo((props: SessionSearchBarProps) => {
         return out;
     }, [messages, query]);
 
-    // Reset the cursor + jump to the first hit whenever the query changes.
+    // ONE cursor decision per change of the inputs (#122): a new query
+    // starts over at the first hit; a changed match list under the same
+    // query follows the selected message (or clamps when it is gone). These
+    // used to be two effects sharing one render's stale cursor, which left
+    // the counter on a different hit than the one scrolled into view.
+    const appliedQueryRef = React.useRef<string | null>(null);
     React.useEffect(() => {
-        setCurrent(0);
-        setSelectedId(matches[0]?.messageId ?? null);
-        if (matches.length > 0) props.onScrollToMessage(matches[0].messageId);
-    }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    // Reconcile the selection whenever the match list changes: follow the
-    // selected message to its new index, or clamp and scroll when it is gone.
-    React.useEffect(() => {
-        const next = reconcileSearchCursor(matches, selectedId, current);
+        const queryChanged = appliedQueryRef.current !== query;
+        appliedQueryRef.current = query;
+        const next = nextSearchCursor(matches, { queryChanged, selectedId, previousIndex: current });
         if (next.index !== current) setCurrent(next.index);
         if (next.messageId !== selectedId) setSelectedId(next.messageId);
         if (next.scroll && next.messageId) props.onScrollToMessage(next.messageId);
-    }, [matches]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [matches, query]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const go = React.useCallback((dir: 1 | -1) => {
         if (matches.length === 0) return;

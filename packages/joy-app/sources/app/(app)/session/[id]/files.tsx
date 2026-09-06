@@ -19,6 +19,18 @@ import { Shaker, ShakeInstance } from '@/components/Shaker';
 import { usePrefetchFileContents } from '@/hooks/usePrefetchFileContents';
 import { AllFilesTab } from '@/components/FilesSidebar';
 
+/** Shared addressability boundary for every row kind on this screen: a git
+ *  identity key for a non-UTF-8 name carries a NUL (gitPathIdentity) and is
+ *  never a path the daemon accepts — it must not reach the file route. */
+function isAddressablePath(path: string): boolean {
+    return !path.includes('\u0000');
+}
+
+function isUnavailableRow(file: GitFileStatus | FileItem): boolean {
+    if (!isAddressablePath(file.fullPath)) return true;
+    return 'status' in file && (file.status === 'deleted' || file.unaddressable);
+}
+
 export default React.memo(function FilesScreen() {
     const router = useRouter();
     const { id: sessionId } = useLocalSearchParams<{ id: string }>();
@@ -75,12 +87,17 @@ export default React.memo(function FilesScreen() {
     const handleFilePress = React.useCallback((file: GitFileStatus | FileItem) => {
         // Deleted files, and rows whose name is not valid UTF-8 (no addressable
         // path — shown by display text only): shake and don't navigate.
-        if ('status' in file && (file.status === 'deleted' || file.unaddressable)) {
+        if (isUnavailableRow(file)) {
             shakerRefs.current.get(file.fullPath)?.shake();
             return;
         }
         const encodedPath = encodePathParam(file.fullPath);
         router.push(`/session/${sessionId}/file?path=${encodedPath}`);
+    }, [router, sessionId]);
+
+    const handleProjectFilePress = React.useCallback((filePath: string) => {
+        if (!isAddressablePath(filePath)) return;
+        router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
     }, [router, sessionId]);
 
     const renderFileIcon = (file: GitFileStatus) => {
@@ -168,20 +185,27 @@ export default React.memo(function FilesScreen() {
     };
 
     const renderGitFileItem = (file: GitFileStatus, index: number, prefix: string, isLast: boolean) => {
-        const isDeleted = file.status === 'deleted';
+        // An unaddressable row (non-UTF-8 name) renders an explicit unavailable
+        // state: dimmed title, a "no action" mark instead of the status icon,
+        // and the same shake-on-press as a deleted row.
+        const unavailable = isUnavailableRow(file);
+        const unaddressable = unavailable && file.status !== 'deleted';
         const item = (
             <Item
                 key={`${prefix}-${file.fullPath}-${index}`}
                 title={file.fileName}
+                titleStyle={unaddressable ? { color: theme.colors.textSecondary } : undefined}
                 subtitle={renderFileSubtitle(file)}
                 icon={renderFileIcon(file)}
-                rightElement={renderStatusIcon(file)}
+                rightElement={unaddressable
+                    ? <Octicons name="circle-slash" size={16} color={theme.colors.textSecondary} />
+                    : renderStatusIcon(file)}
                 onPress={() => handleFilePress(file)}
                 showDivider={!isLast}
             />
         );
 
-        if (isDeleted) {
+        if (unavailable) {
             return (
                 <Shaker
                     key={`shaker-${prefix}-${file.fullPath}-${index}`}
@@ -237,9 +261,7 @@ export default React.memo(function FilesScreen() {
                 <AllFilesTab
                     sessionId={sessionId!}
                     selectedPath={null}
-                    onFilePress={(filePath) => {
-                        router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
-                    }}
+                    onFilePress={handleProjectFilePress}
                 />
             </View>
         );

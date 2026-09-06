@@ -31,8 +31,19 @@ const CREATE_RETRY_BASE_MS = 1000;
 /** Upper bound on any single awaited network/refresh step inside the wait
  *  loop. sync.refreshSessions awaits InvalidateSync, whose backoff retries a
  *  down relay without limit — awaited bare it would never let the loop come
- *  back to check its deadline (#416). */
+ *  back to check its deadline (#416). createSession and retrySpawn attempts
+ *  are capped the same way: a POST that never answers is a lost response,
+ *  which the intent replay (#417) already handles. */
 const STEP_CAP_MS = 10_000;
+/** Upper bound on the cancel DELETE after a spawn is abandoned. It runs at
+ *  the moment the relay is most likely unreachable — unbounded, it stranded
+ *  the waiter forever AFTER its deadline had already fired (#416). */
+const CLEANUP_CAP_MS = STEP_CAP_MS;
+/** How long an UNCERTAIN creation (see SpawnCreationUncertainError) keeps
+ *  being replayed for a repeat of the identical action. The relay dedupes by
+ *  (account, actor, creationIntentId) plus the full request hash, so a
+ *  replay can only ever return the session this exact action asked for. */
+const UNCERTAIN_CREATION_TTL_MS = 10 * 60_000;
 
 type SessionLink = { sessionId?: string; localSessionId?: string; keyEnvelope?: string };
 type SessionLike = { metadata?: { joy__sessionId?: string; v2?: SessionLink } | null };
@@ -47,10 +58,10 @@ export interface SpawnDeps {
     confirm: (title: string, message: string, options: { cancelText: string; confirmText: string }) => Promise<boolean>;
     now: () => number;
     sleep: (ms: number) => Promise<void>;
-    /** Allocates the creation intent (see #417). A caller that wants to
-     *  re-drive ONE user action (e.g. a "Retry" button on the failure it just
-     *  showed) can pin the id here so the relay replays instead of spawning
-     *  a second session; a new user action must get a new id. */
+    /** Pins the creation intent (see #417). A caller re-driving ONE user
+     *  action — the "Retry" of a SpawnCreationUncertainError it just showed —
+     *  passes that error's `creationIntentId` here so the relay replays
+     *  instead of spawning a second session; a new user action must not. */
     creationIntentId?: string;
 }
 
@@ -63,12 +74,21 @@ const defaultDeps = (): SpawnDeps => ({
     sleep: (ms) => new Promise<void>(r => setTimeout(r, ms)),
 });
 
-/** Await `p` for at most `ms`; a slower (or rejecting) promise yields null
- *  and keeps running on its own — the caller re-checks its deadline instead
- *  of being held hostage by a retry loop it does not own (#416). */
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown } | null;
+
+/** Await `p` for at most `ms`. null when it did not settle in time — it keeps
+ *  running on its own and the caller re-checks its deadline instead of being
+ *  held hostage by a retry loop it does not own (#416). A rejection is
+ *  reported as such, so the caller can tell "refused" from "no answer". */
+async function settleWithin<T>(deps: SpawnDeps, p: Promise<T>, ms: number): Promise<Settled<T>> {
+    const tracked: Promise<Settled<T>> = p.then(value => ({ ok: true, value }), error => ({ ok: false, error }));
+    return Promise.race([tracked, deps.sleep(Math.max(0, ms)).then(() => null)]);
+}
+
+/** settleWithin for steps whose failure and timeout are handled alike. */
 async function bounded<T>(deps: SpawnDeps, p: Promise<T>, ms: number): Promise<T | null> {
-    const guarded = p.then(v => v, () => null);
-    return Promise.race([guarded, deps.sleep(Math.max(0, ms)).then(() => null)]);
+    const r = await settleWithin(deps, p, ms);
+    return r?.ok ? r.value : null;
 }
 
 /** A createSession failure worth replaying under the same intent: the request
@@ -77,6 +97,117 @@ async function bounded<T>(deps: SpawnDeps, p: Promise<T>, ms: number): Promise<T
 export function isRetryableCreateError(e: unknown): boolean {
     if (e instanceof V2ApiError) return e.status === 502 || e.status === 503 || e.status === 504;
     return true; // network-level: TypeError from fetch, aborts, DNS
+}
+
+/** Whether the cancel of an abandoned spawn was acknowledged by the relay.
+ *  'uncertain' means the relay may still hold a spawn nobody is waiting for
+ *  — reported separately from the spawn failure itself (#416). */
+export type SpawnCleanup = 'done' | 'uncertain';
+
+/**
+ * The relay may or may not hold an accepted creation (#417): every attempt
+ * inside the create budget failed in a way that could still have been
+ * accepted — a lost response, a gateway 5xx, a POST that never answered.
+ * The identity is retained (uncertainCreationFor) so a retry of the SAME
+ * action replays it instead of queueing a second session; a caller that
+ * shows this failure with a Retry passes `creationIntentId` back through
+ * SpawnDeps. `status`/`code` mirror the last relay answer, if there was one.
+ */
+export class SpawnCreationUncertainError extends Error {
+    readonly creationIntentId: string;
+    readonly machineId: string;
+    readonly cause: unknown;
+    readonly status?: number;
+    readonly code?: string;
+
+    constructor(creationIntentId: string, machineId: string, cause: unknown) {
+        super(cause instanceof Error ? cause.message : String(cause));
+        this.name = 'SpawnCreationUncertainError';
+        this.creationIntentId = creationIntentId;
+        this.machineId = machineId;
+        this.cause = cause;
+        if (cause instanceof V2ApiError) {
+            this.status = cause.status;
+            this.code = cause.code;
+        }
+    }
+}
+
+/** An accepted spawn that failed or never bound and was abandoned. The
+ *  message is the user-facing reason; `cleanup` says whether the cancel
+ *  DELETE was acknowledged (#416). */
+export class SpawnAbandonedError extends Error {
+    constructor(message: string, readonly v2SessionId: string, readonly cleanup: SpawnCleanup) {
+        super(message);
+        this.name = 'SpawnAbandonedError';
+    }
+}
+
+/** The retained identity of a creation whose acceptance is unresolved. */
+export interface UncertainCreation {
+    creationIntentId: string;
+    machineId: string;
+    /** When the create budget ran out (deps.now()). */
+    since: number;
+}
+
+// Keyed by the action's fingerprint (machine + spec): the relay's own
+// idempotency hash covers the whole request, so only the IDENTICAL action
+// may replay an intent. Module state, not persisted: the failure the user
+// can retry lives in this app run too.
+const uncertainCreations = new Map<string, UncertainCreation>();
+
+function stableJson(v: unknown): string {
+    if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
+    if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        return '{' + Object.keys(o).sort().filter(k => o[k] !== undefined).map(k => JSON.stringify(k) + ':' + stableJson(o[k])).join(',') + '}';
+    }
+    return JSON.stringify(v) ?? 'null';
+}
+
+/** Identity of one spawn ACTION: same machine and the same spec. */
+export function creationFingerprint(machineId: string, spec: V2SpawnSpec): string {
+    return machineId + '\n' + stableJson(spec ?? null);
+}
+
+/**
+ * The unresolved creation of exactly this action, if any (#417). The UI
+ * passes its `creationIntentId` as SpawnDeps.creationIntentId when the user
+ * retries the failure it was shown; v2SpawnAndWait also reuses it on its own
+ * for an identical spawn within UNCERTAIN_CREATION_TTL_MS. It resolves when
+ * a create under it is answered (accepted or refused); choosing a DISTINCT
+ * creation is discardUncertainCreation.
+ */
+export function uncertainCreationFor(machineId: string, spec: V2SpawnSpec, now = Date.now()): UncertainCreation | null {
+    const key = creationFingerprint(machineId, spec);
+    const found = uncertainCreations.get(key);
+    if (!found) return null;
+    if (now - found.since > UNCERTAIN_CREATION_TTL_MS) {
+        uncertainCreations.delete(key);
+        return null;
+    }
+    return found;
+}
+
+/** Forget the unresolved creation of this action: the next spawn of it is a
+ *  new creation with a new identity. */
+export function discardUncertainCreation(machineId: string, spec: V2SpawnSpec): void {
+    uncertainCreations.delete(creationFingerprint(machineId, spec));
+}
+
+/** Test seam: a fresh registry between cases. */
+export function resetUncertainCreationsForTests(): void {
+    uncertainCreations.clear();
+}
+
+/** Cancel an accepted spawn nobody is waiting for — without letting the
+ *  cancel itself hang the caller (#416). A 404 means it is already gone. */
+async function cancelSpawn(deps: SpawnDeps, v2id: string): Promise<SpawnCleanup> {
+    const r = await settleWithin(deps, deps.api.deleteSession(v2id), CLEANUP_CAP_MS);
+    if (r === null) return 'uncertain';
+    if (r.ok) return 'done';
+    return r.error instanceof V2ApiError && r.error.status === 404 ? 'done' : 'uncertain';
 }
 
 /**
@@ -88,7 +219,8 @@ export function isRetryableCreateError(e: unknown): boolean {
  *
  * Returns the session id, or null if the user declined the directory
  * prompt (already cleaned up — the caller should just bail quietly).
- * Throws on a spawn that never binds.
+ * Throws SpawnCreationUncertainError when the relay never answered the
+ * creation, and SpawnAbandonedError on a spawn that failed or never bound.
  */
 export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overrides: Partial<SpawnDeps> = {}): Promise<string | null> {
     const deps: SpawnDeps = { ...defaultDeps(), ...overrides };
@@ -98,62 +230,91 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
     // createSession by (account, actor, creationIntentId) and replays the
     // accepted session for a repeat — a fresh uuid per attempt made every
     // retry after a lost acceptance queue ANOTHER session on the daemon
-    // (#417).
-    const creationIntentId = deps.creationIntentId ?? randomUUID();
+    // (#417). An unresolved creation of this very action is replayed too:
+    // after the retry budget the id used to live only in the abandoned
+    // invocation, so the user's own retry accepted a second intent.
+    const fingerprint = creationFingerprint(machineId, spec);
+    const creationIntentId = deps.creationIntentId
+        ?? uncertainCreationFor(machineId, spec, deps.now())?.creationIntentId
+        ?? randomUUID();
     const createStarted = deps.now();
     let v2id: string;
     for (let attempt = 0; ; attempt++) {
-        try {
-            const created = await deps.api.createSession(machineId, spec, { creationIntentId });
-            v2id = created.sessionId;
+        const remaining = CREATE_RETRY_BUDGET_MS - (deps.now() - createStarted);
+        const r = await settleWithin(deps, deps.api.createSession(machineId, spec, { creationIntentId }), Math.min(STEP_CAP_MS, remaining));
+        if (r?.ok) {
+            v2id = r.value.sessionId;
+            uncertainCreations.delete(fingerprint); // acceptance resolved
             break;
-        } catch (e) {
-            const elapsed = deps.now() - createStarted;
-            if (!isRetryableCreateError(e) || elapsed >= CREATE_RETRY_BUDGET_MS) throw e;
-            await deps.sleep(Math.min(CREATE_RETRY_BASE_MS * 2 ** attempt, CREATE_RETRY_BUDGET_MS - elapsed));
         }
+        const error = r ? r.error : new Error('createSession did not answer in time');
+        if (!isRetryableCreateError(error)) {
+            uncertainCreations.delete(fingerprint); // the relay refused it: nothing to replay
+            throw error;
+        }
+        const elapsed = deps.now() - createStarted;
+        if (elapsed >= CREATE_RETRY_BUDGET_MS) {
+            uncertainCreations.set(fingerprint, { creationIntentId, machineId, since: deps.now() });
+            throw new SpawnCreationUncertainError(creationIntentId, machineId, error);
+        }
+        await deps.sleep(Math.min(CREATE_RETRY_BASE_MS * 2 ** attempt, CREATE_RETRY_BUDGET_MS - elapsed));
     }
 
     // Mutable: paused while the user has the directory prompt open, and
     // re-armed for a fresh startup budget once a retry is accepted (#415).
     let deadline = deps.now() + startupBudget;
-    let promptedForDir = false;
+    // The user approved creating the missing directory, but the relay has
+    // not acknowledged the retry yet: re-send it instead of asking again.
+    let dirApproved = false;
 
     while (deps.now() < deadline) {
         await deps.sleep(POLL_MS);
 
         // Poll v2 state so a pre-bind spawn FAILURE is caught, not waited out.
         const st = await bounded(deps, deps.api.sessionState(v2id), Math.min(STEP_CAP_MS, deadline - deps.now()));
-        if (st?.spawnFailure && st.spawnFailure.startsWith('dir_missing:') && !promptedForDir) {
-            promptedForDir = true;
-            const missing = st.spawnFailure.slice('dir_missing:'.length);
-            // The clock does not run against the spawn while the user is
-            // deciding: a prompt left open past the deadline used to let the
-            // retry be ACCEPTED and then throw on the very next loop check,
-            // so the app reported failure while the agent went on to start
-            // (#415).
-            const promptOpened = deps.now();
-            const approved = await deps.confirm(
-                t('newSession.createDirectoryTitle'),
-                t('newSession.createDirectoryMessage', { path: missing }),
-                { cancelText: t('common.cancel'), confirmText: t('common.create') },
-            );
-            deadline += deps.now() - promptOpened;
-            if (!approved) {
-                await deps.api.deleteSession(v2id).catch(() => { });
-                return null;
+        if (st?.spawnFailure && st.spawnFailure.startsWith('dir_missing:')) {
+            if (!dirApproved) {
+                const missing = st.spawnFailure.slice('dir_missing:'.length);
+                // The clock does not run against the spawn while the user is
+                // deciding: a prompt left open past the deadline used to let the
+                // retry be ACCEPTED and then throw on the very next loop check,
+                // so the app reported failure while the agent went on to start
+                // (#415).
+                const promptOpened = deps.now();
+                const approved = await deps.confirm(
+                    t('newSession.createDirectoryTitle'),
+                    t('newSession.createDirectoryMessage', { path: missing }),
+                    { cancelText: t('common.cancel'), confirmText: t('common.create') },
+                );
+                deadline += deps.now() - promptOpened;
+                if (!approved) {
+                    const cleanup = await cancelSpawn(deps, v2id);
+                    if (cleanup !== 'done') console.warn(`[spawn] declined directory prompt, but cancelling ${v2id} was not acknowledged (#416)`);
+                    return null;
+                }
+                dirApproved = true;
             }
-            await deps.api.retrySpawn(v2id, true);
-            // The accepted retry is a new startup: give it the full budget.
-            deadline = deps.now() + startupBudget;
-            promptedForDir = false; // allow a fresh prompt if it fails again for another reason
+            // Bounded (#416): a retry request that hangs must not pin the
+            // waiter. If it did not land, the next poll still reads
+            // dir_missing and re-sends it — the user already approved.
+            const retry = await settleWithin(deps, deps.api.retrySpawn(v2id, true), Math.min(STEP_CAP_MS, Math.max(0, deadline - deps.now())));
+            if (retry?.ok) {
+                // The accepted retry is a new startup: give it the full budget,
+                // and a fresh prompt if it fails again.
+                deadline = deps.now() + startupBudget;
+                dirApproved = false;
+            } else if (retry && retry.error instanceof V2ApiError && retry.error.status >= 400 && retry.error.status < 500) {
+                // Definitive refusal: the relay saw the retry and would not take it.
+                const cleanup = await cancelSpawn(deps, v2id);
+                throw new SpawnAbandonedError(t('errors.spawnFailed', { reason: st.spawnFailure }), v2id, cleanup);
+            }
             continue;
         }
         // Any other spawn failure (clone_failed, agent missing, …) is final:
         // surfacing it now instead of after the 2-minute deadline (#151).
-        if (st?.spawnFailure && !st.spawnFailure.startsWith('dir_missing:')) {
-            await deps.api.deleteSession(v2id).catch(() => { });
-            throw new Error(t('errors.spawnFailed', { reason: st.spawnFailure }));
+        if (st?.spawnFailure) {
+            const cleanup = await cancelSpawn(deps, v2id);
+            throw new SpawnAbandonedError(t('errors.spawnFailed', { reason: st.spawnFailure }), v2id, cleanup);
         }
 
         // Bounded: a relay that stays unreachable after accepting the spawn
@@ -170,11 +331,11 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
         }
     }
     // The relay still holds the accepted spawn: cancel it so it cannot start
-    // an agent nobody is waiting for (Astra on 40873bd6).
-    await deps.api.deleteSession(v2id).catch(() => { });
-    throw new Error(t('errors.spawnDidNotStart'));
+    // an agent nobody is waiting for (Astra on 40873bd6) — bounded, and its
+    // outcome reported on the error rather than assumed (#416).
+    const cleanup = await cancelSpawn(deps, v2id);
+    throw new SpawnAbandonedError(t('errors.spawnDidNotStart'), v2id, cleanup);
 }
-
 
 /**
  * Wait for the card of a session the DAEMON created (fork, teleport, restart)

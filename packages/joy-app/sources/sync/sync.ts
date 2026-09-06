@@ -540,6 +540,12 @@ class Sync {
         // Drop the cursors so that fetch re-anchors like a cold open.
         if (cursorsNeedReanchor(!!storage.getState().sessionMessages[sessionId], this.sessionLastSeq.has(sessionId))) {
             log.log(`💬 sendMessage: store evicted for ${sessionId} — clearing cursors so the next fetch re-anchors (#12)`);
+            // Clearing the cursors is not enough on its own: a forward page
+            // already in flight from the old cursor used to land afterwards
+            // and put the forward cursor back — without the backward anchor —
+            // so the recreated store was forward-only again. The bump makes
+            // that page stale at its commit point (same fence as #407).
+            this.fetchGen.bump(sessionId);
             this.sessionLastSeq.delete(sessionId);
             this.sessionOldestSeq.delete(sessionId);
         }
@@ -643,6 +649,13 @@ class Sync {
      *  message synchronizer, cursors, lock, send/strike bookkeeping, git
      *  status, and the stored card + messages. */
     private forgetSession(sessionId: string) {
+        // Invalidate FIRST, with a generation that stays unique: a page in
+        // flight for this session must find itself stale at its commit point
+        // and write nothing after the delete below. Deleting the counter
+        // (FetchGeneration.forget) reset it to the reusable default 0 — the
+        // very value an in-flight fetch had captured — so that page landed
+        // after the removal and restored the messages and cursor.
+        this.fetchGen.bump(sessionId);
         this.messagesSync.get(sessionId)?.stop();
         this.messagesSync.delete(sessionId);
         this.sessionLastSeq.delete(sessionId);
@@ -650,7 +663,6 @@ class Sync {
         this.sessionMessageLocks.delete(sessionId);
         this.recentSendAt.delete(sessionId);
         this.unopenableStrikes.delete(sessionId);
-        this.fetchGen.forget(sessionId);
         gitStatusSync.clearForSession(sessionId);
         storage.getState().deleteSession(sessionId);
     }
@@ -1201,8 +1213,8 @@ class Sync {
         collected.sort((a, b) => a.seq - b.seq);
         const storeBefore = storage.getState().sessionMessages[sessionId]?.messages.length ?? 0;
         this.assertFresh(sessionId, gen);
-        await this.applyFetchedMessages(sessionId, encryption, collected, { deriveThinking: true });
-        this.assertFresh(sessionId, gen); // decrypt is async too — nothing below may commit after a reset
+        await this.applyFetchedMessages(sessionId, encryption, collected, gen, { deriveThinking: true });
+        this.assertFresh(sessionId, gen); // nothing below may commit after a reset
         // History that fetches but never renders has now happened twice, and
         // both times the only evidence was gone by the time it was reported
         // (a reload rebuilds the store and hides it). Say what the initial
@@ -1282,7 +1294,7 @@ class Sync {
             }
             this.unopenableStrikes.delete(sessionId);
 
-            await this.applyFetchedMessages(sessionId, encryption, messages, { deriveThinking: true });
+            await this.applyFetchedMessages(sessionId, encryption, messages, gen, { deriveThinking: true });
             this.assertFresh(sessionId, gen);
             this.applyLifecycle(sessionId, data.lifecycle);
 
@@ -1337,6 +1349,11 @@ class Sync {
         sessionId: string,
         encryption: ReturnType<Encryption['getSessionEncryption']> & {},
         messages: ApiMessage[],
+        // The fetch generation the caller captured (#407): decryption is
+        // async, and a reset (or a removal, #406; or a send re-anchor, #12)
+        // that lands while it runs must stop the commit HERE — the caller's
+        // own check after this call came too late for the writes inside it.
+        gen: number,
         // Forward/initial fetches carry the newest messages, so a turn-start/
         // turn-end embedded in them reflects the CURRENT turn state — mirror it
         // onto the session (closes the gap codex flagged: the HTTP path updated
@@ -1346,6 +1363,7 @@ class Sync {
     ) => {
         if (messages.length === 0) return;
         const decryptedMessages = await encryption.decryptMessages(messages);
+        this.assertFresh(sessionId, gen); // superseded while decrypting: nothing below may write
         const normalizedMessages: NormalizedMessage[] = [];
         let latestThinking: { seq: number; thinking: boolean } | null = null;
         for (let i = 0; i < decryptedMessages.length; i++) {
@@ -1373,9 +1391,11 @@ class Sync {
             }
         }
         if (normalizedMessages.length > 0) {
+            this.assertFresh(sessionId, gen);
             this.applyMessages(sessionId, normalizedMessages);
         }
         if (latestThinking) {
+            this.assertFresh(sessionId, gen);
             const session = storage.getState().sessions[sessionId];
             if (session && session.thinking !== latestThinking.thinking) {
                 this.applySessions([{ ...session, thinking: latestThinking.thinking, thinkingAt: Date.now() }]);
@@ -1424,7 +1444,12 @@ class Sync {
                 if (this.fetchGen.isStale(sessionId, gen)) return;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
-                await this.applyFetchedMessages(sessionId, encryption, messages);
+                try {
+                    await this.applyFetchedMessages(sessionId, encryption, messages, gen);
+                } catch (e) {
+                    if (e instanceof StaleFetchError) return; // reset while decrypting (#407)
+                    throw e;
+                }
                 if (this.fetchGen.isStale(sessionId, gen)) return;
 
                 let minSeq = beforeSeq;

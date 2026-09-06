@@ -16,6 +16,7 @@ import { DisplayItem, ToolGroupItem, useGroupedMessages } from '@/hooks/useGroup
 import Octicons from '@expo/vector-icons/Octicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { alertError, guarded } from '@/utils/guardAsync';
+import { resolveRevealScroll, rowContainsMessage, RevealLayout, RevealTarget } from './searchReveal';
 
 const SCROLL_THRESHOLD = 300;
 // "Live" (pinned to the newest message) is a SEPARATE, much tighter band than
@@ -67,11 +68,6 @@ function anchorMessageIdFor(row: DisplayItem): string | null {
     if (row.type === 'tool-group') return row.messages[0]?.id ?? null;
     if (row.type === 'agent-work-group') return row.messages[row.messages.length - 1]?.id ?? null;
     return null;
-}
-
-function rowContainsMessage(row: DisplayItem, messageId: string): boolean {
-    if (row.type === 'message') return row.message.id === messageId;
-    return row.messages.some((m) => m.id === messageId);
 }
 
 // Count a row as "visible" as soon as any sliver of it is in view, so the
@@ -240,6 +236,17 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     const collapsedGroupsRef = React.useRef(collapsedGroups);
     collapsedGroupsRef.current = collapsedGroups;
 
+    // In-session search target (#203). State so the row holding it re-renders
+    // with the `reveal` prop (via extraData); mirrored to a ref so renderItem
+    // and the reveal callbacks read the latest without changing identity.
+    const [revealTarget, setRevealTarget] = React.useState<RevealTarget | null>(null);
+    const revealTargetRef = React.useRef<RevealTarget | null>(null);
+    const revealNonceRef = React.useRef(0);
+    // Nonce whose hit already scrolled to its measured position: later layout
+    // reports for it (streaming re-layouts, recycling) must not scroll again.
+    const revealHandledRef = React.useRef(0);
+    const listExtraData = React.useMemo(() => ({ collapsedGroups, revealTarget }), [collapsedGroups, revealTarget]);
+
     // Auto-expand groups that need user approval — but only if the user
     // hasn't manually collapsed them.
     // We track manually-collapsed IDs so we never force-reopen them.
@@ -347,22 +354,48 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         });
     }, []);
 
-    // In-session search (Cmd/Ctrl+F): scroll to the row holding a message id.
-    // viewPosition 0.3 places the match comfortably below the header rather
-    // than flush against it. Returns false if the id isn't in the grouped
-    // window so the caller can surface "not in loaded history".
+    // In-session search (Cmd/Ctrl+F): reveal the message with a given id.
+    // Returns false if the id isn't in the grouped window so the caller can
+    // surface "not in loaded history".
     //
     // A hit inside a COLLAPSED group is revealed first: the group renders its
     // messages only when expanded, so scrolling to the header alone left the
-    // selected match absent from the visible chat (#203). The scroll runs once
-    // the expanded layout has committed (two frames later).
+    // selected match absent from the visible chat (#203). Nested tool groups
+    // inside an agent-work-group keep their own collapse state, so the target
+    // also travels DOWN as the `reveal` prop: AgentWorkGroupView opens the
+    // nested group holding it, and the rendered hit reports its layout within
+    // the row (RevealAnchor → handleRevealLayout), which scrolls to the hit's
+    // ACTUAL position resolved against the current data — scrolling to the
+    // group start alone need not bring a later hit of a long group into view.
+    // The coarse row scroll is the fallback for rows that never report (bare
+    // message rows) and the way to mount a row that is virtualized out — its
+    // anchor then reports and refines.
+    const handleRevealLayout = useCallback((layout: RevealLayout) => {
+        const target = revealTargetRef.current;
+        if (!target || layout.nonce !== target.nonce || layout.messageId !== target.messageId) return;
+        if (revealHandledRef.current === target.nonce) return;
+        const list = flatListRef.current;
+        if (!list) return;
+        const scroll = resolveRevealScroll(orderedItemsRef.current, target.messageId, layout, list.getWindowSize().height);
+        if (!scroll) return;
+        revealHandledRef.current = target.nonce;
+        void list.scrollToIndex({ ...scroll, animated: true });
+    }, []);
     React.useImperativeHandle(ref, () => ({
         scrollToMessageId: (messageId: string) => {
             const items = orderedItemsRef.current;
             const index = items.findIndex((i) => rowContainsMessage(i, messageId));
             if (index < 0) return false;
             const row = items[index];
-            const scroll = () => { void flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.3 }); };
+            const target: RevealTarget = { messageId, nonce: ++revealNonceRef.current };
+            revealTargetRef.current = target;
+            // Bare message rows have nothing to open or measure.
+            setRevealTarget(row.type === 'message' ? null : target);
+            const coarse = () => {
+                if (revealTargetRef.current !== target || revealHandledRef.current === target.nonce) return;
+                const scroll = resolveRevealScroll(orderedItemsRef.current, messageId, null, 0);
+                if (scroll) void flatListRef.current?.scrollToIndex({ ...scroll, animated: true });
+            };
             if (row.type !== 'message' && collapsedGroupsRef.current.has(row.id)) {
                 manuallyCollapsedRef.current.delete(row.id); // a search reveal is not a manual collapse
                 setCollapsedGroups((prev) => {
@@ -371,10 +404,12 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                     next.delete(row.id);
                     return next;
                 });
-                requestAnimationFrame(() => requestAnimationFrame(scroll));
+                // Once the expanded layout has committed (two frames later),
+                // unless the hit's anchor already reported and scrolled.
+                requestAnimationFrame(() => requestAnimationFrame(coarse));
                 return true;
             }
-            scroll();
+            coarse();
             return true;
         },
     }), []);
@@ -393,6 +428,10 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     ), []);
 
     const renderItem = useCallback(({ item }: { item: DisplayItem }) => {
+        // Only the row holding the search target receives it (identity-stable
+        // per search), so every other memoized row compares null to null.
+        const target = revealTargetRef.current;
+        const reveal = target && item.type !== 'message' && rowContainsMessage(item, target.messageId) ? target : null;
         if (item.type === 'tool-group') {
             return (
                 <ToolGroupView
@@ -401,6 +440,8 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                     sessionId={props.sessionId}
                     expanded={!collapsedGroupsRef.current.has(item.id)}
                     onToggle={handleToggleGroup}
+                    reveal={reveal}
+                    onRevealLayout={handleRevealLayout}
                 />
             );
         }
@@ -412,6 +453,8 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                     sessionId={props.sessionId}
                     expanded={!collapsedGroupsRef.current.has(item.id)}
                     onToggle={handleToggleGroup}
+                    reveal={reveal}
+                    onRevealLayout={handleRevealLayout}
                 />
             );
         }
@@ -422,7 +465,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 sessionId={props.sessionId}
             />
         );
-    }, [props.metadata, props.sessionId, handleToggleGroup]);
+    }, [props.metadata, props.sessionId, handleToggleGroup, handleRevealLayout]);
 
     // Non-inverted list: the newest messages sit at the visual bottom. Show the
     // scroll-to-bottom button once the user has scrolled UP far enough from the
@@ -747,7 +790,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 keyboardShouldPersistTaps="handled"
                 keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
                 renderItem={renderItem}
-                extraData={collapsedGroups}
+                extraData={listExtraData}
                 onScroll={handleScroll}
                 onLoad={handleLoad}
                 scrollEventThrottle={16}

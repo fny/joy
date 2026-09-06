@@ -7,7 +7,7 @@
  *   #415 the deadline pauses while the directory prompt is open and an
  *        accepted retry gets a fresh startup budget.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('expo-crypto', () => ({ randomUUID: () => 'uuid-' + Math.random().toString(36).slice(2) }));
 vi.mock('@/modal', () => ({ Modal: { confirm: vi.fn(async () => true) } }));
@@ -22,7 +22,10 @@ vi.mock('@/sync/v2/api', () => {
 });
 
 import { V2ApiError } from '@/sync/v2/api';
-import { isRetryableCreateError, v2SpawnAndWait, waitForLocalSession, type SpawnDeps } from './spawn';
+import {
+    SpawnAbandonedError, SpawnCreationUncertainError, discardUncertainCreation, isRetryableCreateError,
+    resetUncertainCreationsForTests, uncertainCreationFor, v2SpawnAndWait, waitForLocalSession, type SpawnDeps,
+} from './spawn';
 
 type Sessions = Record<string, { metadata?: { joy__sessionId?: string; v2?: { sessionId?: string; localSessionId?: string; keyEnvelope?: string } } }>;
 
@@ -56,6 +59,8 @@ const bound = (v2id: string): Sessions => ({
 });
 
 describe('v2SpawnAndWait', () => {
+    beforeEach(() => resetUncertainCreationsForTests());
+
     it('returns the bound card id once the refresh shows it', async () => {
         let refreshed = 0;
         const h = harness({
@@ -109,13 +114,132 @@ describe('v2SpawnAndWait', () => {
         expect(h.clock.get() - t0).toBeLessThanOrEqual(30_000);
     });
 
+    it('#417 residual: the user retrying the SAME action after the create budget replays ONE intent', async () => {
+        // Every attempt for 31 s "was accepted but the response was lost";
+        // then the relay recovers and the user presses the same button again.
+        const accepted = new Set<string>();
+        let recovered = false;
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
+            accepted.add(opts!.creationIntentId!);
+            if (!recovered) { h.clock.add(31_000); throw new Error('accepted; lost response'); }
+            return { sessionId: 'v2-1' };
+        });
+        const failure = await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e);
+        expect(failure).toBeInstanceOf(SpawnCreationUncertainError);
+        expect(accepted.has(failure.creationIntentId)).toBe(true);
+        // The identity outlives the failed invocation, addressed by the action.
+        expect(uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())?.creationIntentId).toBe(failure.creationIntentId);
+        recovered = true;
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
+        expect(accepted.size).toBe(1);
+        // Resolved by the accepted answer: nothing left to replay.
+        expect(uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())).toBeNull();
+    });
+
+    it('#417: the UI can pin the id from the error, and a distinct action gets its own', async () => {
+        const seen: string[] = [];
+        let fail = true;
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
+            seen.push(opts!.creationIntentId!);
+            if (fail) { h.clock.add(31_000); throw new TypeError('Network request failed'); }
+            return { sessionId: 'v2-1' };
+        });
+        const failure = (await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e)) as SpawnCreationUncertainError;
+        fail = false;
+        // Explicit retry of the shown failure.
+        await v2SpawnAndWait('m', { cwd: '/x' }, { ...h.deps, creationIntentId: failure.creationIntentId });
+        expect(new Set(seen).size).toBe(1);
+        // A different spec is a different action: a new id.
+        await v2SpawnAndWait('m', { cwd: '/y' }, h.deps);
+        expect(new Set(seen).size).toBe(2);
+    });
+
+    it('#417: discarding the uncertain creation makes the next spawn a new one', async () => {
+        const seen: string[] = [];
+        let fail = true;
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async (_m: string, _s: unknown, opts?: { creationIntentId?: string }) => {
+            seen.push(opts!.creationIntentId!);
+            if (fail) { h.clock.add(31_000); throw new TypeError('Network request failed'); }
+            return { sessionId: 'v2-1' };
+        });
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toBeInstanceOf(SpawnCreationUncertainError);
+        fail = false;
+        discardUncertainCreation('m', { cwd: '/x' });
+        await v2SpawnAndWait('m', { cwd: '/x' }, h.deps);
+        expect(new Set(seen).size).toBe(2);
+    });
+
+    it('#417: a definitive refusal resolves the creation — nothing is replayed later', async () => {
+        const h = harness({ sessions: () => bound('v2-1') });
+        (h.api.createSession as ReturnType<typeof vi.fn>).mockImplementation(async () => { throw new V2ApiError(429, 'too_many_sessions', null); });
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toMatchObject({ code: 'too_many_sessions' });
+        expect(uncertainCreationFor('m', { cwd: '/x' }, h.clock.get())).toBeNull();
+    });
+
+    it('#416: a createSession POST that never answers is bounded and ends as an uncertain creation', async () => {
+        const h = harness();
+        h.api.createSession = (() => new Promise(() => { })) as never;
+        const t0 = h.clock.get();
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toBeInstanceOf(SpawnCreationUncertainError);
+        expect(h.clock.get() - t0).toBeLessThanOrEqual(30_000 + 10_000);
+    });
+
+    it('#416 residual: a cleanup DELETE that never settles cannot strand the waiter; the error says so', async () => {
+        const h = harness({ refreshSessions: () => new Promise(() => { }) });
+        let deleting = false;
+        h.api.deleteSession = (() => { deleting = true; return new Promise(() => { }); }) as never;
+        const t0 = h.clock.get();
+        const failure = await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e);
+        expect(deleting).toBe(true);
+        expect(failure).toBeInstanceOf(SpawnAbandonedError);
+        expect(failure.cleanup).toBe('uncertain');
+        expect(failure.v2SessionId).toBe('v2-1');
+        expect(failure.message).toMatch(/spawnDidNotStart/);
+        expect(h.clock.get() - t0).toBeLessThan(120_000 + 30_000);
+    });
+
+    it('#416: an acknowledged cleanup is reported as done', async () => {
+        const h = harness({ refreshSessions: async () => { } });
+        const failure = await v2SpawnAndWait('m', { cwd: '/x' }, h.deps).catch(e => e);
+        expect(failure).toBeInstanceOf(SpawnAbandonedError);
+        expect(failure.cleanup).toBe('done');
+        expect(h.calls.deleted).toBe(1);
+    });
+
+    it('#416: a retrySpawn that hangs is bounded and re-sent on the next poll without asking again', async () => {
+        let confirms = 0;
+        let retries = 0;
+        let landed = false;
+        const h = harness({
+            confirm: async () => { confirms++; return true; },
+            refreshSessions: async () => { },
+            sessions: () => (landed ? bound('v2-1') : {}),
+        });
+        h.api.sessionState = vi.fn(async () => (landed ? null : { spawnFailure: 'dir_missing:/x' }) as never);
+        h.api.retrySpawn = (() => {
+            retries++;
+            if (retries === 1) return new Promise(() => { }); // never answers
+            landed = true;
+            return Promise.resolve({});
+        }) as never;
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).resolves.toBe('app1');
+        expect(confirms).toBe(1);
+        expect(retries).toBe(2);
+    });
+
     it('#416: a refresh that never settles cannot hold the waiter past the deadline', async () => {
         const h = harness({ refreshSessions: () => new Promise(() => { }) });
         const t0 = h.clock.get();
         await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toThrow(/spawnDidNotStart/);
         // Deadline honoured within one poll+step of 120 s, and the accepted
-        // spawn was cancelled so no orphan agent starts.
-        expect(h.clock.get() - t0).toBeLessThan(120_000 + 15_000);
+        // spawn was cancelled so no orphan agent starts. (The virtual clock
+        // also charges the create attempt's and the cleanup's 10 s race caps
+        // up front, since a virtual sleep advances time even when the network
+        // promise wins the race — #416.)
+        expect(h.clock.get() - t0).toBeLessThan(120_000 + 35_000);
         expect(h.calls.deleted).toBe(1);
     });
 
