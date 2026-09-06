@@ -23,7 +23,7 @@ vi.mock("../tmux/driver", async () => {
     commandOnce: async () => ok,
     key: async () => ok,
     literal: async (_target: string, text: string) => {
-      if (/\bclaude\b/.test(text) && text.includes("--session-id")) {
+      if (/\bclaude\b/.test(text) && /--session-id|--resume/.test(text)) {
         // The launch boundary: what is on disk RIGHT NOW is what a crash here
         // would leave for recovery.
         seen.launchCmd = text;
@@ -83,4 +83,34 @@ test("a launch record that cannot be persisted refuses the launch — nothing is
   await expect(reg.create({ cwd })).rejects.toThrow(/could not persist the launch record/);
   rename.mockRestore();
   expect(seen.launchCmd).toBeNull();
+}, 20_000);
+
+test("a launch binding a transcript a teleport import is replacing is refused before anything is spawned; the import's own launch adopts the claim (#550 residual)", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { claimTranscript, transcriptClaims, resetTranscriptClaims } = await import("./transcriptClaims");
+  const { cwdToTranscriptDir } = await import("../claude/transcript");
+  const { listWindowRecords } = await import("./windowRecord");
+  resetTranscriptClaims();
+  const dir = cwdToTranscriptDir(cwd); fs.mkdirSync(dir, { recursive: true });
+  const sid = "abc-5507-0000"; const target = join(dir, `${sid}.jsonl`); fs.writeFileSync(target, "{}\n");
+  try {
+    const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+    const importing = claimTranscript(target, "teleport-import:abc-5507", "replace")!;
+    await expect(reg.create({ cwd, resume_id: sid, forkSession: true, forceNew: true })).rejects.toThrow(/being replaced by a teleport import/);
+    expect(seen.launchCmd).toBeNull();                 // refused before the tmux setup, never typed
+    expect(listWindowRecords()).toEqual([]);           // and before the launch record
+    // The import's own launch carries the claim: it reaches the launch boundary,
+    // and its abort releases only the registry's OWN bind claims — never the
+    // import's, which the import releases when it returns.
+    await expect(reg.create({ cwd, resume_id: sid, forkSession: true, forceNew: true, transcriptClaim: importing })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(seen.launchCmd).toMatch(/--resume abc-5507-0000 --fork-session/);
+    expect(importing.held()).toBe(true);
+    expect(transcriptClaims(target)).toEqual([importing]);
+    importing.release();
+    // Released: a fork of the conversation binds again, and its bind claim goes with the aborted create.
+    seen.launchCmd = null;
+    await expect(reg.create({ cwd, resume_id: sid, forkSession: true, forceNew: true })).rejects.toThrow(/session create failed: launch-claude/);
+    expect(seen.launchCmd).toMatch(/--resume abc-5507-0000/);
+    expect(transcriptClaims(target)).toEqual([]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }, 20_000);
