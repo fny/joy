@@ -334,9 +334,9 @@ export class OpencodeSession implements AgentSession {
         // this request was in flight (tombstoned by cancelQueued) is now
         // running — interrupt it here, not only on the SSE confirm, which a
         // dropped stream never delivers (Astra on 170ec279, #77).
-        if (r.messageID && this.#cancelledIds.delete(item.clientId)) {
+        if (r.messageID && this.#cancelledIds.has(item.clientId)) {
           process.stderr.write(`[opencode ${this.id}] ${item.clientId} was cancelled — interrupting the admitted prompt\n`);
-          void client.interrupt(ocSessionId).catch(() => { /* best effort */ });
+          this.#interruptCancelled(item.clientId, client, ocSessionId);
         }
       } catch (e) {
         if (this.#isEnded()) return;
@@ -429,9 +429,9 @@ export class OpencodeSession implements AgentSession {
         case "confirmPrompt":
           if (eff.messageID) {
             this.#removeInbound(eff.messageID); this.#recordOutcome(eff.messageID, "delivered"); this.#armTurnDeadline(eff.messageID);
-            if (this.#cancelledIds.delete(eff.messageID) && this.#client && this.#ocSessionId) {
+            if (this.#cancelledIds.has(eff.messageID) && this.#client && this.#ocSessionId) {
               // Admitted after the user cancelled it: interrupt now (#77).
-              void this.#client.interrupt(this.#ocSessionId).catch(() => { /* best effort */ });
+              this.#interruptCancelled(eff.messageID, this.#client, this.#ocSessionId);
             }
           }
           break; // admission proven by SSE too (#79)
@@ -617,6 +617,17 @@ export class OpencodeSession implements AgentSession {
   }
   /** Cancelled while their prompt request was in flight (see cancelQueued). */
   #cancelledIds = new Set<string>();
+  /** Interrupt a cancelled prompt that was admitted anyway. The tombstone is
+   *  consumed only once the interrupt SUCCEEDS: consuming it first and
+   *  swallowing the rejection lost the cancellation for good when the
+   *  interrupt failed, leaving work active while queueItemState said
+   *  cancelled (Astra on cde740c1, #77). A kept tombstone lets the next
+   *  admission evidence (HTTP ack or SSE confirm) retry it. */
+  #interruptCancelled(id: string, client: OpencodeClient, ocSessionId: string): void {
+    void client.interrupt(ocSessionId)
+      .then(() => { this.#cancelledIds.delete(id); })
+      .catch((e) => { process.stderr.write(`[opencode ${this.id}] interrupt of cancelled ${id} failed (${e instanceof Error ? e.message : e}) — tombstone kept for retry\n`); });
+  }
   #itemOutcome = new Map<string, "delivered" | "cancelled" | "failed">();
   #recordOutcome(id: string, outcome: "delivered" | "cancelled" | "failed"): void {
     // Terminal outcomes are monotonic: a late admission or reply for an item

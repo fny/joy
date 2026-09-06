@@ -503,6 +503,7 @@ export class CodexSession implements AgentSession {
    *  remove the spooled entry. */
   #onDispatchEchoed(clientId: string): void {
     const before = this.#inbound.length;
+    const was = this.#inbound.find((i) => i.clientId === clientId);
     this.#inbound = this.#inbound.filter((i) => i.clientId !== clientId);
     if (this.#inbound.length !== before) {
       // Ownership FIRST, then the spool: a crash between the two must leave a
@@ -515,7 +516,10 @@ export class CodexSession implements AgentSession {
       if (!saved) {
         const kept = this.#inbound.length; // restore the entry as an ownership record
         const orig = this.#inbound; void kept;
-        this.#inbound = [...orig, { clientId, text: "", state: "delivered", at: Date.now() }];
+        // Keep the relay seq: a recovered adapter dedupes a redelivered
+        // prompt by seq, and without it the ownership record was invisible
+        // to that check — a second entry, a second turn (Astra on cde740c1).
+        this.#inbound = [...orig, { clientId, text: "", state: "delivered", at: Date.now(), ...(was?.seq != null ? { seq: was.seq } : {}) }];
         process.stderr.write(`[codex ${this.id}] checkpoint save failed — keeping ${clientId} in the spool as the ownership record\n`);
       }
       saveCodexInbound(this.id, this.#inbound); this.#recordOutcome(clientId, "delivered"); this.#dispatched.add(clientId);
