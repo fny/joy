@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { TextInput } from 'react-native';
 import { Command, CommandCategory } from './types';
+import { alertError, guarded } from '@/utils/guardAsync';
 
 export function useCommandPalette(commands: Command[], onClose: () => void) {
     const [searchQuery, setSearchQuery] = useState('');
@@ -61,8 +62,10 @@ export function useCommandPalette(commands: Command[], onClose: () => void) {
         setSelectedIndex(0);
     }, [searchQuery]);
 
+    // The palette closes at once (the command may navigate away); a command
+    // that fails afterwards is reported rather than rejecting unhandled.
     const handleSelectCommand = useCallback((command: Command) => {
-        command.action();
+        guarded(() => command.action(), alertError())();
         onClose();
     }, [onClose]);
 

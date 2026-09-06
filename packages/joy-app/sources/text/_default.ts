@@ -43,6 +43,8 @@ export const en = {
         discard: 'Discard',
         version: 'Version',
         copied: 'Copied',
+        copyFailed: 'Could not copy to the clipboard',
+        openLinkFailed: 'Could not open the link',
         share: 'Share',
         copy: 'Copy',
         scanning: 'Scanning...',

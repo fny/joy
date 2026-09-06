@@ -23,3 +23,10 @@ export function useCheckScannerPermissions(): () => Promise<boolean> {
         return true;
     }
 }
+
+/** expo-camera rejects `launchScanner` when the user backs out of Android's
+ *  code scanner (BarcodeScanningCancelledException). Not an error. */
+export function isScannerCancellation(error: unknown): boolean {
+    const e = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+    return /cancel/i.test(`${e?.code ?? ''} ${e?.name ?? ''} ${e?.message ?? ''}`);
+}

@@ -45,6 +45,8 @@ export const ja: TranslationStructure = {
         discard: '破棄',
         version: 'バージョン',
         copied: 'コピーしました',
+        copyFailed: 'クリップボードにコピーできませんでした',
+        openLinkFailed: 'リンクを開けませんでした',
         share: '共有',
         copy: 'コピー',
         scanning: 'スキャン中...',

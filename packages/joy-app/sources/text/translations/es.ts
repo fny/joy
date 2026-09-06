@@ -43,6 +43,8 @@ export const es: TranslationStructure = {
         discard: 'Descartar',
         version: 'Versión',
         copied: 'Copiado',
+        copyFailed: 'No se pudo copiar al portapapeles',
+        openLinkFailed: 'No se pudo abrir el enlace',
         share: 'Compartir',
         copy: 'Copiar',
         scanning: 'Escaneando...',
