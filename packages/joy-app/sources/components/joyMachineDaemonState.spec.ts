@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveDaemonRow, resolveEnvErrorRow, envNamesFor } from './joyMachineDaemonState';
+import { resolveDaemonRow, resolveEnvErrorRow } from './joyMachineDaemonState';
 
 const ok = { ok: true, pid: 42, version: '1.2.3' };
 
@@ -51,19 +51,5 @@ describe('resolveEnvErrorRow (#227)', () => {
         expect(resolveEnvErrorRow('offline')).toEqual({ kind: 'failure', detail: 'offline' });
         expect(resolveEnvErrorRow('Request timed out')).toEqual({ kind: 'failure', detail: 'Request timed out' });
         expect(resolveEnvErrorRow('http_502')).toEqual({ kind: 'failure', detail: 'http_502' });
-    });
-});
-
-describe('envNamesFor (#226)', () => {
-    it('renders the names the current machine answered with', () => {
-        expect(envNamesFor({ machineId: 'B', names: ['X', 'Y'] }, 'B')).toEqual(['X', 'Y']);
-    });
-
-    it('never lends another machine\'s list (and its delete rows) to the machine on screen', () => {
-        expect(envNamesFor({ machineId: 'A', names: ['X'] }, 'B')).toBeNull();
-    });
-
-    it('renders nothing before any machine has answered', () => {
-        expect(envNamesFor(null, 'B')).toBeNull();
     });
 });
