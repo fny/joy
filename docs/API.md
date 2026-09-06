@@ -263,7 +263,23 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   `unresolved` (snapshot `unresolvedCancels`, journal line) instead of being
   reported cancelled; a session-wide interrupt (OpenCode, pi) is withheld
   while uncancelled work would be collateral and resolves with the turn's
-  own end; late evidence for a cancelled row interrupts the turn it names.
+  own end; late evidence for a cancelled row (a tombstone) interrupts the
+  turn it names through that SAME scheduler — withheld while other work
+  runs, one op per command at a time (a second echo coalesces), retried on
+  the cancel budget, dropped once an id-less turn end / idle / interrupt
+  says the run is over. **Observation fencing**: an echo / turn start /
+  turn end / interrupt moves a command only when the attempt it names was
+  made for the row's current payload version (an older attempt of the same
+  text that landed after all is this command's delivery — at-least-once),
+  and the transition is preconditioned on the command's newest attempt;
+  late evidence of an attempt made for a text since edited away (a
+  timed-out submission that landed after the row was edited and
+  re-submitted) is recorded on that attempt as history and never advances
+  the replacement. A row waiting at the
+  driver's `prepare` gate is re-read when the gate opens: an edit (payload
+  version) or a reorder (queue head) meanwhile re-plans instead of
+  submitting the stale row, and the committed attempt records the payload
+  version the driver actually receives.
   **Generations**: `retire(restart | process_exited)` leaves queued rows for
   the replacement, ends a running command `interrupted{restart}` (the turn
   was live in a runtime torn down on purpose — it is never re-run), and turns
@@ -283,8 +299,15 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   `!bash` / `/slash` command is complete at delivery. The turn edges are the
   hooks' (UserPromptSubmit → turn_started, Stop → completed, StopFailure →
   failed, the 60 s idle notification → idle) with the transcript's
-  turn_duration / end_turn / interrupt marker as the hook-less tie-breaker;
-  a turn nobody dispatched is foreign. A submit that never echoes within the
+  turn_duration / end_turn / interrupt marker as the hook-less tie-breaker.
+  With hooks live a transcript terminal is the session's only while the
+  hook turn is open and the entry postdates its opening (the current turn
+  ending before its Stop lands); an entry stamped at or before the hook
+  turn opened, or tailed after a hook closed the turn, is an older edge —
+  relay bookkeeping only, never the next run's terminal, thinking or
+  confirmation ref (the Esc marker keeps its authority for the open hook
+  turn: no Stop fires on an interrupt). A turn nobody dispatched is
+  foreign. A submit that never echoes within the
   window (extended while the pane visibly works) puts the row back to
   `queued` and pauses the queue `dispatch_timeout` (the attempt stays
   matchable: a late echo runs the command instead of re-typing it and lifts
@@ -307,13 +330,19 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   The nucleus lane runs a relay turn as one coordinator command: the row is
   accepted with `relay_turn_id` (a re-offer is the same row), `/start` is
   posted when the command reaches `running` (the driver's echo — no busy()
-  guess, no activity gate), the terminal fact is the command's terminal
+  guess, no activity gate) under the stable event id `start:<turn>`, with
+  its intent and its acknowledgement recorded as separate ledger receipts
+  on the turn (`relay_start_intent` before the request, `relay_start` after
+  the relay answered), the terminal fact is the command's terminal
   state with its reason as `meta.reason`, and a cancel offer is the row's
   durable cancel (a re-offer of one already requested is not new work). A
   restart mid-turn closes the relay turn `interrupted{restart}`. At boot the
   lane resumes every relay turn the ledger still carries for a
-  coordinator-driven session and writes the terminal row (`term:<turn>`,
-  idempotent) for any that ended while no lane was alive (R13). A
+  coordinator-driven session — a running row whose `/start` was never
+  acknowledged is started then (once; a relay that already has the turn
+  running answers replay), one with the ack never again — and writes the
+  terminal row (`term:<turn>`, idempotent) for any that ended while no lane
+  was alive (R13). A
   local checkpoint recorded while its rows are unacked stays pending until
   the acks arrive, so a crash replays instead of skipping (#67). Backlog over
   2000 rows / 64 MiB per session pauses new prompt dispatch and holds
