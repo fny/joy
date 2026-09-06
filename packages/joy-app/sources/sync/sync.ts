@@ -1203,7 +1203,7 @@ class Sync {
                     // runs, not the page's span: the reader scanned (and
                     // trimmed) rows below the ones it returned (#128).
                     const runs = Sync.sealedSpans(data, typeof data.cursor === 'number' ? data.cursor - 1 : 0, Number.isFinite(beforeSeq) ? beforeSeq - 1 : Number.MAX_SAFE_INTEGER);
-                    for (const gap of runs) this.recordUnopenableGap(sessionId, gap.fromSeq, gap.toSeq, v2ctx.key, gap.count);
+                    this.recordUnopenableGaps(sessionId, runs, v2ctx.key, Sync.seqsOf(data.messages));
                     log.log(`💬 fetchInitialLatestPage: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries — anchoring past them, kept as a recoverable gap (#128)`);
                     this.unopenableStrikes.delete(sessionId);
                 }
@@ -1350,7 +1350,7 @@ class Sync {
                 // advance rather than wedge the session, but KEEP the rows
                 // that failed as a gap that a later key change re-reads (#128).
                 const runs = Sync.sealedSpans(data, afterSeq, maxSeq);
-                for (const gap of runs) this.recordUnopenableGap(sessionId, gap.fromSeq, gap.toSeq, v2ctx.key, gap.count);
+                this.recordUnopenableGaps(sessionId, runs, v2ctx.key, Sync.seqsOf(messages));
                 log.log(`💬 fetchForwardSince: ${data.unopenable} row(s) in ${sessionId} unopenable after ${strikes - 1} retries with the current key — advancing past them, ${Sync.describeSpans(runs)} kept as a recoverable gap (#128)`);
             }
             this.unopenableStrikes.delete(sessionId);
@@ -1530,7 +1530,7 @@ class Sync {
                 if ((data.unopenable ?? 0) > 0) {
                     this.sessionsSync.invalidate(); // fire only: awaiting queue idleness can starve under the 2.5s poll (Astra, a979cfef)
                     const runs = Sync.sealedSpans(data, minSeq - 1, beforeSeq - 1);
-                    for (const gap of runs) this.recordUnopenableGap(sessionId, gap.fromSeq, gap.toSeq, v2ctxOlder.key, gap.count);
+                    this.recordUnopenableGaps(sessionId, runs, v2ctxOlder.key, Sync.seqsOf(messages));
                     log.log(`💬 loadOlderMessages: ${data.unopenable} row(s) in ${sessionId} unopenable — ${Sync.describeSpans(runs)} kept as a recoverable gap (#128)`);
                 }
                 storage.getState().applyOlderMessagesPagination(sessionId, {
@@ -1641,6 +1641,7 @@ class Sync {
      * key would replace another key's gap on such a row and end its replay
      * eligibility before anything applied it (#128). From a reader that
      * only counted its failures, the page's own `(pageFrom, pageTo]`.
+     * Sorted and disjoint, like every span list this bookkeeping takes.
      */
     private static sealedSpans(
         data: { unopenable?: number; unopenableSeqs?: number[] },
@@ -1668,11 +1669,56 @@ class Sync {
         return runs;
     }
 
-    /** Remember `(fromSeq, toSeq]` — `count` sealed rows — as unreadable under `key`. */
-    private recordUnopenableGap(sessionId: string, fromSeq: number, toSeq: number, key: Uint8Array | null, count: number) {
-        if (!(toSeq > fromSeq)) return;
+    /** The server seqs of a page's rows, for the stored-seq subtraction. */
+    private static seqsOf(messages: { seq?: number | null }[] | undefined): number[] {
+        const out: number[] = [];
+        if (Array.isArray(messages)) for (const m of messages) if (typeof m.seq === 'number') out.push(m.seq);
+        return out;
+    }
+
+    /**
+     * Remember one read's failed `runs` (sorted, disjoint — `sealedSpans`)
+     * as unreadable under `key`: ONE pass over the session's list and ONE
+     * store publication per read, however many runs the page named. The
+     * first cut of #128 settled and published per run: 4,000 alternating
+     * sealed/lifecycle events made 2,000 publications, each a full sorted
+     * copy of the list — 42M range objects and ~5.7 s on 20,000 old gaps
+     * (F17). A seq the store already holds (or that this page `opened`) is
+     * never a gap — a row sealed under an OLDER key that a newer key's read
+     * cannot open is still history, not missing — so those seqs are cut
+     * out of the runs first, and out of every existing range while here.
+     */
+    private recordUnopenableGaps(
+        sessionId: string,
+        runs: { fromSeq: number; toSeq: number; count: number }[],
+        key: Uint8Array | null,
+        opened: number[] = [],
+    ) {
+        const keyId = Sync.keyId(key);
+        const spans: UnopenableRange[] = [];
+        for (const r of runs) if (r.toSeq > r.fromSeq) spans.push({ fromSeq: r.fromSeq, toSeq: r.toSeq, keyId, count: Math.max(1, r.count) });
+        if (spans.length === 0) return;
+        const stored = this.storedSeqs(sessionId, opened);
         const ranges = this.unopenableGaps.get(sessionId) ?? [];
-        this.unopenableGaps.set(sessionId, Sync.settleRange(ranges, { fromSeq, toSeq, keyId: Sync.keyId(key), count: Math.max(1, count) }));
+        const next = Sync.cutSeqs(Sync.settleRanges(ranges, Sync.cutSeqs(spans, stored)), stored);
+        if (next !== ranges) this.setUnopenableGaps(sessionId, next);
+    }
+
+    /** Every server seq the session's store holds, plus `extra`, ascending
+     *  (duplicates allowed). Rows without a seq (own sends before their ack)
+     *  cannot be a gap's rows and are skipped. */
+    private storedSeqs(sessionId: string, extra: number[] = []): number[] {
+        const messages = storage.getState().sessionMessages[sessionId]?.messages;
+        const seqs: number[] = [];
+        if (Array.isArray(messages)) for (const m of messages) if (typeof m.seq === 'number') seqs.push(m.seq);
+        for (const seq of extra) if (typeof seq === 'number') seqs.push(seq);
+        return seqs.sort((a, b) => a - b);
+    }
+
+    /** Replace a session's list (empty → forgotten) and mirror it once. */
+    private setUnopenableGaps(sessionId: string, ranges: UnopenableRange[]) {
+        if (ranges.length === 0) this.unopenableGaps.delete(sessionId);
+        else this.unopenableGaps.set(sessionId, ranges);
         this.publishUnopenableGaps(sessionId);
     }
 
@@ -1683,28 +1729,49 @@ class Sync {
     }
 
     /**
-     * `range` is the latest word on its rows. An existing range under the
-     * SAME key that overlaps it is absorbed (union, the larger count — the
-     * same rows were counted twice, not more rows); under a DIFFERENT key
-     * only the overlapped part is replaced and the rest is kept. Adjacent
-     * ranges settled under one key are then merged. Sorted, disjoint result.
+     * `runs` (sorted, disjoint, ALL stamped with one key) are the latest word
+     * on their rows. An existing range under the SAME key that overlaps a
+     * run is absorbed (union, the larger count — the same rows were counted
+     * twice, not more rows); under a DIFFERENT key only the overlapped part
+     * is replaced and the rest is kept. Adjacent ranges settled under one
+     * key are then merged. One merge of two sorted lists: O(ranges + runs),
+     * and the input is returned untouched when there is nothing to add.
      */
-    private static settleRange(ranges: UnopenableRange[], range: UnopenableRange): UnopenableRange[] {
-        let added = range;
-        const out: UnopenableRange[] = [];
+    private static settleRanges(ranges: UnopenableRange[], runs: UnopenableRange[]): UnopenableRange[] {
+        if (runs.length === 0) return ranges;
+        const added: UnopenableRange[] = runs.map((r) => ({ ...r }));
+        const kept: UnopenableRange[] = [];
+        let j = 0;
         for (const r of ranges) {
-            if (r.toSeq <= added.fromSeq || r.fromSeq >= added.toSeq) { out.push(r); continue; }
-            if (r.keyId === added.keyId) {
-                added = { fromSeq: Math.min(r.fromSeq, added.fromSeq), toSeq: Math.max(r.toSeq, added.toSeq), keyId: added.keyId, count: Math.max(r.count, added.count) };
+            while (j < added.length && added[j].toSeq <= r.fromSeq) j++;
+            if (j >= added.length || added[j].fromSeq >= r.toSeq) { kept.push(r); continue; }
+            if (r.keyId === added[j].keyId) {
+                // Absorb r into every run it touches; those runs become one.
+                const u = { fromSeq: Math.min(r.fromSeq, added[j].fromSeq), toSeq: Math.max(r.toSeq, added[j].toSeq), keyId: r.keyId, count: Math.max(r.count, added[j].count) };
+                let k = j;
+                while (k + 1 < added.length && added[k + 1].fromSeq < r.toSeq) {
+                    k++;
+                    u.toSeq = Math.max(u.toSeq, added[k].toSeq);
+                    u.count = Math.max(u.count, added[k].count);
+                }
+                added.splice(j, k - j + 1, u);
                 continue;
             }
-            if (r.fromSeq < added.fromSeq) out.push(Sync.clipRange(r, r.fromSeq, added.fromSeq));
-            if (r.toSeq > added.toSeq) out.push(Sync.clipRange(r, added.toSeq, r.toSeq));
+            // Another key: keep the pieces of r that no run covers.
+            let from = r.fromSeq;
+            for (let k = j; k < added.length && added[k].fromSeq < r.toSeq; k++) {
+                if (added[k].fromSeq > from) kept.push(Sync.clipRange(r, from, added[k].fromSeq));
+                from = Math.max(from, added[k].toSeq);
+            }
+            if (from < r.toSeq) kept.push(Sync.clipRange(r, from, r.toSeq));
         }
-        out.push(added);
-        out.sort((a, b) => a.fromSeq - b.fromSeq);
+        // kept and added are each sorted and mutually disjoint: merge them,
+        // fusing adjacent ranges that share a key.
         const merged: UnopenableRange[] = [];
-        for (const r of out) {
+        let a = 0;
+        let b = 0;
+        while (a < kept.length || b < added.length) {
+            const r = b >= added.length || (a < kept.length && kept[a].fromSeq < added[b].fromSeq) ? kept[a++] : added[b++];
             const last = merged[merged.length - 1];
             if (last && last.keyId === r.keyId && last.toSeq === r.fromSeq) {
                 merged[merged.length - 1] = { ...last, toSeq: r.toSeq, count: last.count + r.count };
@@ -1713,6 +1780,58 @@ class Sync {
             }
         }
         return merged;
+    }
+
+    /**
+     * Remove every seq in `seqs` (ascending) from the sorted list: a row the
+     * store holds is not missing, whatever a reader said about it. Ranges
+     * with no such seq come back as-is; the list itself when none had one.
+     */
+    private static cutSeqs(ranges: UnopenableRange[], seqs: number[]): UnopenableRange[] {
+        if (ranges.length === 0 || seqs.length === 0) return ranges;
+        const out: UnopenableRange[] = [];
+        let changed = false;
+        let p = 0;
+        for (const r of ranges) {
+            while (p < seqs.length && seqs[p] <= r.fromSeq) p++;
+            if (p >= seqs.length || seqs[p] > r.toSeq) { out.push(r); continue; }
+            changed = true;
+            let from = r.fromSeq;
+            while (p < seqs.length && seqs[p] <= r.toSeq) {
+                const seq = seqs[p++];
+                if (seq - 1 > from) out.push(Sync.clipRange(r, from, seq - 1));
+                from = seq;
+            }
+            if (r.toSeq > from) out.push(Sync.clipRange(r, from, r.toSeq));
+        }
+        return changed ? out : ranges;
+    }
+
+    /** The range holding `seq`, by binary search over the sorted list. */
+    private static rangeAt(ranges: UnopenableRange[], seq: number): UnopenableRange | undefined {
+        let lo = 0;
+        let hi = ranges.length - 1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            const r = ranges[mid];
+            if (seq <= r.fromSeq) hi = mid - 1;
+            else if (seq > r.toSeq) lo = mid + 1;
+            else return r;
+        }
+        return undefined;
+    }
+
+    /** Whether `seq` is in the ascending list `seqs`. */
+    private static hasSeq(seqs: number[], seq: number): boolean {
+        let lo = 0;
+        let hi = seqs.length - 1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (seqs[mid] < seq) lo = mid + 1;
+            else if (seqs[mid] > seq) hi = mid - 1;
+            else return true;
+        }
+        return false;
     }
 
     /** Remove `(fromSeq, toSeq]` from the list, clipping what overlaps it. */
@@ -1763,73 +1882,89 @@ class Sync {
         if (!ranges || ranges.length === 0) return;
         const keyId = Sync.keyId(v2ctx.key);
         let pages = 0;
-        for (const range of ranges) {
-            if (range.keyId === keyId) continue; // the key that failed on it: nothing new to try
-            if (pages >= Sync.MAX_FORWARD_CATCHUP_PAGES) break;
-            let afterSeq = range.fromSeq;
-            let stillSealed = 0;
-            let opened = 0;
-            let stalled = false;
-            const sealed: UnopenableRange[] = [];
-            const beyond: number[] = [];
-            while (afterSeq < range.toSeq && pages < Sync.MAX_FORWARD_CATCHUP_PAGES) {
-                const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
-                this.assertFresh(sessionId, gen);
-                pages += 1;
-                const messages = (Array.isArray(data.messages) ? data.messages : []).filter((m) => m.seq <= range.toSeq);
-                await this.applyFetchedMessages(sessionId, encryption, messages, gen);
-                this.assertFresh(sessionId, gen);
-                let pageEnd = Math.max(afterSeq, data.cursor ?? afterSeq);
-                for (const m of messages) if (m.seq > pageEnd) pageEnd = m.seq;
-                pageEnd = Math.min(pageEnd, range.toSeq);
-                // Nothing beyond this page: the rest of the range holds no rows.
-                if (!data.hasMore) pageEnd = range.toSeq;
-                if (pageEnd <= afterSeq) { stalled = true; break; }
-                const failed = data.unopenableSeqs;
-                const inRange = failed ? failed.filter((seq) => seq > afterSeq && seq <= pageEnd) : [];
-                const unopenable = failed ? inRange.length : (data.unopenable ?? 0);
-                if (unopenable > 0) {
-                    stillSealed += unopenable;
-                    // One range per run of failed seqs: the rows between two
-                    // runs opened on this page and were applied above.
-                    for (const s of Sync.sealedSpans({ unopenable, unopenableSeqs: inRange }, afterSeq, pageEnd)) sealed.push({ ...s, keyId });
+        let touched = false;
+        try {
+            for (const range of ranges) {
+                if (range.keyId === keyId) continue; // the key that failed on it: nothing new to try
+                if (pages >= Sync.MAX_FORWARD_CATCHUP_PAGES) break;
+                let afterSeq = range.fromSeq;
+                let stillSealed = 0;
+                let opened = 0;
+                let stalled = false;
+                const sealed: UnopenableRange[] = [];
+                const beyond: number[] = [];
+                while (afterSeq < range.toSeq && pages < Sync.MAX_FORWARD_CATCHUP_PAGES) {
+                    const data = await v2MessagesAfter({ ...v2ctx, afterSeq });
+                    this.assertFresh(sessionId, gen);
+                    pages += 1;
+                    const messages = (Array.isArray(data.messages) ? data.messages : []).filter((m) => m.seq <= range.toSeq);
+                    await this.applyFetchedMessages(sessionId, encryption, messages, gen);
+                    this.assertFresh(sessionId, gen);
+                    let pageEnd = Math.max(afterSeq, data.cursor ?? afterSeq);
+                    for (const m of messages) if (m.seq > pageEnd) pageEnd = m.seq;
+                    pageEnd = Math.min(pageEnd, range.toSeq);
+                    // Nothing beyond this page: the rest of the range holds no rows.
+                    if (!data.hasMore) pageEnd = range.toSeq;
+                    if (pageEnd <= afterSeq) { stalled = true; break; }
+                    const failed = data.unopenableSeqs;
+                    const inRange = failed ? failed.filter((seq) => seq > afterSeq && seq <= pageEnd) : [];
+                    const unopenable = failed ? inRange.length : (data.unopenable ?? 0);
+                    if (unopenable > 0) {
+                        stillSealed += unopenable;
+                        // One range per run of failed seqs: the rows between two
+                        // runs opened on this page and were applied above.
+                        for (const s of Sync.sealedSpans({ unopenable, unopenableSeqs: inRange }, afterSeq, pageEnd)) sealed.push({ ...s, keyId });
+                    }
+                    opened += messages.length;
+                    if (failed) for (const seq of failed) if (seq > range.toSeq && seq <= headSeq) beyond.push(seq);
+                    afterSeq = pageEnd;
                 }
-                opened += messages.length;
-                if (failed) for (const seq of failed) if (seq > range.toSeq && seq <= headSeq) beyond.push(seq);
-                afterSeq = pageEnd;
+                // Rows the store holds are history, whatever failed here: a row
+                // sealed under the key BEFORE this one opened then and is not
+                // missing now — the over-read past a range used to record the
+                // seven rows a K2 sync had loaded as K3 gaps, three warnings over
+                // twelve stored rows (F17).
+                const stored = this.storedSeqs(sessionId);
+                let next = Sync.cutRange(this.unopenableGaps.get(sessionId) ?? [], range.fromSeq, range.toSeq);
+                // Failures past this range that the head already stepped over:
+                // nobody else will read them again, so they are a gap of their
+                // own — unless a recorded range already holds them (it replays
+                // under its own stamp, and keeps its continuation cursor). The
+                // subtraction is per SEQ, before the runs are built: a run of
+                // uncovered seqs cannot cross a recorded range, so the run for
+                // 402 and the run for 404 leave an unvisited (402, 403] alone
+                // where one 402..404 envelope replaced it (#128).
+                const orphaned = beyond.filter((seq) => !Sync.rangeAt(next, seq) && !Sync.hasSeq(stored, seq));
+                const orphanRuns = Sync.seqRuns(orphaned).map((s) => ({ ...s, keyId }));
+                // sealed lies inside the range, orphanRuns past it: one sorted,
+                // disjoint batch under this key, settled in a single pass.
+                next = Sync.settleRanges(next, Sync.cutSeqs(sealed.concat(orphanRuns), stored));
+                if (orphaned.length > 0) {
+                    log.log(`💬 replayUnopenableGap: ${orphaned.length} row(s) in ${sessionId} past ${range.fromSeq + 1}..${range.toSeq} unopenable with the current key — ${Sync.describeSpans(orphanRuns)} kept as a recoverable gap of its own (#128)`);
+                }
+                if (afterSeq < range.toSeq) {
+                    // Unvisited remainder: the continuation cursor. A relay that
+                    // made no progress is stamped with this key instead, so it is
+                    // not hammered on every sync until the key changes again.
+                    next = Sync.settleRanges(next, [{ ...Sync.clipRange(range, afterSeq, range.toSeq), keyId: stalled ? keyId : range.keyId }]);
+                }
+                next = Sync.cutSeqs(next, stored);
+                if (next.length === 0) this.unopenableGaps.delete(sessionId);
+                else this.unopenableGaps.set(sessionId, next);
+                touched = true;
+                const span = `${range.fromSeq + 1}..${range.toSeq}`;
+                if (stillSealed > 0) {
+                    log.log(`💬 replayUnopenableGap: ${stillSealed} row(s) in ${sessionId} (${span}) still unopenable with the new key — kept (#128)`);
+                } else if (afterSeq < range.toSeq) {
+                    log.log(`💬 replayUnopenableGap: ${opened} row(s) of ${sessionId} (${span}) recovered, ${afterSeq + 1}..${range.toSeq} continues next sync (#128)`);
+                } else {
+                    log.log(`💬 replayUnopenableGap: gap ${span} in ${sessionId} recovered with the new key (#128)`);
+                }
             }
-            let next = Sync.cutRange(this.unopenableGaps.get(sessionId) ?? [], range.fromSeq, range.toSeq);
-            for (const s of sealed) next = Sync.settleRange(next, s);
-            // Failures past this range that the head already stepped over:
-            // nobody else will read them again, so they are a gap of their
-            // own — unless a recorded range already holds them (it replays
-            // under its own stamp, and keeps its continuation cursor). The
-            // subtraction is per SEQ, before the runs are built: a run of
-            // uncovered seqs cannot cross a recorded range, so the run for
-            // 402 and the run for 404 leave an unvisited (402, 403] alone
-            // where one 402..404 envelope replaced it (#128).
-            const orphaned = beyond.filter((seq) => !next.some((r) => seq > r.fromSeq && seq <= r.toSeq));
-            if (orphaned.length > 0) {
-                const runs = Sync.seqRuns(orphaned);
-                for (const s of runs) next = Sync.settleRange(next, { ...s, keyId });
-                log.log(`💬 replayUnopenableGap: ${orphaned.length} row(s) in ${sessionId} past ${range.fromSeq + 1}..${range.toSeq} unopenable with the current key — ${Sync.describeSpans(runs)} kept as a recoverable gap of its own (#128)`);
-            }
-            if (afterSeq < range.toSeq) {
-                // Unvisited remainder: the continuation cursor. A relay that
-                // made no progress is stamped with this key instead, so it is
-                // not hammered on every sync until the key changes again.
-                next = Sync.settleRange(next, { ...Sync.clipRange(range, afterSeq, range.toSeq), keyId: stalled ? keyId : range.keyId });
-            }
-            this.unopenableGaps.set(sessionId, next);
-            this.publishUnopenableGaps(sessionId);
-            const span = `${range.fromSeq + 1}..${range.toSeq}`;
-            if (stillSealed > 0) {
-                log.log(`💬 replayUnopenableGap: ${stillSealed} row(s) in ${sessionId} (${span}) still unopenable with the new key — kept (#128)`);
-            } else if (afterSeq < range.toSeq) {
-                log.log(`💬 replayUnopenableGap: ${opened} row(s) of ${sessionId} (${span}) recovered, ${afterSeq + 1}..${range.toSeq} continues next sync (#128)`);
-            } else {
-                log.log(`💬 replayUnopenableGap: gap ${span} in ${sessionId} recovered with the new key (#128)`);
-            }
+        } finally {
+            // One publication per replay, however many ranges it settled —
+            // and still one when a reset interrupts it after the first (#407).
+            if (touched) this.publishUnopenableGaps(sessionId);
         }
     }
 
