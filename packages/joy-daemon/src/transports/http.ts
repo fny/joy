@@ -14,6 +14,13 @@ import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../doma
 import { sessionRecords, latestRecordSeq, subscribeRecords } from "../relay/relay";
 import { buildOpenApiSpec } from "./openapi";
 import { handleV2 } from "./v2";
+import { boundedWriter } from "../domain/bounded";
+
+/** Pending bytes one long-lived event client may hold before it is dropped
+ *  (#597). res.write() queues without limit, so a client that stopped reading
+ *  grew the daemon's memory with every broadcast. Sessions can emit MBs in a
+ *  burst, so the bound is generous; a client this far behind is not reading. */
+const EVENT_CLIENT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 interface CompiledRoute {
   method: HttpMethod;
@@ -206,7 +213,14 @@ export function startHttpServer(opts: {
       res.write(JSON.stringify({ hello: true, seq: upTo }) + "\n");
       for (const r of history) res.write(JSON.stringify(r) + "\n");
       if (!follow) return res.end();
-      const unsubscribe = subscribeRecords(sid, (r) => { res.write(JSON.stringify(r) + "\n"); });
+      // Bounded: a follower that stops reading is unsubscribed and dropped
+      // instead of buffering forever (#597).
+      let unsubscribe: () => void = () => {};
+      const write = boundedWriter(res, EVENT_CLIENT_MAX_BUFFERED_BYTES, () => {
+        unsubscribe();
+        process.stderr.write(`[http] /sessions/${sid}/events follower exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
+      });
+      unsubscribe = subscribeRecords(sid, (r) => { write(JSON.stringify(r) + "\n"); });
       res.on("close", unsubscribe);
       return;
     }
@@ -218,10 +232,17 @@ export function startHttpServer(opts: {
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
       });
-      const enqueue = (s: string) => res.write(s);
-      enqueue(`event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`);
-      enqueue(`event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`);
-      const unsubscribe = registry.subscribeSse(enqueue);
+      // The opening history goes out unconditionally (the client has had no
+      // chance to read yet); LIVE events are bounded — a client that stops
+      // reading is unsubscribed and dropped instead of buffering forever (#597).
+      res.write(`event: history\ndata: ${JSON.stringify(registry.chatHistory())}\n\n`);
+      res.write(`event: sessions_history\ndata: ${JSON.stringify(registry.list().map(s => s.toJSON()))}\n\n`);
+      let unsubscribe: () => void = () => {};
+      const enqueue = boundedWriter(res, EVENT_CLIENT_MAX_BUFFERED_BYTES, () => {
+        unsubscribe();
+        process.stderr.write(`[http] /events client exceeded ${EVENT_CLIENT_MAX_BUFFERED_BYTES} pending bytes — dropped\n`);
+      });
+      unsubscribe = registry.subscribeSse((s) => { enqueue(s); });
       res.on("close", unsubscribe);
       return;
     }
