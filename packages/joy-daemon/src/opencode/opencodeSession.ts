@@ -330,6 +330,14 @@ export class OpencodeSession implements AgentSession {
         if (this.#isEnded()) return; // retired mid-request: do not touch the (cleared) spool (#43)
         // A cancel that raced the reply wins: never overwrite its outcome.
         if (r.messageID && this.#inbound.includes(item)) { this.#removeInbound(item.clientId); this.#recordOutcome(item.clientId, "delivered"); }
+        // The HTTP ack is admission evidence too: a prompt cancelled while
+        // this request was in flight (tombstoned by cancelQueued) is now
+        // running — interrupt it here, not only on the SSE confirm, which a
+        // dropped stream never delivers (Astra on 170ec279, #77).
+        if (r.messageID && this.#cancelledIds.delete(item.clientId)) {
+          process.stderr.write(`[opencode ${this.id}] ${item.clientId} was cancelled — interrupting the admitted prompt\n`);
+          void client.interrupt(ocSessionId).catch(() => { /* best effort */ });
+        }
       } catch (e) {
         if (this.#isEnded()) return;
         const msg = e instanceof Error ? e.message : String(e);

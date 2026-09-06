@@ -850,7 +850,11 @@ export class CodexSession implements AgentSession {
     if (this.#itemOutcome.size > 200) for (const k of this.#itemOutcome.keys()) { this.#itemOutcome.delete(k); if (this.#itemOutcome.size <= 150) break; }
   }
   queueItemState(id: string): "pending" | "delivered" | "cancelled" | "failed" | "unknown" {
-    if (this.#inbound.some((i) => i.clientId === id)) return "pending";
+    // A 'delivered' spool entry is an OWNERSHIP record (checkpoint write
+    // failed after the echo) — codex already has the prompt; reporting it
+    // pending held the lane until its dispatch cap (Astra on 170ec279, #78).
+    const it = this.#inbound.find((i) => i.clientId === id);
+    if (it) return it.state === "delivered" ? "delivered" : "pending";
     return this.#itemOutcome.get(id) ?? "unknown";
   }
 
@@ -868,6 +872,9 @@ export class CodexSession implements AgentSession {
   cancelQueued(id: string): boolean {
     const before = this.#inbound.length;
     const item = this.#inbound.find((i) => i.clientId === id);
+    // An ownership record is not unsent work: codex already ran it, and this
+    // entry is the only durable copy of "that user row was ours" (#78).
+    if (item?.state === "delivered") return false;
     this.#inbound = this.#inbound.filter((i) => i.clientId !== id);
     if (this.#inbound.length === before) return false;
     saveCodexInbound(this.id, this.#inbound);
