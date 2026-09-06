@@ -10,6 +10,7 @@
 - **Drawing pad**: a quick two-point flick draws a line instead of a dot, a second finger touching the pad no longer hijacks or drops the stroke in progress, and resizing or rotating the pad keeps annotations on the part of the screenshot they were drawn on.
 - **Paths**: on Linux a tool path that differs from the session folder only by letter case is no longer shortened as if it were inside it, and a home directory that is a filesystem root keeps its separator.
 - **Performance**: a message with many leading blank lines, or a long run of pipe-separated lines that is not a table, no longer stalls the app while it renders.
+- **Restore by QR**: the device showing the code now proves it holds the code's private key before the relay hands it the account, so someone who merely saw the code cannot collect the sign-in first. Relays from before this change keep working as they did.
 
 # Sep 8 (2) — Review follow-ups
 

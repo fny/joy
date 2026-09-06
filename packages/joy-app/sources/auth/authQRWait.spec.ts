@@ -11,11 +11,22 @@ vi.mock('@/text', () => ({ t: (key: string) => key }));
 vi.mock('@/encryption/libsodium', () => ({
     decryptBox: vi.fn(() => new Uint8Array(32).fill(7)),
 }));
+// The proof derivation has its own vector test (encryption/pairingProof.spec.ts);
+// here it is a legible function of the handshake so the POLL is what is asserted.
+// (expo-crypto, which the real derivation digests with, drags react-native in.)
+vi.mock('expo-crypto', () => ({}));
+vi.mock('@/encryption/pairingProof', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/encryption/pairingProof')>()),
+    pairingProof: vi.fn(async (_kp: unknown, hs: { challenge: string }) => `proof(${hs.challenge})`),
+}));
 
 import { authQRWait } from './authQRWait';
 
 const keypair = { publicKey: new Uint8Array(32).fill(1), secretKey: new Uint8Array(32).fill(2) };
 const authorized = { data: { state: 'authorized', token: 'tok', response: 'AAAA' } };
+const requested = (challenge: string) => ({ data: { state: 'requested', challenge, relayPublicKey: 'relay-pub' } });
+const bodies = () => post.mock.calls.map((c) => c[1] as Record<string, unknown>);
+const drain = async (polls: number) => { for (let i = 0; i < polls; i++) await vi.advanceTimersByTimeAsync(1_100); };
 
 describe('authQRWait', () => {
     beforeEach(() => {
@@ -92,5 +103,55 @@ describe('authQRWait', () => {
     it('returns null immediately when cancelled before the first poll', async () => {
         await expect(authQRWait(keypair, undefined, () => true)).resolves.toEqual({ kind: 'cancelled' });
         expect(post).not.toHaveBeenCalled();
+    });
+
+    // #127: the bearer goes only to the holder of the private key.
+    describe('proof of possession (#127)', () => {
+        it('proves over the handshake of the LATEST reply once one was handed out', async () => {
+            post
+                .mockResolvedValueOnce(requested('c1'))
+                .mockResolvedValueOnce(requested('c2'))
+                .mockResolvedValueOnce(authorized);
+            const result = authQRWait(keypair);
+            await drain(2);
+            await expect(result).resolves.toMatchObject({ kind: 'authorized' });
+            expect(bodies().map((b) => b.proof)).toEqual([undefined, 'proof(c1)', 'proof(c2)']);
+            expect(bodies().every((b) => typeof b.publicKey === 'string')).toBe(true);
+        });
+
+        it('a proof_required answer is polled again WITH the proof', async () => {
+            post
+                .mockResolvedValueOnce({ data: { state: 'proof_required', error: 'proof_required', challenge: 'c9', relayPublicKey: 'relay-pub' } })
+                .mockResolvedValueOnce(authorized);
+            const result = authQRWait(keypair);
+            await drain(1);
+            await expect(result).resolves.toMatchObject({ kind: 'authorized' });
+            expect(bodies().map((b) => b.proof)).toEqual([undefined, 'proof(c9)']);
+        });
+
+        it('still pairs against a relay that issues no handshake, without ever sending a proof', async () => {
+            post
+                .mockResolvedValueOnce({ data: { state: 'pending' } })
+                .mockResolvedValueOnce({ data: { state: 'requested' } })
+                .mockResolvedValueOnce(authorized);
+            const result = authQRWait(keypair);
+            await drain(2);
+            await expect(result).resolves.toMatchObject({ kind: 'authorized' });
+            expect(bodies().every((b) => !('proof' in b))).toBe(true);
+        });
+
+        it('after a rejected poll the next one goes proof-less and re-learns the handshake instead of repeating a stale proof', async () => {
+            post
+                .mockResolvedValueOnce(requested('c1'))
+                .mockRejectedValueOnce(Object.assign(new Error('401'), { response: { status: 401, data: { error: 'invalid_proof' } } }))
+                .mockResolvedValueOnce(requested('c2'))
+                .mockResolvedValueOnce(authorized);
+            const result = authQRWait(keypair);
+            await drain(1);
+            await vi.advanceTimersByTimeAsync(2_100); // the retry wait after a failure
+            await drain(1);
+            await expect(result).resolves.toMatchObject({ kind: 'authorized' });
+            expect(bodies().map((b) => b.proof)).toEqual([undefined, 'proof(c1)', undefined, 'proof(c2)']);
+        });
     });
 });
