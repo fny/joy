@@ -77,7 +77,9 @@ process.exit(0);
 
 // Bump when HOOK_SCRIPT or the settings shape changes so stale copies on disk
 // are rewritten on the next daemon start.
-const HOOK_VERSION = "2";
+// "3": the command is shell-quoted (#470) — installs stamped "2" still carry
+// the double-quoted, $-expanding command until they are regenerated (Astra).
+const HOOK_VERSION = "3";
 
 // The stamp covers the script version AND the embedded node path: the hook
 // command pins the daemon's absolute execPath, so a node upgrade that removes
