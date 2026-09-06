@@ -115,8 +115,9 @@ every relay; machines register per account.
   `about`. Outcomes of `ask`/`wait`/`run`: `answered` 0 · `needs_input` 6 ·
   `timeout` 4 · `gone` 1 (the session ended or no longer exists — a 404 from
   `/check` is never "answered", #496) · `error` 1 with a `reason` (`/check`
-  failed or returned an unknown state; or the record stream broke and its
-  tail could not be recovered, so the reply would be incomplete, #497). One
+  failed or returned an unknown state; or the log holds records past what the
+  stream delivered and the final fetch could not get them — a reopened
+  stream that advertises a seq and stalls is not a complete reply, #497). One
   deadline covers the whole command — session resolution, the send, every
   poll and sleep, the record stream and the final catch-up — so a daemon
   that accepts any of those requests and never answers still yields

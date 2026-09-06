@@ -1107,6 +1107,12 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
   let boundarySeq: number | null = opts.queuedId ? null : opts.afterSeq;
   let fallbackBoundary: number | null = null;
   let lastSeq = opts.afterSeq;
+  // The highest seq the daemon has ADVERTISED for this log: every `{hello,
+  // seq}` frame (initial connect and each reconnect) names the log's head at
+  // that moment. A connected socket is not proof those rows arrived — a
+  // reopened stream can say hello{seq:2} and stall before row 2 (#497
+  // residual) — so finish() fetches through the high-water before success.
+  let advertised = opts.afterSeq;
   let sawActivity = false;
   let connected = false;
   let lastStreamError: string | null = null;
@@ -1125,7 +1131,7 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
     while (!controller.signal.aborted) {
       try {
         for await (const line of streamEvents(id, { after: lastSeq, follow: true, signal: bound() })) {
-          if (line?.hello) { connected = true; continue; }
+          if (line?.hello) { connected = true; advertised = Math.max(advertised, Number(line.seq) || 0); continue; }
           consume(line);
         }
         lastStreamError = "stream closed"; // a follow stream never ends on its own
@@ -1145,20 +1151,30 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
     if (state !== "timeout") await wait(Math.min(FINISH_GRACE_MS, remaining()), life.signal);
     controller.abort();
     await pump.catch(() => {});
-    if (!connected && !timedOut()) {
-      // The stream was down when the turn ended: whatever landed after the
-      // last consumed record is not here. Fetch that tail once, bounded by
-      // what is left of the deadline (a timed-out wait starts NO catch-up,
-      // #501); if even that fails the reply is INCOMPLETE and the outcome
-      // says so rather than passing a truncated answer off as the answer
-      // (#497).
-      try {
-        for await (const line of streamEvents(id, { after: lastSeq, follow: false, signal: AbortSignal.timeout(Math.min(CATCHUP_MS, remaining())) })) { if (!line?.hello) consume(line); }
-      } catch (e) {
-        if (state === "answered" || state === "needs_input") {
-          state = "error";
-          reason = `output stream lost after seq ${lastSeq} (${lastStreamError ?? (e instanceof Error ? e.message : String(e))}) — the reply is incomplete; \`joy events ${id} --json\` has the records`;
+    if (!timedOut() && (state === "answered" || state === "needs_input")) {
+      // Completeness (#497): the reply is what the daemon's log holds through
+      // its head NOW — asked for directly (`?last=0`), and never below the
+      // seq any hello frame advertised. Anything between the last consumed
+      // record and that head is fetched once, bounded by what is left of the
+      // deadline (a timed-out wait starts NO catch-up, #501). A tail that
+      // cannot be obtained makes the outcome an `error`: a connected socket,
+      // or a stream that was down, is never taken as proof the rows arrived.
+      const budget = () => either(life.signal, AbortSignal.timeout(Math.min(CATCHUP_MS, remaining())));
+      const head = await headSeq(id, budget());
+      const highWater = Math.max(advertised, head ?? 0);
+      let fetchError: string | null = null;
+      if (lastSeq < highWater || (head === null && !connected)) {
+        try {
+          for await (const line of streamEvents(id, { after: lastSeq, follow: false, signal: budget() })) { if (!line?.hello) consume(line); }
+        } catch (e) {
+          fetchError = e instanceof Error ? e.message : String(e);
         }
+      }
+      if (lastSeq < highWater || (head === null && !connected && fetchError)) {
+        state = "error";
+        const why = fetchError ?? lastStreamError ?? "the daemon did not answer";
+        const held = lastSeq < highWater ? `the daemon holds records through seq ${highWater}` : "the stream was down and the tail could not be fetched";
+        reason = `output stream lost after seq ${lastSeq} — ${held} (${why}) — the reply is incomplete; \`joy events ${id} --json\` has the records`;
       }
     }
     const from = boundarySeq ?? fallbackBoundary ?? opts.afterSeq;
