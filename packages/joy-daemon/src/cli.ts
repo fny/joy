@@ -369,14 +369,38 @@ const defaultStopDeps: StopDeps = {
  *  show` used to read as "no supervisor" and the daemon got a direct SIGTERM
  *  that Restart=always undid. */
 export type SupervisorProbe = Supervisor | null | { kind: "unknown"; reason: string };
+/** The pid a `systemctl show -p MainPID` run reported, or null when its
+ *  output is not that answer. The COMPLETE `MainPID=<digits>` line is
+ *  required: an exit-0 run that printed nothing (a broken or foreign
+ *  `systemctl` on PATH, a user manager that is not running) used to read as
+ *  MainPID 0 — "inactive, unsupervised" — and a Restart=always unit got the
+ *  direct SIGTERM it undoes (#502 residual). A blank answer is no answer. */
+export function parseMainPid(stdout: string): number | null {
+  const m = /^MainPID=(\d+)\s*$/m.exec(stdout);
+  return m ? Number(m[1]) : null;
+}
+/** `launchctl list <label>` prints the job's property-list dictionary —
+ *  `{ … "Label" = "<label>"; … };` — with a `"PID" = <n>;` entry while the
+ *  job runs. Only a dictionary naming THIS label is launchd's answer (pid
+ *  null = loaded, not running); anything else out of an exit-0 run is
+ *  malformed, not an inactive job. */
+export function parseLaunchdJob(stdout: string, label: string): { pid: number | null } | null {
+  const text = stdout.trim();
+  if (!/^\{[\s\S]*\}\s*;?$/.test(text)) return null;
+  const named = /"Label"\s*=\s*"([^"]*)"\s*;/.exec(text);
+  if (!named || named[1] !== label) return null;
+  const m = /"PID"\s*=\s*(\d+)\s*;/.exec(text);
+  return { pid: m ? Number(m[1]) : null };
+}
+const printed = (stdout: string): string => (stdout.trim() ? JSON.stringify(stdout.trim().slice(0, 40)) : "nothing");
 export function detectSupervisor(pid: number, deps: Pick<StopDeps, "platform" | "run">): SupervisorProbe {
   if (deps.platform === "linux") {
     const unit = `${serviceName()}.service`;
     // MainPID is "0" for an inactive unit and for a unit that is not installed.
-    const r = deps.run("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit]);
+    const r = deps.run("systemctl", ["--user", "show", "-p", "MainPID", unit]);
     if (r.status !== 0) return { kind: "unknown", reason: `systemctl --user show ${unit} ${r.status === null ? "could not run" : `exited ${r.status}`}` };
-    const main = Number(r.stdout.trim());
-    if (!Number.isFinite(main)) return { kind: "unknown", reason: `systemctl --user show ${unit} printed ${JSON.stringify(r.stdout.trim().slice(0, 40))}, not a MainPID` };
+    const main = parseMainPid(r.stdout);
+    if (main === null) return { kind: "unknown", reason: `systemctl --user show ${unit} printed ${printed(r.stdout)}, not a MainPID= line` };
     return main === pid ? { kind: "systemd", unit } : null;
   }
   if (deps.platform === "darwin") {
@@ -386,8 +410,9 @@ export function detectSupervisor(pid: number, deps: Pick<StopDeps, "platform" | 
     const r = deps.run("launchctl", ["list", label]);
     if (r.status === 113) return null;
     if (r.status !== 0) return { kind: "unknown", reason: `launchctl list ${label} ${r.status === null ? "could not run" : `exited ${r.status}`}` };
-    const m = /"PID"\s*=\s*(\d+)/.exec(r.stdout);
-    return m && Number(m[1]) === pid ? { kind: "launchd", label, plist: launchdPlistPath() } : null;
+    const job = parseLaunchdJob(r.stdout, label);
+    if (!job) return { kind: "unknown", reason: `launchctl list ${label} printed ${printed(r.stdout)}, not the job's dictionary` };
+    return job.pid === pid ? { kind: "launchd", label, plist: launchdPlistPath() } : null;
   }
   return null;
 }

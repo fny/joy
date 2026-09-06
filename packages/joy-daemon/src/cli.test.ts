@@ -57,7 +57,7 @@ afterAll(async () => {
 
 describe("joy stop under a supervisor (#502)", () => {
   const fakeRun = (mainPid: string, onStop: () => void) => (cmd: string, args: string[]) => {
-    if (cmd === "systemctl" && args.includes("show")) return { status: 0, stdout: `${mainPid}\n` };
+    if (cmd === "systemctl" && args.includes("show")) return { status: 0, stdout: `MainPID=${mainPid}\n` };
     if (cmd === "systemctl" && args.includes("stop")) { onStop(); return { status: 0, stdout: "" }; }
     return { status: 1, stdout: "" };
   };
@@ -70,11 +70,22 @@ describe("joy stop under a supervisor (#502)", () => {
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 1, stdout: "" }) })).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/systemctl --user show joy-daemon.service exited 1/) });
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: null, stdout: "" }) })).toMatchObject({ kind: "unknown" }); // no systemctl binary
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "garbage\n" }) })).toMatchObject({ kind: "unknown" });
+    // An exit-0 run that printed NO MainPID line is the same non-answer (Astra F9):
+    // Number("") is 0, which used to read as "inactive — unsupervised".
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "" }) })).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/printed nothing, not a MainPID= line/) });
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "MainPID=\n" }) })).toMatchObject({ kind: "unknown" });
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "4242\n" }) })).toMatchObject({ kind: "unknown" }); // a bare number is not the property line
+    expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "Id=joy-daemon.service\nMainPID=4242\n" }) })).toEqual({ kind: "systemd", unit: "joy-daemon.service" });
     const launchd = (out: string, status = 0) => ({ platform: "darwin", run: () => ({ status, stdout: out }) });
     expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))?.kind).toBe("launchd");
-    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running
+    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running: a job dictionary without a PID
+    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 999;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // the job runs something else
     expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded: launchctl's own definitive answer
     expect(detectSupervisor(4242, launchd("", 1))).toMatchObject({ kind: "unknown" }); // launchctl itself failed
+    // Exit 0 without the job's dictionary is malformed, not an inactive job (Astra F9).
+    expect(detectSupervisor(4242, launchd(""))).toMatchObject({ kind: "unknown", reason: expect.stringMatching(/printed nothing, not the job's dictionary/) });
+    expect(detectSupervisor(4242, launchd("garbage\n"))).toMatchObject({ kind: "unknown" });
+    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "com.other.job";\n};'))).toMatchObject({ kind: "unknown" }); // some other job's dictionary
   });
 
   describe("a failed supervisor inspection (#502 residual)", () => {
@@ -123,6 +134,41 @@ describe("joy stop under a supervisor (#502)", () => {
       expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
     });
 
+    // Astra F9: `systemctl show` exited 0 and printed NOTHING while daemon.json
+    // recorded a systemd launch — the blank read as MainPID 0, "unsupervised",
+    // and the unit's daemon got a direct SIGTERM that Restart=always undid.
+    test("an exit-0 inspection that printed nothing is no answer: daemon.json's systemd launch wins, stopped through the unit", async () => {
+      withLauncher("systemd");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const actions: string[] = [];
+      const run = (_c: string, args: string[]) => { actions.push(args.join(" ")); if (args.includes("stop")) alive = false; return { status: 0, stdout: "" }; };
+      expect(await cmdStop({ platform: "linux", run, kill: () => { actions.push("SIGTERM"); }, exists: () => false, cgroupOf: () => null })).toBe(0);
+      expect(actions).not.toContain("SIGTERM");
+      expect(actions).toContain("--user stop joy-daemon.service");
+      expect(log.out.join("\n")).toContain("via systemctl --user stop joy-daemon.service");
+    });
+
+    test("an exit-0 inspection that printed nothing, no independent evidence: nothing is signalled, exit 1", async () => {
+      route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
+      const actions: string[] = [];
+      const run = (_c: string, args: string[]) => { actions.push(args.join(" ")); return { status: 0, stdout: "" }; };
+      expect(await cmdStop({ platform: "linux", run, kill: () => { actions.push("SIGTERM"); }, exists: () => false, cgroupOf: () => null })).toBe(1);
+      expect(actions).not.toContain("SIGTERM");
+      expect(actions.some((a) => a.includes(" stop "))).toBe(false);
+      expect(log.out.join("\n")).toMatch(/could not determine whether the daemon is supervised \(systemctl --user show joy-daemon.service printed nothing, not a MainPID= line\) — nothing signalled/);
+    });
+
+    test("darwin: exit-0 garbage from launchctl takes the unknown path too — daemon.json's launchd record stops it through launchctl", async () => {
+      withLauncher("launchd");
+      let alive = true;
+      route("GET /status", (_q, res) => alive ? json(res, 200, { pid: 4242, version: "test" }) : json(res, 503, {}));
+      const actions: string[] = [];
+      const run = (cmd: string, args: string[]) => { actions.push(`${cmd} ${args[0]}`); if (args[0] === "unload") alive = false; return { status: 0, stdout: cmd === "launchctl" && args[0] === "list" ? "garbage\n" : "" }; };
+      expect(await cmdStop({ platform: "darwin", run, kill: () => { actions.push("SIGTERM"); }, exists: () => false })).toBe(0);
+      expect(actions).toEqual(["launchctl list", "launchctl unload"]);
+    });
+
     test("the kernel's cgroup settles it either way", () => {
       const deps = { platform: "linux", run: failing, kill: () => {}, exists: () => false };
       const inUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/joy-daemon.service\n";
@@ -157,7 +203,7 @@ describe("joy stop under a supervisor (#502)", () => {
   test("systemctl stop failing is reported as failure — no fallback signal that the unit would undo", async () => {
     route("GET /status", (_q, res) => json(res, 200, { pid: 4242, version: "test" }));
     const killed: number[] = [];
-    const run = (cmd: string, args: string[]) => args.includes("show") ? { status: 0, stdout: "4242\n" } : { status: 5, stdout: "" };
+    const run = (cmd: string, args: string[]) => args.includes("show") ? { status: 0, stdout: "MainPID=4242\n" } : { status: 5, stdout: "" };
     expect(await cmdStop({ platform: "linux", run, kill: (pid) => { killed.push(pid); } })).toBe(1);
     expect(killed).toEqual([]);
     expect(log.out.join("\n")).toMatch(/systemctl --user stop joy-daemon.service failed/);
