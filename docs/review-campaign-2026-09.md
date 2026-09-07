@@ -626,6 +626,24 @@ app.
   round (its weekly Codex limit is under 10%). **2 open**: #127 (rollout
   flag) and #628 (awaiting the batched verdict).
 
+- 2026-09-11 (early) — Astra's batched verdicts on the late-night round were
+  both "partial": #628 still trusted an undefined recorded start on the
+  no-/proc path and called an all-unreadable search conclusive; the lane
+  restart fix left one race where the sweep cleared the adoption marker while
+  the loop's retry was mid-await (TypeError, synthetic failed terminal over a
+  live command). Fixed in daf4bb5e (positive proof before pgid ownership;
+  `unclassified` candidates keep recovery `unknown`) and 8049b0ae (one
+  adoption answer per turn via a per-entry epoch; resumeTurn's catch cancels a
+  live command instead of inventing a failure). While verifying, our own
+  vitest runs kept dying with exit 143: strace showed a worker calling
+  `kill(0, SIGTERM)`. Root cause (6d03905f): `retireChildProcess` called
+  `proc.kill()` on a child whose spawn had FAILED, and libuv then signalled an
+  uninitialised pid — in the daemon that could SIGTERM its own process group
+  from a tool deadline or a session teardown. Non-positive pids are now
+  refused everywhere (`pidAlive(0)` used to be true because `kill(0, 0)`
+  succeeds against our own group). Pushed at 6d03905f; all three sent to
+  Astra as one batched round. **2 open**: #127 (rollout flag) and #628.
+
 ## Campaign summary (as of 2026-09-10 late)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
@@ -634,7 +652,7 @@ Astra verification → residual-round loop; tunnel/auth/gate files reviewed by
 Fable security agents instead of Astra. Of the 605, 603 are closed with an
 Astra (or Fable security) verdict or explicit evidence; the two still open
 are #127 (the pairing account-flavour flag flips only after every app build
-sends the proof — a rollout step, not code) and #628 (its fourth round is
+sends the proof — a rollout step, not code) and #628 (its fifth round is
 landing). Roughly 50 residual rounds followed the six waves.
 
 **Architecture that landed.**
