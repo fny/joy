@@ -677,16 +677,24 @@ app.
   account-flavour flag stays OFF until every app build in the field sends
   the proof; #127 stays open for that flip.
 
+- 2026-09-11 (evening) — **Pairing flag flipped and #127 closed.**
+  `JOY_RELAY_PAIRING_PROOF_ACCOUNT=1` set in `~/joy-relay.env` on the box
+  (0600, backup kept) and both relay units restarted; the variable is live in
+  each process. Verified end to end on the dev relay: a pickup with no proof
+  is refused `proof_required`, a pickup carrying the proof returns the sealed
+  response. Stable answers the capabilities probe with no errors since the
+  restart. **All 630 issues are now closed.**
+
 ## Campaign summary (as of 2026-09-11)
 
 **Scope.** 630 issues filed from the September coverage review (Astra/gpt-6-astra
 findings plus Fable's own, and two found by our own test runs during the
 residual rounds), executed in six waves with an implement → commit →
 Astra verification → residual-round loop; tunnel/auth/gate files reviewed by
-Fable security agents instead of Astra. Of the 630, 629 are closed with an
-Astra (or Fable security) verdict or explicit evidence; the one still open is
-#127 (the pairing account-flavour flag flips only after every app build sends
-the proof — a rollout step, not code). Roughly 55 residual rounds followed the
+Fable security agents instead of Astra. All 630 are closed with an
+Astra (or Fable security) verdict or explicit evidence, #127 last: its
+account-flavour flag was flipped on the relay once the app build carrying the
+proof had shipped. Roughly 55 residual rounds followed the
 six waves; the last code commit is 3d6681a3.
 
 **Architecture that landed.**
@@ -710,11 +718,11 @@ six waves; the last code commit is 3d6681a3.
   visible placeholder, sealed spawn specs, app-side pairing proof.
 
 **Deploy status.** Relay, this box's daemon, the `release` branch and both
-app targets shipped at 173996c8 on 2026-09-11 (see the log). Remaining: the
-user's other daemon installs pull from `release`; the pairing account-flavour
-flag (`JOY_RELAY_PAIRING_PROOF_ACCOUNT=1` in `~/joy-relay.env` on the box,
-then restart `joy-relay.service`) flips only after every app build sends the
-proof, and #127 closes with it.
+app targets shipped at 173996c8 on 2026-09-11 (see the log). The pairing account-flavour flag
+(`JOY_RELAY_PAIRING_PROOF_ACCOUNT=1` in `~/joy-relay.env`, both units
+restarted) was flipped the same day and #127 closed with it — an app build
+from before the proof can no longer restore by QR. Remaining: the user's
+other daemon installs pull from `release` on their next update.
 
 **Verification hygiene learned.** Run the daemon suite as three shards with a
 2400 s budget (a `timeout` kill reads as exit 143); union-merging test files
@@ -726,8 +734,7 @@ seconds in is a test-spawned `kill(0)`, not the tool timeout — diagnose with
 `strace -f -e trace=kill`; background tool jobs on this box were stopped
 externally several times, so run long suites in the foreground.
 
-**Left open by design (see the won't-fix criteria below):** #127's flag flip
-waits on rollout, not code; every flaky-test low surfaced during the campaign
+**Left open by design (see the won't-fix criteria below):** nothing — every flaky-test low surfaced during the campaign
 (#623 #624 #626 #627) was fixed at its root rather than retried. Not done
 here, for the user to decide: an upstream Node/libuv report for
 `child.kill()` on a ChildProcess whose spawn failed (see #630), and the
