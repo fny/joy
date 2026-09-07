@@ -590,6 +590,12 @@ app.
   known-foreign prompts block the window fallback). Closed #69. In flight:
   lane restart round three. **11 open.**
 
+- 2026-09-10 (afternoon) — Astra verified and closed #48 #69 #128 #130 #560
+  (Wave E is complete). In flight: lane restart round three (adoption
+  resolution, record-only terminals), #628 round three (leased group
+  registrations, marker-based recorded recovery). **7 open**, all awaiting
+  verdicts on pushed fixes or inside those two agents.
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
