@@ -603,6 +603,13 @@ app.
   acked). Astra verified and closed #495 #498 #550 #625 #627. **2 open**:
   #127 (rollout flag by design) and #628 (third round in flight).
 
+- 2026-09-10 (night) — pushed #628 round three (f10f5acf: leased group
+  registrations the sweep never evicts, occupants trusted only when positively
+  identified, unsearchable groups unconfirmed, marker-proven descendants
+  reaped before a recorded server is freed). Full daemon regression 1257
+  tests in three shards, app 1832, relay 122. No agents running. **2 open**:
+  #127 (rollout flag) and #628 (awaiting verdict).
+
 ## Campaign summary (as of 2026-09-10 late)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
