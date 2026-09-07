@@ -80,6 +80,18 @@ const noop = (): void => {};
  * event loop. So lifecycle listeners are removed, terminal error sinks are
  * installed on the process and each of its pipes, stdin is closed, and the
  * process is killed if it is still alive.
+ *
+ * A child that never started is NOT signalled. `proc.kill()` does not go
+ * through `process.kill`: it calls `uv_process_kill` on the child's libuv
+ * handle, and a spawn that FAILED (ENOENT, EACCES, EAGAIN — the very case
+ * this helper exists for) leaves that handle's `pid` field unassigned. The
+ * signal then goes to whatever integer that memory happens to hold: usually a
+ * dead number, sometimes a STRANGER's pid, and often enough 0 — which in
+ * POSIX means "every process in MY process group", i.e. the daemon SIGTERMing
+ * itself and everything it shares a group with. Verified on Node 24: 400
+ * retirements of a failed spawn produced 21 `kill(0, SIGTERM)` syscalls and a
+ * spray of unrelated pids. `proc.pid` is `undefined` exactly when the handle
+ * has no pid, so it is the gate.
  */
 export function retireChildProcess(proc: ChildProcess | null | undefined, opts: { stdin?: "end" | "destroy" } = {}): void {
   if (!proc) return;
@@ -91,13 +103,28 @@ export function retireChildProcess(proc: ChildProcess | null | undefined, opts: 
     if (opts.stdin === "destroy") proc.stdin?.destroy();
     else proc.stdin?.end();
   } catch { /* already gone */ }
-  try { proc.kill(); } catch { /* already gone */ }
+  if (isSignallablePid(proc.pid)) { try { proc.kill(); } catch { /* already gone */ } }
 }
 
 // ── process-group kill with escalation ───────────────────────────────────────
 
-/** Is `pid` alive (signal 0 delivered)? A zombie counts as alive here. */
+/**
+ * Is `pid` a number that may be handed to a kill? Only a positive integer is.
+ * `kill(0, …)` signals the CALLER's whole process group, `kill(-n, …)` a group
+ * by name, and `NaN`/`undefined` coerce to 0 — none of which is ever what a
+ * caller holding "the pid of the thing I spawned" means. Every signal in this
+ * module passes through this gate, so a missing or bogus pid can only ever be
+ * a no-op, never a group-wide SIGTERM.
+ */
+function isSignallablePid(pid: number | undefined | null): pid is number {
+  return typeof pid === "number" && Number.isInteger(pid) && pid > 0;
+}
+
+/** Is `pid` alive (signal 0 delivered)? A zombie counts as alive here. A pid
+ *  that is not a real pid (0, negative, NaN) is never "alive": `kill(0, 0)`
+ *  succeeds against our OWN group, which is not evidence about anyone. */
 export function pidAlive(pid: number): boolean {
+  if (!isSignallablePid(pid)) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
@@ -162,8 +189,10 @@ function psRows(args: string[]): NonNullable<ReturnType<typeof parsePsRow>>[] | 
  * racing the kernel's allocator). Production code never reassigns these.
  */
 export const processProbe = {
-  /** `null` when `pid` is not there. */
+  /** `null` when `pid` is not there — including when it is not a pid at all
+   *  (0, negative, NaN): nothing is "there" under a number no process holds. */
   identityOf(pid: number): ProcessIdentity | null {
+    if (!isSignallablePid(pid)) return null;
     if (hasProc()) {
       const f = procStatFields(pid);
       return f && f[19] !== undefined ? { start: f[19], zombie: f[0] === "Z" } : null;
@@ -175,8 +204,12 @@ export const processProbe = {
   },
   /** Every process whose pgid is `pgid`, with its identity. Per-pid failures
    *  are skipped — a process vanishing between readdir and read must not end
-   *  the scan. `null` when the platform cannot list processes at all. */
+   *  the scan. `null` when the platform cannot list processes at all.
+   *  A pgid that is not a pid (0, negative, NaN) names no group of ours and
+   *  is empty — it is never scanned for: kernel threads all report `pgrp 0`,
+   *  so a scan for pgid 0 would enumerate them as members to be signalled. */
   membersOf(pgid: number): Array<{ pid: number } & ProcessIdentity> | null {
+    if (!isSignallablePid(pgid)) return [];
     if (hasProc()) {
       const out: Array<{ pid: number } & ProcessIdentity> = [];
       let entries: string[] = [];
@@ -200,6 +233,8 @@ export const processProbe = {
    *  "not ours" disowned a group whose leader had just exited (its pid is
    *  still un-reusable, so the pgid is still proof) — `null` there. */
   hasMarker(pid: number, marker: string): boolean | null {
+    // Not a pid: nothing is there, so nothing there is ours.
+    if (!isSignallablePid(pid)) return false;
     if (!hasProc()) return null;
     let raw = "";
     try {
@@ -598,6 +633,16 @@ export interface KillProcessGroupOptions {
 export async function killProcessGroup(pid: number, opts: KillProcessGroupOptions = {}): Promise<boolean> {
   const graceMs = opts.graceMs ?? 2000;
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
+  // Nothing that is not a pid is ever signalled. `kill(-pid)` below is a
+  // GROUP signal, and with `pid` 0 that group is OUR OWN: one caller handing
+  // over a missing pid (`child.pid` after a failed spawn, a `Number(…)` of
+  // undefined, a pid read back from a truncated file) would SIGTERM the daemon
+  // and every process sharing its group. Refused at the door, and reported as
+  // an unconfirmed termination because nothing was killed.
+  if (!isSignallablePid(pid)) {
+    log(`[kill-group] refusing to signal ${String(pid)}: not a process id (0 or negative would signal this daemon's own process group)`);
+    return false;
+  }
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const tick = 100;
   const rounds = Math.max(1, Math.ceil(graceMs / tick));
@@ -691,8 +736,9 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   const signal = (sig: NodeJS.Signals): void => {
     // Group-wide delivery only while the leader exists: -pgid is unambiguous
     // then, and it reaches a member forked between capture and signal.
+    // `pid` was proven signallable at entry, so `-pid` is a real group, never 0.
     if (leaderPresent()) { try { process.kill(-pid, sig); } catch { /* not a group leader: single-process below */ } }
-    for (const p of survivors()) { try { process.kill(p, sig); } catch { /* gone */ } }
+    for (const p of survivors()) { if (isSignallablePid(p)) { try { process.kill(p, sig); } catch { /* gone */ } } }
   };
 
   if (survivors().length === 0) {

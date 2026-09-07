@@ -68,6 +68,31 @@ describe("retireChildProcess", () => {
     expect(proc.listenerCount("error")).toBeGreaterThan(0);
   });
 
+  // A child that never started is never signalled. `proc.kill()` does not go
+  // through process.kill: it calls uv_process_kill on the child's libuv handle,
+  // and a FAILED spawn leaves that handle's pid field unassigned — the signal
+  // then goes to whatever integer that memory holds. Measured on Node 24: 400
+  // retirements of a failed spawn produced 21 `kill(0, SIGTERM)` syscalls (0 is
+  // "every process in MY group": the daemon SIGTERMing itself and its whole
+  // group — roughly one vitest run in four died of exactly this, exit 143)
+  // plus a spray of unrelated pids.
+  test("a spawn that never produced a process is not signalled — kill(0) would hit our own group", async () => {
+    const proc = spawn("/nonexistent/binary-xyz", [], { stdio: ["pipe", "pipe", "ignore"] });
+    expect(proc.pid).toBeUndefined(); // no pid: the handle's pid was never assigned
+    const childKill = vi.spyOn(proc, "kill");
+    const anyKill = vi.spyOn(process, "kill");
+    try {
+      retireChildProcess(proc, { stdin: "end" });
+      expect(childKill).not.toHaveBeenCalled();
+      expect(anyKill).not.toHaveBeenCalled();
+    } finally {
+      childKill.mockRestore();
+      anyKill.mockRestore();
+    }
+    await sleep(50);
+    expect(proc.listenerCount("error")).toBeGreaterThan(0); // still retired properly
+  });
+
   test("a live child is killed and its lifecycle listeners are gone", async () => {
     const proc = spawn("sleep", ["30"], { stdio: ["pipe", "ignore", "ignore"] });
     let exitedVia = "";
@@ -93,6 +118,44 @@ describe("killProcessGroup", () => {
     strays.push(survivor);
     return survivor;
   };
+
+  // The last fence: whatever a caller believes, a number that is not a pid is
+  // never signalled. `kill(-pid, sig)` is a GROUP signal, so `pid` 0 makes it
+  // `kill(0, sig)` — every process in the daemon's own group — and the old
+  // probes actively invited it: `pidAlive(0)` is `process.kill(0, 0)`, which
+  // SUCCEEDS against our own group, so pid 0 looked like a live leader and the
+  // group kill went ahead. NaN and undefined coerce the same way.
+  describe.each([
+    ["zero", 0],
+    ["negative zero", -0],
+    ["a negative pid", -1],
+    ["a negative pgid", -4242],
+    ["NaN", Number.NaN],
+    ["a fraction", 3.5],
+  ])("a pid that is not a pid: %s", (_label, bad) => {
+    test("killProcessGroup refuses it, signals nothing and reports the kill unconfirmed", async () => {
+      const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+      const logs: string[] = [];
+      try {
+        await expect(killProcessGroup(bad, { graceMs: 50, log: (l) => logs.push(l) })).resolves.toBe(false);
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
+      expect(logs.join("\n")).toMatch(/refusing to signal/);
+    });
+
+    test("every probe reports it absent, so nothing can be captured under it", () => {
+      expect(pidAlive(bad)).toBe(false);
+      expect(processProbe.identityOf(bad)).toBeNull();
+      // Not `null` ("could not look") and never a /proc scan: kernel threads
+      // all report `pgrp 0`, so scanning for pgid 0 would enumerate them as
+      // members to be signalled.
+      expect(processProbe.membersOf(bad)).toEqual([]);
+      expect(processProbe.hasMarker(bad, "tok-nobody")).toBe(false);
+      expect(processGroupMembers(bad)).toEqual([]);
+    });
+  });
 
   test("a TERM-resistant child that outlives its exited group leader is still found and killed (#571)", async () => {
     // Leader: a shell that forks a TERM-ignoring sleeper into the SAME process
