@@ -314,8 +314,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // `adoptionPending`: the relay could not answer the adoption of a resumed
   // turn (unavailable, not refused) — the loop keeps the runtime running and
   // retries; the sweep may adopt it meanwhile and clear the marker.
+  // `adoptionAnswer`: the RESOLVED answer the sweep got for that turn, left
+  // for the loop to act on (it runs it through honourAdoption and clears it).
   type AdoptionPending = { since: number; attempts: number; lastError: string };
-  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null }>();
+  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null; adoptionAnswer?: Adoption | null }>();
   const ADOPTION_RETRY_MS: readonly number[] = opts.adoptionRetryMs ?? [1_000, 2_000, 4_000, 8_000];
   const ADOPTION_PENDING_RETRY_MS = opts.adoptionPendingRetryMs ?? 30_000;
   // Turns whose attachments are still being materialized: the one window
@@ -1167,11 +1169,22 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
               log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} is orphaned on the relay, ${owner.id} still runs it here and the relay cannot answer its adoption (${a.detail}) — adoption_pending, left running`);
               continue;
             }
-            // Any RESOLVED answer — adopted (running/cancelling) or a terminal
-            // the relay already holds — ends the pending wait: the loop's
-            // next pass reads the marker and returns to a plain bounded wait.
-            if ((a.kind === "running" || a.kind === "cancelling" || a.kind === "terminal") && loop.adoptionPending) loop.adoptionPending = null;
-            log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but ${owner.id} still runs it here → ${a.kind === "none" ? "left to its loop" : a.kind === "refused" ? `refused (${a.code}) — left to its loop` : `adopted (${a.kind})`}`);
+            // Any RESOLVED answer — adopted (running/cancelling), a terminal
+            // the relay already holds, or an authoritative refusal — is the
+            // LOOP's to ACT ON, not merely the end of its wait. The whole
+            // answer is carried on the loop entry BEFORE the pending marker
+            // comes off, and the loop's next pass runs it through the same
+            // honourAdoption its own retry uses. Clearing the marker alone
+            // DROPPED the verdict (Astra, F28): a sweep that received
+            // terminal/cancelled left the loop waiting out a command it
+            // should have cancelled — cancelRequestedAt null, zero interrupts
+            // — and the /start it then posted 409'd turn_cancelled into the
+            // void, for as long as the runtime ran or the 30-minute cap.
+            if (a.kind === "running" || a.kind === "cancelling" || a.kind === "terminal" || a.kind === "refused") {
+              loop.adoptionAnswer = a;
+              loop.adoptionPending = null;
+            }
+            log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but ${owner.id} still runs it here → ${a.kind === "none" ? "left to its loop" : a.kind === "refused" ? `refused (${a.code}) — carried to its loop` : `adopted (${a.kind})`}`);
             notedOwnedOrphans.delete(ex.turnId);
           } else if (!notedOwnedOrphans.has(ex.turnId)) {
             notedOwnedOrphans.add(ex.turnId);
@@ -1238,9 +1251,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // is ARRANGED and landed: while a terminal row for the session is
       // still unacked, the archive is owed to the retry loop, which lands it
       // after the saved terminal — never ahead of it, never instead of it.
-      materializeLedgerTerminalsFor(s.localSessionId);
-      if (owesTerminal(s.localSessionId)) {
-        log(`reconcile: archive ${s.sessionId.slice(0, 8)} deferred — local ${s.localSessionId} still owes a saved terminal to the relay; it lands first`);
+      const settlement = materializeLedgerTerminalsFor(s.localSessionId);
+      if (settlement !== "settled") {
+        log(settlement === "unknown"
+          ? `reconcile: archive ${s.sessionId.slice(0, 8)} deferred — local ${s.localSessionId}'s ledger cannot be read, so a saved terminal may still be owed; the archive waits for it`
+          : `reconcile: archive ${s.sessionId.slice(0, 8)} deferred — local ${s.localSessionId} still owes a saved terminal to the relay; it lands first`);
         deferArchive({ v2SessionId: s.sessionId, localSessionId: s.localSessionId, card, keyB64: key ? Buffer.from(key).toString("base64") : null });
         continue;
       }
@@ -1988,13 +2003,47 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     let done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, TURN_CAP_MS) : TURN_CAP_MS });
     while (done.state !== null && !isTerminal(done.state) && Date.now() < capAt) {
       const entry = activeTurns.get(turnId);
+      // The SWEEP may have answered this turn's adoption while the loop was
+      // waiting, and that answer is a VERDICT — not just the end of the wait.
+      // Honour it here, through the same handler the in-loop retry uses, so a
+      // cancelled close (or an authoritative refusal) cancels the local
+      // command instead of leaving it running behind a closed turn (F28).
+      const swept = entry?.adoptionAnswer ?? null;
+      if (swept && entry) {
+        entry.adoptionAnswer = null;
+        const v = await honourAdoption(swept, "orphan sweep");
+        if (v === "done") return;
+        // Resolved: the next pass takes the plain branch below — the owed
+        // /start (none for a closed turn), then ONE fresh wait to the cap.
+        adoptionPending = false;
+        continue;
+      }
       if (!entry?.adoptionPending) {
         // The relay answered (here or through the sweep), or nothing was
         // ever pending: finish the owed /start, then wait out the turn.
         adoptionPending = false;
         if (!startPosted) {
           try { await postStart(turnId, localId, commandId, leaseRef); startPosted = true; }
-          catch (e) { if ((e as { status?: number }).status !== 409) throw e; log(`${tag}: /start after the adoption refused (${errText(e)}) — the relay has its answer; the outcome posts as the terminal fact`); startPosted = true; }
+          catch (e) {
+            if ((e as { status?: number }).status !== 409) throw e;
+            const code = (e as { relayError?: string }).relayError ?? "";
+            if (START_CANCEL_CLASS.has(code) && ledger.getCommand(commandId)?.cancelRequestedAt == null) {
+              // The relay's authoritative no, arriving as a /start refusal:
+              // the turn was cancelled (or its session closed) while this
+              // adoption was parked, and NOTHING has cancelled the command
+              // here. Waiting that out — the command still running,
+              // cancelRequestedAt null, zero interrupts — was the F28 wedge.
+              // (A cancel already requested locally is the same answer,
+              // already honoured: the coordinator is interrupting and Phase C
+              // ends the turn cancelled when the runtime confirms; closing it
+              // here would report `cancelled` before the agent had stopped.)
+              await cancelLocally(code);
+              log(`${tag}: /start after the adoption refused (${code}) → cancelled locally`);
+              return;
+            }
+            log(`${tag}: /start after the adoption refused (${errText(e)}) — the relay has its answer; the outcome posts as the terminal fact`);
+            startPosted = true;
+          }
         }
         done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: Math.max(0, capAt - Date.now()) });
         continue;
@@ -2098,10 +2147,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   /** Every terminal command of ONE local session that still owes its relay
    *  turn a terminal row gets it derived (idempotent). Works from the ledger
    *  alone — no live handle needed (Astra, F21). */
-  function materializeLedgerTerminalsFor(localId: string): void {
+  function materializeLedgerTerminalsFor(localId: string): TerminalSettlement {
     let rows: CommandRow[];
-    try { rows = ledger.listCommands(localId); } catch { return; } // unreadable: the next pass retries
+    try { rows = ledger.listCommands(localId); }
+    catch (e) {
+      // The command scan FAILED: nothing is known about this session's last
+      // word — not that it owes none (Astra, F28). The caller treats that as
+      // `unknown` and waits; the next pass (the archive backoff, the sweep)
+      // derives again once storage recovers.
+      if (!scanFailures.has(localId)) { scanFailures.add(localId); log(`${localId}: the ledger's commands cannot be read (${errText(e)}) — a saved terminal may still be owed; derivation retries`); }
+      return "unknown";
+    }
+    if (scanFailures.delete(localId)) log(`${localId}: the ledger's commands read again — deriving any owed terminal`);
     for (const row of rows) if (row.relayTurnId && isTerminalState(row.state)) materializeLedgerTerminal(row, localId);
+    // A terminal the ledger REFUSED is held in memory (commitOutbound): the
+    // intent exists and is owed. Re-commit it now rather than wait for the
+    // sweep, so a recovered ledger settles it before the archive is retried.
+    if (unpersisted.some((r) => r.sessionId === localId)) retryUnpersisted();
+    return terminalSettlement(localId);
   }
   /** The same across every session the ledger may hold commands for: the
    *  live handles, the window records (a session that ended or died while
@@ -2115,14 +2178,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     for (const s of rows) if (s.daemonId === machineId && s.localSessionId) ids.add(s.localSessionId);
     for (const id of ids) materializeLedgerTerminalsFor(id);
   }
-  /** Does the session still have a terminal row the relay has not acked
-   *  (a saved outcome whose delivery is arranged but not landed)? A row the
-   *  relay refused for good is settled as dropped and owes nothing. An
-   *  outbox the ledger cannot READ is an unknown, never a clean slate: the
-   *  archive waits for the next pass rather than overtake an outcome. */
-  const owesTerminal = (localId: string): boolean => {
-    try { return ledger.pendingOutbound(localId).some((r) => r.kind === "terminal"); } catch { return true; }
+  /** Where a session's LAST WORD to the relay stands (Astra, F28). Only
+   *  `settled` may be archived over:
+   *    `unknown` — the ledger could not be read (the command scan or the
+   *      outbox threw). Nothing is known; a readable-but-empty outbox after
+   *      a FAILED scan is not a clean slate, it is an unanswered question.
+   *    `pending` — a terminal row is committed and unacked, OR its intent is
+   *      held in memory because the ledger refused the write. Both owe the
+   *      relay an outcome that must land BEFORE the archive.
+   *    `settled` — the scan succeeded and nothing is owed (a row the relay
+   *      refused for good is settled as dropped). */
+  type TerminalSettlement = "unknown" | "pending" | "settled";
+  const terminalSettlement = (localId: string): TerminalSettlement => {
+    if (unpersisted.some((r) => r.sessionId === localId && r.kind === "terminal")) return "pending";
+    try { return ledger.pendingOutbound(localId).some((r) => r.kind === "terminal") ? "pending" : "settled"; }
+    catch { return "unknown"; }
   };
+  /** Sessions whose command scan is failing, logged once each. */
+  const scanFailures = new Set<string>();
   /** Is a relay turn's command still pending in the ledger (a worker here)? */
   const pendingLedgerTurn = (turnId: string): boolean => { const r = ledger.commandForRelayTurn(turnId); return !!r && !isTerminalState(r.state); };
 
@@ -2226,7 +2299,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function runArchiveJob(job: ArchiveRowJob): Promise<boolean> {
     const l = lease;
     if (!l) return false;
-    if (owesTerminal(job.localSessionId)) {
+    // Derive again on EVERY attempt — the scan that failed last time (or the
+    // write the ledger refused) is what this backoff is waiting on (F28).
+    // The archive proceeds only once the commands READ and every terminal
+    // they imply has settled; `unknown` and `pending` both wait.
+    if (materializeLedgerTerminalsFor(job.localSessionId) !== "settled") {
       // The saved outcome goes first (Astra, F21): the sender is delivering
       // it; this attempt counts and the backoff retries the archive after.
       archiveAttempts.set(job.v2SessionId, (archiveAttempts.get(job.v2SessionId) ?? 0) + 1);
