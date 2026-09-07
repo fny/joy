@@ -458,16 +458,19 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
         );
     }
 
+    // Icon only (#640): the archive glyph already reads as archive, and the
+    // label forced the action pane wide enough to eat the row it acts on.
+    // The string stays as the accessibility label so the action is still
+    // announced by name.
     const renderRightActions = () => (
         <Pressable
             style={styles.swipeAction}
             onPress={handleArchive}
             disabled={archivingSession}
+            accessibilityRole="button"
+            accessibilityLabel={t('sessionInfo.archiveSession')}
         >
-            <Ionicons name="archive-outline" size={20} color="#FFFFFF" />
-            <Text style={styles.swipeActionText} numberOfLines={2}>
-                {t('sessionInfo.archiveSession')}
-            </Text>
+            <Ionicons name="archive-outline" size={22} color="#FFFFFF" />
         </Pressable>
     );
 
@@ -648,17 +651,10 @@ const stylesheet = StyleSheet.create((theme) => ({
         marginRight: 8,
     },
     swipeAction: {
-        width: 112,
+        width: 72,
         height: '100%',
         alignItems: 'center',
         justifyContent: 'center',
         backgroundColor: theme.colors.status.error,
-    },
-    swipeActionText: {
-        marginTop: 4,
-        fontSize: 12,
-        color: '#FFFFFF',
-        textAlign: 'center',
-        ...Typography.default('semiBold'),
     },
 }));
