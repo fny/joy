@@ -21,7 +21,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import { Ledger, DEFAULT_PRUNE_POLICY } from "./ledger";
 
 let dir: string;
@@ -31,6 +31,25 @@ const FILE = "/t.jsonl";
 const policy = (keep: number) => ({ ...DEFAULT_PRUNE_POLICY, transcriptReceiptsPerSession: keep });
 const count = (sessionId: string) => ledger.listReceipts(sessionId, "transcript_uuid").length;
 const has = (sessionId: string, ref: string) => ledger.hasReceipt(sessionId, "transcript_uuid", ref);
+/** PERF budgets are generous (idle runs take a fraction) and overridable for
+ *  a loaded shard: JOY_PERF_BUDGET_MS applies to every one. */
+const budget = (ms: number) => Number(process.env.JOY_PERF_BUDGET_MS ?? ms);
+/** Every insertion-time cap DELETE executed from now on: the index its
+ *  subselect is pinned to, and the SQL text (for EXPLAIN). A spy on
+ *  StatementSync.prototype.run keyed on sourceSQL sees each execution
+ *  whether or not the ledger's statement cache already held it. */
+function capDeletes(): () => Array<{ index: string; sql: string }> {
+  const seen: Array<{ index: string; sql: string }> = [];
+  const run = StatementSync.prototype.run;
+  vi.spyOn(StatementSync.prototype, "run").mockImplementation(function (this: StatementSync, ...args: unknown[]) {
+    const m = /^DELETE FROM receipts WHERE rowid IN \([\s\S]*INDEXED BY (\w+)/.exec(this.sourceSQL);
+    if (m) seen.push({ index: m[1], sql: this.sourceSQL });
+    return run.apply(this, args as Parameters<typeof run>);
+  });
+  return () => seen.splice(0);
+}
+const plan = (sql: string, ...params: Array<string | number>) =>
+  ledger.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params).map((r) => String((r as { detail: unknown }).detail));
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "joy-ledger-receipts-"));
@@ -63,27 +82,31 @@ function commitCursor(sessionId: string, offset: number, path = FILE): void {
 }
 
 describe("transcript-uuid receipts are bounded (#560)", () => {
-  it("caps a long-running session's set at the retained count below its committed cursor", () => {
+  it("PERF: caps a long-running session's set at the retained count below its committed cursor (20k append-only)", () => {
+    const t0 = performance.now();
     forward("s1", 20_000);
     commitCursor("s1", 20_000);
     expect(count("s1")).toBe(20_000); // every one is inside the 7-day window
     const r = ledger.prune(policy(2_000));
+    expect(performance.now() - t0).toBeLessThan(budget(4_000));
     expect(r.receipts).toBe(18_000);
     expect(count("s1")).toBe(2_000);
     // The NEWEST survive — those are the ones a replay can still reach.
     expect(has("s1", "u19999")).toBe(true);
     expect(has("s1", "u18000")).toBe(true);
     expect(has("s1", "u17999")).toBe(false);
-  });
+  }, 30_000);
 
-  it("stays bounded as the session keeps running and committing", () => {
+  it("PERF: stays bounded as the session keeps running and committing (25k append-only)", () => {
+    const t0 = performance.now();
     for (let round = 0; round < 5; round++) {
       forward("s1", 5_000, round * 5_000);
       commitCursor("s1", (round + 1) * 5_000);
       ledger.prune(policy(1_000));
       expect(count("s1")).toBe(1_000);
     }
-  });
+    expect(performance.now() - t0).toBeLessThan(budget(5_000));
+  }, 30_000);
 
   it("keeps everything at or after a COMMITTED transcript cursor, cap or not", () => {
     forward("s1", 3_000);
@@ -379,4 +402,117 @@ describe("transcript-uuid receipts are bounded (#560)", () => {
     expect(count("s1")).toBe(1);
     expect(has("s1", "u30")).toBe(true);
   });
+});
+
+// The insertion-time cap's DELETE takes "the k oldest covered receipts of the
+// cursor's file". Two shapes of that set want two access paths (#627, review
+// of 1043b4df): append-only, where the file's oldest rows by ordinal ARE the
+// covered ones, so an ordinal walk stops after k — versus a protected prefix,
+// where thousands of OLDER receipts lie beyond the cursor (a previous run
+// forwarded far ahead of what a partial recovery then committed) and that
+// same walk re-reads them all on every insert. A bounded probe of the file's
+// k+slack oldest rows picks the plan per insert; both delete the same rows.
+describe("the insertion cap picks its access path per shape (#627)", () => {
+  const reopen = (cap: number) => { ledger.close(); ledger = Ledger.open(dir, { now: () => now, transcriptReceiptsPerSession: cap }); };
+  const at = (ref: string, byteOffset: number) => ledger.addReceipt("s1", { kind: "transcript_uuid", ref, at: (now += 1_000), transcriptPath: FILE, byteOffset });
+
+  it("append-only: the ordinal walk, pinned to the covering ordinal index, no temp b-tree", () => {
+    reopen(10);
+    forward("s1", 50);                                       // u0..u49 at bytes 0..49
+    commitCursor("s1", 50);
+    const deletes = capDeletes();
+    forward("s1", 5, 50);                                    // u50..u54 beyond the cursor: 5 inserts over the cap
+    expect(count("s1")).toBe(10);
+    expect(has("s1", "u44")).toBe(false);
+    expect(has("s1", "u45")).toBe(true);
+    const d = deletes();
+    expect(d.map((x) => x.index)).toEqual(Array(5).fill("receipts_file_ord_pos"));
+    const p = plan(d[0].sql, "s1", FILE, 50, 1);
+    expect(p.some((x) => x.includes("COVERING INDEX receipts_file_ord_pos"))).toBe(true);
+    expect(p.some((x) => x.includes("TEMP B-TREE"))).toBe(false);
+  });
+
+  it("a few older receipts beyond the cursor (within the probe's slack) still take the walk", () => {
+    reopen(10);
+    forward("s1", 5, 0, undefined, 1_000_000);              // u0..u4 at bytes 1M..: older by ordinal, never covered
+    forward("s1", 50, 5, undefined, 0);                      // u5..u54 at bytes 0..49
+    commitCursor("s1", 50);
+    const deletes = capDeletes();
+    at("u55", 50);                                           // over the cap by 46 → the 46 oldest COVERED go
+    expect(count("s1")).toBe(10);                            // u0..u4 (protected) + u51..u55
+    expect(has("s1", "u0")).toBe(true);
+    expect(has("s1", "u50")).toBe(false);
+    expect(has("s1", "u51")).toBe(true);
+    expect(deletes().map((x) => x.index)).toEqual(["receipts_file_ord_pos"]);
+  });
+
+  it("a protected prefix: the byte range, sorted over the covered rows only — the prefix is never walked", () => {
+    reopen(205);
+    forward("s1", 200, 0, undefined, 1_000_000);            // u0..u199 at bytes 1M..: older by ordinal, beyond the cursor
+    commitCursor("s1", 100);
+    // Covered arrivals whose byte order is the REVERSE of their ordinal order.
+    at("u200", 30); at("u201", 20); at("u202", 10); at("u203", 5); at("u204", 1);
+    expect(count("s1")).toBe(205);                           // at the cap: nothing goes yet
+    const deletes = capDeletes();
+    at("u205", 50);                                          // over by one: the OLDEST covered by ordinal (u200), not the lowest byte (u204)
+    expect(count("s1")).toBe(205);
+    expect(has("s1", "u200")).toBe(false);
+    expect(has("s1", "u204")).toBe(true);
+    at("u206", 60);
+    expect(has("s1", "u201")).toBe(false);
+    expect(has("s1", "u202")).toBe(true);
+    for (let i = 0; i < 200; i++) expect(has("s1", `u${i}`)).toBe(true);
+    const d = deletes();
+    expect(d.map((x) => x.index)).toEqual(["receipts_position", "receipts_position"]);
+    const p = plan(d[0].sql, "s1", FILE, 100, 1);
+    expect(p.some((x) => x.includes("INDEX receipts_position") && x.includes("byte_offset<?"))).toBe(true);
+    expect(p.some((x) => x.includes("receipts_file_ord_pos"))).toBe(false);
+  });
+
+  it("both plans take the same rows: the oldest by ordinal, whatever their byte order", () => {
+    reopen(5);
+    commitCursor("s1", 100);
+    at("u0", 30); at("u1", 20); at("u2", 10); at("u3", 5); at("u4", 1);
+    const deletes = capDeletes();
+    at("u5", 50);
+    expect(deletes().map((x) => x.index)).toEqual(["receipts_file_ord_pos"]);
+    expect(count("s1")).toBe(5);
+    expect(has("s1", "u0")).toBe(false);                     // oldest ordinal, highest byte among the covered
+    expect(has("s1", "u4")).toBe(true);                      // lowest byte, but newer
+    expect(has("s1", "u5")).toBe(true);
+  });
+
+  it("PERF: 20,000 older receipts beyond the cursor, then 500 lower-position arrivals under an advancing cursor (the review's sparse workload)", () => {
+    forward("s1", 20_000, 0, undefined, 1_000_000);         // ordinals 1..20000, bytes 1M..: protected by every cursor below
+    const t0 = performance.now();
+    ledger.tx(() => {
+      for (let i = 0; i < 500; i++) {
+        expect(ledger.setCheckpoint("s1", "claude_transcript", FILE, i).committed).toBe(true);
+        at(`n${i}`, i);                                      // covered once the NEXT cursor lands
+      }
+    });
+    const elapsed = performance.now() - t0;
+    expect(elapsed).toBeLessThan(budget(1_500));             // 1.8s when the ordinal walk re-read the prefix per insert; ~0.1s by the byte range
+    expect(count("s1")).toBe(20_001);                        // the parent ledger's retained set: the prefix + the one arrival no cursor covers
+    expect(has("s1", "u0")).toBe(true);
+    expect(has("s1", "u19999")).toBe(true);
+    expect(has("s1", "n499")).toBe(true);
+    expect(has("s1", "n498")).toBe(false);
+    expect(has("s1", "n0")).toBe(false);
+  }, 30_000);
+
+  it("PERF: append-only over the cap with the cursor committing every 100 receipts (10k)", () => {
+    const t0 = performance.now();
+    ledger.tx(() => {
+      for (let i = 0; i < 10_000; i++) {
+        if (i % 100 === 0) expect(ledger.setCheckpoint("s1", "claude_transcript", FILE, i).committed).toBe(true);
+        at(`u${i}`, i);
+      }
+    });
+    expect(performance.now() - t0).toBeLessThan(budget(4_000));
+    expect(count("s1")).toBe(DEFAULT_PRUNE_POLICY.transcriptReceiptsPerSession);
+    expect(has("s1", "u9999")).toBe(true);
+    expect(has("s1", "u5000")).toBe(true);
+    expect(has("s1", "u4999")).toBe(false);
+  }, 30_000);
 });

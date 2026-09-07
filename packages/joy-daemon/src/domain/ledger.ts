@@ -298,6 +298,20 @@ const placeholders = (n: number): string => Array.from({ length: n }, () => "?")
 /** The daemon's "already forwarded this transcript entry" receipt (#560). */
 const TRANSCRIPT_RECEIPT_KIND = "transcript_uuid";
 const TRANSCRIPT_CURSOR_KIND = "claude_transcript";
+/** The insertion-time cap's DELETE (#560, #627): the k oldest (by ordinal)
+ *  forwarded-uuid receipts of one file that lie below a byte offset. Two
+ *  pinned plans, same rows — the probe in #capTranscriptReceiptsOnInsert
+ *  picks one. The ordinal walk stops at the k-th covered row (right when the
+ *  oldest rows are covered: the append-only shape); the byte range locates
+ *  the covered set and sorts only it (right when a long run of older,
+ *  uncovered rows precedes the covered ones). */
+const CAP_DELETE_BY_ORDINAL_WALK = `DELETE FROM receipts WHERE rowid IN (
+  SELECT rowid FROM receipts INDEXED BY receipts_file_ord_pos WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<? ORDER BY ord LIMIT ?)`;
+const CAP_DELETE_BY_BYTE_RANGE = `DELETE FROM receipts WHERE rowid IN (
+  SELECT rowid FROM receipts INDEXED BY receipts_position WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<? ORDER BY ord LIMIT ?)`;
+/** How many uncovered rows the ordinal walk may step over before the byte
+ *  range is the better plan (a few out-of-order arrivals, not a prefix). */
+const CAP_PROBE_SLACK = 64;
 /** SQL (over a `receipts` row): its session's COMMITTED transcript cursor
  *  covers it POSITIONALLY — the receipt recorded where its entry starts, in
  *  the very file the cursor names, and that start lies below the committed
@@ -373,7 +387,7 @@ export class Ledger {
    *  (the sweep is exact on its own, so a stale entry costs at most an early
    *  re-check). A re-placed receipt (position observed again) resets the
    *  entry too, since it may have moved into or out of coverage. */
-  #transcriptSets = new Map<string, { n: number; cursor: string | null; covered: number }>();
+  #transcriptSets = new Map<string, { n: number; cursor: { ref: string; offset: number } | null; covered: number }>();
   /** Sessions already warned (once per process) that their forwarded-uuid
    *  set is over the cap with nothing the committed cursor covers. */
   #uncoveredWarned = new Set<string>();
@@ -437,10 +451,15 @@ export class Ledger {
     if (!has("checkpoints", "pending_receipt_ord")) this.#db.exec("ALTER TABLE checkpoints ADD COLUMN pending_receipt_ord INTEGER");
     this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_ord ON receipts(session_id, kind, ord)");
     this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_position ON receipts(session_id, kind, transcript_path, byte_offset)");
-    // The insertion-time cap deletes the OLDEST covered rows (#560): ordinal
-    // order within one file, so the walk stops at the first covered rows
-    // instead of sorting the whole covered set per receipt (#627).
-    this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_file_ord ON receipts(session_id, kind, transcript_path, ord)");
+    // The insertion-time cap deletes the OLDEST covered rows of one file
+    // (#560). Two access paths, one per shape of the set — see
+    // #capTranscriptReceiptsOnInsert: the ordinal walk (this index, covering
+    // so the probe that picks the path never touches the table) for the
+    // append-only shape, the byte-offset range (receipts_position) when a run
+    // of older receipts beyond the cursor precedes the covered ones (#627).
+    // receipts_file_ord was its first cut, without byte_offset.
+    this.#db.exec("DROP INDEX IF EXISTS receipts_file_ord");
+    this.#db.exec("CREATE INDEX IF NOT EXISTS receipts_file_ord_pos ON receipts(session_id, kind, transcript_path, ord, byte_offset)");
     if (!this.#get("SELECT 1 AS x FROM schema_meta WHERE key='receipt_ord'")) {
       const max = Number(this.#get("SELECT COALESCE(MAX(ord),0) AS m FROM receipts")?.m ?? 0);
       this.#run("INSERT INTO schema_meta(key,value) VALUES('receipt_ord',?)", String(max));
@@ -1025,15 +1044,25 @@ export class Ledger {
     return Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<?`,
       sessionId, cursor.ref, cursor.offset)?.n ?? 0);
   }
+  /** Rows of one file the session's forwarded-uuid receipts hold in a byte
+   *  range `[from, to)` — what a cursor advancing from `from` to `to` in
+   *  that file newly covers. */
+  #coveredBetween(sessionId: string, path: string, from: number, to: number): number {
+    return Number(this.#get(`SELECT COUNT(*) AS n FROM receipts WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset>=? AND byte_offset<?`,
+      sessionId, path, from, to)?.n ?? 0);
+  }
   /** After a forwarded-uuid receipt landed: over the cap, the OLDEST rows
    *  the committed cursor covers positionally go, as many as the excess —
    *  never one the cursor does not cover (those are what a replay still
    *  reaches, and a receipt with no known position might be). The covered
-   *  count is re-read from the table only when the cursor moves (a commit
-   *  or a promotion) or a receipt is re-placed; under an unchanged cursor
-   *  the receipt that just landed is counted here if that cursor already
-   *  covers it (same file, below the offset — review a57bf97e: it used to
-   *  go uncounted, so once the cached count hit zero every later covered
+   *  count is re-read from the table only when the cursor changes file or
+   *  moves back, or a receipt is re-placed; a cursor that ADVANCED within
+   *  its file adds just the rows between the two offsets (a commit per
+   *  receipt used to re-count the whole covered set — the cap's worth of
+   *  rows — on every insert, #627); under an unchanged cursor the receipt
+   *  that just landed is counted here if that cursor already covers it
+   *  (same file, below the offset — review a57bf97e: it used to go
+   *  uncounted, so once the cached count hit zero every later covered
    *  insert was kept until the sweep). A session whose excess is all
    *  uncovered still costs nothing beyond one warning per process. */
   #capTranscriptReceiptsOnInsert(sessionId: string, pos: { path: string; offset: number } | null): void {
@@ -1048,19 +1077,39 @@ export class Ledger {
     if (excess <= 0) return;
     const cursor = this.#committedCursor(sessionId);
     if (!cursor) { st.cursor = null; st.covered = 0; return; }
-    const key = `${cursor.offset}\n${cursor.ref}`;
-    if (key !== st.cursor) {
-      st.cursor = key;
+    if (st.cursor && st.cursor.ref === cursor.ref && cursor.offset >= st.cursor.offset) {
+      // Unchanged, or advanced within its file: the count held for the
+      // previous offset, so the row just inserted joins it if that offset
+      // already covered it, and an advance adds exactly the rows between
+      // the two offsets (the new row among them when it lies there).
+      if (pos && pos.path === cursor.ref && pos.offset < st.cursor.offset) st.covered++;
+      if (cursor.offset > st.cursor.offset) { st.covered += this.#coveredBetween(sessionId, cursor.ref, st.cursor.offset, cursor.offset); st.cursor = cursor; }
+    } else {
+      st.cursor = cursor;
       st.covered = this.#coveredCount(sessionId, cursor);   // includes the row just inserted
-    } else if (pos && pos.path === cursor.ref && pos.offset < cursor.offset) {
-      st.covered++;
     }
     if (st.covered <= 0) { this.#warnUncovered(sessionId, st.n, cursor); return; }
-    // INDEXED BY: the planner otherwise takes the byte_offset range and sorts
-    // every covered row by ord on each insert over the cap (#627).
-    const deleted = Number(this.#run(`DELETE FROM receipts WHERE rowid IN (
-        SELECT rowid FROM receipts INDEXED BY receipts_file_ord WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? AND byte_offset<? ORDER BY ord LIMIT ?)`,
-      sessionId, cursor.ref, cursor.offset, Math.min(st.covered, excess)).changes);
+    const k = Math.min(st.covered, excess);
+    // Two plans for "the k oldest covered rows of this file", identical in
+    // what they delete (#627). Left to itself the planner takes the
+    // byte_offset range and sorts the WHOLE covered set by ord on every
+    // insert over the cap — up to the cap's worth of rows per receipt in the
+    // append-only shape, where the covered rows are all but the newest few.
+    // There the ordinal walk is right: the file's oldest rows by ord are
+    // covered, so it stops after k. But under a run of older receipts that
+    // lie BEYOND the cursor (a previous run forwarded far ahead of what a
+    // partial recovery then committed — review 32f6ed84's shape, at scale)
+    // that same walk re-reads the whole protected prefix on every insert
+    // (20k rows, 500 times: 1.8s against 0.1s for the range plan). The
+    // probe settles it per insert: do the file's k+slack oldest rows by ord
+    // hold k covered ones? Then the walk terminates within them; otherwise
+    // the covered set is located by its byte range and sorted — small when
+    // the shape is a protected prefix, and never worse than the parent's
+    // plan when it is not.
+    const probe = Number(this.#get(`SELECT COUNT(*) AS n FROM (
+        SELECT byte_offset FROM receipts INDEXED BY receipts_file_ord_pos WHERE session_id=? AND kind='${TRANSCRIPT_RECEIPT_KIND}' AND transcript_path=? ORDER BY ord LIMIT ?)
+       WHERE byte_offset<?`, sessionId, cursor.ref, k + CAP_PROBE_SLACK, cursor.offset)?.n ?? 0);
+    const deleted = Number(this.#run(probe >= k ? CAP_DELETE_BY_ORDINAL_WALK : CAP_DELETE_BY_BYTE_RANGE, sessionId, cursor.ref, cursor.offset, k).changes);
     st.n -= deleted; st.covered -= deleted;
   }
   /** Once per session per process: the set is over the cap and nothing in
