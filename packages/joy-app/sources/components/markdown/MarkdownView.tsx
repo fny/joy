@@ -20,6 +20,9 @@ import { useDoubleTap } from '@/hooks/useDoubleTap';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { isTouchWeb } from '@/utils/isTouchWeb';
+import { useUnistyles } from 'react-native-unistyles';
+import { getDefaultFont, getMonoFont } from '@/constants/Typography';
+import { SelectableText, isSelectableTextAvailable, type JoyTextSpan, type JoyTextStyle } from '../../../modules/joy-selectable-text';
 
 // Hover exists only on desktop web. Everywhere else (native, touch web) the
 // code block's Copy sat at opacity 0 with pointerEvents none forever, since
@@ -54,7 +57,11 @@ export const MarkdownView = React.memo((props: {
     // iOS this flag does not trade selection away for copy; turning it ON is
     // the only way to get selection at all, which is why it now defaults on.
     const markdownCopyV2 = useLocalSetting('markdownCopyV2');
-    const selectable = Platform.OS === 'web' || !markdownCopyV2;
+    // iOS selects in place through the native UITextView view (#641), so it
+    // always reports selectable and never mounts the long-press wrapper — that
+    // gesture would fight the text view's own selection gesture, which is the
+    // exact collision the comment above describes.
+    const selectable = Platform.OS === 'web' || isSelectableTextAvailable || !markdownCopyV2;
     const router = useRouter();
 
     const handleLinkPress = React.useCallback((url: string) => {
@@ -127,7 +134,7 @@ export const MarkdownView = React.memo((props: {
         );
     }
 
-    if (!markdownCopyV2) {
+    if (!markdownCopyV2 || isSelectableTextAvailable) {
         return renderContent();
     }
     
@@ -186,8 +193,57 @@ const HEADER_BASE_METRICS: Record<1 | 2 | 3 | 4 | 5 | 6, { fontSize: number; lin
     6: { fontSize: 16, lineHeight: 24 },
 };
 
+/**
+ * iOS text you can select a phrase out of (#641).
+ *
+ * RN's `<Text selectable>` does not select on iOS — its Fabric view only wires
+ * a long-press that copies the whole paragraph. This routes the same spans to a
+ * UITextView instead, which is the one UIKit control that draws selection
+ * handles over an attributed string. Android and web keep the ordinary <Text>:
+ * both already select natively.
+ */
+function useJoyTextStyle(scaled: { fontSize: number; lineHeight: number } | null): JoyTextStyle {
+    const { theme } = useUnistyles();
+    return React.useMemo(() => ({
+        fontFamily: getDefaultFont('regular'),
+        fontFamilyBold: getDefaultFont('semiBold'),
+        fontFamilyItalic: getDefaultFont('italic'),
+        fontFamilyMono: getMonoFont('regular'),
+        fontSize: scaled?.fontSize ?? 16,
+        lineHeight: scaled?.lineHeight ?? 24,
+        color: theme.colors.text,
+        // Links render in the body colour with an underline in the <Text> path;
+        // the native view has no textDecoration prop yet, so they take the
+        // theme's link colour instead of going invisible.
+        linkColor: theme.colors.textLink ?? theme.colors.text,
+        codeColor: theme.colors.text,
+    }), [theme, scaled?.fontSize, scaled?.lineHeight]);
+}
+
+/** MarkdownSpan[] (parser shape) -> JoyTextSpan[] (native record shape). */
+function toNativeSpans(spans: MarkdownSpan[]): JoyTextSpan[] {
+    return spans.map((span) => ({
+        text: span.text,
+        bold: span.styles.includes('bold') || span.styles.includes('semibold'),
+        italic: span.styles.includes('italic'),
+        code: span.styles.includes('code'),
+        url: span.url,
+    }));
+}
+
 function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
+    const nativeStyle = useJoyTextStyle(scaled);
+    const nativeSpans = React.useMemo(() => toNativeSpans(props.spans), [props.spans]);
+    // iOS: a UITextView so a phrase can actually be selected (#641). The block's
+    // own margins stay on the wrapper so surrounding rhythm is unchanged.
+    if (isSelectableTextAvailable && props.selectable) {
+        return (
+            <View style={[style.text, props.first && style.first, props.last && style.last, { height: undefined }]}>
+                <SelectableText spans={nativeSpans} textStyle={nativeStyle} onLinkPress={props.onLinkPress} />
+            </View>
+        );
+    }
     return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last, scaled]}><RenderSpans spans={props.spans} baseStyle={[style.text, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
