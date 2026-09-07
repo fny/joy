@@ -8,6 +8,7 @@ import {
     getAvailableModels,
     getAvailablePermissionModes,
     getEffortLevelsForModel,
+    getDefaultEffortKeyForModel,
     resolveCurrentOption,
     EffortLevel,
 } from '@/components/modelModeOptions';
@@ -659,19 +660,29 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
     ), [agentDefaultOverrides, flavor]);
 
+    // Same precedence as the model above (#638): the mode the daemon reports
+    // the session is ACTUALLY in outranks the stored selection, which goes
+    // stale the moment someone Shift+Tabs in the terminal.
     const permissionMode = React.useMemo<PermissionMode | null>(() => (
         resolveCurrentOption(availableModes, [
+            session.metadata?.currentOperatingModeCode,
             session.permissionMode,
             effectiveAgentDefaults.permissionMode,
-            session.metadata?.currentOperatingModeCode,
         ])
     ), [availableModes, session.permissionMode, effectiveAgentDefaults.permissionMode, session.metadata?.currentOperatingModeCode]);
 
+    // currentModelCode FIRST (#638): it is the daemon's mirror of the model
+    // actually producing output, and it tracks /model switches made in the
+    // terminal that the stored selection never learns about. Ranking the
+    // stored selection above it made the settings sheet disagree with the
+    // status row on the same screen — the row reads currentModelCode and said
+    // `opus` while the sheet's radio sat on the app default `fable`. The row
+    // was right; the sheet was showing a preference, not the truth.
     const modelMode = React.useMemo<ModelMode | null>(() => (
         resolveCurrentOption(availableModels, [
+            session.metadata?.currentModelCode,
             session.modelMode,
             effectiveAgentDefaults.modelMode,
-            session.metadata?.currentModelCode,
         ])
     ), [availableModels, session.modelMode, effectiveAgentDefaults.modelMode, session.metadata?.currentModelCode]);
 
@@ -681,12 +692,18 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         () => getEffortLevelsForModel(flavor, modelKey),
         [flavor, modelKey],
     );
+    // The flavour's effective default is the LAST resort (#638): with neither
+    // a session value nor an override, this resolved to null and the sheet
+    // rendered an effort column with every radio empty, while the agent was
+    // of course running at some effort the whole time. A group that cannot
+    // show "what you are on now" is worse than no group.
     const effortLevel = React.useMemo<EffortLevel | null>(() => (
         resolveCurrentOption(availableEffortLevels, [
             session.effortLevel,
             effectiveAgentDefaults.effortLevel,
+            getDefaultEffortKeyForModel(flavor, modelKey),
         ])
-    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel]);
+    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel, flavor, modelKey]);
 
     const sessionStatus = useSessionStatus(session);
     // joy message queue: messages sent while Claude is busy line up here and
