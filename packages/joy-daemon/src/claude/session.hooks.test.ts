@@ -388,6 +388,119 @@ test("#498 hooks live: a transcript turn no pending dispatch's window contains l
   s.end("killed");
 });
 
+// Astra F20 residuals: the ownership decision must be the SAME for every
+// naming (no already-open-turn shortcut keyed on arrival time), a pending ref
+// must carry its attempt (two equal texts are two dispatches), and a known
+// foreign prompt forbids the window fallback across it.
+
+test("#498 hooks live (F20): A's lagging answer is tailed between B's Enter and B's UserPromptSubmit — B does not take A's open turn; its own answer names it", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("f20-pre-confirm"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-f20-pre-confirm");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const a = queueFor(s).accept("A original", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "A original" });
+  const timeA = Date.now();
+  s.onHookEvent({ event: "Stop" });
+  await vi.advanceTimersByTimeAsync(2_000);
+  // B's Enter is out, its hook not yet in — and the tailer reaches A's turn now.
+  const b = queueFor(s).accept("B requested", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onTranscriptEntry(assistantAt("f20-a-answer", timeA, "A answer"));
+  const [turnA] = turnStartsSent(sent);
+  expect(turnA).toBeTruthy();
+  expect(queueFor(s).command(a.id)?.runtimeTurnId).toBe(turnA);
+  // B's confirm lands while A's turn is still open in the transcript: A's turn
+  // is A's (named by A's window) — B waits for the turn the transcript opens for it.
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "B requested" });
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "running", runtimeTurnId: null });
+  s.onTranscriptEntry(assistantAt("f20-a-end", timeA, "A end", "end_turn"));
+  await vi.advanceTimersByTimeAsync(10);
+  s.onTranscriptEntry(assistantAt("f20-b-answer", Date.now(), "B answer"));
+  const turns = turnStartsSent(sent);
+  expect(turns).toHaveLength(2);
+  expect(turns[1]).not.toBe(turnA);
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "running", runtimeTurnId: turns[1] });
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "completed", runtimeTurnId: turns[1] });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: turnA });
+  s.end("killed");
+});
+
+test("#498 hooks live (F20): two dispatches with the SAME text are two attempts — each is named its own turn, the older one's window match never names the newer", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("f20-same-text"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-f20-same-text");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const a = queueFor(s).accept("continue please", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "continue please" });
+  const timeA = Date.now();
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: null });
+  await vi.advanceTimersByTimeAsync(3_000);
+  const b = queueFor(s).accept("continue please", { mirrorToRelay: false, source: "rpc" });
+  expect(b.id).not.toBe(a.id);
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "continue please" });
+  expect(queueFor(s).command(b.id)?.state).toBe("running");
+  // A's answer, stamped inside A's window: A's turn, bound to A's attempt — not
+  // to "the latest attempt with this text".
+  s.onTranscriptEntry(assistantAt("f20-same-a", timeA, "first answer"));
+  const [turnA] = turnStartsSent(sent);
+  expect(turnA).toBeTruthy();
+  expect(queueFor(s).command(a.id)?.runtimeTurnId).toBe(turnA);
+  expect(queueFor(s).command(b.id)?.runtimeTurnId).toBeNull();
+  s.onTranscriptEntry(assistantAt("f20-same-a-end", timeA, "first end", "end_turn"));
+  // B's pending entry survived A's naming (same text, different attempt) and names B's own turn.
+  s.onTranscriptEntry(assistantAt("f20-same-b", Date.now(), "second answer"));
+  const turns = turnStartsSent(sent);
+  expect(turns).toHaveLength(2);
+  expect(turns[1]).not.toBe(turnA);
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "running", runtimeTurnId: turns[1] });
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(b.id)).toMatchObject({ state: "completed", runtimeTurnId: turns[1] });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: turnA });
+  s.end("killed");
+});
+
+test("#498 hooks live (F20): a TUI prompt within clock slack of Stopped A — its user entry is known foreign, so its turn is nobody's and A stays unattributed", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("f20-foreign"), driver, { claudeSessionId: "sid" });
+  const { rs } = relayStub("rs-f20-foreign");
+  const sent: any[] = []; rs.send = (m: any) => { sent.push(m); };
+  s.attachRelay(rs, true);
+  s.onHookEvent({ event: "SessionStart", source: "startup", session_id: "sid" });
+  const a = queueFor(s).accept("owned request without a tailed answer", { mirrorToRelay: false, source: "rpc" });
+  await vi.advanceTimersByTimeAsync(400);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "owned request without a tailed answer" });
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: null });
+  // 500ms later (inside TURN_WINDOW_SLACK_MS of A's closed window) a prompt typed
+  // in the terminal runs: its hook, its user entry, then its answer.
+  await vi.advanceTimersByTimeAsync(500);
+  s.onHookEvent({ event: "UserPromptSubmit", prompt: "typed directly in the TUI" });
+  const foreignAt = Date.now();
+  s.onTranscriptEntry({ type: "user", uuid: "f20-foreign-user", timestamp: isoAt(foreignAt), message: { role: "user", content: "typed directly in the TUI" } } as any);
+  await vi.advanceTimersByTimeAsync(10);
+  s.onTranscriptEntry(assistantAt("f20-foreign-answer", Date.now(), "TUI answer"));
+  const [foreignTurn] = turnStartsSent(sent);
+  expect(foreignTurn).toBeTruthy();
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: null });
+  s.onTranscriptEntry(assistantAt("f20-foreign-end", Date.now(), "TUI done", "end_turn"));
+  s.onHookEvent({ event: "Stop" });
+  expect(queueFor(s).command(a.id)).toMatchObject({ state: "completed", runtimeTurnId: null });
+  s.end("killed");
+});
+
 // ── no hook ever: behaviour identical to today ──────────────────────────────
 
 test("no hook seen: the pane rules stay in force — turn start confirms on an empty box, the pane sets and clears thinking, exit waits for the pid probe", async () => {
