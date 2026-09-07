@@ -213,7 +213,17 @@ export const HOOK_NEEDS_INPUT_STALE_MS = 10_000;
  *  out (the confirm time when the hook beat our Enter callback), `closedAt`
  *  when a hook's Stop / StopFailure or the next prompt ended the run (null
  *  while it runs). `hookConfirmed`: UserPromptSubmit has been seen for it. */
-export interface PendingTurnRef { ref: string; openAt: number; closedAt: number | null; hookConfirmed: boolean }
+/** One confirmed dispatch awaiting its transcript turn (#498). Carries the
+ *  ATTEMPT it stands for, not just its text: two dispatches with the same
+ *  text ("continue please") are two entries with two windows, and the turn
+ *  each opens is named for its own attempt — a text ref alone resolved to
+ *  the latest attempt of that text, so A's turn was named for B. */
+export interface PendingTurnRef { attemptId: string | null; commandId: string | null; ref: string; openAt: number; closedAt: number | null; hookConfirmed: boolean }
+/** How the transcript turn now open was attributed when it opened (#498):
+ *  `named` for a dispatch of ours, `foreign` when the transcript proved it
+ *  someone else's (its user entry was not ours), `unclaimed` when nothing
+ *  placed it. Only an unclaimed turn may still be named by a later confirm. */
+export type TurnAttribution = "named" | "foreign" | "unclaimed";
 /** Tolerance when placing a transcript entry's timestamp (the CLI's clock)
  *  inside a pending dispatch's window (the daemon's clock, hook receipt
  *  times): the first assistant entry of a short reply can be written within
@@ -664,7 +674,10 @@ export class Session {
   #relay: RelaySession | null = null;
   #tailer: TranscriptTailer | null = null;
   #transcriptPollActive = false;
-  #turn: { turnId: string; since: number } | null = null;
+  /** `openedAt` is the TRANSCRIPT timestamp of the entry that opened the turn
+   *  (the runtime's clock, what the pending windows are matched against);
+   *  `since` is when the daemon read it — bookkeeping only, never ownership. */
+  #turn: { turnId: string; since: number; openedAt: number; attribution: TurnAttribution } | null = null;
   // Last "thinking" value pushed to the relay. The pane poll (#pollThinking)
   // reconciles this against the live pane so the app's status matches the
   // window; the event-driven setters below give instant feedback in between.
@@ -875,11 +888,15 @@ export class Session {
    *  Cleared at the transcript's turn terminal and on a hook-less turn open
    *  (that path names the turn from #lastConfirmedRef). */
   #pendingTurnRefs: PendingTurnRef[] = [];
-  /** The ref of the dispatch whose user entry the tailer read LAST — the
-   *  transcript is sequential, so the next turn it opens is that prompt's
-   *  (#498). null when the last user prompt read was not a dispatch of ours
-   *  (a terminal prompt, a task notification): that turn is foreign. */
-  #transcriptPromptOwner: { ref: string; at: number } | null = null;
+  /** The user prompt the tailer read LAST — the transcript is sequential, so
+   *  the next turn it opens is that prompt's (#498). `own`: a dispatch of
+   *  ours still awaiting its turn. `foreign`: a prompt that is provably NOT
+   *  ours (typed at the terminal) — the turn it opens is nobody's, and no
+   *  hook window may claim it either: within clock slack of a Stopped
+   *  dispatch's window, the fallback named that TUI turn for the stopped
+   *  dispatch. null: no order evidence (nothing read yet, or the last turn
+   *  consumed it) — the hook windows decide alone. */
+  #transcriptPromptOwner: { kind: "own"; ref: string; at: number } | { kind: "foreign"; at: number } | null = null;
 
   // ── Dispatch ───────────────────────────────────────────────────────────────
   // The queue itself is the session coordinator's (domain/coordinator.ts):
@@ -2174,12 +2191,22 @@ export class Session {
       if (opts.echo !== false) this.#driver.emit({ kind: "echo", runtimeRef: ref });
       const isCommand = /^\s*!/.test(item.text) || /^\/[a-zA-Z][\w:-]*(?:\s|$)/.test(item.text);
       if (isCommand) this.#driver.emit({ kind: "turn_ended", runtimeRef: ref, status: "completed" });
-      // The runtime turn this dispatch runs as (#498): a transcript turn that
-      // opened AFTER this submit (a dialog / turn-start confirm) is the one it
-      // opened — name it now; otherwise the turn is named when the transcript
-      // opens it. A command runs no turn of its own.
-      else if (this.#turn && this.#dispatchSubmittedAt !== null && this.#turn.since >= this.#dispatchSubmittedAt) this.#nameRuntimeTurn(ref);
-      else this.#pushPendingTurnRef(ref, how === "UserPromptSubmit");
+      // The runtime turn this dispatch runs as (#498): it is named when the
+      // transcript opens it, by the ownership decision every naming goes
+      // through (#claimTurnOwner) — never by an "already open" shortcut. Such
+      // a shortcut compared the open turn's ARRIVAL time with the submit and
+      // named a lagging older turn for the dispatch confirmed after it was
+      // read (Astra F20). Hook-less, the turn-start confirm settles AFTER the
+      // transcript opened the turn (a fresh box read): the turn open then,
+      // still unclaimed, is decided now — by the entry's own timestamp against
+      // this dispatch's window. A command runs no turn of its own.
+      else {
+        this.#pushPendingTurnRef(item, how === "UserPromptSubmit");
+        if (!this.#hooksLive && this.#turn && this.#turn.attribution === "unclaimed") {
+          const owner = this.#claimTurnOwner(this.#turn.openedAt);
+          if (owner) this.#nameRuntimeTurn(owner);
+        }
+      }
     }
     settle?.(result);
     this.#broadcastQueue();
@@ -2194,10 +2221,13 @@ export class Session {
    *  never names its turns itself: without this, the CLI guessed the first
    *  turn started after the send, and an earlier queued message's answer
    *  came back labelled as this one's. */
-  #nameRuntimeTurn(ref: string): void {
-    this.#pendingTurnRefs = this.#pendingTurnRefs.filter((r) => r.ref !== ref);
+  #nameRuntimeTurn(owner: PendingTurnRef): void {
+    // Only THIS entry leaves the queue: another pending dispatch with the same
+    // text keeps its own window and is named for its own turn.
+    this.#pendingTurnRefs = this.#pendingTurnRefs.filter((r) => r !== owner);
     if (!this.#turn) return;
-    this.#driver.emit({ kind: "turn_started", runtimeRef: ref, runtimeTurnId: this.#turn.turnId });
+    this.#turn.attribution = "named";
+    this.#driver.emit({ kind: "turn_started", runtimeRef: owner.ref, attemptId: owner.attemptId, runtimeTurnId: this.#turn.turnId });
   }
 
   /** Remember a confirmed dispatch whose transcript turn has not opened yet
@@ -2206,10 +2236,11 @@ export class Session {
    *  the next prompt closes it. A second prompt submitted means the earlier
    *  turn is over as far as ownership goes: the runtime runs one turn at a
    *  time, so any older window still open closes here. */
-  #pushPendingTurnRef(ref: string, hookConfirmed: boolean): void {
+  #pushPendingTurnRef(item: QueuedItem, hookConfirmed: boolean): void {
     const now = Date.now();
+    const ref = item.runtimeRef ?? flattenForMatch(item.text);
     for (const r of this.#pendingTurnRefs) if (r.closedAt === null) r.closedAt = now;
-    this.#pendingTurnRefs.push({ ref, openAt: Math.min(this.#dispatchSubmittedAt ?? now, now), closedAt: null, hookConfirmed });
+    this.#pendingTurnRefs.push({ attemptId: item.attemptId ?? null, commandId: item.id, ref, openAt: Math.min(this.#dispatchSubmittedAt ?? now, now), closedAt: null, hookConfirmed });
     if (this.#pendingTurnRefs.length > PENDING_TURN_REFS_MAX) this.#pendingTurnRefs.splice(0, this.#pendingTurnRefs.length - PENDING_TURN_REFS_MAX);
   }
 
@@ -2233,10 +2264,14 @@ export class Session {
   }
 
   /** Name the dispatch whose turn the transcript is opening at `entryTimeMs`
-   *  (#498) — or nobody. Provable ownership only:
+   *  (#498) — or nobody. `entryTimeMs` is the opening entry's OWN timestamp
+   *  (the runtime's clock), never when the daemon read it. Provable
+   *  ownership only:
    *   1. the transcript's own order: the last user prompt the tailer read was
    *      a dispatch of ours still awaiting its turn, so the assistant entries
-   *      that follow it are that prompt's turn;
+   *      that follow it are that prompt's turn. A last prompt that was NOT
+   *      ours settles it the other way: the turn is foreign, and no window
+   *      (nor its clock slack) may claim it;
    *   2. else the hook-observed turn boundaries: exactly one pending window
    *      [openAt, closedAt] contains the entry's timestamp. A window that
    *      closed before the entry (its Stop already fired) cannot own it, and
@@ -2247,15 +2282,20 @@ export class Session {
    *  transcript is sequential, so an older dispatch's turn would already
    *  have opened — it never will. An unclaimed entry leaves the queue as is;
    *  a later entry may still be provably one of theirs. */
-  #claimTurnOwner(entryTimeMs: number): string | null {
+  #claimTurnOwner(entryTimeMs: number): PendingTurnRef | null {
     const refs = this.#pendingTurnRefs;
-    const take = (i: number): string => {
-      const ref = refs[i].ref;
+    const take = (i: number): PendingTurnRef => {
+      const owner = refs[i];
       this.#pendingTurnRefs = refs.slice(i + 1);
-      return ref;
+      return owner;
     };
     const byOrder = this.#transcriptPromptOwner;
     this.#transcriptPromptOwner = null;
+    if (byOrder?.kind === "foreign") {
+      if (this.#turn) this.#turn.attribution = "foreign";
+      this.#dlog(`transcript turn at ${new Date(entryTimeMs).toISOString()} follows a prompt that was not ours — foreign, not naming it (#498)`);
+      return null;
+    }
     if (byOrder) {
       const i = refs.findIndex((r) => r.ref === byOrder.ref && r.openAt <= byOrder.at + TURN_WINDOW_SLACK_MS);
       if (i >= 0) return take(i);
@@ -2885,7 +2925,7 @@ export class Session {
       const opened = !this.#turn;
       const turnId = this.#turn?.turnId ?? crypto.randomUUID();
       if (opened) {
-        this.#turn = { turnId, since: Date.now() };
+        this.#turn = { turnId, since: Date.now(), openedAt: timeMs, attribution: "foreign" }; // a note is nobody's dispatch
         this.#relay.send(encodeTurnStart({ turn: turnId, time: timeMs }));
       }
       this.#relay.send(encodeTextEvent(text, { turn: turnId, time: timeMs }));
@@ -4616,7 +4656,13 @@ export class Session {
         // (a terminal prompt, a task notification: that turn is foreign).
         // Keyed on the pending queue, not the ledger match below: a hook's
         // Stop may already have completed the command whose echo lags.
-        this.#transcriptPromptOwner = this.#pendingTurnRefs.some((r) => r.ref === matchContent) ? { ref: matchContent, at: entryTimeMs } : null;
+        // Machine text (a <task-notification>, the compaction summary) is not
+        // a prompt and says nothing about whose turn follows it.
+        if (!isCompactSummary && !isSystemPromptEntry(entry, content)) {
+          this.#transcriptPromptOwner = this.#pendingTurnRefs.some((r) => r.ref === matchContent)
+            ? { kind: "own", ref: matchContent, at: entryTimeMs }
+            : { kind: "foreign", at: entryTimeMs };
+        }
         // Match against the ledger's attempts awaiting evidence for this text —
         // oldest first, so identical texts pair in submission order. Attempts
         // are persisted, so a restart between the type and the echo (the old
@@ -4722,7 +4768,7 @@ export class Session {
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
-          this.#turn = { turnId: crypto.randomUUID(), since: Date.now() };
+          this.#turn = { turnId: crypto.randomUUID(), since: Date.now(), openedAt: entryTimeMs, attribution: "unclaimed" };
           this.#turnUsage = null; // fresh turn → reset usage accumulator
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
           // A fresh turn starting is the proof a dispatched queue message
@@ -4738,6 +4784,7 @@ export class Session {
             if (!this.#hooksLive) {
               this.#pendingTurnRefs = [];
               this.#transcriptPromptOwner = null;
+              if (this.#lastConfirmedRef) this.#turn.attribution = "named";
               this.#driver.emit({ kind: "turn_started", runtimeRef: this.#lastConfirmedRef, runtimeTurnId: this.#turn.turnId });
             } else {
               const owner = this.#claimTurnOwner(entryTimeMs);
@@ -4745,6 +4792,7 @@ export class Session {
             }
           } else {
             this.#transcriptPromptOwner = null; // replayed history names nothing
+            this.#turn.attribution = "foreign";
           }
         }
         // Capture token usage (cumulative per message) to report at turn-end —

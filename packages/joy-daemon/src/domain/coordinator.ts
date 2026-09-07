@@ -87,7 +87,7 @@ export interface ReconcileOutcome { attemptId: string; outcome: "accepted" | "ru
 export type Observation =
   | { kind: "ready" }
   | { kind: "echo"; runtimeRef: string; runtimeTurnId?: string | null; receiptKind?: string }
-  | { kind: "turn_started"; runtimeTurnId?: string | null; runtimeRef?: string | null }
+  | { kind: "turn_started"; runtimeTurnId?: string | null; runtimeRef?: string | null; attemptId?: string | null }
   | { kind: "turn_ended"; runtimeTurnId?: string | null; runtimeRef?: string | null; status: TurnStatus; detail?: string }
   | { kind: "idle" }
   | { kind: "interrupted"; runtimeTurnId?: string | null }
@@ -1056,7 +1056,13 @@ export class SessionCoordinator {
         return;
       }
       case "turn_started": {
-        const attempt = (o.runtimeRef ? this.ledger.matchAttemptByRef(sid, o.runtimeRef) ?? this.ledger.attemptByRef(sid, o.runtimeRef) : null)
+        // The driver that KNOWS which attempt's turn opened names it outright
+        // (#498): a text ref alone resolves to the latest attempt of that
+        // text, so of two dispatches reading "continue please" the older
+        // one's turn was named for the newer.
+        const byAttempt = o.attemptId ? this.ledger.getAttempt(o.attemptId) : null;
+        const attempt = (byAttempt && byAttempt.sessionId === sid ? byAttempt : null)
+          ?? (o.runtimeRef ? this.ledger.matchAttemptByRef(sid, o.runtimeRef) ?? this.ledger.attemptByRef(sid, o.runtimeRef) : null)
           ?? (o.runtimeTurnId ? this.ledger.attemptByRuntimeTurnId(sid, o.runtimeTurnId) : null);
         if (!attempt) {
           // Foreign: started at the terminal, or ours before the response
