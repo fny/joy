@@ -92,6 +92,8 @@ interface AgentInputProps {
     isSending?: boolean;
     minHeight?: number;
     zenMode?: boolean;
+    /** Tap the status line to see what is running in the background (#646). */
+    onStatusPress?: () => void;
     /** Image attachments waiting to be sent (expImageUpload feature). */
     selectedImages?: AttachmentPreview[];
     onPickImages?: () => void;
@@ -342,6 +344,10 @@ type StatusRowProps = {
     effortLabel: string | null;
     costUsd?: number | null;
     zenMode?: boolean;
+    /** Tapping the status opens the background-work sheet (#646). Absent when
+     *  nothing is running, so the text stays inert rather than opening an
+     *  empty list. */
+    onStatusPress?: () => void;
 };
 
 const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRowProps) {
@@ -365,7 +371,14 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
             <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, gap: 11 }}>
                 {p.connectionStatus && (
                     <>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Pressable
+                            style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+                            onPress={p.onStatusPress}
+                            disabled={!p.onStatusPress}
+                            hitSlop={8}
+                            accessibilityRole={p.onStatusPress ? 'button' : undefined}
+                            accessibilityLabel={p.onStatusPress ? t('backgroundWork.title') : undefined}
+                        >
                             <StatusDot
                                 color={p.connectionStatus.dotColor}
                                 isPulsing={p.connectionStatus.isPulsing}
@@ -374,11 +387,14 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                             <Text style={{
                                 fontSize: 11,
                                 color: p.connectionStatus.color,
-                                ...Typography.default()
+                                ...Typography.default(),
+                                // Underline hints it is tappable without adding
+                                // chrome to a line that is mostly read, not used.
+                                ...(p.onStatusPress ? { textDecorationLine: 'underline' as const, textDecorationStyle: 'dotted' as const } : {}),
                             }}>
                                 {p.connectionStatus.text}
                             </Text>
-                        </View>
+                        </Pressable>
                         {p.connectionStatus.cliStatus && (
                             <>
                                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -1257,6 +1273,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     effortLabel={props.effortLevel?.name ?? null}
                     costUsd={props.costUsd}
                     zenMode={props.zenMode}
+                    onStatusPress={props.onStatusPress}
                 />
 
                 <AgentInputContextChips

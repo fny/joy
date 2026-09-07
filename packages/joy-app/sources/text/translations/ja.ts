@@ -379,6 +379,20 @@ export const ja: TranslationStructure = {
         allow: '許可',
         deny: '拒否',
     },
+    backgroundWork: {
+        title: 'バックグラウンドで実行中',
+        close: '閉じる',
+        empty: '現在実行中のものはありません。',
+        justStarted: '開始直後',
+        forMinutes: ({ count }: { count: number }) => `${count}分経過`,
+        forHours: ({ count }: { count: number }) => `${count}時間経過`,
+        mayBeStuck: '停止している可能性',
+        kind: {
+            shell: 'バックグラウンドコマンド',
+            agent: 'バックグラウンドエージェント',
+            process: '長時間実行プロセス',
+        },
+    },
     joyDialog: {
         label: '要対応',
         fallbackTitle: 'Claude Code が質問しています',

@@ -19,6 +19,7 @@ import { VoiceAssistantStatusBar } from '@/components/VoiceAssistantStatusBar';
 import { startVoice } from '@/realtime/RealtimeSession';
 import { useRealtimeStatus, useVoiceArmedSessionId } from '@/sync/storage';
 import { SessionSearchBar } from './SessionSearchBar';
+import { BackgroundWorkSheet } from './BackgroundWorkSheet';
 import { Deferred } from '@/components/Deferred';
 import { EmptyMessages } from '@/components/EmptyMessages';
 import { useDraft } from '@/hooks/useDraft';
@@ -1046,6 +1047,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         getSuggestions(sessionId, query)
     ), [sessionId]);
 
+    // Background-work sheet (#646): the status line reports counts ("3/6 tasks")
+    // and the counts alone cannot say WHICH thing is stuck — which is the case
+    // that matters, since an outstanding count also suppresses the turn-done
+    // push. Tappable only when there is something to list.
+    const [bgSheetOpen, setBgSheetOpen] = React.useState(false);
+    const hasBackgroundWork = (session.metadata?.joy__bgDetail?.items?.length ?? 0) > 0;
+    React.useEffect(() => {
+        if (!hasBackgroundWork) setBgSheetOpen(false);
+    }, [hasBackgroundWork]);
+
     const connectionStatus = React.useMemo(() => ({
         text: sessionStatus.statusText,
         color: sessionStatus.statusColor,
@@ -1125,6 +1136,23 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     <ChatList ref={chatListRef} session={session} />
                 )}
             </Deferred>
+            {bgSheetOpen && (
+                <View
+                    pointerEvents="box-none"
+                    style={{
+                        position: 'absolute',
+                        left: 12,
+                        right: 12,
+                        // Sits above the composer, anchored to the status line it
+                        // belongs to rather than floating in the middle.
+                        bottom: 96 + safeArea.bottom,
+                        alignItems: 'flex-start',
+                        zIndex: 25,
+                    }}
+                >
+                    <BackgroundWorkSheet metadata={session.metadata} onClose={() => setBgSheetOpen(false)} />
+                </View>
+            )}
             {searchOpen && messages.length > 0 && (
                 <View
                     pointerEvents="box-none"
@@ -1191,6 +1219,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             onEffortLevelChange={updateEffortLevel}
             metadata={session.metadata}
             connectionStatus={connectionStatus}
+            onStatusPress={hasBackgroundWork ? () => setBgSheetOpen((v) => !v) : undefined}
             blockSend={false}
             onSend={handleSend}
             onMicPress={isDisconnected ? undefined : handleMicrophonePress}

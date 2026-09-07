@@ -378,6 +378,20 @@ export const es: TranslationStructure = {
         allow: 'Permitir',
         deny: 'Denegar',
     },
+    backgroundWork: {
+        title: 'EJECUTÁNDOSE EN SEGUNDO PLANO',
+        close: 'Cerrar',
+        empty: 'No hay nada en ejecución ahora mismo.',
+        justStarted: 'recién iniciado',
+        forMinutes: ({ count }: { count: number }) => `${count} min`,
+        forHours: ({ count }: { count: number }) => `${count} h`,
+        mayBeStuck: 'puede estar atascado',
+        kind: {
+            shell: 'Comando en segundo plano',
+            agent: 'Agente en segundo plano',
+            process: 'Proceso de larga duración',
+        },
+    },
     joyDialog: {
         label: 'ACCIÓN REQUERIDA',
         fallbackTitle: 'Claude Code está haciendo una pregunta',

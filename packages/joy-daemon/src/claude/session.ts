@@ -460,6 +460,33 @@ export function joyTitleValue(entry: any): string | null {
   return m?.[1].trim() ? m[1].trim().slice(0, 60) : null;
 }
 
+/** The `<joy-bg long-running>` tags in an assistant entry, with their labels
+ *  (#646). The label is what a human can actually recognise — "Nuxt dev
+ *  server" rather than a background id — and it is already in the tag; it was
+ *  simply thrown away, leaving nothing to show but a count. */
+export function joyBgLongRunning(entry: any): Array<{ id: string; label?: string }> {
+  const msg = entry?.message as Record<string, unknown> | undefined;
+  if (!msg || String(msg.role || "") !== "assistant") return [];
+  const c = msg.content;
+  let text = "";
+  if (typeof c === "string") text = c;
+  else if (Array.isArray(c)) {
+    for (const p of c) if (p?.type === "text" && typeof p.text === "string") text += "\n" + p.text;
+  }
+  if (!text.includes("<joy-bg")) return [];
+  const out: Array<{ id: string; label?: string }> = [];
+  const tagRe = /<joy-bg\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(text))) {
+    if (!/\blong-running\b/i.test(m[0])) continue;
+    const idm = /\bid="([^"]+)"/.exec(m[0]);
+    if (!idm) continue;
+    const lm = /\blabel="([^"]+)"/.exec(m[0]);
+    out.push({ id: idm[1], ...(lm ? { label: lm[1].trim().slice(0, 60) } : {}) });
+  }
+  return out;
+}
+
 export function joyBgLongRunningIds(entry: any): string[] {
   const msg = entry?.message as Record<string, unknown> | undefined;
   if (!msg || String(msg.role || "") !== "assistant") return [];
@@ -512,7 +539,7 @@ export function classifyBgTasks(
   events: BgEvent[],
   lrIds: Set<string>,
   nowMs: number = Date.now(),
-): { shell: BgGroup; agent: BgGroup; longRunning: Set<string>; outstanding: Set<string>; total: number; done: number } {
+): { shell: BgGroup; agent: BgGroup; longRunning: Set<string>; outstanding: Set<string>; total: number; done: number; startedAt: Map<string, number> } {
   // Drop launches that aged out with no completion BEFORE classifying, so the
   // per-group batch accounting in step() never sees them. Un-timestamped
   // launches (live-tail events from before this ran) never age out.
@@ -524,6 +551,9 @@ export function classifyBgTasks(
   const shell: BgGroup = { outstanding: new Set(), total: 0, done: 0 };
   const agent: BgGroup = { outstanding: new Set(), total: 0, done: 0 };
   const longRunning = new Set<string>();
+  // When each still-running thing started, so the app can say how long it has
+  // been going (#646) — a task running for hours is the tell that it is stuck.
+  const startedAt = new Map<string, number>();
   const step = (g: BgGroup, id: string) => {
     if (g.outstanding.has(id)) return;
     if (g.outstanding.size === 0) { g.total = 0; g.done = 0; } // fresh batch, per group
@@ -531,6 +561,7 @@ export function classifyBgTasks(
   };
   for (const ev of events) {
     if (ev.kind === "launch") {
+      if (ev.atMs !== undefined && !startedAt.has(ev.id)) startedAt.set(ev.id, ev.atMs);
       if (lrIds.has(ev.id)) { longRunning.add(ev.id); continue; }
       step(ev.source === "agent" ? agent : shell, ev.id);
     } else {
@@ -541,7 +572,7 @@ export function classifyBgTasks(
   }
   // Combined view for the union-based busy()/self-heal checks.
   const outstanding = new Set([...shell.outstanding, ...agent.outstanding]);
-  return { shell, agent, longRunning, outstanding, total: shell.total + agent.total, done: shell.done + agent.done };
+  return { shell, agent, longRunning, outstanding, total: shell.total + agent.total, done: shell.done + agent.done, startedAt };
 }
 
 /**
@@ -707,6 +738,7 @@ export class Session {
     path: string; offset: number;
     events: BgEvent[];
     lrIds: Set<string>;
+    lrLabels: Map<string, string>;
     lastGoal: { condition: string; met: boolean; atMs: number } | null;
   } | null = null;
   // Long-running processes (servers/daemons the agent tagged <joy-bg long-running>).
@@ -3570,7 +3602,7 @@ export class Session {
    *  in the N/M where they'd stick at 0/1). */
   #deriveBgTasks(): ReturnType<typeof classifyBgTasks> {
     const emptyG = { outstanding: new Set<string>(), total: 0, done: 0 };
-    const empty = { shell: { ...emptyG }, agent: { ...emptyG }, longRunning: new Set<string>(), outstanding: new Set<string>(), total: 0, done: 0 };
+    const empty = { shell: { ...emptyG }, agent: { ...emptyG }, longRunning: new Set<string>(), outstanding: new Set<string>(), total: 0, done: 0, startedAt: new Map<string, number>() };
     if (!this.transcriptPath || !existsSync(this.transcriptPath)) return empty;
     // Incremental scan: transcripts are append-only, so parse only the bytes
     // added since the last derive (a whole-file re-parse ran every 150ms-coalesced
@@ -3581,11 +3613,11 @@ export class Session {
     if (this.#scan?.path !== this.transcriptPath) this.#scan = null;
     const scan = this.#scan ?? (this.#scan = {
       path: this.transcriptPath, offset: 0,
-      events: [], lrIds: new Set<string>(), lastGoal: null,
+      events: [], lrIds: new Set<string>(), lrLabels: new Map<string, string>(), lastGoal: null,
     });
     try {
       const size = statSync(scan.path).size;
-      if (size < scan.offset) { scan.offset = 0; scan.events = []; scan.lrIds = new Set(); scan.lastGoal = null; }
+      if (size < scan.offset) { scan.offset = 0; scan.events = []; scan.lrIds = new Set(); scan.lrLabels = new Map(); scan.lastGoal = null; }
       if (size > scan.offset) {
         const fd = openSync(scan.path, "r");
         try {
@@ -3606,7 +3638,10 @@ export class Session {
               if (ev) scan.events.push(ev.kind === "launch"
                 ? { ...ev, atMs: Date.parse(String((entry as { timestamp?: string }).timestamp || "")) || Date.now() }
                 : ev);
-              for (const id of joyBgLongRunningIds(entry)) scan.lrIds.add(id);
+              for (const lr of joyBgLongRunning(entry)) {
+                scan.lrIds.add(lr.id);
+                if (lr.label) scan.lrLabels.set(lr.id, lr.label);
+              }
               const g = goalStatusFromEntry(entry);
               if (g) {
                 const atMs = Date.parse(String((entry as { timestamp?: string }).timestamp || "")) || Date.now();
@@ -3641,11 +3676,25 @@ export class Session {
     const tasks = d.shell.outstanding.size > 0 ? { done: d.shell.done, total: d.shell.total } : null;
     const agents = d.agent.outstanding.size > 0 ? { done: d.agent.done, total: d.agent.total } : null;
     const longRunning = d.longRunning.size > 0 ? d.longRunning.size : null;
-    const key = JSON.stringify({ tasks, agents, longRunning });
+    // What is running, not just how much (#646). Ordered oldest-first: the
+    // thing that has been going longest is the one worth looking at.
+    const labels = this.#scan?.lrLabels;
+    const item = (id: string, kind: "shell" | "agent" | "process") => ({
+      id, kind,
+      ...(labels?.get(id) ? { label: labels.get(id)! } : {}),
+      ...(d.startedAt.has(id) ? { since: d.startedAt.get(id)! } : {}),
+    });
+    const items = [
+      ...[...d.agent.outstanding].map((id) => item(id, "agent")),
+      ...[...d.shell.outstanding].map((id) => item(id, "shell")),
+      ...[...d.longRunning].map((id) => item(id, "process")),
+    ].sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity));
+    const detail = items.length > 0 ? { items } : null;
+    const key = JSON.stringify({ tasks, agents, longRunning, detail });
     if (key === this.#lastBgKey) return;
     const relay = this.#relay;
     if (!relay) return;
-    void relay.updateBgTasks(tasks, agents, longRunning).then(() => { this.#lastBgKey = key; }, () => { });
+    void relay.updateBgTasks(tasks, agents, longRunning, detail).then(() => { this.#lastBgKey = key; }, () => { });
   }
 
   /** Apply a parsed /goal status: a met=false goal is ACTIVE (push it, keeping

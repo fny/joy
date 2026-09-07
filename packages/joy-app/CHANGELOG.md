@@ -1,3 +1,8 @@
+# Sep 8 (5) — See what is running
+
+- **Tap the status line to see what is running in the background.** It used to report only a count — "3/6 tasks" — which cannot tell you *which* thing is stuck, and that is exactly the case worth understanding: an outstanding count also holds back the turn-done notification, so one wedged job quietly costs you pushes for hours. The sheet lists each background command, agent and long-running process with the label the agent gave it, how long it has been going, and a warning once it has been running long enough to doubt.
+- **Stale daemons can now say so.** The daemon reported a fixed version string that never changed, so the app's "update your CLI" warning read every daemon as out of date and, once dismissed, stayed silent forever — including for a daemon three days behind that could not serve the terminal. The daemon now reports its real version.
+
 # Sep 8 (4) — Device pass
 
 - **Session titles stay put**: once the agent titles a session for the work it is actually doing, Claude's own title no longer replaces it later. Your own `/title` still wins over both, and `/clear` hands the title back so a fresh conversation gets a fresh one.

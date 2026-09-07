@@ -424,6 +424,20 @@ export const en = {
         allow: 'Allow',
         deny: 'Deny',
     },
+    backgroundWork: {
+        title: 'RUNNING IN THE BACKGROUND',
+        close: 'Close',
+        empty: 'Nothing running right now.',
+        justStarted: 'just started',
+        forMinutes: ({ count }: { count: number }) => count === 1 ? 'for 1 min' : `for ${count} min`,
+        forHours: ({ count }: { count: number }) => count === 1 ? 'for 1 hour' : `for ${count} hours`,
+        mayBeStuck: 'may be stuck',
+        kind: {
+            shell: 'Background command',
+            agent: 'Background agent',
+            process: 'Long-running process',
+        },
+    },
     joyDialog: {
         label: 'ACTION NEEDED',
         fallbackTitle: 'Claude Code is asking a question',

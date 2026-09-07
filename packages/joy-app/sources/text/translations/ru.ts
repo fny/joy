@@ -506,6 +506,20 @@ export const ru: TranslationStructure = {
         allow: 'Разрешить',
         deny: 'Отклонить',
     },
+    backgroundWork: {
+        title: 'РАБОТАЕТ В ФОНЕ',
+        close: 'Закрыть',
+        empty: 'Сейчас ничего не выполняется.',
+        justStarted: 'только начато',
+        forMinutes: ({ count }: { count: number }) => `${count} мин`,
+        forHours: ({ count }: { count: number }) => `${count} ч`,
+        mayBeStuck: 'возможно, завис',
+        kind: {
+            shell: 'Фоновая команда',
+            agent: 'Фоновый агент',
+            process: 'Длительный процесс',
+        },
+    },
     joyDialog: {
         label: 'ТРЕБУЕТСЯ ДЕЙСТВИЕ',
         fallbackTitle: 'Claude Code задаёт вопрос',

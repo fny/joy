@@ -140,6 +140,18 @@ export const MetadataSchema = z.object({
     // tagged <joy-bg long-running>). These never "complete", so they're kept OUT
     // of joy__tasks (the N/M) and shown as plain text next to the status.
     joy__longRunning: z.number().nullable().optional(),
+    // WHAT is running behind the session, alongside the counts above (#646).
+    // The counts alone say a number is stuck but never which thing — and an
+    // outstanding count also suppresses the turn-done push, so this is what
+    // makes a wedged background job visible instead of merely puzzling.
+    joy__bgDetail: z.object({
+        items: z.array(z.object({
+            id: z.string(),
+            kind: z.enum(['shell', 'agent', 'process']),
+            label: z.string().optional(),
+            since: z.number().optional(),
+        })),
+    }).nullable().optional(),
     // Context tokens used as of the latest turn (input + cache-read + cache-create
     // from the transcript's cumulative usage), reported by joy-tmux. The app owns
     // the window/threshold; this is just the raw count. Not yet surfaced in the UI.

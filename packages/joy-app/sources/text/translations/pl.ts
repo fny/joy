@@ -395,6 +395,20 @@ export const pl: TranslationStructure = {
         allow: 'Zezwól',
         deny: 'Odmów',
     },
+    backgroundWork: {
+        title: 'DZIAŁA W TLE',
+        close: 'Zamknij',
+        empty: 'Nic teraz nie działa.',
+        justStarted: 'właśnie rozpoczęto',
+        forMinutes: ({ count }: { count: number }) => `${count} min`,
+        forHours: ({ count }: { count: number }) => `${count} h`,
+        mayBeStuck: 'może być zablokowany',
+        kind: {
+            shell: 'Polecenie w tle',
+            agent: 'Agent w tle',
+            process: 'Proces długotrwały',
+        },
+    },
     joyDialog: {
         label: 'WYMAGANE DZIAŁANIE',
         fallbackTitle: 'Claude Code zadaje pytanie',

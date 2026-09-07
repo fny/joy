@@ -620,6 +620,21 @@ export interface JoyTasksInfo {
   total: number;  // launched in this batch
 }
 
+/** One thing still running behind the session, for the app's task sheet (#646).
+ *  The counts alone ("3/6 tasks") say a number is stuck but never which one —
+ *  and a background job that never completes suppresses the turn-done push for
+ *  six hours, so "what is actually running" is the question worth answering. */
+export interface JoyBgItem {
+  id: string;
+  kind: 'shell' | 'agent' | 'process';   // process = a <joy-bg long-running> server
+  label?: string;                        // from the tag, when the agent gave one
+  since?: number;                        // epoch ms of its launch
+}
+
+export interface JoyBgDetail {
+  items: JoyBgItem[];
+}
+
 /**
  * The agent's active goal (Claude's `/goal`), surfaced from the transcript's
  * `goal_status` attachments. Present while a goal is in progress (met=false);
@@ -843,8 +858,15 @@ export class RelaySession {
    *  clear of one field can't be dropped by a still-pending set of the other.
    *  The caller (Session#reconcileBgTasks) dedups by DESIRED state, so we always
    *  write when called (no this.metadata skip that could race a pending write). */
-  async updateBgTasks(tasks: JoyTasksInfo | null, agents: JoyTasksInfo | null, longRunning: number | null): Promise<void> {
-    await this.mergeMetadata({ joy__tasks: tasks, joy__agents: agents, joy__longRunning: longRunning });
+  async updateBgTasks(
+    tasks: JoyTasksInfo | null,
+    agents: JoyTasksInfo | null,
+    longRunning: number | null,
+    detail: JoyBgDetail | null = null,
+  ): Promise<void> {
+    // Detail rides the SAME patch as the counts: a sheet listing work that the
+    // counts say has finished (or vice versa) is worse than no sheet.
+    await this.mergeMetadata({ joy__tasks: tasks, joy__agents: agents, joy__longRunning: longRunning, joy__bgDetail: detail });
   }
 
   /** Context tokens used as of the latest turn (input + cache-read + cache-create

@@ -379,6 +379,20 @@ export const zhHans: TranslationStructure = {
         allow: '允许',
         deny: '拒绝',
     },
+    backgroundWork: {
+        title: '后台运行中',
+        close: '关闭',
+        empty: '当前没有正在运行的任务。',
+        justStarted: '刚刚开始',
+        forMinutes: ({ count }: { count: number }) => `已运行 ${count} 分钟`,
+        forHours: ({ count }: { count: number }) => `已运行 ${count} 小时`,
+        mayBeStuck: '可能已卡住',
+        kind: {
+            shell: '后台命令',
+            agent: '后台智能体',
+            process: '长时间运行的进程',
+        },
+    },
     joyDialog: {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提问',

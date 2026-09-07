@@ -378,6 +378,20 @@ export const ca: TranslationStructure = {
         allow: 'Permet',
         deny: 'Denega',
     },
+    backgroundWork: {
+        title: 'EN SEGON PLA',
+        close: 'Tanca',
+        empty: 'Ara mateix no hi ha res en execució.',
+        justStarted: 'acaba de començar',
+        forMinutes: ({ count }: { count: number }) => `${count} min`,
+        forHours: ({ count }: { count: number }) => `${count} h`,
+        mayBeStuck: 'pot estar encallat',
+        kind: {
+            shell: 'Comanda en segon pla',
+            agent: 'Agent en segon pla',
+            process: 'Procés de llarga durada',
+        },
+    },
     joyDialog: {
         label: 'ACCIÓ REQUERIDA',
         fallbackTitle: 'Claude Code està fent una pregunta',

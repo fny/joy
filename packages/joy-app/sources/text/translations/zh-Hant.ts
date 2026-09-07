@@ -378,6 +378,20 @@ export const zhHant: TranslationStructure = {
         allow: '允許',
         deny: '拒絕',
     },
+    backgroundWork: {
+        title: '背景執行中',
+        close: '關閉',
+        empty: '目前沒有正在執行的工作。',
+        justStarted: '剛剛開始',
+        forMinutes: ({ count }: { count: number }) => `已執行 ${count} 分鐘`,
+        forHours: ({ count }: { count: number }) => `已執行 ${count} 小時`,
+        mayBeStuck: '可能已卡住',
+        kind: {
+            shell: '背景指令',
+            agent: '背景智能體',
+            process: '長時間執行的程序',
+        },
+    },
     joyDialog: {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提問',

@@ -1427,3 +1427,35 @@ test("toolResultText: string and block results forward; image-only stays undefin
   expect(out.startsWith("x".repeat(100))).toBe(true);
   expect(out.endsWith("x".repeat(100))).toBe(true);
 });
+
+// ── #646: what is running, not just how many ────────────────────────────────
+
+import { joyBgLongRunning } from "./session";
+
+test("joyBgLongRunning: keeps the label so the app can name a process", () => {
+  const e = (text: string) => ({ message: { role: "assistant", content: text } });
+  expect(joyBgLongRunning(e('<joy-bg id="b1" long-running label="Nuxt dev server" />')))
+    .toEqual([{ id: "b1", label: "Nuxt dev server" }]);
+  // A tag with no label still counts — it just has nothing to show but its id.
+  expect(joyBgLongRunning(e('<joy-bg id="b2" long-running />'))).toEqual([{ id: "b2" }]);
+  // Not long-running, and not an assistant entry: neither is a process.
+  expect(joyBgLongRunning(e('<joy-bg id="b3" label="x" />'))).toEqual([]);
+  expect(joyBgLongRunning({ message: { role: "user", content: '<joy-bg id="b4" long-running />' } })).toEqual([]);
+});
+
+test("classifyBgTasks: reports when each outstanding thing started", () => {
+  const r = classifyBgTasks(
+    [
+      { kind: "launch", id: "a", source: "shell", atMs: 1_000 },
+      { kind: "launch", id: "b", source: "agent", atMs: 2_000 },
+      { kind: "complete", id: "a" },
+      { kind: "launch", id: "c", source: "shell", atMs: 3_000 },
+    ],
+    new Set(),
+    5_000,
+  );
+  expect(r.startedAt.get("b")).toBe(2_000);
+  expect(r.startedAt.get("c")).toBe(3_000);
+  // Still outstanding: b (agent) and c (shell).
+  expect([...r.outstanding].sort()).toEqual(["b", "c"]);
+});

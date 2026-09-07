@@ -376,6 +376,20 @@ export const it: TranslationStructure = {
         allow: 'Consenti',
         deny: 'Nega',
     },
+    backgroundWork: {
+        title: 'IN ESECUZIONE IN BACKGROUND',
+        close: 'Chiudi',
+        empty: 'Non c\'è nulla in esecuzione al momento.',
+        justStarted: 'appena iniziato',
+        forMinutes: ({ count }: { count: number }) => `${count} min`,
+        forHours: ({ count }: { count: number }) => `${count} h`,
+        mayBeStuck: 'potrebbe essere bloccato',
+        kind: {
+            shell: 'Comando in background',
+            agent: 'Agente in background',
+            process: 'Processo di lunga durata',
+        },
+    },
     joyDialog: {
         label: 'AZIONE RICHIESTA',
         fallbackTitle: 'Claude Code sta facendo una domanda',
