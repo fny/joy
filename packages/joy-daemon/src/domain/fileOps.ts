@@ -16,7 +16,7 @@ import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, tmpdir } from "os";
 import { writeFileAtomicAsync } from "./atomicWrite";
 import { TextAccumulator } from "./textStream";
-import { killProcessGroup, retireChildProcess, registerGroup, refreshGroupMembers, forgetGroup, newProcessGroupMarker, PGROUP_MARKER_ENV } from "./bounded";
+import { killProcessGroup, retireChildProcess, registerGroup, refreshGroupMembers, newProcessGroupMarker, PGROUP_MARKER_ENV } from "./bounded";
 
 const execAsync = promisify(exec);
 
@@ -450,7 +450,11 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
     // Identity captured at SPAWN, while the leader certainly exists: its
     // start time (so a pid reused before the deadline is never mistaken for
     // this tool) and the group's membership, widened opportunistically below.
-    if (child.pid) registerGroup(child.pid, { marker });
+    // The registration is LEASED for the whole run (#628 F21): this run is
+    // the caller that may still have to kill the group, so the registry's
+    // sweep must not collect its start-time fence while another spawn storm
+    // goes by. The lease is released the moment the run settles.
+    const group = child.pid ? registerGroup(child.pid, { marker }) : null;
     // Nothing is ever fed to the tool: close stdin so a tool that would read
     // it (rg with no path operand) exits instead of waiting forever. The
     // handlers ALSO give rg a path so it searches the tree rather than this
@@ -481,7 +485,7 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
-      if (child.pid) forgetGroup(child.pid);
+      group?.release();
       resolveResult({ exitCode, stdout: stdout.end(), stderr: stderr.end(), timedOut, terminationUnconfirmed });
     };
     const deadline = setTimeout(() => {
@@ -516,7 +520,7 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
     child.stdout.on("data", (d: Buffer) => { stdout.push(d); observe(); });
     child.stderr.on("data", (d: Buffer) => { stderr.push(d); observe(); });
     child.on("close", (code) => { settle(code ?? 0); });
-    child.on("error", (err) => { if (settled) return; settled = true; clearTimeout(deadline); if (child.pid) forgetGroup(child.pid); rejectResult(err); });
+    child.on("error", (err) => { if (settled) return; settled = true; clearTimeout(deadline); group?.release(); rejectResult(err); });
   });
 }
 
