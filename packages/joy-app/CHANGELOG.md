@@ -1,3 +1,14 @@
+# Sep 8 (4) — Device pass
+
+- **Session titles stay put**: once the agent titles a session for the work it is actually doing, Claude's own title no longer replaces it later. Your own `/title` still wins over both, and `/clear` hands the title back so a fresh conversation gets a fresh one.
+- **Settings shows what you are actually on**: the model, effort and permission mode in the session settings now read the live session instead of a stored preference, so they cannot disagree with the status row above them. Effort always shows a selection rather than an empty column.
+- **Status row**: the effort level now appears between the model and the permission mode, and context remaining moved to the end of that row.
+- **Search marks what it found**: jumping to a match highlights every occurrence of your query in that message, instead of scrolling you to a wall of text with nothing marked. Search also no longer counts matches it cannot scroll to.
+- **Sent messages settle**: a message whose delivery confirmation arrived before the app had finished registering the send no longer stays dimmed as undelivered forever.
+- **Select text in place (iOS)**: long-press a message to select a phrase with normal selection handles, keeping bold, code and links styled while you drag. Previously iOS could only copy a whole block. Under Settings → Features, and it needs a new build rather than an update.
+- **Swipe to archive** is icon-only, so the action no longer covers the row it applies to.
+- **After `/clear`** a session returns to idle immediately instead of showing as busy for several seconds.
+
 # Sep 8 (3) — Review follow-ups
 
 - **Full sessions**: a session whose relay budget is used up shows a persistent warning in the chat and a marker on its sidebar row, counting the output that could not be saved and since when, with a Start a new session action; the daemon remembers the loss across restarts, and no notification is needed to see it.
