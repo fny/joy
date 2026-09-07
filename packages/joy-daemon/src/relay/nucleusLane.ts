@@ -72,6 +72,9 @@ export interface NucleusLaneOpts {
    *  2s, 4s, 8s by default, after which the turn is `adoption_pending` and
    *  retried on the slow cadence. A test seam, like `archiveRetryMs`. */
   adoptionRetryMs?: readonly number[];
+  /** Cadence (ms) of the slow adoption retry once a turn is parked
+   *  `adoption_pending`: 30s by default. A test seam, like `adoptionRetryMs`. */
+  adoptionPendingRetryMs?: number;
 }
 
 /** One relay turn this lane is driving, as the handle reports it. `state`
@@ -314,6 +317,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   type AdoptionPending = { since: number; attempts: number; lastError: string };
   const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null }>();
   const ADOPTION_RETRY_MS: readonly number[] = opts.adoptionRetryMs ?? [1_000, 2_000, 4_000, 8_000];
+  const ADOPTION_PENDING_RETRY_MS = opts.adoptionPendingRetryMs ?? 30_000;
   // Turns whose attachments are still being materialized: the one window
   // before the command row exists, so a cancel there aborts the preparation.
   const preparing = new Map<string, () => void>();
@@ -1151,7 +1155,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
               log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} is orphaned on the relay, ${owner.id} still runs it here and the relay cannot answer its adoption (${a.detail}) — adoption_pending, left running`);
               continue;
             }
-            if ((a.kind === "running" || a.kind === "cancelling") && loop.adoptionPending) loop.adoptionPending = null;
+            // Any RESOLVED answer — adopted (running/cancelling) or a terminal
+            // the relay already holds — ends the pending wait: the loop's
+            // next pass reads the marker and returns to a plain bounded wait.
+            if ((a.kind === "running" || a.kind === "cancelling" || a.kind === "terminal") && loop.adoptionPending) loop.adoptionPending = null;
             log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but ${owner.id} still runs it here → ${a.kind === "none" ? "left to its loop" : a.kind === "refused" ? `refused (${a.code}) — left to its loop` : `adopted (${a.kind})`}`);
             notedOwnedOrphans.delete(ex.turnId);
           } else if (!notedOwnedOrphans.has(ex.turnId)) {
@@ -1795,15 +1802,24 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // The relay could not answer this turn's adoption (mirrors the loop
     // entry's marker, which the sweep shares): no /start until it can.
     let adoptionPending = false;
+    /** The relay ANSWERED the adoption question — whatever the answer: the
+     *  shared `adoption_pending` marker (the loop entry the sweep reads too)
+     *  comes off. Clearing it only for `running` (Astra, F21) left a
+     *  `cancelling` or terminal answer parked: the loop's next pass saw the
+     *  marker still set and asked again at once — twelve adoptions in one
+     *  burst against a relay that had closed the turn, until the 30-minute
+     *  cap — and its stale sliced wait hid the runtime's own terminal. */
+    const adoptionResolved = () => { const t = activeTurns.get(turnId); if (t?.adoptionPending) t.adoptionPending = null; };
     /** Act on the relay's adoption answer. `continue` → the loop goes on to
      *  the terminal; `done` → the turn is closed here; `none` → the relay
      *  had nothing to adopt (the caller decides); `pending` → the relay
      *  could not answer: the runtime keeps running, the turn is
-     *  `adoption_pending` and Phase C keeps retrying. */
+     *  `adoption_pending` and Phase C keeps retrying. Every answer but
+     *  `pending` is a resolution and clears the pending marker. */
     const honourAdoption = async (a: Adoption, via: string): Promise<"continue" | "done" | "none" | "pending"> => {
+      if (a.kind !== "unavailable") adoptionResolved();
       switch (a.kind) {
         case "running":
-          { const t = activeTurns.get(turnId); if (t?.adoptionPending) t.adoptionPending = null; }
           log(`${tag}: adopted on the relay under this lease (${via})`);
           return "continue";
         case "refused":
@@ -1817,12 +1833,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // Unresolved: the relay said nothing about the turn. A runtime the
           // driver confirmed running is never cancelled on a relay outage.
           noteAdoptionPending(turnId, a.detail);
-          log(`${tag}: the relay cannot answer the adoption (${a.detail}, ${via}) — adoption_pending, the command keeps running; retrying every ${RETRY_MAX_MS / 1000}s`);
+          log(`${tag}: the relay cannot answer the adoption (${a.detail}, ${via}) — adoption_pending, the command keeps running; retrying every ${ADOPTION_PENDING_RETRY_MS / 1000}s`);
           return "pending";
         case "cancelling":
           // The relay had a cancel requested for it — preserved through the
-          // adoption: honour it here; the coordinator interrupts and the
-          // turn ends cancelled through Phase C.
+          // adoption: honour it here, ONCE (the ledger's cancel flag is
+          // idempotent; a re-offer or a second answer adds nothing); the
+          // coordinator interrupts and the turn ends cancelled through Phase C.
           log(`${tag}: adopted on the relay with a cancel pending (${via}) → cancelling locally`);
           q().cancel(commandId);
           return "continue";
@@ -1837,7 +1854,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // is still working on it here — a recovery 409 is no proof that a
           // runtime should be cancelled. It keeps running; its outcome is
           // reported through the terminal fact when it ends (the relay
-          // answers replay), and no /start is posted for a closed turn.
+          // answers replay), and no /start is posted for a closed turn. The
+          // answer is honoured ONCE: the turn is never re-adopted after it.
           log(`${tag}: the relay already closed this turn ${a.terminalState} (${via}) — the local command keeps running; its outcome posts as the terminal fact`);
           startPosted = true;
           return "continue";
@@ -1932,17 +1950,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // Phase C — the command's terminal IS the turn's: completed/failed from
     // the runtime's turn-end, cancelled once the interrupt is confirmed,
     // interrupted on idle-without-terminal, a restart or a kill (#463).
-    // While the adoption is pending the wait is sliced: every RETRY_MAX_MS
-    // the relay is asked again (the sweep may have adopted it meanwhile —
-    // the marker on the loop entry is shared); once adopted, the /start
-    // still owed is posted (a replay on the relay; the durable ack lands).
+    // While the adoption is pending the wait is sliced: every
+    // ADOPTION_PENDING_RETRY_MS the relay is asked again (the sweep may have
+    // adopted it meanwhile — the marker on the loop entry is shared); once
+    // the relay has ANSWERED — adopted, cancelling, or a terminal it already
+    // holds — the marker is off, the /start still owed is posted (a replay
+    // on the relay; the durable ack lands) and the loop returns to one fresh
+    // bounded wait for the command's own terminal. No answer is acted on
+    // twice: a resolved turn is never re-adopted (Astra, F21).
     const capAt = Date.now() + TURN_CAP_MS;
-    let done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: adoptionPending ? Math.min(RETRY_MAX_MS, TURN_CAP_MS) : TURN_CAP_MS });
+    let done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, TURN_CAP_MS) : TURN_CAP_MS });
     while (done.state !== null && !isTerminal(done.state) && Date.now() < capAt) {
       const entry = activeTurns.get(turnId);
       if (!entry?.adoptionPending) {
-        // The sweep adopted it (or nothing was ever pending): finish the
-        // owed /start, then wait out the turn.
+        // The relay answered (here or through the sweep), or nothing was
+        // ever pending: finish the owed /start, then wait out the turn.
         adoptionPending = false;
         if (!startPosted) {
           try { await postStart(turnId, localId, commandId, leaseRef); startPosted = true; }
@@ -1955,21 +1977,23 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const v = await honourAdoption(a, `retry ${entry.adoptionPending.attempts}`);
       if (v === "done") return;
       if (v === "continue") {
+        // Resolved (running / cancelling / a remote terminal): the marker is
+        // off, so the next pass takes the plain branch above — the owed
+        // /start (none for a closed turn), then ONE fresh wait to the cap.
         adoptionPending = false;
         if (a.kind === "terminal") startPosted = true; // closed elsewhere: no /start for a closed turn
-        continue; // the next pass posts the owed /start and waits out the turn
+        continue;
       }
       if (v === "none") {
         // Nothing to adopt any more (another turn is active, or the relay
         // no longer holds it as a predecessor's) — a question the relay
         // answered, not a cancel: the runtime finishes, its terminal posts.
         adoptionPending = false;
-        { const t = activeTurns.get(turnId); if (t) t.adoptionPending = null; }
         log(`${tag}: nothing left to adopt on the relay (${a.kind === "none" ? a.detail ?? "none" : a.kind}) — the command keeps running; its outcome posts as the terminal fact`);
         startPosted = true;
         continue;
       }
-      done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: Math.min(RETRY_MAX_MS, Math.max(0, capAt - Date.now())) });
+      done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: Math.min(ADOPTION_PENDING_RETRY_MS, Math.max(0, capAt - Date.now())) });
     }
     if (done.state === null) return finish("failed", "command_lost");
     if (!isTerminal(done.state)) {
