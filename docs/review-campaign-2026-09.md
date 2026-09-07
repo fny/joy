@@ -610,6 +610,22 @@ app.
   tests in three shards, app 1832, relay 122. No agents running. **2 open**:
   #127 (rollout flag) and #628 (awaiting verdict).
 
+- 2026-09-10 (late night) — Astra's verdict on #628 round three was
+  "partial": a re-registered pid replaced a held registration, an unknown
+  start "?" matched another "?", and recorded recovery skipped the descendant
+  search on a reused launcher. It also returned a REGRESSION on the lane
+  restart round (the orphan sweep cleared the adoption marker on any
+  terminal without honouring a cancel) and a partial on record-only archive
+  ordering (two storage-error paths). Fixed in 7fd2e4ef (spawn leases name
+  which incarnation of a pid they own; "?" is never an identity; reused
+  launchers still get their marker-proven descendants reaped; a search that
+  could not run reports `unknown` and recovery refuses a second server) and
+  66bc1ed4 (the sweep carries its complete adoption answer to the turn loop;
+  terminal settlement is unknown/pending/settled and every archive path waits
+  for `settled`). Pushed at 14805496; both sent to Astra as one batched
+  round (its weekly Codex limit is under 10%). **2 open**: #127 (rollout
+  flag) and #628 (awaiting the batched verdict).
+
 ## Campaign summary (as of 2026-09-10 late)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
@@ -618,7 +634,7 @@ Astra verification → residual-round loop; tunnel/auth/gate files reviewed by
 Fable security agents instead of Astra. Of the 605, 603 are closed with an
 Astra (or Fable security) verdict or explicit evidence; the two still open
 are #127 (the pairing account-flavour flag flips only after every app build
-sends the proof — a rollout step, not code) and #628 (its third round is
+sends the proof — a rollout step, not code) and #628 (its fourth round is
 landing). Roughly 50 residual rounds followed the six waves.
 
 **Architecture that landed.**
