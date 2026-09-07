@@ -658,16 +658,26 @@ app.
   wait is woken by the sweep's parked cancellation instead of running to the
   cap. Pushed; sent to Astra as waveF32. **1 open**: #127 (rollout flag).
 
-## Campaign summary (as of 2026-09-10 late)
+- 2026-09-11 (midday) — Astra: 3d6681a3 **fixed** (reverse order adopts
+  running, then the sweep's later terminal/cancelled is carried and wakes the
+  long wait; one interrupt, one cancelled completion; F28/F30 cases intact;
+  one older fixture needed a wider sweep allowance under a concurrent run,
+  no assertion weakened). Full daemon regression 1285 tests green at
+  3d6681a3 in three foreground shards; app and relay untouched since their
+  last full runs (1832 / 122 at f10f5acf). **Campaign complete**: 630 issues,
+  629 closed, #127 open by design.
 
-**Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
-findings plus Fable's own), executed in six waves with an implement → commit →
+## Campaign summary (as of 2026-09-11)
+
+**Scope.** 630 issues filed from the September coverage review (Astra/gpt-6-astra
+findings plus Fable's own, and two found by our own test runs during the
+residual rounds), executed in six waves with an implement → commit →
 Astra verification → residual-round loop; tunnel/auth/gate files reviewed by
-Fable security agents instead of Astra. Of the 605, 603 are closed with an
-Astra (or Fable security) verdict or explicit evidence; the two still open
-are #127 (the pairing account-flavour flag flips only after every app build
-sends the proof — a rollout step, not code) and #628 (its fifth round is
-landing). Roughly 50 residual rounds followed the six waves.
+Fable security agents instead of Astra. Of the 630, 629 are closed with an
+Astra (or Fable security) verdict or explicit evidence; the one still open is
+#127 (the pairing account-flavour flag flips only after every app build sends
+the proof — a rollout step, not code). Roughly 55 residual rounds followed the
+six waves; the last code commit is 3d6681a3.
 
 **Architecture that landed.**
 - Daemon: SQLite ledger + outbox (C1) replacing every JSON store; session
@@ -676,7 +686,10 @@ landing). Roughly 50 residual rounds followed the six waves.
   with per-launch fencing and a single readiness decision; SQLite
   `BEGIN IMMEDIATE` locks for the daemon singleton and the env store;
   canonical cwd, transcript-claim ownership, positional receipt coverage,
-  process-group termination that never trusts a dead leader's pid.
+  process-group termination that never trusts a dead leader's pid, binds
+  each kill to the spawn lease (incarnation) it owns, and refuses to signal
+  anything that is not a positive pid (a failed spawn used to be signalled
+  through libuv as pid 0 — the caller's own process group, #630).
 - Relay: tunnel bounds (client_slow / client_gone / relay_busy), request
   replay guard, event budgets with a persisted, visible loss marker,
   `expectedMetadataVersion` CAS, conditional session delete, pairing proof of
@@ -696,11 +709,17 @@ was deployed by the campaign.
 drops the seam closer — rebuild from both parents; worktree agents must
 install their own node_modules (a `pnpm add` through a symlink rewrote the
 main checkout once); the Codex TUI can silently downgrade Astra's model —
-check the footer before trusting verdicts.
+check the footer before trusting verdicts; a vitest run dying with exit 143
+seconds in is a test-spawned `kill(0)`, not the tool timeout — diagnose with
+`strace -f -e trace=kill`; background tool jobs on this box were stopped
+externally several times, so run long suites in the foreground.
 
 **Left open by design (see the won't-fix criteria below):** #127's flag flip
 waits on rollout, not code; every flaky-test low surfaced during the campaign
-(#623 #624 #626 #627) was fixed at its root rather than retried.
+(#623 #624 #626 #627) was fixed at its root rather than retried. Not done
+here, for the user to decide: an upstream Node/libuv report for
+`child.kill()` on a ChildProcess whose spawn failed (see #630), and the
+deploys themselves.
 
 ## Won't-fix criteria
 
