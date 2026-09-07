@@ -349,7 +349,7 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
     const showPermission = !!p.displayPermissionMode
         && p.permissionModeKey !== 'default'
         && !!p.permissionLabel;
-    const showInfoLine = !p.zenMode && !!(p.agentLabel || p.modelLabel || p.effortLabel || showPermission);
+    const showInfoLine = !p.zenMode && !!(p.agentLabel || p.modelLabel || p.effortLabel || showPermission || p.contextWarning);
     if (!p.connectionStatus && !p.contextWarning && !showInfoLine) {
         return null;
     }
@@ -435,16 +435,6 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                         )}
                     </>
                 )}
-                {p.contextWarning && (
-                    <Text style={{
-                        fontSize: 11,
-                        color: p.contextWarning.color,
-                        marginLeft: p.connectionStatus ? 8 : 0,
-                        ...Typography.default()
-                    }}>
-                        {p.connectionStatus ? '• ' : ''}{p.contextWarning.text}
-                    </Text>
-                )}
             </View>
             {showInfoLine && (() => {
                 const permColor = p.isSandboxedYoloMode ? '#4169E1' :
@@ -455,7 +445,7 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                                     p.permissionModeKey === 'safe-yolo' ? theme.colors.permission.safeYolo :
                                         p.permissionModeKey === 'yolo' ? theme.colors.permission.yolo :
                                             theme.colors.textSecondary;
-                // agent · model · reasoning · permission — only segments that exist.
+                // agent · model · effort · permission · usage — only segments that exist.
                 const dim = { fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() } as const;
                 const segments: React.ReactNode[] = [];
                 const pushDot = () => segments.push(<Text key={`d${segments.length}`} style={dim}>{' · '}</Text>);
@@ -469,6 +459,13 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                     segments.push(<Text key="cost" style={dim}>{`$${cost}`}</Text>);
                 }
                 if (showPermission) { if (segments.length) pushDot(); segments.push(<Text key="perm" style={{ fontSize: 11, color: permColor, ...Typography.default() }}>{p.permissionLabel}</Text>); }
+                // Usage trails the cluster: agent · model · effort · perm · 67% left
+                // (#637). It keeps its own warning colour — that is the whole point
+                // of the segment — so it is not part of the dim run.
+                if (p.contextWarning) {
+                    if (segments.length) pushDot();
+                    segments.push(<Text key="usage" style={{ fontSize: 11, color: p.contextWarning.color, ...Typography.default() }}>{p.contextWarning.text}</Text>);
+                }
                 return (
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         {segments}
