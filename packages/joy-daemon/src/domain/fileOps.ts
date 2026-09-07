@@ -16,7 +16,7 @@ import { join, resolve, sep, dirname, basename } from "path";
 import { homedir, tmpdir } from "os";
 import { writeFileAtomicAsync } from "./atomicWrite";
 import { TextAccumulator } from "./textStream";
-import { killProcessGroup, retireChildProcess, registerGroup, refreshGroupMembers, newProcessGroupMarker, PGROUP_MARKER_ENV } from "./bounded";
+import { killProcessGroup, retireChildProcess, registerGroup, newProcessGroupMarker, PGROUP_MARKER_ENV } from "./bounded";
 
 const execAsync = promisify(exec);
 
@@ -503,7 +503,11 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
       // Keep the helper's verdict: `false` (members outlived SIGKILL) and a
       // throw both mean the group may still be running — say so, never
       // settle as if the kill had succeeded.
-      killProcessGroup(child.pid, { graceMs: 2_000, marker, log }).then(
+      // The LEASE, not just the pid: the kill then binds to the incarnation
+      // this run spawned, so a group registered later under a recycled number
+      // can neither lend this teardown its members nor lose its own record to
+      // it (#628 F29).
+      killProcessGroup(child.pid, { graceMs: 2_000, marker, group: group ?? undefined, log }).then(
         (gone) => { if (!gone) terminationUnconfirmed = true; done(); },
         (err: unknown) => {
           terminationUnconfirmed = true;
@@ -516,7 +520,7 @@ export function runTool(binary: string, args: string[], cwd?: string, extraEnv?:
     // Output is proof of life: every chunk is a chance to widen the captured
     // membership (throttled to one scan per 200ms) before a leader that exits
     // early takes the pgid's meaning with it.
-    const observe = () => { if (child.pid) refreshGroupMembers(child.pid); };
+    const observe = () => { group?.refresh(); };
     child.stdout.on("data", (d: Buffer) => { stdout.push(d); observe(); });
     child.stderr.on("data", (d: Buffer) => { stderr.push(d); observe(); });
     child.on("close", (code) => { settle(code ?? 0); });

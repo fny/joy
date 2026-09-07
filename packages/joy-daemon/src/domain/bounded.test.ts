@@ -316,6 +316,71 @@ describe("killProcessGroup", () => {
     } finally { held.release(); forgetGroup(pid); kill.mockRestore(); }
   });
 
+  test("a pid registered again is a different group: the old lease signals nothing (#628 F29)", async () => {
+    // The number was recycled while an earlier caller still owed its group a
+    // kill. Registering it again used to REPLACE the held record, so the old
+    // caller's teardown read the new spawn's captured members, SIGTERMed a
+    // process it had never started, and retired the new caller's record on the
+    // way out. Registrations are per (pid, incarnation): a lease addresses the
+    // record it was given and no other. Nothing real is touched — the probes
+    // describe the pids.
+    const pid = 991341;
+    let current = "spawn-incarnation";
+    let live = true;
+    processProbe.identityOf = (p) => (p === pid && live ? { start: current, zombie: false } : null);
+    // Whatever holds the number leads the group and carries ITS own marker.
+    processProbe.membersOf = (g) => (g === pid && live ? [{ pid, start: current, zombie: false }] : []);
+    processProbe.hasMarker = (_p, marker) => marker === current;
+    const first = registerGroup(pid, { marker: "spawn-incarnation" });
+    current = "new-incarnation"; // the first leader exited; a new spawn got the pid
+    const second = registerGroup(pid, { marker: "new-incarnation" });
+    // The pid now names the newest registration…
+    expect(spawnedGroupIdentity(pid)).toMatchObject({ start: "new-incarnation", marker: "new-incarnation" });
+    const signals: Array<[number, string | number | undefined]> = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((p: number, s: NodeJS.Signals) => { signals.push([p, s]); live = false; return true; }) as typeof process.kill);
+    const logs: string[] = [];
+    try {
+      // …while the FIRST caller's teardown still speaks for what IT spawned.
+      await expect(killProcessGroup(pid, { group: first, marker: "spawn-incarnation", graceMs: 0, log: (l) => logs.push(l) })).resolves.toBe(false);
+      expect(signals).toEqual([]); // the new process is never signalled
+      expect(logs.some((l) => l.includes("not the process spawned here"))).toBe(true);
+      // The newer registration is untouched by the older caller's retirement…
+      expect(spawnedGroupIdentity(pid)).toMatchObject({ start: "new-incarnation", marker: "new-incarnation" });
+      // …and still reaches its own process when ITS holder tears it down.
+      await expect(killProcessGroup(pid, { group: second, marker: "new-incarnation", graceMs: 0, log: (l) => logs.push(l) })).resolves.toBe(true);
+      expect(signals).toEqual([[-pid, "SIGTERM"]]);
+    } finally { kill.mockRestore(); first.release(); second.release(); forgetGroup(pid); }
+  });
+
+  test.each([["a registration", true], ["a persisted identity", false]] as const)(
+    "an unreadable start time is not an identity: %s is refused, never signalled (#628 F29)",
+    async (_label, registered) => {
+      // No /proc and no usable `ps`: the pid is alive but its start time reads
+      // back as `?`. A recorded `?` compared against a current `?` used to
+      // pass for identity and authorised kill(-pgid) on an occupant nobody
+      // could identify. Unknown never matches unknown.
+      const pid = 991342;
+      processProbe.identityOf = (p) => (p === pid ? { start: "?", zombie: false } : null);
+      processProbe.membersOf = () => null;
+      processProbe.hasMarker = () => null;
+      const held = registered ? registerGroup(pid, { marker: "tok-unknown" }) : null;
+      const signals: Array<[number, string | number | undefined]> = [];
+      const kill = vi.spyOn(process, "kill").mockImplementation(((p: number, s: NodeJS.Signals) => { signals.push([p, s]); return true; }) as typeof process.kill);
+      const logs: string[] = [];
+      try {
+        await expect(killProcessGroup(pid, {
+          group: held ?? undefined,
+          marker: "tok-unknown",
+          spawnStart: registered ? undefined : "?",
+          graceMs: 0,
+          log: (l) => logs.push(l),
+        })).resolves.toBe(false);
+        expect(signals).toEqual([]); // no kill(-pgid), no single-process kill
+        expect(logs.some((l) => l.includes("cannot be proven to be the process spawned here"))).toBe(true);
+      } finally { kill.mockRestore(); held?.release(); forgetGroup(pid); }
+    },
+  );
+
   test("an already-dead pid resolves true without escalation", async () => {
     const p = spawn("true", [], { stdio: "ignore" });
     await waitExit(p);

@@ -29,6 +29,7 @@ import type { SessionDeps, SessionStatus, SessionRecord, QueuedMessage, QueueSta
 import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
 import { spawnOpencodeServer, OpencodeClient, killOpencodeServerPid, reapRecordedOpencodeServer, type OpencodeServerIdentity } from "./opencodeClient";
+import type { GroupRegistration } from "../domain/bounded";
 import { OpencodeNormalizer, type OpencodeEffect } from "./normalize";
 import { opencodeJoyPreamble, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { ledgerFor, type Ledger } from "../domain/ledger";
@@ -295,6 +296,9 @@ export class OpencodeSession implements AgentSession {
   #procMarker?: string;
   /** Launcher start time of the server this generation spawned (#628). */
   #procStart?: string;
+  /** The registration lease for that launcher's group (#628 F29): the kill
+   *  binds to THIS incarnation, never to a later spawn given the same pid. */
+  #procGroup?: GroupRegistration;
   #thinking = false;
   #started = false;
   #activeTurn: string | null = null;
@@ -420,15 +424,28 @@ export class OpencodeSession implements AgentSession {
         // spawned before anything is signalled (#628): after a restart it may
         // belong to an unrelated process, and a stranger must be left alone —
         // which is not a reason to refuse a fresh server.
-        const outcome = await reapRecordedOpencodeServer(this.#reapPid, this.#reapIdentity); // gone before a replacement opens the same conversation (#71)
+        // gone before a replacement opens the same conversation (#71).
+        // "unknown" is NOT permission to start one (#628 F29): the platform
+        // could not list processes, so nothing established that the recorded
+        // server's descendants are gone. Retry a few times — the listing is
+        // usually a transient failure — and refuse rather than run a second
+        // server on top of one we never proved was dead.
+        let outcome = await reapRecordedOpencodeServer(this.#reapPid, this.#reapIdentity);
+        for (let attempt = 0; outcome === "unknown" && attempt < 3; attempt++) {
+          await new Promise((r) => setTimeout(r, 250));
+          if (this.status === "ended") return;
+          outcome = await reapRecordedOpencodeServer(this.#reapPid, this.#reapIdentity);
+        }
         if (outcome === "alive") throw new Error(`recorded opencode server ${this.#reapPid} could not be stopped — not starting a second one`);
+        if (outcome === "unknown") throw new Error(`ownership of recorded opencode server ${this.#reapPid} could not be established — not starting a second one`);
       }
       // Killed while we waited for the reap: this generation must not spawn.
       if (this.status === "ended") return;
-      const { proc, port, marker, startedAt } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
+      const { proc, port, marker, startedAt, group } = spawnOpencodeServer(this.cwd, { joySessionId: this.id });
       this.#proc = proc;
       this.#procMarker = marker;
       this.#procStart = startedAt;
+      this.#procGroup = group;
       proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
       proc.on("error", () => { if (this.status !== "ended") this.end("process_exited"); });
       const p = await port;
@@ -810,7 +827,7 @@ export class OpencodeSession implements AgentSession {
     this.endReason = reason;
     try { this.#client?.close(); } catch { /* ignore */ }
     this.#client = null;
-    if (this.#proc?.pid) void killOpencodeServerPid(this.#proc.pid, this.#procMarker, this.#procStart);
+    if (this.#proc?.pid) void killOpencodeServerPid(this.#proc.pid, this.#procMarker, this.#procStart, this.#procGroup);
     this.#proc = null;
     // The coordinator is retired FIRST: the turn-end below must not be
     // mistaken for the runtime's verdict on a dead generation's commands.

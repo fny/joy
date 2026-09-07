@@ -19,7 +19,7 @@ import { writeFileSync } from "fs";
 import { join } from "path";
 import { joyStateDir } from "../paths";
 import { LineDecoder, TextAccumulator } from "../domain/textStream";
-import { withDeadline, killProcessGroup, BoundedTail, PGROUP_MARKER_ENV, newProcessGroupMarker, registerGroup, spawnedGroupIdentity, isSpawnedGroupLeader, ownedGroupMembers, processProbe, pidAlive } from "../domain/bounded";
+import { withDeadline, killProcessGroup, BoundedTail, PGROUP_MARKER_ENV, newProcessGroupMarker, registerGroup, spawnedGroupIdentity, isSpawnedGroupLeader, ownedGroupMembers, processProbe, pidAlive, type GroupRegistration } from "../domain/bounded";
 import * as http from "http";
 
 // Provider API keys (e.g. FIREWORKS_API_KEY for the opencode config's
@@ -63,6 +63,12 @@ export interface OpencodeSpawnResult {
    *  recorded server pid: after a daemon restart it is the only way to tell
    *  the recorded server from an unrelated process that inherited its pid. */
   startedAt?: string;
+  /** The registration lease for the launcher's group (#628 F29). Hold it for
+   *  the life of the server and hand it to killOpencodeServerPid: the kill
+   *  then binds to THIS launcher's incarnation, so a later spawn that happens
+   *  to be given the same pid can neither lend this teardown its members nor
+   *  lose its own record to it. */
+  group?: GroupRegistration;
 }
 
 /** The spawn identity of a recorded opencode server (#628) — persisted with
@@ -105,7 +111,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
   // the pid alone proves nothing. The registration is held for the life of the
   // server — killOpencodeServerPid retires it — so no later spawn can sweep the
   // start-time fence away while the server is still running (#628 F21).
-  if (proc.pid) registerGroup(proc.pid, { marker });
+  const group = proc.pid ? registerGroup(proc.pid, { marker }) : undefined;
   const startedAt = proc.pid ? spawnedGroupIdentity(proc.pid)?.start : undefined;
   // Post-startup output is DRAINED but not retained (#69). A long-running
   // `opencode serve` keeps logging to stderr; the startup listener used to
@@ -143,7 +149,7 @@ export function spawnOpencodeServer(cwd: string, opts?: { bin?: string; joySessi
     listenTimedOut = stopParsing;
   });
   const port = withDeadline(listen, 30_000, () => { listenTimedOut(); throw new Error("opencode serve: no listen line within 30s"); });
-  return { proc, port, serverLog, marker, startedAt };
+  return { proc, port, serverLog, marker, startedAt, group };
 }
 
 /** One opencode SSE/global event. `durable.seq` is a per-session monotonic
@@ -311,8 +317,8 @@ export class OpencodeClient {
  *  launcher already exited is still found; without it (a pid recorded by an
  *  earlier daemon run) only the launcher itself and members captured while
  *  it lived are signalled — never a group that merely reused the pid. */
-export async function killOpencodeServerPid(pid: number, marker?: string, spawnStart?: string): Promise<boolean> {
-  return killProcessGroup(pid, { graceMs: 2000, marker, spawnStart, log: (line) => process.stderr.write(line.replace(/^\[kill-group\]/, "[opencode] server") + "\n") });
+export async function killOpencodeServerPid(pid: number, marker?: string, spawnStart?: string, group?: GroupRegistration): Promise<boolean> {
+  return killProcessGroup(pid, { graceMs: 2000, marker, spawnStart, group, log: (line) => process.stderr.write(line.replace(/^\[kill-group\]/, "[opencode] server") + "\n") });
 }
 
 /**
@@ -321,36 +327,59 @@ export async function killOpencodeServerPid(pid: number, marker?: string, spawnS
  * reused, so the recorded spawn identity (launcher start time + JOY_PGROUP)
  * is verified BEFORE anything is signalled.
  *
- *  - "unowned" — the pid is free AND nothing marker-proven survives it, or it
- *    now belongs to a different process, or it is not an `opencode serve`:
- *    nothing was signalled, and the caller may start a fresh server;
+ *  - "unowned" — the pid is not ours AND a search that actually ran found
+ *    nothing marker-proven it left behind: nothing was signalled, and the
+ *    caller may start a fresh server;
  *  - "gone"    — our recorded server was found and is now terminated;
  *  - "alive"   — it survived SIGKILL (or could not be confirmed dead): the
- *    caller must NOT start a second server on top of it.
+ *    caller must NOT start a second server on top of it;
+ *  - "unknown" — the search could not be RUN at all (#628 F29): the platform
+ *    listed no processes, so "nothing found" is the absence of a search, not
+ *    the absence of the server. Never treat this as unowned — the caller
+ *    should retry rather than start a second server on top of descendants it
+ *    never proved were gone.
  */
-export async function reapRecordedOpencodeServer(pid: number, identity: OpencodeServerIdentity = {}): Promise<"unowned" | "gone" | "alive"> {
-  // The recorded pid is the LAUNCHER's, and `opencode` is a launcher: it
-  // spawns the real `opencode.exe serve` and exits, so at recovery time the
-  // recorded pid is usually free while the server it left behind is still
-  // listening. "The leader is gone" therefore does NOT mean the record is
-  // free (#628 F21) — that shortcut left a live, marker-proven server running
-  // and let a second one start on the same conversation. Look for what the
-  // group left behind first: members that prove themselves through their own
-  // JOY_PGROUP environment, or that match a pair captured at spawn.
-  if (processProbe.identityOf(pid) === null) {
-    const left = ownedGroupMembers(pid, { marker: identity.marker });
-    if (left.pids.length === 0) return "unowned";
-    process.stderr.write(`[opencode] recorded server ${pid} has exited but left ${left.pids.join(",")} behind — reaping before allowing a replacement\n`);
+export async function reapRecordedOpencodeServer(pid: number, identity: OpencodeServerIdentity = {}): Promise<"unowned" | "gone" | "alive" | "unknown"> {
+  const occupant = processProbe.identityOf(pid);
+  if (occupant !== null && isSpawnedGroupLeader(pid, identity)) {
+    if (!isOpencodeServerPid(pid)) return "unowned";
     return (await killOpencodeServerPid(pid, identity.marker, identity.start)) ? "gone" : "alive";
   }
-  if (!isSpawnedGroupLeader(pid, identity)) {
-    if (pidAlive(pid) && (identity.start !== undefined || identity.marker !== undefined)) {
-      process.stderr.write(`[opencode] recorded server ${pid} is not the process we spawned (start ${identity.start ?? "?"}) — not signalling it\n`);
+  // The recorded pid is not (or no longer) our launcher — `opencode` is a
+  // LAUNCHER: it spawns the real `opencode.exe serve` and exits, so at
+  // recovery time the recorded pid is usually free, and sometimes recycled,
+  // while the server it left behind is still listening. Neither "the leader
+  // is gone" nor "the number belongs to someone else" means the record is
+  // free (#628 F21/F29) — that shortcut left a live, marker-proven server
+  // running and let a second one open the same conversation. Look for what
+  // the group left behind: DESCENDANTS that prove themselves through their
+  // own JOY_PGROUP environment, or that match a pair captured at spawn.
+  //
+  // One exception: an occupant that carries our marker but reports a
+  // different start time is contradictory evidence about the number itself.
+  // The recorded start wins (it is what identifies the launcher), and nothing
+  // in that group is signalled — a stranger is never touched.
+  const markedOccupant = occupant !== null && identity.marker !== undefined
+    && processProbe.hasMarker(pid, identity.marker) === true;
+  if (!markedOccupant) {
+    const left = ownedGroupMembers(pid, { marker: identity.marker });
+    // The launcher's own number is excluded: whatever holds it now failed the
+    // identity check above, so it is not ours to signal.
+    const descendants = left.pids.filter((p) => p !== pid);
+    if (descendants.length > 0) {
+      process.stderr.write(`[opencode] recorded server ${pid} is ${occupant === null ? "gone" : "not the process we spawned"} but left ${descendants.join(",")} behind — reaping before allowing a replacement\n`);
+      return (await killOpencodeServerPid(pid, identity.marker, identity.start)) ? "gone" : "alive";
     }
-    return "unowned";
+    // Nothing found — but only a search that RAN is evidence of absence.
+    if (identity.marker !== undefined && !left.searched) {
+      process.stderr.write(`[opencode] recorded server ${pid}: no process listing available, so nothing proves its group is gone — deferring\n`);
+      return "unknown";
+    }
   }
-  if (!isOpencodeServerPid(pid)) return "unowned";
-  return (await killOpencodeServerPid(pid, identity.marker, identity.start)) ? "gone" : "alive";
+  if (occupant !== null && (identity.start !== undefined || identity.marker !== undefined)) {
+    process.stderr.write(`[opencode] recorded server ${pid} is not the process we spawned (start ${identity.start ?? "?"}) — not signalling it\n`);
+  }
+  return "unowned";
 }
 
 /** Is `pid` verifiably an opencode server? (process name is `opencode.exe`). */
@@ -373,7 +402,7 @@ export function isOpencodeServerPid(pid: number): boolean {
  *  directory; the HTTP API can). Cost ≈ one server boot (~2-4s), acceptable
  *  for an on-demand picker. */
 export async function listOpencodeSessionsForCwd(cwd: string): Promise<Array<{ id: string; title: string; updatedAt: number }>> {
-  const { proc, port, marker, startedAt } = spawnOpencodeServer(cwd);
+  const { proc, port, marker, startedAt, group } = spawnOpencodeServer(cwd);
   try {
     const p = await port;
     const client = new OpencodeClient(p);
@@ -396,6 +425,6 @@ export async function listOpencodeSessionsForCwd(cwd: string): Promise<Array<{ i
     // every other one (#628): its launcher has usually already exited by now,
     // so without the marker/start pair this kill either signalled nothing or
     // signalled whatever inherited the pid.
-    if (proc.pid) void killOpencodeServerPid(proc.pid, marker, startedAt);
+    if (proc.pid) void killOpencodeServerPid(proc.pid, marker, startedAt, group);
   }
 }

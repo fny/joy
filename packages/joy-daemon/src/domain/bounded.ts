@@ -237,13 +237,21 @@ export function processGroupMembers(pgid: number): number[] {
 
 interface SpawnedGroup {
   pid: number;
+  /** Which INCARNATION of `pid` this record speaks for (#628 F29). A pid is a
+   *  reusable number, so a second registration of it does NOT describe the
+   *  same process: it gets its own record under its own token, and a caller
+   *  still holding an older lease keeps addressing what IT spawned. A later
+   *  registration never mutates, replaces or lends anything to an older one. */
+  generation: number;
   /** The leader's start time at spawn; `undefined` when the platform could
    *  not read one (the identity check then degrades to "the pid exists"). */
   start?: string;
   /** The `JOY_PGROUP` token stamped on the spawn's environment, if any. */
   marker?: string;
-  /** pid → start time of every process seen in the group while it was
-   *  provably ours. The leader is the first entry. */
+  /** pid -> start time of every process seen in the group while it was
+   *  provably ours. The leader is the first entry. Never an UNKNOWN_START: a
+   *  start time nobody could read identifies nothing, so it is not recorded
+   *  as identity (#628 F29). */
   members: Map<number, string>;
   lastScanAt: number;
   /** How many callers still hold this registration (#628 F21). A spawn site
@@ -253,13 +261,41 @@ interface SpawnedGroup {
   holds: number;
 }
 
-/** Groups this daemon created, by leader pid. Entries are dropped when the
- *  group is killed (killProcessGroup) or retired (forgetGroup). */
+/** Every registration this daemon holds, keyed by GENERATION rather than by
+ *  pid: one pid can legitimately appear more than once — its number was
+ *  recycled while an earlier caller still owed that group a kill — and the
+ *  records are wholly independent of one another (#628 F29). Entries go when
+ *  their own kill runs (killProcessGroup), when they are retired
+ *  (forgetGroup), or when the sweep collects an unheld, finished one. */
 const spawnedGroups = new Map<number, SpawnedGroup>();
+/** pid -> the generation of its NEWEST registration: what a caller holding no
+ *  lease of its own (a pid read back from disk, a diagnostic) can see. */
+const currentGeneration = new Map<number, number>();
+let nextGeneration = 1;
 /** Above this many live records, dead ones are swept on the next register. */
 const GROUP_SWEEP_AT = 64;
 /** Minimum gap between opportunistic /proc scans for one group. */
 const GROUP_SCAN_INTERVAL_MS = 200;
+
+/** The newest registration for `pid`, for callers that hold no lease. */
+function currentRecord(pid: number): SpawnedGroup | undefined {
+  const gen = currentGeneration.get(pid);
+  return gen === undefined ? undefined : spawnedGroups.get(gen);
+}
+
+/** The record a lease speaks for, or `undefined` once it has been retired. A
+ *  lease NEVER resolves to another generation's record, so a caller can never
+ *  be handed the membership of a process it did not spawn (#628 F29). */
+function leasedRecord(reg: GroupRegistration): SpawnedGroup | undefined {
+  const rec = spawnedGroups.get(reg.generation);
+  return rec !== undefined && rec.pid === reg.pid ? rec : undefined;
+}
+
+/** Drop ONE record, and the pid index with it when it was the pid's newest. */
+function retireRecord(rec: SpawnedGroup): void {
+  spawnedGroups.delete(rec.generation);
+  if (currentGeneration.get(rec.pid) === rec.generation) currentGeneration.delete(rec.pid);
+}
 
 /** A caller's claim on a registration. Held from the spawn until the run
  *  settles: the sweep below never collects a held record, so a group's
@@ -268,6 +304,13 @@ const GROUP_SCAN_INTERVAL_MS = 200;
  *  the record. */
 export interface GroupRegistration {
   readonly pid: number;
+  /** The incarnation of `pid` this lease speaks for (#628 F29). Hand the
+   *  lease to killProcessGroup and the kill binds to THIS record — never to a
+   *  later registration that merely inherited the number. */
+  readonly generation: number;
+  /** Widen THIS record's captured membership (throttled like
+   *  refreshGroupMembers). Cheap and safe to call from a hot path. */
+  refresh(force?: boolean): void;
   /** Give up this caller's claim. Idempotent, and a no-op once the record has
    *  already been retired (by killProcessGroup or forgetGroup). */
   release(): void;
@@ -280,47 +323,67 @@ export interface GroupRegistration {
  * with the same token that was put in the child's `JOY_PGROUP`.
  *
  * The returned registration is a LEASE (#628 F21): hold it for as long as the
- * caller may still have to signal that group, and release it when the run
- * settles. A registration the sweep can evict while a caller still intends to
- * kill through it is worse than no registration at all — the kill then has no
- * start-time fence and the pid's current occupant, which may be an unrelated
- * process that inherited the number, looks like the leader.
+ * caller may still have to signal that group, release it when the run settles,
+ * and pass it to killProcessGroup. A registration the sweep can evict while a
+ * caller still intends to kill through it is worse than no registration at all
+ * — the kill then has no start-time fence and the pid's current occupant,
+ * which may be an unrelated process that inherited the number, looks like the
+ * leader.
+ *
+ * Registering a pid that is ALREADY registered creates a second, independent
+ * record (#628 F29). The number was recycled; the new caller's group is not
+ * the old caller's group, and quietly overwriting the old record handed its
+ * holder the new process's members — which it then signalled, believing it was
+ * tearing down its own spawn. The older record is neither mutated nor dropped
+ * while anyone still holds it.
  */
 export function registerGroup(pid: number, opts: { marker?: string; start?: string } = {}): GroupRegistration {
-  if (!Number.isInteger(pid) || pid <= 0) return { pid, release() { /* nothing was recorded */ } };
+  if (!Number.isInteger(pid) || pid <= 0) return { pid, generation: 0, refresh() { /* nothing was recorded */ }, release() { /* nothing was recorded */ } };
   if (spawnedGroups.size >= GROUP_SWEEP_AT) sweepSpawnedGroups();
+  // Any record already under this pid describes a DIFFERENT incarnation. It is
+  // left exactly as it is while anyone still holds it; an unheld one whose
+  // group is provably finished can go now.
+  const previous = currentRecord(pid);
+  if (previous !== undefined && previous.holds <= 0 && groupCollectable(previous)) retireRecord(previous);
   const start = opts.start ?? processProbe.identityOf(pid)?.start;
   const members = new Map<number, string>();
-  if (start !== undefined) members.set(pid, start);
-  const rec: SpawnedGroup = { pid, start, marker: opts.marker, members, lastScanAt: 0, holds: 1 };
-  spawnedGroups.set(pid, rec);
-  refreshGroupMembers(pid, { force: true });
+  if (start !== undefined && start !== UNKNOWN_START) members.set(pid, start);
+  const rec: SpawnedGroup = { pid, generation: nextGeneration++, start, marker: opts.marker, members, lastScanAt: 0, holds: 1 };
+  spawnedGroups.set(rec.generation, rec);
+  currentGeneration.set(pid, rec.generation);
+  refreshRecord(rec, true);
   let released = false;
   return {
     pid,
+    generation: rec.generation,
+    refresh(force = false) { if (spawnedGroups.get(rec.generation) === rec) refreshRecord(rec, force); },
     release() {
       if (released) return;
       released = true;
-      // Only this record's claim is dropped: if the pid was re-registered (or
-      // the record already retired) the entry now belongs to someone else.
-      if (spawnedGroups.get(pid) !== rec) return;
+      // Only THIS record's claim is dropped; a record already retired, or one
+      // belonging to another incarnation of the pid, is none of our business.
+      if (spawnedGroups.get(rec.generation) !== rec) return;
       rec.holds -= 1;
       // Nobody's obligation any more: collect it now if the group is provably
       // finished, otherwise leave it for the sweep — a caller being done does
       // not mean the processes are.
-      if (rec.holds <= 0 && groupCollectable(rec)) spawnedGroups.delete(pid);
+      if (rec.holds <= 0 && groupCollectable(rec)) retireRecord(rec);
     },
   };
 }
 
-/** Forget a registered group — its leader has been reaped and the caller no
- *  longer intends to signal it. */
-export function forgetGroup(pid: number): void { spawnedGroups.delete(pid); }
+/** Forget every registration under `pid` — its leader has been reaped and no
+ *  caller intends to signal it. (A kill retires only the record it is bound
+ *  to; this is the blunt instrument, for teardown and tests.) */
+export function forgetGroup(pid: number): void {
+  for (const rec of [...spawnedGroups.values()]) if (rec.pid === pid) retireRecord(rec);
+}
 
-/** The spawn identity recorded for `pid`, for diagnostics, persistence and
- *  tests. `undefined` when the group was never registered here. */
+/** The spawn identity recorded for `pid` — the NEWEST registration under that
+ *  number — for diagnostics, persistence and tests. `undefined` when the group
+ *  was never registered here. */
 export function spawnedGroupIdentity(pid: number): { start?: string; marker?: string; members: number[] } | undefined {
-  const rec = spawnedGroups.get(pid);
+  const rec = currentRecord(pid);
   return rec ? { start: rec.start, marker: rec.marker, members: [...rec.members.keys()] } : undefined;
 }
 
@@ -337,7 +400,7 @@ export function spawnedGroupIdentity(pid: number): { start?: string; marker?: st
  *   - nothing captured under it is still alive.
  */
 function sweepSpawnedGroups(): void {
-  for (const [pid, rec] of spawnedGroups) if (rec.holds <= 0 && groupCollectable(rec)) spawnedGroups.delete(pid);
+  for (const rec of [...spawnedGroups.values()]) if (rec.holds <= 0 && groupCollectable(rec)) retireRecord(rec);
 }
 
 /** Is there provably nothing left for this record to identify? True only when
@@ -350,6 +413,7 @@ function groupCollectable(rec: SpawnedGroup): boolean {
     || (rec.start !== undefined && rec.start !== UNKNOWN_START && leader.start !== rec.start);
   if (!leaderGone) return false;
   return ![...rec.members].some(([p, start]) => {
+    if (start === UNKNOWN_START) return false;
     const now = processProbe.identityOf(p);
     return now !== null && !now.zombie && now.start === start;
   });
@@ -357,7 +421,10 @@ function groupCollectable(rec: SpawnedGroup): boolean {
 
 /** Add every member of `pgid` that is provably ours to `into`. The bare pgid
  *  is proof only while the leader is verifiably still there; with a marker
- *  each hit proves itself through its own environment.
+ *  each hit proves itself through its own environment. A member whose start
+ *  time could not be read is skipped: it could never be told apart from the
+ *  next process to hold its number, so recording it as identity would only
+ *  license an unproven signal later (#628 F29).
  *
  *  Returns whether the group was actually SEARCHED: false when there was no
  *  admissible way to look (no leader and no marker) and false when the
@@ -368,7 +435,7 @@ function captureMembers(pgid: number, marker: string | undefined, leaderHere: bo
   const rows = processProbe.membersOf(pgid);
   if (rows === null) return false;
   for (const m of rows) {
-    if (m.zombie || into.has(m.pid)) continue;
+    if (m.zombie || m.start === UNKNOWN_START || into.has(m.pid)) continue;
     if (marker === undefined) { if (leaderHere) into.set(m.pid, m.start); continue; }
     const has = processProbe.hasMarker(m.pid, marker);
     if (has === true || (has === null && leaderHere)) into.set(m.pid, m.start);
@@ -376,39 +443,56 @@ function captureMembers(pgid: number, marker: string | undefined, leaderHere: bo
   return true;
 }
 
+/** Widen ONE record's captured membership. The leader counts as "here" only
+ *  when it is positively the incarnation this record was opened for: an
+ *  unreadable start time (`?`) matches nothing, not even another `?`. */
+function refreshRecord(rec: SpawnedGroup, force = false): void {
+  const now = Date.now();
+  if (!force && now - rec.lastScanAt < GROUP_SCAN_INTERVAL_MS) return;
+  rec.lastScanAt = now;
+  const leader = processProbe.identityOf(rec.pid);
+  const leaderHere = leader !== null
+    && (rec.start === undefined || (rec.start !== UNKNOWN_START && leader.start === rec.start));
+  captureMembers(rec.pid, rec.marker, leaderHere, rec.members);
+}
+
 /**
  * Opportunistically widen a registered group's captured membership. Cheap and
  * safe to call from a hot path (it scans at most every 200ms, and only while
  * the group is still identifiable): every call makes a leader that exits early
- * less likely to take its descendants out of reach.
+ * less likely to take its descendants out of reach. A caller holding a lease
+ * should use `registration.refresh()` instead — that cannot be aimed at a
+ * later incarnation of the same pid.
  */
 export function refreshGroupMembers(pid: number, opts: { force?: boolean } = {}): void {
-  const rec = spawnedGroups.get(pid);
-  if (!rec) return;
-  const now = Date.now();
-  if (!opts.force && now - rec.lastScanAt < GROUP_SCAN_INTERVAL_MS) return;
-  rec.lastScanAt = now;
-  const leader = processProbe.identityOf(pid);
-  const leaderHere = leader !== null && (rec.start === undefined || leader.start === rec.start);
-  captureMembers(pid, rec.marker, leaderHere, rec.members);
+  const rec = currentRecord(pid);
+  if (rec !== undefined) refreshRecord(rec, opts.force === true);
 }
 
 /**
  * Is the process now occupying `pid` the one whose spawn identity is
- * `expected` (start time and/or `JOY_PGROUP` marker)? False when the pid is
- * free, or when it has been reused by an unrelated process — the caller must
- * then NOT signal it. With nothing expected and no registration, "the pid
- * exists" is all that can be said, which is the pre-#628 contract.
+ * `expected` (start time and/or `JOY_PGROUP` marker)? Once anything is
+ * CLAIMED about the pid — an expected start time, a marker, a registration —
+ * the answer is yes only when something POSITIVELY says so: the start time
+ * recorded at spawn matches, or the occupant's own environment carries the
+ * marker. Absence of a mismatch is not identification, and a start time
+ * nobody could read (`?`) matches nothing, not even another `?` (#628 F29):
+ * an unidentifiable pid must not be signalled. With nothing expected and no
+ * registration, "the pid exists" is all that can be said, which is the
+ * pre-#628 contract.
  */
 export function isSpawnedGroupLeader(pid: number, expected: { start?: string; marker?: string } = {}): boolean {
   const now = processProbe.identityOf(pid);
   if (!now) return false;
-  const rec = spawnedGroups.get(pid);
+  const rec = currentRecord(pid);
   const start = expected.start ?? rec?.start;
-  if (start !== undefined && start !== UNKNOWN_START && now.start !== start) return false;
   const marker = expected.marker ?? rec?.marker;
-  if (marker !== undefined && processProbe.hasMarker(pid, marker) === false) return false;
-  return true;
+  if (start === undefined && marker === undefined && rec === undefined) return true;
+  const knownStart = start !== undefined && start !== UNKNOWN_START;
+  if (knownStart && now.start !== start) return false;
+  const markerProof = marker !== undefined ? processProbe.hasMarker(pid, marker) : null;
+  if (markerProof === false) return false;
+  return (knownStart && now.start === start) || markerProof === true;
 }
 
 export interface KillProcessGroupOptions {
@@ -427,6 +511,13 @@ export interface KillProcessGroupOptions {
    *  ANOTHER process (a server pid read back from disk after a restart).
    *  In-process callers get this from registerGroup instead. */
   spawnStart?: string;
+  /** The lease registerGroup returned at spawn (#628 F29). With it the kill
+   *  binds to the exact incarnation the caller spawned: a later registration
+   *  of the same pid — a recycled number, another run — can neither lend this
+   *  call its captured members nor lose its own record to this call's
+   *  retirement. Without a lease the newest record under the pid is all there
+   *  is to go on. */
+  group?: GroupRegistration;
 }
 
 /**
@@ -464,15 +555,24 @@ export interface KillProcessGroupOptions {
  *     is still owed — and with a group claimed under the pid (a marker, a
  *     recorded start, a registration) the occupant is signalled only when it
  *     is POSITIVELY identified: no start-time match and no readable marker
- *     means nothing is signalled at all (#628, Wave F21).
+ *     means nothing is signalled at all (#628, Wave F21);
+ *   - the lease also names WHICH incarnation of the pid is being torn down
+ *     (#628, Wave F29). Registrations are per (pid, generation): a call handed
+ *     a lease uses that record and no other, so a group registered later under
+ *     a recycled number can neither lend this call its members — which is how
+ *     an old caller came to SIGTERM a brand-new process — nor lose its own
+ *     record to this call's retirement. And an identity nobody could read is
+ *     not an identity: a recorded `?` start does not match a current `?`, so
+ *     an unidentifiable pid is refused rather than signalled.
  *
  * The verdict is evidence-based: `true` means the group was searched and
- * nothing of it survives. When a group the daemon registered cannot be
- * searched at all — its leader vanished, no marker can be verified here and
- * nothing but the leader was ever captured — this resolves FALSE
- * (termination unconfirmed) rather than claiming a kill that never happened.
- * An unregistered pid carries no such claim (nobody here says a group ever
- * existed under it), so it keeps the older contract and resolves true.
+ * nothing of it survives. When a group claimed under this pid cannot be
+ * searched at all — its leader vanished or the number now belongs to someone
+ * we cannot identify as ours, no marker can be verified here and nothing but
+ * the leader was ever captured — this resolves FALSE (termination
+ * unconfirmed) rather than claiming a kill that never happened. A pid nobody
+ * claims anything about (no marker, no recorded start, no registration) keeps
+ * the older contract and resolves true.
  */
 export async function killProcessGroup(pid: number, opts: KillProcessGroupOptions = {}): Promise<boolean> {
   const graceMs = opts.graceMs ?? 2000;
@@ -481,15 +581,26 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   const tick = 100;
   const rounds = Math.max(1, Math.ceil(graceMs / tick));
 
+  // WHICH registration this call speaks for (#628 F29). A lease binds the kill
+  // to the incarnation its holder spawned: a later registration under the same
+  // number describes a different process, and its captured members must never
+  // authorise a signal here. With no lease, the newest record under the pid is
+  // all there is to go on (a pid read back from disk, a legacy caller).
+  const lease = opts.group !== undefined && opts.group.pid === pid ? opts.group : undefined;
+  let rec = lease !== undefined ? leasedRecord(lease) : currentRecord(pid);
+  // A record captured under a DIFFERENT marker belongs to a different spawn:
+  // its membership says nothing about this one.
+  if (rec !== undefined && opts.marker !== undefined && rec.marker !== undefined && rec.marker !== opts.marker) rec = undefined;
   // Last chance to widen the captured set while the leader may still exist.
-  refreshGroupMembers(pid, { force: true });
-  const rec = spawnedGroups.get(pid);
+  if (rec !== undefined) refreshRecord(rec, true);
   const marker = opts.marker ?? rec?.marker;
   const spawnStart = opts.spawnStart ?? rec?.start;
   /** What was captured while the group was provably ours. */
   const captured = new Map<number, string>(rec?.members ?? []);
-  // The registration is consumed here: this call is the group's retirement.
-  forgetGroup(pid);
+  // The registration is consumed here: this call is the group's retirement —
+  // and only of the record this call is bound to. Another incarnation's
+  // registration, still held by another caller, is left exactly where it is.
+  if (rec !== undefined) retireRecord(rec);
 
   // The leader's own incarnation, fixed at entry: the pid this was called
   // with must still be that process on every later probe — and it must be
@@ -498,7 +609,10 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   // (no kill(-pgid), no single-process kill); only captured members and, with
   // a marker, self-proving ones can still be signalled.
   const occupant = processProbe.identityOf(pid);
-  const reused = occupant !== null && spawnStart !== undefined && spawnStart !== UNKNOWN_START && occupant.start !== spawnStart;
+  /** A start time nobody could read proves nothing — least of all against
+   *  another unreadable one. Unknown never matches unknown (#628 F29). */
+  const knownStart = spawnStart !== undefined && spawnStart !== UNKNOWN_START;
+  const reused = occupant !== null && knownStart && occupant.start !== spawnStart;
   const markerProof = occupant !== null && marker !== undefined ? processProbe.hasMarker(pid, marker) : null;
   const foreign = markerProof === false;
   // Absence of a mismatch is NOT identification (#628 F21). The occupant is
@@ -506,10 +620,11 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   // one recorded at spawn, or its own environment carries our marker. When a
   // group was claimed under this pid — a marker, a recorded start time, a
   // registration — and neither proof is available (the start time was never
-  // read, or /proc is not there to check the marker), the pid is UNIDENTIFIED
-  // and nothing is signalled through it. Falling back to "the pid exists" is
-  // how a scavenged registration turned kill(-pgid) loose on a stranger.
-  const identified = (occupant !== null && spawnStart !== undefined && occupant.start === spawnStart) || markerProof === true;
+  // read or cannot be read at all, or /proc is not there to check the
+  // marker), the pid is UNIDENTIFIED and nothing is signalled through it.
+  // Falling back to "the pid exists" is how a scavenged registration turned
+  // kill(-pgid) loose on a stranger.
+  const identified = (occupant !== null && knownStart && occupant.start === spawnStart) || markerProof === true;
   /** Did anyone claim a group ever existed under this pid? With no marker, no
    *  recorded start and no registration there is nothing to prove and nothing
    *  to disprove: "the pid exists" is all there ever was (pre-#628 contract). */
@@ -519,22 +634,37 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   else if (occupant !== null && claimed && !identified) log(`[kill-group] pid ${pid} cannot be proven to be the process spawned here (no start-time or ${PGROUP_MARKER_ENV} match) — refusing to signal it`);
   const leaderAtEntry = occupant !== null && !reused && !foreign && (identified || !claimed) ? occupant : null;
   const leaderPresent = (): boolean => leaderAtEntry !== null && processProbe.identityOf(pid)?.start === leaderAtEntry.start;
+  /** The number is held by something that is NOT our leader. It therefore
+   *  names a DIFFERENT group now: scanning it is not a search of ours, and
+   *  finding nothing in it is no evidence that our group is gone (#628 F29). */
+  const pgidTaken = occupant !== null && leaderAtEntry === null;
 
-  /** pid → start time of every member proven to be ours. */
+  /** pid -> start time of every member proven to be ours. */
   const owned = new Map<number, string>(captured);
   if (leaderAtEntry) owned.set(pid, leaderAtEntry.start);
   /** Did any scan of the group actually happen? A platform that cannot list
    *  processes returns nothing from every scan, which must not read as "the
    *  group is empty" (#628 F21). */
   let searched = false;
-  const capture = (): void => { if (captureMembers(pid, marker, leaderPresent(), owned)) searched = true; };
+  const capture = (): void => {
+    if (captureMembers(pid, marker, leaderPresent(), owned)) searched = true;
+    // Whatever holds the number now is not ours: a scan of the group it leads
+    // must never enrol the pid itself (#628 F29).
+    if (pgidTaken) owned.delete(pid);
+  };
+  /** Is `p` still the process that was captured? A start time nobody could
+   *  read is not an identity; the only exception is the leader, which had to
+   *  be positively identified at entry before it was owned at all. */
+  const proven = (p: number, start: string): boolean => {
+    const now = processProbe.identityOf(p);
+    if (now === null || now.zombie) return false;
+    if (start !== UNKNOWN_START) return now.start === start;
+    return p === pid && leaderAtEntry !== null && now.start === UNKNOWN_START;
+  };
   const survivors = (): number[] => {
     capture();
     const out: number[] = [];
-    for (const [p, start] of owned) {
-      const now = processProbe.identityOf(p);
-      if (now && !now.zombie && now.start === start) out.push(p);
-    }
+    for (const [p, start] of owned) if (proven(p, start)) out.push(p);
     return out;
   };
   const signal = (sig: NodeJS.Signals): void => {
@@ -552,11 +682,12 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
     // A marker only makes the group findable if the group could be ENUMERATED
     // (and the marker itself read): with `membersOf` returning null on every
     // scan there was nowhere to look, and a marked record whose leader has
-    // vanished is then unconfirmed rather than gone (#628 F21).
+    // vanished is then unconfirmed rather than gone (#628 F21). Nor is a scan
+    // of a pgid that now belongs to someone ELSE a search of ours (#628 F29).
     const markerCheckable = marker !== undefined && searched && processProbe.hasMarker(pid, marker) !== null;
-    const searchable = leaderAtEntry !== null || markerCheckable || captured.size > 1;
-    if (!searchable && rec) {
-      log(`[kill-group] group ${pid}: its leader was already gone and the group could not be searched (nothing captured${marker !== undefined && !searched ? ", no process listing available" : ""}) — termination unconfirmed`);
+    const searchable = leaderAtEntry !== null || (markerCheckable && !pgidTaken) || captured.size > 1;
+    if (!searchable && claimed) {
+      log(`[kill-group] group ${pid}: ${pgidTaken ? "its pid now holds a process we cannot identify as ours" : "its leader was already gone"} and the group could not be searched (nothing captured${marker !== undefined && !searched ? ", no process listing available" : ""}) — termination unconfirmed`);
       return false;
     }
     return true;
@@ -580,7 +711,8 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
  * of anything (#628). A pid qualifies when its own environment carries the
  * spawn's `JOY_PGROUP` marker, or when it matches a (pid, start time) pair
  * captured while the group was provably ours — the registration made at spawn,
- * or a `members` list persisted from an earlier daemon run.
+ * or a `members` list persisted from an earlier daemon run. A pair whose start
+ * time was never readable proves nothing and is skipped (#628 F29).
  *
  * `searched` reports whether the platform could enumerate at all: an empty
  * list with `searched: false` means "nowhere to look", not "nothing there".
@@ -589,11 +721,12 @@ export function ownedGroupMembers(
   pgid: number,
   opts: { marker?: string; members?: Iterable<readonly [number, string]> } = {},
 ): { searched: boolean; pids: number[] } {
-  const rec = spawnedGroups.get(pgid);
+  const rec = currentRecord(pgid);
   const marker = opts.marker ?? rec?.marker;
   const captured = new Map<number, string>(opts.members ?? rec?.members ?? []);
   const pids = new Set<number>();
   for (const [p, start] of captured) {
+    if (start === UNKNOWN_START) continue;
     const now = processProbe.identityOf(p);
     if (now !== null && !now.zombie && now.start === start) pids.add(p);
   }

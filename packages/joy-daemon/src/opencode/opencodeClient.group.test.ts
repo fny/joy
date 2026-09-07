@@ -153,3 +153,57 @@ describe("recorded-server recovery verifies the pid before signalling it (#628)"
     expect(killGroup).not.toHaveBeenCalled();
   }, 20_000);
 });
+
+// #628 (Wave F29) — recovery must PROVE the recorded server's group is gone
+// before it lets a replacement start. Two ways it could not: a launcher pid
+// that had been recycled skipped the descendant search altogether, and a
+// search that could not run at all ("no process listing on this platform")
+// was reported as "nothing there".
+describe("recovery proves absence before allowing a replacement (#628 F29)", () => {
+  const original = { ...processProbe };
+  afterEach(() => { Object.assign(processProbe, original); });
+
+  it("searches a REUSED launcher pid for the descendants it left, and reaps them", async () => {
+    const launcher = 993001;
+    const child = 993002;
+    let childLive = true;
+    // The launcher's number now belongs to a stranger (different start time,
+    // and it does not carry our marker); the server it spawned is still there
+    // and still proves itself through its own JOY_PGROUP.
+    processProbe.identityOf = (p) => {
+      if (p === launcher) return { start: "a-strangers-incarnation", zombie: false };
+      if (p === child) return childLive ? { start: "child-start", zombie: false } : null;
+      return original.identityOf(p);
+    };
+    processProbe.membersOf = (g) => (g === launcher ? (childLive ? [{ pid: child, start: "child-start", zombie: false }] : []) : original.membersOf(g));
+    processProbe.hasMarker = (p, m) => (m === "tok-f29-reused" ? p === child && childLive : original.hasMarker(p, m));
+    const signals: Array<[number, string | number | undefined]> = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((p: number, s: NodeJS.Signals) => {
+      signals.push([p, s]);
+      if (p === child || p === -child) childLive = false;
+      return true;
+    }) as typeof process.kill);
+    try {
+      await expect(reapRecordedOpencodeServer(launcher, { start: "our-launcher-incarnation", marker: "tok-f29-reused" })).resolves.toBe("gone");
+      expect(signals).toEqual([[child, "SIGTERM"]]); // the marked child, and only it
+      expect(signals.some(([p]) => p === launcher || p === -launcher)).toBe(false); // the stranger is untouched
+    } finally { kill.mockRestore(); }
+  }, 20_000);
+
+  it("reports 'unknown' — never 'unowned' — when the group could not be listed at all", async () => {
+    const launcher = 993003;
+    // The recorded launcher is gone and this platform lists no processes: what
+    // it left behind can be neither found nor ruled out.
+    processProbe.identityOf = (p) => (p === launcher ? null : original.identityOf(p));
+    processProbe.membersOf = (g) => (g === launcher ? null : original.membersOf(g));
+    processProbe.hasMarker = (p, m) => (m === "tok-f29-dead" ? null : original.hasMarker(p, m));
+    const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    try {
+      // "unowned" here is what let a SECOND server open the same conversation
+      // on top of descendants nobody had proven were gone (#71).
+      await expect(reapRecordedOpencodeServer(launcher, { start: "recorded", marker: "tok-f29-dead" })).resolves.toBe("unknown");
+      expect(killGroup).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled();
+    } finally { kill.mockRestore(); }
+  }, 20_000);
+});
