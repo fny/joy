@@ -1365,14 +1365,20 @@ test("trustPromptKeys: null until the options paint (never guesses)", () => {
   expect(trustPromptKeys("")).toBeNull();
 });
 
-test("thinkingLeaseMs: real prompts hold the full lease, slash commands a short one", () => {
+test("thinkingLeaseMs: real prompts hold the full lease, generating commands a short one, no-ops none", () => {
   expect(thinkingLeaseMs("write me a function")).toBe(THINKING_LEASE_MS);
   expect(thinkingLeaseMs("  think hard about /effort")).toBe(THINKING_LEASE_MS); // a / mid-prompt is not a command
-  expect(thinkingLeaseMs("/effort high")).toBe(SLASH_THINKING_LEASE_MS);
-  expect(thinkingLeaseMs("/model opus")).toBe(SLASH_THINKING_LEASE_MS);
-  expect(thinkingLeaseMs("  /status")).toBe(SLASH_THINKING_LEASE_MS);
-  // /compact and custom commands generate: they keep the short lease, never zero.
-  expect(thinkingLeaseMs("/compact")).toBeGreaterThan(0);
+  // Commands that provably never generate get NO lease (#636): the 8s window
+  // exists to cover a generating command's pre-spinner second, which these do
+  // not have, so it is pure "busy" latency. /clear is the one people notice.
+  expect(thinkingLeaseMs("/clear")).toBe(0);
+  expect(thinkingLeaseMs("  /status")).toBe(0);
+  expect(thinkingLeaseMs("/effort high")).toBe(0);   // argument does not change the command
+  expect(thinkingLeaseMs("/MODEL opus")).toBe(0);    // case-insensitive
+  // /compact, /init and custom commands DO generate: they keep the short lease.
+  expect(thinkingLeaseMs("/compact")).toBe(SLASH_THINKING_LEASE_MS);
+  expect(thinkingLeaseMs("/init")).toBe(SLASH_THINKING_LEASE_MS);
+  expect(thinkingLeaseMs("/some-custom-command")).toBe(SLASH_THINKING_LEASE_MS);
   expect(thinkingLeaseMs(null)).toBe(THINKING_LEASE_MS);
   expect(thinkingLeaseMs(undefined)).toBe(THINKING_LEASE_MS);
 });

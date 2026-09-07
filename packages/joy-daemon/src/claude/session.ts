@@ -193,6 +193,15 @@ export const THINKING_LEASE_MS = 170_000;
  *  review, 2026-09-04). Long enough to cover that second, short enough
  *  that a no-op command is over before anyone notices. */
 export const SLASH_THINKING_LEASE_MS = 8_000;
+/** The built-ins that provably never generate: they print, open a picker, or
+ *  reset state and return. The 8s slash lease exists to cover the pre-spinner
+ *  second of a command that DOES generate (/compact, /init, custom commands) —
+ *  these have no such second to cover, so any lease at all is pure latency.
+ *  /clear is the one people notice: it is the command you run precisely when
+ *  you want to start typing again, and it sat "busy" for the full 8s (#636). */
+const NON_GENERATING_COMMANDS = new Set([
+  "/clear", "/status", "/context", "/effort", "/model", "/cost", "/help", "/config", "/doctor",
+]);
 /** SessionEnd → teardown grace: the hook runs INSIDE the exiting claude, so
  *  its pid is still alive at hook time. Confirm death after this many ms;
  *  a pid still alive then is a claude that did not exit (a /clear-class
@@ -235,7 +244,12 @@ export const TURN_WINDOW_SLACK_MS = 1_500;
  *  later turns is not going to be. */
 const PENDING_TURN_REFS_MAX = 32;
 export function thinkingLeaseMs(prompt: string | null | undefined): number {
-  return (prompt ?? "").trimStart().startsWith("/") ? SLASH_THINKING_LEASE_MS : THINKING_LEASE_MS;
+  const text = (prompt ?? "").trimStart();
+  if (!text.startsWith("/")) return THINKING_LEASE_MS;
+  // The command token only — `/model opus` is still /model.
+  const cmd = text.split(/\s+/)[0].toLowerCase();
+  if (NON_GENERATING_COMMANDS.has(cmd)) return 0;
+  return SLASH_THINKING_LEASE_MS;
 }
 
 /** Bytes of tool output forwarded to the app per call. The relay accepts 256KB
