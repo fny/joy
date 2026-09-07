@@ -9,13 +9,13 @@
 // command stays running, the relay adopts the turn under the new lease
 // (cancellation preserved), at most one /start is posted, and exactly one
 // terminal is published when the runtime ends.
-import { test, expect, beforeEach, afterEach } from "vitest";
+import { test, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { startRelay } from "../../../joy-relay/test/harness.mjs";
-import { ledgerFor, closeAllLedgers } from "../domain/ledger";
+import { ledgerFor, closeAllLedgers, LedgerWriteError, type NewOutbound } from "../domain/ledger";
 import { coordinatorFor, resetCoordinators } from "../domain/coordinator";
 import { FakeDriver, settle } from "../domain/coordinator.fakeDriver";
 import { startNucleusLane, type NucleusLaneHandle } from "./nucleusLane";
@@ -37,7 +37,10 @@ type Prior =
   | "parked_then_terminal"       // before /start; parked adoption_pending, then the relay answers the retry with a terminal it holds (the turn was closed `completed` elsewhere) while the runtime keeps running
   | "parked_then_cancelling"     // before /start; parked adoption_pending, then the app requests a cancel — the retry adopts `cancelling`
   | "terminal_before_outbox"     // /start applied; the command COMPLETED in the ledger, the process died before its terminal row was committed
-  | "terminal_record_only";      // as above, and the session exists only as a window record now — no live handle (the window died with the daemon)
+  | "terminal_record_only"       // as above, and the session exists only as a window record now — no live handle (the window died with the daemon)
+  | "terminal_record_read_failure"  // record-only + a saved terminal, and the ledger's COMMAND SCAN throws (SQLITE_IOERR) until the test heals it
+  | "terminal_record_write_failure" // record-only + a saved terminal, and the terminal's outbox WRITE is refused (held in memory) until the test heals it
+  | "sweep_then_cancelled";      // before /start; the loop parks adoption_pending for good, and the ORPHAN SWEEP's own reconcile is answered terminal/cancelled (the turn closed between the sweep's GET and its reconcile)
 
 let dir = "";
 let prevHome: string | undefined;
@@ -56,6 +59,7 @@ beforeEach(() => {
 afterEach(async () => {
   await lane?.stop(); lane = null;
   restoreFetch?.(); restoreFetch = null;
+  vi.restoreAllMocks();
   await retire?.(); retire = null;
   resetCoordinators();
   closeAllLedgers();
@@ -72,17 +76,37 @@ afterEach(async () => {
 function interceptFetch(
   unavailable: (n: number) => boolean = () => false,
   closeRemotely: (n: number) => boolean = () => false,
-): { starts: () => number; adoptions: () => number; reconcileRunning: () => number; terminalAnswers: () => number } {
+  closeOnSweep = false,
+): { starts: () => number; adoptions: () => number; reconcileRunning: () => number; terminalAnswers: () => number; sweepClosed: () => boolean } {
   const real = globalThis.fetch;
-  let starts = 0, adoptions = 0, reconciles = 0, terminalAnswers = 0;
+  let starts = 0, adoptions = 0, reconciles = 0, terminalAnswers = 0, sweepClosed = false;
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? "GET";
     if (method === "POST" && /\/daemon\/turns\/[^/]+\/start$/.test(url)) starts++;
+    const body = JSON.parse(String(init?.body ?? "{}")) as { resolution?: string; meta?: { reason?: string } };
     const isReconcileRunning = method === "POST" && /\/daemon\/turns\/[^/]+\/reconcile$/.test(url)
-      && (JSON.parse(String(init?.body ?? "{}")) as { resolution?: string }).resolution === "running";
+      && body.resolution === "running";
     if (isReconcileRunning) {
       reconciles++;
+      if (closeOnSweep) {
+        if (body.meta?.reason === "orphan_sweep") {
+          // The ORPHAN SWEEP asks. Between the sweep's GET (which read the
+          // turn `orphaned`) and this reconcile, the turn is closed
+          // `cancelled` on the relay — so the sweep's OWN answer is
+          // terminal/cancelled. Only the sweep ever gets an answer here.
+          if (!sweepClosed) {
+            const closed = await real(input, { ...init, body: JSON.stringify({ resolution: "terminal", terminalState: "cancelled", meta: { reason: "closed_while_orphaned" } }) });
+            if (!closed.ok) throw new Error(`the racing close failed: ${closed.status}`);
+            sweepClosed = true;
+          }
+        } else {
+          // The LOOP's own adoption (daemon_restart / adoption_retry) never
+          // reaches the relay: the turn stays parked `adoption_pending`
+          // there, so only the sweep's carried answer can resolve it.
+          return new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503, headers: { "content-type": "application/json" } });
+        }
+      }
       if (unavailable(reconciles)) return new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503, headers: { "content-type": "application/json" } });
       if (closeRemotely(reconciles)) {
         // The turn is closed on the relay under the lane's own lease the
@@ -99,7 +123,7 @@ function interceptFetch(
     return res;
   }) as typeof fetch;
   restoreFetch = () => { globalThis.fetch = real; };
-  return { starts: () => starts, adoptions: () => adoptions, reconcileRunning: () => reconciles, terminalAnswers: () => terminalAnswers };
+  return { starts: () => starts, adoptions: () => adoptions, reconcileRunning: () => reconciles, terminalAnswers: () => terminalAnswers, sweepClosed: () => sweepClosed };
 }
 
 async function scenario(prior: Prior) {
@@ -123,7 +147,7 @@ async function scenario(prior: Prior) {
   expect((await d1.received(offer.deliveryId)).status).toBe(200);
   expect((await d1.submitted(offer.turnId)).status).toBe(200);
   const turnId = offer.turnId as string;
-  const beforeStart: readonly Prior[] = ["dispatching", "closed_remotely", "adoption_unavailable_twice", "adoption_unavailable", "parked_then_terminal", "parked_then_cancelling"];
+  const beforeStart: readonly Prior[] = ["dispatching", "closed_remotely", "adoption_unavailable_twice", "adoption_unavailable", "parked_then_terminal", "parked_then_cancelling", "sweep_then_cancelled"];
   const parked = prior === "parked_then_terminal" || prior === "parked_then_cancelling";
   if (!beforeStart.includes(prior)) {
     expect((await d1.start(turnId, { runtimeEventId: `start:${turnId}` })).status).toBe(200);
@@ -138,7 +162,8 @@ async function scenario(prior: Prior) {
   await settle();
   first.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "RuntimeTurn" });
   expect(c.state(row.id)).toBe("running");
-  const savedTerminal = prior === "terminal_before_outbox" || prior === "terminal_record_only";
+  const recordFailure = prior === "terminal_record_read_failure" || prior === "terminal_record_write_failure";
+  const savedTerminal = prior === "terminal_before_outbox" || prior === "terminal_record_only" || recordFailure;
   if (savedTerminal) {
     // The runtime finished and the ledger committed `completed`; the process
     // died before the lane committed the terminal outbox row.
@@ -158,6 +183,12 @@ async function scenario(prior: Prior) {
   await r.db.query("UPDATE daemon_leases SET expires_at = now() - interval '1 second' WHERE id = $1", [d1.leaseId]);
   await r.core.sweepExpiredLeases();
   expect((await r.call("GET", `/joy/v2/sessions/${sid}`)).json.execution.state).toBe("orphaned");
+  if (prior === "sweep_then_cancelled") {
+    // A queued successor is what makes the ordinary every-tick sweep inspect
+    // this orphan at all: from the session list it looks wedged — work
+    // queued, nothing executing.
+    expect((await r.post(sid, { clientIntentId: randomUUID(), ciphertext: JSON.stringify({ v: 1, t: "plain", text: "successor" }) })).status).toBe(202);
+  }
   if (prior === "closed_remotely") {
     // An intermediate daemon generation (an old build's orphan pass) closed
     // the turn `interrupted` on the relay; the runtime never noticed.
@@ -181,23 +212,43 @@ async function scenario(prior: Prior) {
   const s: any = { id, status: "active", cwd: dir, agentFlavor: "codex", busy: () => c.busy(id), abort: () => c.abortRunning(id), toJSON: () => ({ id, cwd: dir, status: "active", agent: "codex" }) };
   // Record-only: the registry has NO handle for the session — its window
   // record (and the relay's row) is all that names it.
-  const recordOnly = prior === "terminal_record_only";
+  const recordOnly = prior === "terminal_record_only" || recordFailure;
   const registry: any = { get: (x: string) => (x === id && !recordOnly ? s : undefined), list: () => (recordOnly ? [] : [s]), create: async () => s, chatHistory: () => [], listRecords: () => [{ id, v2SessionId: sid, launchCwd: dir }], saveRecord: () => {} };
   retire = async () => { c.retire(id, "restart"); await settle(); };
   const logs: string[] = [];
+  // Injected STORAGE failures, healed by the test when it has observed that
+  // no archive happened (Astra, F28): the command scan throws, or the
+  // terminal's outbox write is refused and the row is held in memory.
+  const faults = { readFails: prior === "terminal_record_read_failure", writeFails: prior === "terminal_record_write_failure" };
+  if (prior === "terminal_record_read_failure") {
+    const realList = ledger.listCommands.bind(ledger);
+    vi.spyOn(ledger, "listCommands").mockImplementation((sessionId: string) => {
+      if (faults.readFails && sessionId === id) throw new Error("SQLITE_IOERR: injected command read failure");
+      return realList(sessionId);
+    });
+  }
+  if (prior === "terminal_record_write_failure") {
+    const realEnqueue = ledger.enqueueOutbound.bind(ledger);
+    vi.spyOn(ledger, "enqueueOutbound").mockImplementation((rows: NewOutbound[]) => {
+      if (faults.writeFails && rows.some((x) => x.kind === "terminal" && x.runtimeEventId === `term:${turnId}`)) {
+        throw new LedgerWriteError("tx", new Error("SQLITE_IOERR: injected outbox write failure"));
+      }
+      return realEnqueue(rows);
+    });
+  }
   // Parked priors: the bounded backoff (1 + 2 retries) is refused, the turn
   // parks `adoption_pending`; the slow retry then gets a real answer.
   const unavailable = prior === "adoption_unavailable" ? () => true : prior === "adoption_unavailable_twice" ? (n: number) => n <= 2 : parked ? (n: number) => n <= 3 : undefined;
   const closeRemotely = prior === "parked_then_terminal" ? (n: number) => n === 4 : undefined;
-  const { starts, adoptions, reconcileRunning, terminalAnswers } = interceptFetch(unavailable, closeRemotely);
+  const { starts, adoptions, reconcileRunning, terminalAnswers, sweepClosed } = interceptFetch(unavailable, closeRemotely, prior === "sweep_then_cancelled");
   const execution = async () => (await r.call("GET", `/joy/v2/sessions/${sid}`)).json.execution as { state: string; turnId: string | null; cancelRequested: boolean };
   const events = async (kind: string) => (await r.db.query("SELECT count(*)::int AS n FROM session_events WHERE session_id = $1 AND kind = $2", [sid, kind])).rows[0].n as number;
   const turnRow = async () => (await r.db.query("SELECT state, terminal_state, lease_epoch FROM turns WHERE id = $1", [turnId])).rows[0] as { state: string; terminal_state: string | null; lease_epoch: string | number };
   // The in-loop adoption backoff is shortened (a test seam); production waits 1s, 2s, 4s, 8s.
   // The slow (parked) retry cadence is shortened too: production asks every 30s.
   // The owed-archive backoff is shortened for the record-only case: production waits 2s…60s.
-  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400], ...(parked ? { adoptionPendingRetryMs: 300 } : {}), ...(recordOnly ? { archiveRetryMs: { min: 200, max: 400 } } : {}) });
-  return { id, sid, turnId, row, ledger, next, logs, starts, adoptions, reconcileRunning, terminalAnswers, execution, events, turnRow, lane: () => lane!, coordinator: () => c, r };
+  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400], ...(parked ? { adoptionPendingRetryMs: 300 } : {}), ...(prior === "sweep_then_cancelled" ? { adoptionPendingRetryMs: 1_000 } : {}), ...(recordOnly ? { archiveRetryMs: { min: 200, max: 400 } } : {}) });
+  return { id, sid, turnId, row, ledger, next, logs, faults, starts, adoptions, reconcileRunning, terminalAnswers, sweepClosed, execution, events, turnRow, lane: () => lane!, coordinator: () => c, r };
 }
 
 test.each(["dispatching", "running", "acknowledged"] as const)(
@@ -448,3 +499,92 @@ test("real relay + SQLite: the command COMPLETED in the ledger, the session exis
   expect(t.coordinator().state(t.row.id)).toBe("completed");
   expect(t.lane().relayTurns()).toEqual([]);
 }, 30_000);
+
+test("real relay: the ORPHAN SWEEP's own reconcile is answered terminal/cancelled (the turn closed between its GET and its reconcile) while the loop's adoption is parked — the sweep CARRIES that answer to the loop, which cancels the local command instead of waiting behind a closed turn (F28)", async () => {
+  const t = await scenario("sweep_then_cancelled");
+  // The loop's own adoption never reaches the relay: the turn parks.
+  await until(() => t.lane().relayTurns().some((x) => x.state === "adoption_pending"), 15_000);
+  expect(t.coordinator().state(t.row.id)).toBe("running");
+  expect(t.next.interrupts).toHaveLength(0);
+  // The every-tick sweep reads the orphan and asks; the turn is closed
+  // `cancelled` just before its reconcile lands, so the SWEEP holds the
+  // relay's only answer about this turn.
+  await until(() => t.sweepClosed(), 25_000);
+  await until(() => t.logs.some((l) => /was orphaned but .* still runs it here → adopted \(terminal\)/.test(l)), 10_000);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "cancelled" });
+  // Before the fix the sweep cleared the marker and DROPPED the answer: the
+  // loop took the fresh terminal wait, swallowed its own /start 409
+  // turn_cancelled, and waited out a live command with cancelRequestedAt
+  // null and zero interrupts. Now the answer arrives through honourAdoption.
+  await until(() => t.logs.some((l) => /the relay closed this turn cancelled \(orphan sweep\) → cancelled locally/.test(l)), 20_000);
+  await until(() => t.next.interrupts.length > 0, 10_000);
+  expect(t.ledger.getCommand(t.row.id)?.cancelRequestedAt).not.toBeNull();
+  expect(t.coordinator().state(t.row.id)).not.toBe("running");
+  // No /start was ever posted for a turn the relay had closed.
+  expect(t.starts()).toBe(0);
+  expect(t.logs.some((l) => /\/start after the adoption refused/.test(l))).toBe(false);
+  // The runtime confirms the interrupt: the relay's `cancelled` stands, once.
+  t.next.emit({ kind: "turn_ended", runtimeTurnId: "RuntimeTurn", status: "cancelled" });
+  await until(() => t.coordinator().state(t.row.id) === "cancelled");
+  await until(() => !t.lane().relayTurns().some((x) => x.turnId === t.turnId), 10_000);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "cancelled" });
+}, 60_000);
+
+test("real relay + SQLite: the ledger's COMMAND SCAN throws while a saved `completed` is still owed — a readable-but-empty outbox after a FAILED scan is not a clean slate: nothing is archived, and once the ledger reads again the derived terminal lands BEFORE the archive (F28)", async () => {
+  const t = await scenario("terminal_record_read_failure");
+  // The scan failure is reported, and the archive waits on an UNKNOWN.
+  await until(() => t.logs.some((l) => /the ledger's commands cannot be read/.test(l)), 15_000);
+  await until(() => t.logs.some((l) => /archive .* deferred — local c9session's ledger cannot be read/.test(l)), 15_000);
+  await sleep(1_200); // several archive-retry periods
+  expect(t.logs.some((l) => /archived orphan/.test(l))).toBe(false);
+  expect(t.logs.some((l) => /archived replacement row/.test(l))).toBe(false);
+  expect(t.ledger.hasOutboundEvent(`term:${t.turnId}`)).toBe(false);
+  expect((await t.turnRow()).state).not.toBe("terminal");
+  const sessionRow = async () => (await t.r.db.query("SELECT state FROM native_sessions WHERE id = $1", [t.sid])).rows[0] as { state: string };
+  expect((await sessionRow()).state).not.toBe("archived");
+  // Storage recovers: derivation retries, the saved outcome lands first…
+  t.faults.readFails = false;
+  await until(() => t.logs.some((l) => /completed in the ledger with no terminal row/.test(l)), 15_000);
+  await until(() => t.ledger.hasOutboundEvent(`term:${t.turnId}`), 10_000);
+  await until(async () => (await t.turnRow()).state === "terminal", 15_000);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  // …and only THEN the archive.
+  await until(() => t.logs.some((l) => /archived replacement row .* for ended session c9session/.test(l)), 15_000);
+  expect((await sessionRow()).state).toBe("archived");
+  const order = await t.r.db.query("SELECT (s.updated_at >= tu.terminal_at) AS after_terminal FROM native_sessions s, turns tu WHERE s.id = $1 AND tu.id = $2", [t.sid, t.turnId]);
+  expect(order.rows[0]).toMatchObject({ after_terminal: true });
+  await sleep(400);
+  expect(await t.events("turn.terminal")).toBe(1);
+  expect(t.logs.filter((l) => /archived replacement row/.test(l))).toHaveLength(1);
+  expect(t.logs.some((l) => /was orphaned → interrupted/.test(l))).toBe(false);
+}, 60_000);
+
+test("real relay + SQLite: the derived terminal's outbox WRITE is refused and the row is held in memory — the held intent counts as owed: no archive while it is held, and once the ledger accepts writes the terminal is committed and lands BEFORE the archive (F28)", async () => {
+  const t = await scenario("terminal_record_write_failure");
+  // The row is derived, refused, and held — the ledger has no terminal row.
+  await until(() => t.logs.some((l) => /completed in the ledger with no terminal row/.test(l)), 15_000);
+  await until(() => t.logs.some((l) => /outbox commit failed/.test(l)), 15_000);
+  expect(t.ledger.hasOutboundEvent(`term:${t.turnId}`)).toBe(false);
+  await until(() => t.logs.some((l) => /archive .* deferred — local c9session still owes a saved terminal/.test(l)), 15_000);
+  await sleep(1_200); // several archive-retry periods
+  expect(t.logs.some((l) => /archived orphan/.test(l))).toBe(false);
+  expect(t.logs.some((l) => /archived replacement row/.test(l))).toBe(false);
+  expect((await t.turnRow()).state).not.toBe("terminal");
+  const sessionRow = async () => (await t.r.db.query("SELECT state FROM native_sessions WHERE id = $1", [t.sid])).rows[0] as { state: string };
+  expect((await sessionRow()).state).not.toBe("archived");
+  // Storage recovers: the held row is re-committed by the derivation the
+  // archive retry drives — no waiting for the slow sweep.
+  t.faults.writeFails = false;
+  await until(() => t.logs.some((l) => /outbox persistence restored/.test(l)), 15_000);
+  expect(t.ledger.hasOutboundEvent(`term:${t.turnId}`)).toBe(true);
+  await until(async () => (await t.turnRow()).state === "terminal", 15_000);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  await until(() => t.logs.some((l) => /archived replacement row .* for ended session c9session/.test(l)), 15_000);
+  expect((await sessionRow()).state).toBe("archived");
+  const order = await t.r.db.query("SELECT (s.updated_at >= tu.terminal_at) AS after_terminal FROM native_sessions s, turns tu WHERE s.id = $1 AND tu.id = $2", [t.sid, t.turnId]);
+  expect(order.rows[0]).toMatchObject({ after_terminal: true });
+  await sleep(400);
+  expect(await t.events("turn.terminal")).toBe(1);
+  expect(t.logs.filter((l) => /archived replacement row/.test(l))).toHaveLength(1);
+  expect(t.logs.some((l) => /was orphaned → interrupted/.test(l))).toBe(false);
+}, 60_000);
