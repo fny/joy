@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import v8 from "node:v8";
 import vm from "node:vm";
-import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, BoundedTail, PGROUP_MARKER_ENV, registerGroup, refreshGroupMembers, forgetGroup, spawnedGroupIdentity } from "./bounded";
+import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, BoundedTail, PGROUP_MARKER_ENV, registerGroup, refreshGroupMembers, forgetGroup, spawnedGroupIdentity, type GroupRegistration } from "./bounded";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitExit = async (p: ChildProcess) => { for (let i = 0; i < 100 && p.exitCode === null && p.signalCode === null; i++) await sleep(20); };
@@ -258,6 +258,62 @@ describe("killProcessGroup", () => {
     expect(spawnedGroupIdentity(p.pid!)).toMatchObject({ marker: "tok-registry" });
     await killProcessGroup(p.pid!, { graceMs: 100, log: () => {} });
     expect(spawnedGroupIdentity(p.pid!)).toBeUndefined();
+  });
+
+  test("a registration a caller still holds survives the registry sweep, so a reused pid is still refused (#628 F21)", async () => {
+    // The registry's sweep is a memory bound, not an expiry. It used to
+    // scavenge a group whose captured members no longer matched — and the pid
+    // of an outstanding tool run is exactly that: its leader (a shell that
+    // backgrounded the work) has exited. With the start-time fence gone, the
+    // kill fell back to "the pid exists" and signalled whatever now held the
+    // number. Nothing real is touched here: the probes describe the pids.
+    const pid = 991339;
+    const others: GroupRegistration[] = [];
+    let stage = "spawn-incarnation";
+    // No /proc on this platform: the marker cannot be inspected, so the start
+    // time recorded at spawn is the ONLY fence there is.
+    processProbe.identityOf = (p) => (p === pid ? { start: stage, zombie: false } : null);
+    processProbe.membersOf = () => [];
+    processProbe.hasMarker = () => null;
+    const held = registerGroup(pid, { marker: "owned-marker" });
+    stage = "new-unrelated-incarnation"; // the leader exited; a stranger got the pid
+    const signals: Array<[number, string | number | undefined]> = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((p: number, s: NodeJS.Signals) => { signals.push([p, s]); return true; }) as typeof process.kill);
+    const logs: string[] = [];
+    try {
+      // Other spawns, more than enough to trigger the sweep several times over,
+      // while this caller still owns a teardown obligation on `pid`.
+      for (let i = 0; i < 200; i++) others.push(registerGroup(992000 + i));
+      expect(spawnedGroupIdentity(pid)).toMatchObject({ start: "spawn-incarnation", marker: "owned-marker" });
+      await expect(killProcessGroup(pid, { marker: "owned-marker", graceMs: 0, log: (l) => logs.push(l) })).resolves.toBe(false);
+      expect(signals).toEqual([]); // no kill(-pgid), no single-process kill
+      expect(logs.some((l) => l.includes("not the process spawned here"))).toBe(true);
+      // …and the bound still works: released records of finished groups go.
+      for (const o of others) o.release();
+      expect(spawnedGroupIdentity(992000)).toBeUndefined();
+    } finally { held.release(); for (const o of others) forgetGroup(o.pid); kill.mockRestore(); }
+  });
+
+  test("a marked group that could not be enumerated at all is unconfirmed, not 'gone' (#628 F21)", async () => {
+    // A marker is only evidence if the group can be SEARCHED. Here every scan
+    // comes back null (no process listing on this platform), so "nothing of it
+    // was found" is the absence of a search, not the absence of the group.
+    const pid = 991338;
+    let present = true;
+    let scans = 0;
+    processProbe.identityOf = (p) => (p === pid && present ? { start: "owned", zombie: false } : null);
+    processProbe.membersOf = () => { scans++; return null; };
+    processProbe.hasMarker = () => present;
+    const held = registerGroup(pid, { marker: "recorded-marker" });
+    present = false; // the leader is gone by the time the kill runs
+    const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    const logs: string[] = [];
+    try {
+      await expect(killProcessGroup(pid, { graceMs: 0, log: (l) => logs.push(l) })).resolves.toBe(false);
+      expect(scans).toBeGreaterThan(0);
+      expect(kill).not.toHaveBeenCalled();
+      expect(logs.filter((l) => l.includes("termination unconfirmed"))).toHaveLength(1);
+    } finally { held.release(); forgetGroup(pid); kill.mockRestore(); }
   });
 
   test("an already-dead pid resolves true without escalation", async () => {

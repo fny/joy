@@ -246,6 +246,11 @@ interface SpawnedGroup {
    *  provably ours. The leader is the first entry. */
   members: Map<number, string>;
   lastScanAt: number;
+  /** How many callers still hold this registration (#628 F21). A spawn site
+   *  takes one at registerGroup and drops it when its run settles; while it
+   *  is held the record is the caller's only proof of WHICH process it
+   *  spawned, so the sweep must not collect it. */
+  holds: number;
 }
 
 /** Groups this daemon created, by leader pid. Entries are dropped when the
@@ -256,20 +261,56 @@ const GROUP_SWEEP_AT = 64;
 /** Minimum gap between opportunistic /proc scans for one group. */
 const GROUP_SCAN_INTERVAL_MS = 200;
 
+/** A caller's claim on a registration. Held from the spawn until the run
+ *  settles: the sweep below never collects a held record, so a group's
+ *  identity cannot be scavenged out from under the caller that is still
+ *  responsible for killing it (#628 F21). Releasing the last claim retires
+ *  the record. */
+export interface GroupRegistration {
+  readonly pid: number;
+  /** Give up this caller's claim. Idempotent, and a no-op once the record has
+   *  already been retired (by killProcessGroup or forgetGroup). */
+  release(): void;
+}
+
 /**
  * Record a process group at the moment it is spawned: the leader's start time
  * (so a later kill can tell the group apart from whatever inherits its pid)
  * and the marker its children inherit. Call it right after a detached spawn,
  * with the same token that was put in the child's `JOY_PGROUP`.
+ *
+ * The returned registration is a LEASE (#628 F21): hold it for as long as the
+ * caller may still have to signal that group, and release it when the run
+ * settles. A registration the sweep can evict while a caller still intends to
+ * kill through it is worse than no registration at all — the kill then has no
+ * start-time fence and the pid's current occupant, which may be an unrelated
+ * process that inherited the number, looks like the leader.
  */
-export function registerGroup(pid: number, opts: { marker?: string; start?: string } = {}): void {
-  if (!Number.isInteger(pid) || pid <= 0) return;
+export function registerGroup(pid: number, opts: { marker?: string; start?: string } = {}): GroupRegistration {
+  if (!Number.isInteger(pid) || pid <= 0) return { pid, release() { /* nothing was recorded */ } };
   if (spawnedGroups.size >= GROUP_SWEEP_AT) sweepSpawnedGroups();
   const start = opts.start ?? processProbe.identityOf(pid)?.start;
   const members = new Map<number, string>();
   if (start !== undefined) members.set(pid, start);
-  spawnedGroups.set(pid, { pid, start, marker: opts.marker, members, lastScanAt: 0 });
+  const rec: SpawnedGroup = { pid, start, marker: opts.marker, members, lastScanAt: 0, holds: 1 };
+  spawnedGroups.set(pid, rec);
   refreshGroupMembers(pid, { force: true });
+  let released = false;
+  return {
+    pid,
+    release() {
+      if (released) return;
+      released = true;
+      // Only this record's claim is dropped: if the pid was re-registered (or
+      // the record already retired) the entry now belongs to someone else.
+      if (spawnedGroups.get(pid) !== rec) return;
+      rec.holds -= 1;
+      // Nobody's obligation any more: collect it now if the group is provably
+      // finished, otherwise leave it for the sweep — a caller being done does
+      // not mean the processes are.
+      if (rec.holds <= 0 && groupCollectable(rec)) spawnedGroups.delete(pid);
+    },
+  };
 }
 
 /** Forget a registered group — its leader has been reaped and the caller no
@@ -283,29 +324,56 @@ export function spawnedGroupIdentity(pid: number): { start?: string; marker?: st
   return rec ? { start: rec.start, marker: rec.marker, members: [...rec.members.keys()] } : undefined;
 }
 
-/** Drop records whose leader is gone AND whose captured members are all gone:
- *  a long-lived daemon must not accumulate one entry per tool run. */
+/**
+ * Bound the registry: a long-lived daemon must not accumulate one entry per
+ * tool run. It is ONLY a memory bound, never an expiry — evicting a record
+ * that a caller still needs re-opens the very defect the registry exists to
+ * close (#628 F21: after enough unrelated spawns, the kill lost the start
+ * time of a group whose leader had exited and fell back to signalling
+ * whatever now held the pid). So a record goes only when
+ *   - no caller still holds it (its lease was released), AND
+ *   - its leader is CONFIRMED gone — the pid is free, or a different
+ *     incarnation now holds it; "cannot tell" keeps the record, AND
+ *   - nothing captured under it is still alive.
+ */
 function sweepSpawnedGroups(): void {
-  for (const [pid, rec] of spawnedGroups) {
-    const anyLive = [...rec.members].some(([p, start]) => {
-      const now = processProbe.identityOf(p);
-      return now !== null && !now.zombie && now.start === start;
-    });
-    if (!anyLive) spawnedGroups.delete(pid);
-  }
+  for (const [pid, rec] of spawnedGroups) if (rec.holds <= 0 && groupCollectable(rec)) spawnedGroups.delete(pid);
+}
+
+/** Is there provably nothing left for this record to identify? True only when
+ *  the LEADER is confirmed gone — its pid free, or a different incarnation on
+ *  it — and nothing captured under it is still alive. "Cannot tell" is false:
+ *  a record is never dropped on a guess (#628 F21). */
+function groupCollectable(rec: SpawnedGroup): boolean {
+  const leader = processProbe.identityOf(rec.pid);
+  const leaderGone = leader === null
+    || (rec.start !== undefined && rec.start !== UNKNOWN_START && leader.start !== rec.start);
+  if (!leaderGone) return false;
+  return ![...rec.members].some(([p, start]) => {
+    const now = processProbe.identityOf(p);
+    return now !== null && !now.zombie && now.start === start;
+  });
 }
 
 /** Add every member of `pgid` that is provably ours to `into`. The bare pgid
  *  is proof only while the leader is verifiably still there; with a marker
- *  each hit proves itself through its own environment. */
-function captureMembers(pgid: number, marker: string | undefined, leaderHere: boolean, into: Map<number, string>): void {
-  if (!leaderHere && marker === undefined) return;
-  for (const m of processProbe.membersOf(pgid) ?? []) {
+ *  each hit proves itself through its own environment.
+ *
+ *  Returns whether the group was actually SEARCHED: false when there was no
+ *  admissible way to look (no leader and no marker) and false when the
+ *  platform could not list processes at all. An empty result from a scan that
+ *  never happened is not evidence of an empty group (#628 F21). */
+function captureMembers(pgid: number, marker: string | undefined, leaderHere: boolean, into: Map<number, string>): boolean {
+  if (!leaderHere && marker === undefined) return false;
+  const rows = processProbe.membersOf(pgid);
+  if (rows === null) return false;
+  for (const m of rows) {
     if (m.zombie || into.has(m.pid)) continue;
     if (marker === undefined) { if (leaderHere) into.set(m.pid, m.start); continue; }
     const has = processProbe.hasMarker(m.pid, marker);
     if (has === true || (has === null && leaderHere)) into.set(m.pid, m.start);
   }
+  return true;
 }
 
 /**
@@ -390,7 +458,13 @@ export interface KillProcessGroupOptions {
  *     is recognised and never signalled, and the members captured while the
  *     leader lived, which are signalled individually once it is gone. A
  *     leader that exits before the deadline no longer takes its descendants
- *     out of reach (#628, Wave F14).
+ *     out of reach (#628, Wave F14);
+ *   - that registration is a LEASE the caller holds until its run settles, so
+ *     the registry's sweep cannot scavenge the start-time fence while the kill
+ *     is still owed — and with a group claimed under the pid (a marker, a
+ *     recorded start, a registration) the occupant is signalled only when it
+ *     is POSITIVELY identified: no start-time match and no readable marker
+ *     means nothing is signalled at all (#628, Wave F21).
  *
  * The verdict is evidence-based: `true` means the group was searched and
  * nothing of it survives. When a group the daemon registered cannot be
@@ -425,16 +499,35 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
   // a marker, self-proving ones can still be signalled.
   const occupant = processProbe.identityOf(pid);
   const reused = occupant !== null && spawnStart !== undefined && spawnStart !== UNKNOWN_START && occupant.start !== spawnStart;
-  const foreign = occupant !== null && marker !== undefined && processProbe.hasMarker(pid, marker) === false;
+  const markerProof = occupant !== null && marker !== undefined ? processProbe.hasMarker(pid, marker) : null;
+  const foreign = markerProof === false;
+  // Absence of a mismatch is NOT identification (#628 F21). The occupant is
+  // the leader only when something positively says so: its start time is the
+  // one recorded at spawn, or its own environment carries our marker. When a
+  // group was claimed under this pid — a marker, a recorded start time, a
+  // registration — and neither proof is available (the start time was never
+  // read, or /proc is not there to check the marker), the pid is UNIDENTIFIED
+  // and nothing is signalled through it. Falling back to "the pid exists" is
+  // how a scavenged registration turned kill(-pgid) loose on a stranger.
+  const identified = (occupant !== null && spawnStart !== undefined && occupant.start === spawnStart) || markerProof === true;
+  /** Did anyone claim a group ever existed under this pid? With no marker, no
+   *  recorded start and no registration there is nothing to prove and nothing
+   *  to disprove: "the pid exists" is all there ever was (pre-#628 contract). */
+  const claimed = marker !== undefined || spawnStart !== undefined || rec !== undefined;
   if (reused) log(`[kill-group] pid ${pid} is not the process spawned here (start ${occupant!.start} ≠ ${spawnStart}) — refusing to signal it`);
   else if (foreign) log(`[kill-group] pid ${pid} does not carry ${PGROUP_MARKER_ENV}=${marker} — not ours, refusing to signal it`);
-  const leaderAtEntry = reused || foreign ? null : occupant;
+  else if (occupant !== null && claimed && !identified) log(`[kill-group] pid ${pid} cannot be proven to be the process spawned here (no start-time or ${PGROUP_MARKER_ENV} match) — refusing to signal it`);
+  const leaderAtEntry = occupant !== null && !reused && !foreign && (identified || !claimed) ? occupant : null;
   const leaderPresent = (): boolean => leaderAtEntry !== null && processProbe.identityOf(pid)?.start === leaderAtEntry.start;
 
   /** pid → start time of every member proven to be ours. */
   const owned = new Map<number, string>(captured);
   if (leaderAtEntry) owned.set(pid, leaderAtEntry.start);
-  const capture = (): void => { captureMembers(pid, marker, leaderPresent(), owned); };
+  /** Did any scan of the group actually happen? A platform that cannot list
+   *  processes returns nothing from every scan, which must not read as "the
+   *  group is empty" (#628 F21). */
+  let searched = false;
+  const capture = (): void => { if (captureMembers(pid, marker, leaderPresent(), owned)) searched = true; };
   const survivors = (): number[] => {
     capture();
     const out: number[] = [];
@@ -456,10 +549,14 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
     // when there was somewhere to look. A registered group whose leader is
     // gone, with no verifiable marker and nothing captured beyond the leader,
     // was never searched: say so instead of confirming a kill (#628 F14).
-    const markerCheckable = marker !== undefined && processProbe.hasMarker(pid, marker) !== null;
+    // A marker only makes the group findable if the group could be ENUMERATED
+    // (and the marker itself read): with `membersOf` returning null on every
+    // scan there was nowhere to look, and a marked record whose leader has
+    // vanished is then unconfirmed rather than gone (#628 F21).
+    const markerCheckable = marker !== undefined && searched && processProbe.hasMarker(pid, marker) !== null;
     const searchable = leaderAtEntry !== null || markerCheckable || captured.size > 1;
     if (!searchable && rec) {
-      log(`[kill-group] group ${pid}: its leader was already gone and nothing of the group was captured — termination unconfirmed`);
+      log(`[kill-group] group ${pid}: its leader was already gone and the group could not be searched (nothing captured${marker !== undefined && !searched ? ", no process listing available" : ""}) — termination unconfirmed`);
       return false;
     }
     return true;
@@ -475,6 +572,40 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
     if (left.length) { log(`[kill-group] group ${pid}: ${left.join(",")} still alive after SIGKILL`); return false; }
   }
   return true;
+}
+
+/**
+ * The live members of `pgid` that PROVE they are ours, usable after the leader
+ * has exited — when the bare pgid is a reusable number and no longer evidence
+ * of anything (#628). A pid qualifies when its own environment carries the
+ * spawn's `JOY_PGROUP` marker, or when it matches a (pid, start time) pair
+ * captured while the group was provably ours — the registration made at spawn,
+ * or a `members` list persisted from an earlier daemon run.
+ *
+ * `searched` reports whether the platform could enumerate at all: an empty
+ * list with `searched: false` means "nowhere to look", not "nothing there".
+ */
+export function ownedGroupMembers(
+  pgid: number,
+  opts: { marker?: string; members?: Iterable<readonly [number, string]> } = {},
+): { searched: boolean; pids: number[] } {
+  const rec = spawnedGroups.get(pgid);
+  const marker = opts.marker ?? rec?.marker;
+  const captured = new Map<number, string>(opts.members ?? rec?.members ?? []);
+  const pids = new Set<number>();
+  for (const [p, start] of captured) {
+    const now = processProbe.identityOf(p);
+    if (now !== null && !now.zombie && now.start === start) pids.add(p);
+  }
+  let searched = false;
+  if (marker !== undefined) {
+    const rows = processProbe.membersOf(pgid);
+    if (rows !== null) {
+      searched = true;
+      for (const m of rows) { if (!m.zombie && processProbe.hasMarker(m.pid, marker) === true) pids.add(m.pid); }
+    }
+  }
+  return { searched, pids: [...pids] };
 }
 
 // ── descriptor lifecycle ─────────────────────────────────────────────────────

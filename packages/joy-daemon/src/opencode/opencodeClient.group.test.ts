@@ -114,6 +114,38 @@ describe("recorded-server recovery verifies the pid before signalling it (#628)"
     expect(await waitGone(pid)).toBe(true);
   }, 20_000);
 
+  it("reaps the marker-proven server a recorded launcher left behind before freeing the record", async () => {
+    if (!existsSync("/proc/self/environ")) return;
+    // The real shape (#628 F21): `opencode` is a LAUNCHER — it starts the
+    // actual `opencode.exe serve` and exits. At recovery the recorded pid is
+    // free while the server it left behind is still listening, and treating
+    // "the leader has exited" as "the record is free" left that server running
+    // and let a second one open the same conversation.
+    const exe = join(dir, "opencode.exe");
+    if (!existsSync(exe)) { copyFileSync("/bin/sh", exe); chmodSync(exe, 0o755); }
+    const pidFile = join(dir, "left-behind.pid");
+    const launcher = spawn("/bin/sh", ["-c", `"${exe}" -c 'trap "" TERM; sleep 30' serve </dev/null >/dev/null 2>&1 & echo $! > "${pidFile}"; exit 0`], {
+      detached: true, stdio: "ignore", env: { ...process.env, [PGROUP_MARKER_ENV]: "tok-left-behind" },
+    });
+    const pid = launcher.pid!;
+    const start = processProbe.identityOf(pid)!.start;
+    await new Promise<void>((r) => launcher.on("exit", () => r()));
+    await sleep(100);
+    const child = Number(readFileSync(pidFile, "utf8").trim());
+    strays.push(child);
+    expect(pidAlive(pid)).toBe(false); // the recorded launcher is gone…
+    expect(pidAlive(child)).toBe(true); // …its marked server is not
+
+    expect(await reapRecordedOpencodeServer(pid, { start, marker: "tok-left-behind" })).toBe("gone");
+    expect(killGroup).toHaveBeenCalledTimes(1);
+    expect(await waitGone(child)).toBe(true);
+
+    // Only once nothing marker-proven survives is the record actually free.
+    killGroup.mockClear();
+    expect(await reapRecordedOpencodeServer(pid, { start, marker: "tok-left-behind" })).toBe("unowned");
+    expect(killGroup).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("treats a free pid as unowned rather than starting a kill", async () => {
     const done = spawn("true", [], { stdio: "ignore" });
     for (let i = 0; i < 100 && done.exitCode === null && done.signalCode === null; i++) await sleep(20);
