@@ -318,10 +318,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // for the loop to act on (it runs it through honourAdoption and clears it).
   // `adoptionEpoch`: which RESOLVED answer has been applied to this turn's
   // adoption. The sweep and the loop can have reconciles in flight for the
-  // same turn at the same moment; the epoch names the winner (see
-  // settleAdoption / parkAdoptionAnswer).
+  // same turn at the same moment; the epoch de-duplicates answers of the SAME
+  // class (two `running`s, the same terminal twice) — it never outranks a
+  // cancellation (see settleAdoption / parkAdoptionAnswer).
+  // `wake`: the loop's terminal wait, interruptible. A verdict parked while
+  // the loop waits out a 30-minute turn needs a consumer NOW, not at the cap.
   type AdoptionPending = { since: number; attempts: number; lastError: string };
-  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null; adoptionAnswer?: Adoption | null; adoptionEpoch?: number }>();
+  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null; adoptionAnswer?: Adoption | null; adoptionEpoch?: number; wake?: (() => void) | null }>();
   const ADOPTION_RETRY_MS: readonly number[] = opts.adoptionRetryMs ?? [1_000, 2_000, 4_000, 8_000];
   const ADOPTION_PENDING_RETRY_MS = opts.adoptionPendingRetryMs ?? 30_000;
   // Turns whose attachments are still being materialized: the one window
@@ -945,18 +948,51 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  cancelRequestedAt null, zero interrupts).
    *
    *  Nothing may be read off the entry across an await: re-read it, and
-   *  arbitrate through these two. */
+   *  arbitrate through these two.
+   *
+   *  ── …but cancellation is MONOTONE (Astra, F31) ──
+   *  "First complete answer wins" is right only for answers of the same
+   *  class. In the REVERSE interleaving — both reconciles begin while the
+   *  turn is orphaned, the loop's retry adopts it `running` and takes its
+   *  /start ack, and the delayed sweep then observes a REAL terminal/cancelled
+   *  close through the relay API — dropping the sweep's answer "because the
+   *  loop advanced the epoch" threw away the NEWER authoritative fact: the
+   *  relay turn cancelled, the local command still running with
+   *  cancelRequestedAt null and zero interrupts, and the loop already inside
+   *  its 30-minute terminal wait, so nothing was left to consume it.
+   *  The relay never un-says a cancellation, so an answer of that class is
+   *  applied by whichever side observes it, whenever it observes it —
+   *  through the same cancel path, once. */
   const adoptionEpoch = (turnId: string): number => activeTurns.get(turnId)?.adoptionEpoch ?? 0;
+  /** The answers that MEAN "this turn must stop": the relay closed it
+   *  cancelled, it holds a cancel request for it, or it authoritatively
+   *  refused the adoption (session closed, budget failed). Monotone — the
+   *  relay only ever moves further into them — so they outrank the epoch. */
+  const isCancelAnswer = (a: Adoption): boolean =>
+    a.kind === "refused" || a.kind === "cancelling" || (a.kind === "terminal" && a.terminalState === "cancelled");
   /** The LOOP's side. Given the answer its own reconcile returned and the
    *  epoch it started from, it returns the answer to honour: the sweep's
    *  parked one when the sweep got there first (`via` names it), otherwise
    *  its own — claiming the epoch, so a sweep still in flight defers to it.
-   *  An `unavailable` answer resolves nothing and claims nothing. */
+   *  An `unavailable` answer resolves nothing and claims nothing. A parked
+   *  CANCELLATION is honoured whatever this pass got, and a cancellation
+   *  this pass got is honoured even when it lost the epoch. */
   function settleAdoption(turnId: string, mine: Adoption, epochBefore: number): { answer: Adoption; via: string | null } {
     const t = activeTurns.get(turnId);
     if (!t) return { answer: mine, via: null };
+    const swept = t.adoptionAnswer ?? null;
+    // A cancellation the sweep carried is THE answer — including when ours
+    // says the same thing (the relay closed the turn under both of us): it
+    // is consumed here, so the cancellation is applied exactly once.
+    if (swept && isCancelAnswer(swept)) {
+      t.adoptionAnswer = null;
+      t.adoptionEpoch = (t.adoptionEpoch ?? 0) + 1;
+      return { answer: swept, via: "orphan sweep, which answered first" };
+    }
     if ((t.adoptionEpoch ?? 0) !== epochBefore) {
-      const swept = t.adoptionAnswer ?? null;
+      // Monotone: a cancellation we learned LATER than the epoch's winner is
+      // still the authoritative fact, and it is what we act on.
+      if (isCancelAnswer(mine)) { t.adoptionEpoch = (t.adoptionEpoch ?? 0) + 1; return { answer: mine, via: null }; }
       if (!swept) return { answer: mine, via: null };
       t.adoptionAnswer = null;
       return { answer: swept, via: "orphan sweep, which answered first" };
@@ -964,16 +1000,25 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (mine.kind !== "unavailable") t.adoptionEpoch = epochBefore + 1;
     return { answer: mine, via: null };
   }
-  /** The SWEEP's side: park a RESOLVED answer for the loop to act on, unless
-   *  the loop answered its own adoption while this reconcile was in flight —
-   *  then the loop's answer stands and this one is dropped (`false`). */
-  function parkAdoptionAnswer(turnId: string, a: Adoption, epochBefore: number): boolean {
+  /** The SWEEP's side: park a RESOLVED answer for the loop to act on and wake
+   *  its wait. `dropped` when the loop answered its own adoption while this
+   *  reconcile was in flight and this pass adds nothing to it; `carried-late`
+   *  when it lost that race but holds a CANCELLATION, which is carried
+   *  anyway — the loop's `running` never outranks a later cancelled close. */
+  function parkAdoptionAnswer(turnId: string, a: Adoption, epochBefore: number): "parked" | "carried-late" | "dropped" {
     const t = activeTurns.get(turnId);
-    if (!t || (t.adoptionEpoch ?? 0) !== epochBefore) return false;
-    t.adoptionEpoch = epochBefore + 1;
+    if (!t) return "dropped";
+    const late = (t.adoptionEpoch ?? 0) !== epochBefore;
+    // A cancellation already parked and not yet consumed says everything this
+    // one would: never carry the same stop twice.
+    if (late && !(isCancelAnswer(a) && !(t.adoptionAnswer && isCancelAnswer(t.adoptionAnswer)))) return "dropped";
+    t.adoptionEpoch = (t.adoptionEpoch ?? 0) + 1;
     t.adoptionAnswer = a;
     t.adoptionPending = null;
-    return true;
+    // The loop may be waiting out the turn itself: give this verdict a
+    // consumer now instead of leaving it to expire at the cap (F31).
+    t.wake?.();
+    return late ? "carried-late" : "parked";
   }
   /** /start refusals that MEAN "stop the prompt": a cancellation that beat
    *  the control offer here, a session closed under the turn (#614), a
@@ -1230,12 +1275,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // void, for as long as the runtime ran or the 30-minute cap.
             // …and only when THIS pass is the first resolved answer: the
             // loop's own reconcile may have landed while ours was in flight,
-            // in which case its answer stands and ours is dropped (F30).
+            // in which case its answer stands and ours is dropped (F30) —
+            // UNLESS ours is a cancellation, which is monotone and belongs to
+            // the loop however late it arrives (F31): the alternative was a
+            // turn cancelled on the relay whose command kept running here.
             if (a.kind === "running" || a.kind === "cancelling" || a.kind === "terminal" || a.kind === "refused") {
-              if (!parkAdoptionAnswer(ex.turnId, a, epochBefore)) {
+              const parked = parkAdoptionAnswer(ex.turnId, a, epochBefore);
+              if (parked === "dropped") {
                 log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but its own loop answered the adoption first — this pass's ${a.kind} answer is dropped`);
                 notedOwnedOrphans.delete(ex.turnId);
                 continue;
+              }
+              if (parked === "carried-late") {
+                log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was adopted by its own loop first, but the relay has since ${a.kind === "refused" ? `refused it (${a.code})` : a.kind === "terminal" ? `closed it ${a.terminalState}` : "had a cancel requested for it"} — cancellation is monotone, so this later answer is carried to its loop`);
               }
               if (a.kind === "cancelling" && owner.cancelRequestedAt == null) coordinator.cancel(owner.id);
             }
@@ -1898,6 +1950,32 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // The relay could not answer this turn's adoption (mirrors the loop
     // entry's marker, which the sweep shares): no /start until it can.
     let adoptionPending = false;
+    // An authoritative cancellation was applied here. Both sides can observe
+    // the SAME cancelled close (the sweep's carried answer and our own
+    // retry's), and it must reach the runtime once: one durable cancel, one
+    // interrupt, one `cancelled` terminal (Astra, F31).
+    let cancelClosed = false;
+    /** The command's terminal wait, interruptible by the sweep. A verdict
+     *  parked while we wait is a fact the loop must act on NOW — the wait is
+     *  as long as the turn may run (30 min), so an un-woken wait meant a
+     *  cancellation with no consumer until the cap. Aborting resolves with
+     *  the command's CURRENT state, so the loop re-reads the entry (never
+     *  across an await) and honours what was parked. */
+    const waitForTerminal = async (timeoutMs: number) => {
+      const ac = new AbortController();
+      const wake = () => ac.abort();
+      const entry = activeTurns.get(turnId);
+      if (entry) {
+        entry.wake = wake;
+        if (entry.adoptionAnswer) wake(); // parked between the last look and this wait
+      }
+      try {
+        return await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs, signal: ac.signal });
+      } finally {
+        const cur = activeTurns.get(turnId);
+        if (cur?.wake === wake) cur.wake = null;
+      }
+    };
     /** The relay ANSWERED the adoption question — whatever the answer: the
      *  shared `adoption_pending` marker (the loop entry the sweep reads too)
      *  comes off. Clearing it only for `running` (Astra, F21) left a
@@ -1914,6 +1992,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
      *  `pending` is a resolution and clears the pending marker. */
     const honourAdoption = async (a: Adoption, via: string): Promise<"continue" | "done" | "none" | "pending"> => {
       if (a.kind !== "unavailable") adoptionResolved();
+      // The same stop, learned twice (the sweep carried it and our own
+      // reconcile returned it): it is applied once — a second cancelLocally
+      // would interrupt again and publish a second terminal (F31).
+      if (cancelClosed && isCancelAnswer(a)) {
+        log(`${tag}: the relay's cancellation again (${a.kind}, ${via}) — already applied here`);
+        return a.kind === "cancelling" ? "continue" : "done";
+      }
       switch (a.kind) {
         case "running":
           log(`${tag}: adopted on the relay under this lease (${via})`);
@@ -1922,6 +2007,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // The relay's authoritative no — the session is closed under the
           // turn, or the budget failed it before its first start (#613): the
           // same cancel class a /start refusal carries.
+          cancelClosed = true;
           await cancelLocally(a.code);
           log(`${tag}: adoption refused by the relay (${a.code}, ${via}) → cancelled locally`);
           return "done";
@@ -1941,6 +2027,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           return "continue";
         case "terminal":
           if (a.terminalState === "cancelled") {
+            cancelClosed = true;
             await cancelLocally("relay_cancelled");
             log(`${tag}: the relay closed this turn cancelled (${via}) → cancelled locally`);
             return "done";
@@ -2061,7 +2148,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // bounded wait for the command's own terminal. No answer is acted on
     // twice: a resolved turn is never re-adopted (Astra, F21).
     const capAt = Date.now() + TURN_CAP_MS;
-    let done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, TURN_CAP_MS) : TURN_CAP_MS });
+    let done = await waitForTerminal(adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, TURN_CAP_MS) : TURN_CAP_MS);
     while (done.state !== null && !isTerminal(done.state) && Date.now() < capAt) {
       const entry = activeTurns.get(turnId);
       // The SWEEP may have answered this turn's adoption while the loop was
@@ -2106,7 +2193,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             startPosted = true;
           }
         }
-        done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: Math.max(0, capAt - Date.now()) });
+        done = await waitForTerminal(Math.max(0, capAt - Date.now()));
         continue;
       }
       // Everything this pass needs off the entry is read BEFORE the await:
@@ -2143,7 +2230,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         startPosted = true;
         continue;
       }
-      done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: Math.min(ADOPTION_PENDING_RETRY_MS, Math.max(0, capAt - Date.now())) });
+      done = await waitForTerminal(Math.min(ADOPTION_PENDING_RETRY_MS, Math.max(0, capAt - Date.now())));
     }
     if (done.state === null) return finish("failed", "command_lost");
     if (!isTerminal(done.state)) {
