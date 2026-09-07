@@ -316,8 +316,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // retries; the sweep may adopt it meanwhile and clear the marker.
   // `adoptionAnswer`: the RESOLVED answer the sweep got for that turn, left
   // for the loop to act on (it runs it through honourAdoption and clears it).
+  // `adoptionEpoch`: which RESOLVED answer has been applied to this turn's
+  // adoption. The sweep and the loop can have reconciles in flight for the
+  // same turn at the same moment; the epoch names the winner (see
+  // settleAdoption / parkAdoptionAnswer).
   type AdoptionPending = { since: number; attempts: number; lastError: string };
-  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null; adoptionAnswer?: Adoption | null }>();
+  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null; adoptionAnswer?: Adoption | null; adoptionEpoch?: number }>();
   const ADOPTION_RETRY_MS: readonly number[] = opts.adoptionRetryMs ?? [1_000, 2_000, 4_000, 8_000];
   const ADOPTION_PENDING_RETRY_MS = opts.adoptionPendingRetryMs ?? 30_000;
   // Turns whose attachments are still being materialized: the one window
@@ -927,6 +931,50 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     const prev = t.adoptionPending;
     t.adoptionPending = { since: prev?.since ?? Date.now(), attempts: (prev?.attempts ?? 0) + 1, lastError: detail };
   }
+  /** ── one adoption answer per turn (Astra, F30) ──
+   *  The orphan sweep and a turn's OWN loop (its resume adoption, or a Phase
+   *  C retry) can have reconciles in flight for the same turn at the same
+   *  moment: the ordinary eight-second sweep against a loop parked
+   *  `adoption_pending`. Whichever RESOLVED answer completes FIRST is the one
+   *  that is applied; the loser drops its own answer and observes the
+   *  winner's. Without that, the sweep stored its answer and cleared
+   *  `adoptionPending` while the loop's retry was awaiting its reconcile, and
+   *  the retry then read `entry.adoptionPending.attempts` across that await
+   *  — TypeError, a synthetic `failed` terminal from resumeTurn's catch, and
+   *  the sweep's cancellation never honoured (the command still running,
+   *  cancelRequestedAt null, zero interrupts).
+   *
+   *  Nothing may be read off the entry across an await: re-read it, and
+   *  arbitrate through these two. */
+  const adoptionEpoch = (turnId: string): number => activeTurns.get(turnId)?.adoptionEpoch ?? 0;
+  /** The LOOP's side. Given the answer its own reconcile returned and the
+   *  epoch it started from, it returns the answer to honour: the sweep's
+   *  parked one when the sweep got there first (`via` names it), otherwise
+   *  its own — claiming the epoch, so a sweep still in flight defers to it.
+   *  An `unavailable` answer resolves nothing and claims nothing. */
+  function settleAdoption(turnId: string, mine: Adoption, epochBefore: number): { answer: Adoption; via: string | null } {
+    const t = activeTurns.get(turnId);
+    if (!t) return { answer: mine, via: null };
+    if ((t.adoptionEpoch ?? 0) !== epochBefore) {
+      const swept = t.adoptionAnswer ?? null;
+      if (!swept) return { answer: mine, via: null };
+      t.adoptionAnswer = null;
+      return { answer: swept, via: "orphan sweep, which answered first" };
+    }
+    if (mine.kind !== "unavailable") t.adoptionEpoch = epochBefore + 1;
+    return { answer: mine, via: null };
+  }
+  /** The SWEEP's side: park a RESOLVED answer for the loop to act on, unless
+   *  the loop answered its own adoption while this reconcile was in flight —
+   *  then the loop's answer stands and this one is dropped (`false`). */
+  function parkAdoptionAnswer(turnId: string, a: Adoption, epochBefore: number): boolean {
+    const t = activeTurns.get(turnId);
+    if (!t || (t.adoptionEpoch ?? 0) !== epochBefore) return false;
+    t.adoptionEpoch = epochBefore + 1;
+    t.adoptionAnswer = a;
+    t.adoptionPending = null;
+    return true;
+  }
   /** /start refusals that MEAN "stop the prompt": a cancellation that beat
    *  the control offer here, a session closed under the turn (#614), a
    *  budget the relay failed the turn on (#613). Every other 409 is a
@@ -1160,8 +1208,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (owner) {
           const loop = activeTurns.get(ex.turnId);
           if (loop?.started && (owner.state === "running" || owner.state === "cancelling")) {
+            const epochBefore = adoptionEpoch(ex.turnId);
             const a = await adoptRelayTurn(ex.turnId, l, "orphan_sweep");
-            if (a.kind === "cancelling" && owner.cancelRequestedAt == null) coordinator.cancel(owner.id);
             if (a.kind === "unavailable") {
               // Unresolved, not a verdict: the loop keeps the runtime and
               // retries on its own cadence; this pass never cancels on it.
@@ -1180,9 +1228,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // should have cancelled — cancelRequestedAt null, zero interrupts
             // — and the /start it then posted 409'd turn_cancelled into the
             // void, for as long as the runtime ran or the 30-minute cap.
+            // …and only when THIS pass is the first resolved answer: the
+            // loop's own reconcile may have landed while ours was in flight,
+            // in which case its answer stands and ours is dropped (F30).
             if (a.kind === "running" || a.kind === "cancelling" || a.kind === "terminal" || a.kind === "refused") {
-              loop.adoptionAnswer = a;
-              loop.adoptionPending = null;
+              if (!parkAdoptionAnswer(ex.turnId, a, epochBefore)) {
+                log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but its own loop answered the adoption first — this pass's ${a.kind} answer is dropped`);
+                notedOwnedOrphans.delete(ex.turnId);
+                continue;
+              }
+              if (a.kind === "cancelling" && owner.cancelRequestedAt == null) coordinator.cancel(owner.id);
             }
             log(`reconcile: turn ${ex.turnId.slice(0, 8)} on ${s.sessionId.slice(0, 8)} was orphaned but ${owner.id} still runs it here → ${a.kind === "none" ? "left to its loop" : a.kind === "refused" ? `refused (${a.code}) — carried to its loop` : `adopted (${a.kind})`}`);
             notedOwnedOrphans.delete(ex.turnId);
@@ -1942,8 +1997,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // backoff first; past it the turn is `adoption_pending` — NOT "none":
         // a /start posted then would 409 (orphaned / no current delivery) and
         // that refusal used to cancel the surviving runtime (Astra, F14).
+        const epochBefore = adoptionEpoch(turnId);
         const a = await adoptWithBackoff(turnId, leaseRef, "daemon_restart", tag);
-        const v = await honourAdoption(a, "resumed");
+        // The sweep may have answered this turn while the backoff ran; the
+        // first resolved answer is the one honoured (F30).
+        const { answer, via } = settleAdoption(turnId, a, epochBefore);
+        const v = await honourAdoption(answer, via ?? "resumed");
         if (v === "done") return;
         if (v === "pending") adoptionPending = true;
       }
@@ -1964,8 +2023,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // answer the question either (unavailable → adoption_pending).
           let verdict: "continue" | "done" | "none" | "pending" = "none";
           if (!START_CANCEL_CLASS.has(code)) {
-            const a = await adoptWithBackoff(turnId, leaseRef, "start_refused", tag);
-            verdict = await honourAdoption(a, "after /start refused");
+            const epochBefore = adoptionEpoch(turnId);
+            const a0 = await adoptWithBackoff(turnId, leaseRef, "start_refused", tag);
+            const { answer: a, via } = settleAdoption(turnId, a0, epochBefore);
+            verdict = await honourAdoption(a, via ?? "after /start refused");
             if (verdict === "done") return;
             if (verdict === "pending") adoptionPending = true;
             if (a.kind === "running") {
@@ -2048,8 +2109,22 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         done = await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs: Math.max(0, capAt - Date.now()) });
         continue;
       }
-      const a = await adoptRelayTurn(turnId, leaseRef, "adoption_retry");
-      const v = await honourAdoption(a, `retry ${entry.adoptionPending.attempts}`);
+      // Everything this pass needs off the entry is read BEFORE the await:
+      // the sweep can answer this same turn while our reconcile is in flight
+      // and it CLEARS the pending marker when it does — reading
+      // `entry.adoptionPending.attempts` back after the await threw
+      // TypeError, and resumeTurn's catch turned that into a synthetic
+      // `failed` terminal over a still-running command whose cancellation
+      // the sweep had already been told about (Astra, F30).
+      const attempts = entry.adoptionPending.attempts;
+      const epochBefore = entry.adoptionEpoch ?? 0;
+      const a0 = await adoptRelayTurn(turnId, leaseRef, "adoption_retry");
+      // First complete answer wins: if the sweep resolved this adoption while
+      // we were in flight, HERS is honoured (through the same handler) and
+      // ours is dropped — never both, and never a dereference of the marker
+      // she cleared.
+      const { answer: a, via } = settleAdoption(turnId, a0, epochBefore);
+      const v = await honourAdoption(a, via ?? `retry ${attempts}`);
       if (v === "done") return;
       if (v === "continue") {
         // Resolved (running / cancelling / a remote terminal): the marker is
@@ -2102,7 +2177,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       await driveTurn(turnId, row.sessionId, row.id, leaseRef, { startPosted: started, resumed: true, tag });
     } catch (e) {
       log(`${tag} error: ${String(e)}`);
-      try { await postTerminal(turnId, row.sessionId, { type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason: "lane_error", detail: String(e).slice(0, 300) } }, leaseRef); } catch { /* lease-expiry orphaning */ }
+      // A terminal here is the loop giving up — it must never be a LIE about
+      // a runtime that is still working. If the command is still live, stop
+      // it FIRST (cancel + abort, both idempotent) and report the turn
+      // cancelled, not `failed`: the synthetic `failed` used to close the
+      // turn on the relay while the agent kept burning tokens behind it, with
+      // cancelRequestedAt null and no interrupt ever sent (Astra, F30).
+      let state: CommandState = "failed";
+      const live = ledger.getCommand(row.id);
+      if (live && !isTerminalState(live.state)) {
+        state = "cancelled";
+        log(`${tag}: the loop failed while ${row.id} was still ${live.state} → cancelling it before the turn's terminal`);
+        try { coordinator.cancel(row.id); } catch { /* no actor */ }
+        try { await registry.get(row.sessionId)?.abort(); } catch { /* pane teardown */ }
+      }
+      try { await postTerminal(turnId, row.sessionId, { type: "terminal", terminalState: state, runtimeEventId: randomUUID(), meta: { reason: "lane_error", detail: String(e).slice(0, 300) } }, leaseRef); } catch { /* lease-expiry orphaning */ }
     } finally {
       inFlight.delete(turnId);
       activeTurns.delete(turnId);
