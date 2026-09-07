@@ -42,6 +42,9 @@ export const lightTheme = {
         textDestructive: Platform.select({ ios: '#FF3B30', default: '#F44336' }),
         textSecondary: Platform.select({ ios: '#8E8E93', default: '#49454F' }),
         textLink: '#2BACCC',
+        // In-session search hit (#639) — a wash behind the matched words, dark
+        // enough to find at a glance and light enough to read body text on.
+        searchHighlight: 'rgba(255, 196, 0, 0.45)',
         deleteAction: '#FF6B6B', // Delete/remove button color
         warningCritical: '#FF3B30',
         warning: '#8E8E93',
@@ -263,6 +266,7 @@ export const darkTheme = {
         textDestructive: Platform.select({ ios: '#FF453A', default: '#F48FB1' }),
         textSecondary: Platform.select({ ios: '#8E8E93', default: '#CAC4D0' }),
         textLink: '#2BACCC',
+        searchHighlight: 'rgba(255, 196, 0, 0.30)',
         deleteAction: '#FF6B6B', // Delete/remove button color (same in both themes)
         warningCritical: '#FF453A',
         warning: '#8E8E93',

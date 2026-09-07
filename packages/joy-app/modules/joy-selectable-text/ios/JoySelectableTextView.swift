@@ -11,6 +11,8 @@ struct JoyTextSpan: Record {
   @Field var code: Bool = false
   /// Absent for ordinary text; a URL makes the run a tappable link.
   @Field var url: String? = nil
+  /// Part of the current in-session search hit — drawn with a wash behind it.
+  @Field var highlighted: Bool = false
 }
 
 /// The fonts and colours the JS side already resolved from the theme. Passed in
@@ -28,6 +30,7 @@ struct JoyTextStyle: Record {
   @Field var linkColor: String = "#0A7EA4"
   @Field var codeColor: String? = nil
   @Field var codeBackgroundColor: String? = nil
+  @Field var highlightColor: String? = nil
 }
 
 /**
@@ -103,6 +106,7 @@ final class JoySelectableTextView: ExpoView {
     let linkColor = UIColor(hex: textStyle.linkColor) ?? .link
     let codeColor = textStyle.codeColor.flatMap { UIColor(hex: $0) } ?? baseColor
     let codeBackground = textStyle.codeBackgroundColor.flatMap { UIColor(hex: $0) }
+    let highlight = textStyle.highlightColor.flatMap { UIColor(hex: $0) }
 
     for span in spans {
       guard !span.text.isEmpty else { continue }
@@ -115,6 +119,11 @@ final class JoySelectableTextView: ExpoView {
 
       if span.code, let codeBackground {
         attributes[.backgroundColor] = codeBackground
+      }
+      // The search wash wins over the code tint: it is the thing the reader is
+      // hunting for, and a hit inside inline code must still stand out.
+      if span.highlighted, let highlight {
+        attributes[.backgroundColor] = highlight
       }
 
       // A link run carries .link so UITextView makes it tappable; the tap is

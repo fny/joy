@@ -9,6 +9,7 @@ export type JoyTextSpan = {
     italic?: boolean;
     code?: boolean;
     url?: string | null;
+    highlighted?: boolean;
 };
 
 /** Fonts and colours resolved on the JS side from the theme + chat font scale. */
@@ -23,6 +24,7 @@ export type JoyTextStyle = {
     linkColor: string;
     codeColor?: string;
     codeBackgroundColor?: string;
+    highlightColor?: string;
 };
 
 type NativeProps = {

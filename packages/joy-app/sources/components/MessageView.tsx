@@ -63,6 +63,9 @@ export const MessageView = React.memo((props: {
   metadata: Metadata | null;
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
+  /** The in-session search query, when THIS row holds the selected match
+   *  (#639) — its occurrences are marked so the hit is visible on arrival. */
+  highlight?: string;
 }) => {
   return (
     <View
@@ -75,6 +78,7 @@ export const MessageView = React.memo((props: {
           metadata={props.metadata}
           sessionId={props.sessionId}
           getMessageById={props.getMessageById}
+          highlight={props.highlight}
         />
       </View>
     </View>
@@ -87,6 +91,7 @@ function RenderBlock(props: {
   metadata: Metadata | null;
   sessionId: string;
   getMessageById?: (id: string) => Message | null;
+  highlight?: string;
 }): React.ReactElement {
   switch (props.message.kind) {
     case 'user-text':
@@ -95,11 +100,12 @@ function RenderBlock(props: {
           message={props.message}
           metadata={props.metadata}
           sessionId={props.sessionId}
+          highlight={props.highlight}
         />
       );
 
     case 'agent-text':
-      return <AgentTextBlock message={props.message} sessionId={props.sessionId} />;
+      return <AgentTextBlock message={props.message} sessionId={props.sessionId} highlight={props.highlight} />;
 
     case 'tool-call':
       return <ToolCallBlock
@@ -128,6 +134,7 @@ function UserTextBlock(props: {
   message: UserTextMessage;
   metadata: Metadata | null;
   sessionId: string;
+  highlight?: string;
 }) {
   const handleOptionPress = useOptionPress(props.sessionId); // failures are surfaced + retained (#231)
 
@@ -246,7 +253,7 @@ function UserTextBlock(props: {
                 <Text style={styles.slashCommandToken}>{slashMatch[1]}</Text>
                 {slashMatch[2]}
               </Text>
-            : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} />}
+            : <MarkdownView markdown={bodyText} onOptionPress={handleOptionPress} sessionId={props.sessionId} highlight={props.highlight} />}
       </View>}
     </View>
   );
@@ -388,6 +395,7 @@ function GenericBlockChip({ tag }: { tag: string }) {
 function AgentTextBlock(props: {
   message: AgentTextMessage;
   sessionId: string;
+  highlight?: string;
 }) {
   const handleOptionPress = useOptionPress(props.sessionId); // failures are surfaced + retained (#231)
 
@@ -417,7 +425,7 @@ function AgentTextBlock(props: {
     return (
       <View style={styles.agentMessageContainer}>
         {segments.map((seg, i) => seg.kind === 'md'
-          ? <MarkdownView key={i} markdown={seg.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+          ? <MarkdownView key={i} markdown={seg.text} onOptionPress={handleOptionPress} sessionId={props.sessionId} highlight={props.highlight} />
           : seg.kind === 'img'
             ? <JoyImage key={i} sessionId={props.sessionId} src={seg.src} width={seg.width} height={seg.height} alt={seg.alt} />
             : <JoyFileChip key={i} sessionId={props.sessionId} path={seg.path} line={seg.line} name={seg.name} />)}
@@ -427,7 +435,7 @@ function AgentTextBlock(props: {
 
   return (
     <View style={styles.agentMessageContainer}>
-      <MarkdownView markdown={text} onOptionPress={handleOptionPress} sessionId={props.sessionId} />
+      <MarkdownView markdown={text} onOptionPress={handleOptionPress} sessionId={props.sessionId} highlight={props.highlight} />
     </View>
   );
 }

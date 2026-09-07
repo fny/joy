@@ -18,6 +18,7 @@ import Octicons from '@expo/vector-icons/Octicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { resolveRevealScroll, rowContainsMessage, RevealLayout, RevealTarget } from './searchReveal';
+import { useSessionSearch } from '@/hooks/useSessionSearch';
 
 const SCROLL_THRESHOLD = 300;
 // "Live" (pinned to the newest message) is a SEPARATE, much tighter band than
@@ -253,7 +254,17 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // Nonce whose hit already scrolled to its measured position: later layout
     // reports for it (streaming re-layouts, recycling) must not scroll again.
     const revealHandledRef = React.useRef(0);
-    const listExtraData = React.useMemo(() => ({ collapsedGroups, revealTarget }), [collapsedGroups, revealTarget]);
+    // The live search hit (#639). Same ref-plus-extraData shape as the reveal
+    // target above: renderItem reads the ref so its identity never changes,
+    // and extraData makes the visible rows re-render when the hit moves.
+    const searchQuery = useSessionSearch((st) => st.query);
+    const searchMessageId = useSessionSearch((st) => st.selectedMessageId);
+    const searchRef = React.useRef({ query: searchQuery, messageId: searchMessageId });
+    searchRef.current = { query: searchQuery, messageId: searchMessageId };
+    const listExtraData = React.useMemo(
+        () => ({ collapsedGroups, revealTarget, searchQuery, searchMessageId }),
+        [collapsedGroups, revealTarget, searchQuery, searchMessageId],
+    );
 
     // Auto-expand groups that need user approval — but only if the user
     // hasn't manually collapsed them.
@@ -466,8 +477,15 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 />
             );
         }
+        // Only the selected match highlights, so a keystroke re-renders one row
+        // rather than every mounted message.
+        const search = searchRef.current;
+        const highlight = search.query && item.type === 'message' && item.message.id === search.messageId
+            ? search.query
+            : undefined;
         return (
             <MessageView
+                highlight={highlight}
                 message={item.message}
                 metadata={props.metadata}
                 sessionId={props.sessionId}

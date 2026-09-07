@@ -3,9 +3,10 @@ import { View, TextInput, Pressable, Platform } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
-import { useSessionMessages } from '@/sync/storage';
+import { useSessionMessages, useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { nextSearchCursor } from './searchCursor';
+import { useSessionSearch } from '@/hooks/useSessionSearch';
 
 export interface SessionSearchBarProps {
     sessionId: string;
@@ -29,7 +30,12 @@ function buildSnippet(text: string, at: number, queryLen: number): string {
 
 export const SessionSearchBar = React.memo((props: SessionSearchBarProps) => {
     const { theme } = useUnistyles();
-    const { messages } = useSessionMessages(props.sessionId);
+    const { messages: storedMessages } = useSessionMessages(props.sessionId);
+    const chatHistoryLimit = useSetting('joy__chatHistoryLimit');
+    const messages = React.useMemo(
+        () => chatHistoryLimit != null ? storedMessages.slice(0, chatHistoryLimit) : storedMessages,
+        [storedMessages, chatHistoryLimit],
+    );
     const [query, setQuery] = React.useState('');
     // The selection is a MESSAGE ID, mapped to an index against the current
     // match list: matches change while the bar is open (a failed optimistic
@@ -45,7 +51,11 @@ export const SessionSearchBar = React.memo((props: SessionSearchBarProps) => {
         return () => clearTimeout(t);
     }, []);
 
-    // Matches over the LOADED window only (older history pages in on scroll).
+    // Matches over the LOADED window only (older history pages in on scroll),
+    // and capped to what the list actually RENDERS: ChatList slices the stored
+    // messages by joy__chatHistoryLimit, so a hit past the cap was counted here
+    // and then failed to scroll — scrollToMessageId searches the rendered rows
+    // and returned false with no feedback at all (#639).
     // messages carry text on user-text / agent-text kinds.
     const matches = React.useMemo<Match[]>(() => {
         const q = query.trim().toLowerCase();
@@ -74,6 +84,12 @@ export const SessionSearchBar = React.memo((props: SessionSearchBarProps) => {
         if (next.messageId !== selectedId) setSelectedId(next.messageId);
         if (next.scroll && next.messageId) props.onScrollToMessage(next.messageId);
     }, [matches, query]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Publish the current hit so the row it lives in can mark it (#639).
+    const setMatch = useSessionSearch((st) => st.setMatch);
+    React.useEffect(() => {
+        setMatch(query.trim(), selectedId);
+    }, [query, selectedId, setMatch]);
 
     const go = React.useCallback((dir: 1 | -1) => {
         if (matches.length === 0) return;

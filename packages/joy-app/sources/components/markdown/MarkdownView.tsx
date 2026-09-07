@@ -1,4 +1,5 @@
 import { MarkdownSpan, parseMarkdown } from './parseMarkdown';
+import { highlightSpans, type HighlightableSpan } from './highlightSpans';
 import * as React from 'react';
 import { Image, Pressable, View, Platform } from 'react-native';
 import { HorizontalScrollView } from '../HorizontalScrollView';
@@ -37,6 +38,8 @@ export type Option = {
 
 export const MarkdownView = React.memo((props: { 
     markdown: string;
+    /** In-session search query to mark inside this body (#639). */
+    highlight?: string;
     onOptionPress?: (option: Option) => void;
     sessionId?: string;
 }) => {
@@ -109,25 +112,25 @@ export const MarkdownView = React.memo((props: {
             <View style={{ width: '100%' }} {...(Platform.OS === 'web' ? ({ dataSet: { joySelectable: 'true' } } as any) : {})} {...(webContextMenu as any)}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
+                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} highlight={props.highlight} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'header') {
-                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
+                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} highlight={props.highlight} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'horizontal-rule') {
                         return <View style={style.horizontalRule} key={index} />;
                     } else if (block.type === 'quote') {
-                        return <RenderQuoteBlock lines={block.lines} key={index} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
+                        return <RenderQuoteBlock lines={block.lines} key={index} selectable={selectable} native={nativeSelect} highlight={props.highlight} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'list') {
-                        return <RenderListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
+                        return <RenderListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} highlight={props.highlight} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'numbered-list') {
-                        return <RenderNumberedListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
+                        return <RenderNumberedListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} highlight={props.highlight} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'code-block') {
-                        return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} />;
+                        return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} highlight={props.highlight} />;
                     } else if (block.type === 'mermaid') {
                         return <MermaidRenderer content={block.content} key={index} />;
                     } else if (block.type === 'options') {
-                        return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onOptionPress={props.onOptionPress} />;
+                        return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} highlight={props.highlight} onOptionPress={props.onOptionPress} />;
                     } else if (block.type === 'table') {
-                        return <RenderTableBlock headers={block.headers} rows={block.rows} onLinkPress={handleLinkPress} selectable={selectable} native={nativeSelect} key={index} first={index === 0} last={index === blocks.length - 1} />;
+                        return <RenderTableBlock headers={block.headers} rows={block.rows} onLinkPress={handleLinkPress} selectable={selectable} native={nativeSelect} highlight={props.highlight} key={index} first={index === 0} last={index === blocks.length - 1} />;
                     } else if (block.type === 'image') {
                         // The URL is part of the key: a different image is a different decision (#94).
                         return <RenderImageBlock url={block.url} alt={block.alt} key={`${index}:${block.url}`} first={index === 0} last={index === blocks.length - 1} />;
@@ -222,6 +225,7 @@ function useJoyTextStyle(scaled: { fontSize: number; lineHeight: number } | null
         // theme's link colour instead of going invisible.
         linkColor: theme.colors.textLink ?? theme.colors.text,
         codeColor: theme.colors.text,
+        highlightColor: theme.colors.searchHighlight,
     }), [theme, scaled?.fontSize, scaled?.lineHeight]);
 }
 
@@ -254,21 +258,22 @@ function useNativeBlock(blockStyle: unknown, scaled: { fontSize: number; lineHei
 }
 
 /** MarkdownSpan[] (parser shape) -> JoyTextSpan[] (native record shape). */
-function toNativeSpans(spans: MarkdownSpan[]): JoyTextSpan[] {
+function toNativeSpans(spans: HighlightableSpan[]): JoyTextSpan[] {
     return spans.map((span) => ({
         text: span.text,
         bold: span.styles.includes('bold') || span.styles.includes('semibold'),
         italic: span.styles.includes('italic'),
         code: span.styles.includes('code'),
         url: span.url,
+        highlighted: span.highlighted ?? false,
     }));
 }
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
+function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, native: boolean, highlight?: string, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
     const blockStyle = [style.text, props.first && style.first, props.last && style.last, scaled];
     const native = useNativeBlock(blockStyle, scaled);
-    const nativeSpans = React.useMemo(() => toNativeSpans(props.spans), [props.spans]);
+    const nativeSpans = React.useMemo(() => toNativeSpans(highlightSpans(props.spans, props.highlight)), [props.spans, props.highlight]);
     // iOS: a UITextView so a phrase can actually be selected (#641). The block's
     // own margins stay on the wrapper so surrounding rhythm is unchanged.
     if (props.native) {
@@ -278,10 +283,10 @@ function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: b
             </View>
         );
     }
-    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last, scaled]}><RenderSpans spans={props.spans} baseStyle={[style.text, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
+    return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last, scaled]}><RenderSpans spans={highlightSpans(props.spans, props.highlight)} baseStyle={[style.text, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
-function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
+function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean, native: boolean, highlight?: string, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
     const native = useNativeBlock([style.text, style.quoteText, scaled], scaled);
     return (
@@ -291,17 +296,17 @@ function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean,
                     ? <View key={i} style={{ height: 8 }} />
                     : props.native
                         ? <View key={i} style={ZERO_BLOCK_MARGIN}>
-                            <SelectableText spans={toNativeSpans(spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                            <SelectableText spans={toNativeSpans(highlightSpans(spans, props.highlight))} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
                         </View>
                         : <Text key={i} selectable={props.selectable} style={[style.text, style.quoteText, scaled]}>
-                            <RenderSpans spans={spans} baseStyle={[style.text, style.quoteText, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
+                            <RenderSpans spans={highlightSpans(spans, props.highlight)} baseStyle={[style.text, style.quoteText, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
                         </Text>
             ))}
         </View>
     );
 }
 
-function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
+function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, native: boolean, highlight?: string, onLinkPress: (url: string) => void }) {
     const scale = useChatFontScale();
     const base = HEADER_BASE_METRICS[props.level];
     const scaled = scale === 1 ? null : { fontSize: base.fontSize * scale, lineHeight: base.lineHeight * scale };
@@ -311,11 +316,11 @@ function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: Markdow
     if (props.native) {
         return (
             <View style={native.wrapper}>
-                <SelectableText spans={toNativeSpans(props.spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                <SelectableText spans={toNativeSpans(highlightSpans(props.spans, props.highlight))} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
             </View>
         );
     }
-    return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
+    return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={highlightSpans(props.spans, props.highlight)} baseStyle={headerStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
 // The native text view sizes itself to its content; the block's own vertical
@@ -324,7 +329,7 @@ const ZERO_BLOCK_MARGIN = { marginTop: 0, marginBottom: 0 } as const;
 
 const BULLETS = ['•', '◦', '▪'] as const;
 
-function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
+function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, native: boolean, highlight?: string, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
     const listStyle = [style.text, style.list, scaled];
     const native = useNativeBlock(listStyle, scaled);
@@ -335,16 +340,16 @@ function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] 
                     <Text selectable={false} style={[listStyle, { marginRight: 8, marginTop: 1 }]}>{BULLETS[Math.min(item.depth, BULLETS.length - 1)]}</Text>
                     {props.native
                         ? <View style={[{ flex: 1 }, ZERO_BLOCK_MARGIN]}>
-                            <SelectableText spans={toNativeSpans(item.spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                            <SelectableText spans={toNativeSpans(highlightSpans(item.spans, props.highlight))} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
                         </View>
-                        : <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={item.spans} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>}
+                        : <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={highlightSpans(item.spans, props.highlight)} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>}
                 </View>
             ))}
         </View>
     );
 }
 
-function RenderNumberedListBlock(props: { items: { number: number, depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
+function RenderNumberedListBlock(props: { items: { number: number, depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, native: boolean, highlight?: string, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
     const listStyle = [style.text, style.list, scaled];
     const native = useNativeBlock(listStyle, scaled);
@@ -355,16 +360,16 @@ function RenderNumberedListBlock(props: { items: { number: number, depth: number
                     <Text selectable={false} style={[listStyle, { marginRight: 8, marginTop: 1 }]}>{item.number}.</Text>
                     {props.native
                         ? <View style={[{ flex: 1 }, ZERO_BLOCK_MARGIN]}>
-                            <SelectableText spans={toNativeSpans(item.spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                            <SelectableText spans={toNativeSpans(highlightSpans(item.spans, props.highlight))} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
                         </View>
-                        : <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={item.spans} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>}
+                        : <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={highlightSpans(item.spans, props.highlight)} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>}
                 </View>
             ))}
         </View>
     );
 }
 
-function RenderCodeBlock(props: { content: string, language: string | null, first: boolean, last: boolean, selectable: boolean, native: boolean }) {
+function RenderCodeBlock(props: { content: string, language: string | null, first: boolean, last: boolean, selectable: boolean, native: boolean, highlight?: string }) {
     const [isHovered, setIsHovered] = React.useState(false);
 
     const copyCode = React.useCallback(guarded(async () => {
@@ -460,6 +465,7 @@ function RenderOptionsBlock(props: {
     last: boolean,
     selectable: boolean,
     native: boolean,
+    highlight?: string,
     onOptionPress?: (option: Option) => void
 }) {
     const { armedKey, requireDoubleTap } = useDoubleTap();
@@ -509,7 +515,8 @@ function RenderSpans(props: RenderSpanProps) {
     const scaled = useScaledBodyStyle();
     return (<>
         {props.spans.map((span, index) => {
-            const spanStyles = [span.styles.map(s => style[s]), span.styles.includes('code') ? scaled : null];
+            const spanStyles = [span.styles.map(s => style[s]), span.styles.includes('code') ? scaled : null,
+                (span as HighlightableSpan).highlighted ? style.searchHit : null];
             if (span.url) {
                 const isExternalLink = isHttpMarkdownLink(span.url);
                 return (
@@ -568,6 +575,7 @@ function RenderTableBlock(props: {
     onLinkPress: (url: string) => void,
     selectable: boolean,
     native: boolean,
+    highlight?: string,
     first: boolean,
     last: boolean
 }) {
@@ -663,6 +671,12 @@ const style = StyleSheet.create((theme) => ({
         ...Typography.mono(),
         fontSize: 16,
         lineHeight: 24,
+        color: theme.colors.text,
+    },
+    // The in-session search hit (#639). A background rather than a colour so it
+    // survives on top of whatever the span already is — bold, code, a link.
+    searchHit: {
+        backgroundColor: theme.colors.searchHighlight,
         color: theme.colors.text,
     },
     link: {
