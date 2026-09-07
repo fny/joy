@@ -21,6 +21,7 @@ import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { useUnistyles } from 'react-native-unistyles';
+import { StyleSheet as RNStyleSheet } from 'react-native';
 import { getDefaultFont, getMonoFont } from '@/constants/Typography';
 import { SelectableText, isSelectableTextAvailable, type JoyTextSpan, type JoyTextStyle } from '../../../modules/joy-selectable-text';
 
@@ -60,8 +61,12 @@ export const MarkdownView = React.memo((props: {
     // iOS selects in place through the native UITextView view (#641), so it
     // always reports selectable and never mounts the long-press wrapper — that
     // gesture would fight the text view's own selection gesture, which is the
-    // exact collision the comment above describes.
-    const selectable = Platform.OS === 'web' || isSelectableTextAvailable || !markdownCopyV2;
+    // exact collision the comment above describes. Behind a Features toggle
+    // (Select Text In Place) so a bad native build is one switch from the old
+    // behaviour rather than a new binary.
+    const nativeSelectionSetting = useLocalSetting('nativeTextSelection');
+    const nativeSelect = isSelectableTextAvailable && nativeSelectionSetting;
+    const selectable = Platform.OS === 'web' || nativeSelect || !markdownCopyV2;
     const router = useRouter();
 
     const handleLinkPress = React.useCallback((url: string) => {
@@ -104,25 +109,25 @@ export const MarkdownView = React.memo((props: {
             <View style={{ width: '100%' }} {...(Platform.OS === 'web' ? ({ dataSet: { joySelectable: 'true' } } as any) : {})} {...(webContextMenu as any)}>
                 {blocks.map((block, index) => {
                     if (block.type === 'text') {
-                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
+                        return <RenderTextBlock spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'header') {
-                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
+                        return <RenderHeaderBlock level={block.level} spans={block.content} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'horizontal-rule') {
                         return <View style={style.horizontalRule} key={index} />;
                     } else if (block.type === 'quote') {
-                        return <RenderQuoteBlock lines={block.lines} key={index} selectable={selectable} onLinkPress={handleLinkPress} />;
+                        return <RenderQuoteBlock lines={block.lines} key={index} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'list') {
-                        return <RenderListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
+                        return <RenderListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'numbered-list') {
-                        return <RenderNumberedListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onLinkPress={handleLinkPress} />;
+                        return <RenderNumberedListBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onLinkPress={handleLinkPress} />;
                     } else if (block.type === 'code-block') {
-                        return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} />;
+                        return <RenderCodeBlock content={block.content} language={block.language} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} />;
                     } else if (block.type === 'mermaid') {
                         return <MermaidRenderer content={block.content} key={index} />;
                     } else if (block.type === 'options') {
-                        return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} onOptionPress={props.onOptionPress} />;
+                        return <RenderOptionsBlock items={block.items} key={index} first={index === 0} last={index === blocks.length - 1} selectable={selectable} native={nativeSelect} onOptionPress={props.onOptionPress} />;
                     } else if (block.type === 'table') {
-                        return <RenderTableBlock headers={block.headers} rows={block.rows} onLinkPress={handleLinkPress} selectable={selectable} key={index} first={index === 0} last={index === blocks.length - 1} />;
+                        return <RenderTableBlock headers={block.headers} rows={block.rows} onLinkPress={handleLinkPress} selectable={selectable} native={nativeSelect} key={index} first={index === 0} last={index === blocks.length - 1} />;
                     } else if (block.type === 'image') {
                         // The URL is part of the key: a different image is a different decision (#94).
                         return <RenderImageBlock url={block.url} alt={block.alt} key={`${index}:${block.url}`} first={index === 0} last={index === blocks.length - 1} />;
@@ -134,7 +139,7 @@ export const MarkdownView = React.memo((props: {
         );
     }
 
-    if (!markdownCopyV2 || isSelectableTextAvailable) {
+    if (!markdownCopyV2 || nativeSelect) {
         return renderContent();
     }
     
@@ -220,6 +225,34 @@ function useJoyTextStyle(scaled: { fontSize: number; lineHeight: number } | null
     }), [theme, scaled?.fontSize, scaled?.lineHeight]);
 }
 
+// A block's style array mixes layout (margins) with text metrics (size, colour,
+// family). A View may only carry the former and the native text view needs the
+// latter, so this splits one into the other rather than duplicating every
+// block's spacing as a second stylesheet entry.
+const LAYOUT_KEYS = ['margin', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight',
+    'padding', 'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight', 'flex', 'alignSelf'] as const;
+
+function useNativeBlock(blockStyle: unknown, scaled: { fontSize: number; lineHeight: number } | null) {
+    const base = useJoyTextStyle(scaled);
+    const flat = (RNStyleSheet.flatten(blockStyle as any) ?? {}) as Record<string, any>;
+    const wrapper: Record<string, any> = {};
+    for (const key of LAYOUT_KEYS) {
+        if (flat[key] !== undefined) wrapper[key] = flat[key];
+    }
+    // A numeric/named bold weight cannot be expressed as a span, so it is
+    // folded into the family the whole block renders in (headers).
+    const weight = String(flat.fontWeight ?? '');
+    const isBold = weight === 'bold' || (/^\d+$/.test(weight) && Number(weight) >= 600);
+    const textStyle: JoyTextStyle = {
+        ...base,
+        fontSize: flat.fontSize ?? base.fontSize,
+        lineHeight: flat.lineHeight ?? base.lineHeight,
+        color: flat.color ?? base.color,
+        fontFamily: isBold ? getDefaultFont('semiBold') : (flat.fontFamily ?? base.fontFamily),
+    };
+    return { wrapper, textStyle };
+}
+
 /** MarkdownSpan[] (parser shape) -> JoyTextSpan[] (native record shape). */
 function toNativeSpans(spans: MarkdownSpan[]): JoyTextSpan[] {
     return spans.map((span) => ({
@@ -231,79 +264,107 @@ function toNativeSpans(spans: MarkdownSpan[]): JoyTextSpan[] {
     }));
 }
 
-function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+function RenderTextBlock(props: { spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
-    const nativeStyle = useJoyTextStyle(scaled);
+    const blockStyle = [style.text, props.first && style.first, props.last && style.last, scaled];
+    const native = useNativeBlock(blockStyle, scaled);
     const nativeSpans = React.useMemo(() => toNativeSpans(props.spans), [props.spans]);
     // iOS: a UITextView so a phrase can actually be selected (#641). The block's
     // own margins stay on the wrapper so surrounding rhythm is unchanged.
-    if (isSelectableTextAvailable && props.selectable) {
+    if (props.native) {
         return (
-            <View style={[style.text, props.first && style.first, props.last && style.last, { height: undefined }]}>
-                <SelectableText spans={nativeSpans} textStyle={nativeStyle} onLinkPress={props.onLinkPress} />
+            <View style={native.wrapper}>
+                <SelectableText spans={nativeSpans} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
             </View>
         );
     }
     return <Text selectable={props.selectable} style={[style.text, props.first && style.first, props.last && style.last, scaled]}><RenderSpans spans={props.spans} baseStyle={[style.text, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
-function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean, onLinkPress: (url: string) => void }) {
+function RenderQuoteBlock(props: { lines: MarkdownSpan[][], selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
+    const native = useNativeBlock([style.text, style.quoteText, scaled], scaled);
     return (
         <View style={style.quote}>
             {props.lines.map((spans, i) => (
                 spans.length === 0
                     ? <View key={i} style={{ height: 8 }} />
-                    : <Text key={i} selectable={props.selectable} style={[style.text, style.quoteText, scaled]}>
-                        <RenderSpans spans={spans} baseStyle={[style.text, style.quoteText, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
-                    </Text>
+                    : props.native
+                        ? <View key={i} style={ZERO_BLOCK_MARGIN}>
+                            <SelectableText spans={toNativeSpans(spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                        </View>
+                        : <Text key={i} selectable={props.selectable} style={[style.text, style.quoteText, scaled]}>
+                            <RenderSpans spans={spans} baseStyle={[style.text, style.quoteText, scaled]} selectable={props.selectable} onLinkPress={props.onLinkPress} />
+                        </Text>
             ))}
         </View>
     );
 }
 
-function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+function RenderHeaderBlock(props: { level: 1 | 2 | 3 | 4 | 5 | 6, spans: MarkdownSpan[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
     const scale = useChatFontScale();
     const base = HEADER_BASE_METRICS[props.level];
     const scaled = scale === 1 ? null : { fontSize: base.fontSize * scale, lineHeight: base.lineHeight * scale };
     const s = (style as any)[`header${props.level}`];
     const headerStyle = [style.header, s, props.first && style.first, props.last && style.last, scaled];
+    const native = useNativeBlock(headerStyle, scaled ?? base);
+    if (props.native) {
+        return (
+            <View style={native.wrapper}>
+                <SelectableText spans={toNativeSpans(props.spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+            </View>
+        );
+    }
     return <Text selectable={props.selectable} style={headerStyle}><RenderSpans spans={props.spans} baseStyle={headerStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>;
 }
 
+// The native text view sizes itself to its content; the block's own vertical
+// rhythm stays on the wrapper, so the inner view must not add margins again.
+const ZERO_BLOCK_MARGIN = { marginTop: 0, marginBottom: 0 } as const;
+
 const BULLETS = ['•', '◦', '▪'] as const;
 
-function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+function RenderListBlock(props: { items: { depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
     const listStyle = [style.text, style.list, scaled];
+    const native = useNativeBlock(listStyle, scaled);
     return (
         <View style={{ flexDirection: 'column', marginBottom: 8, gap: 6 }}>
             {props.items.map((item, index) => (
                 <View key={index} style={{ flexDirection: 'row', alignItems: 'flex-start', paddingLeft: item.depth * 16 }}>
                     <Text selectable={false} style={[listStyle, { marginRight: 8, marginTop: 1 }]}>{BULLETS[Math.min(item.depth, BULLETS.length - 1)]}</Text>
-                    <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={item.spans} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>
+                    {props.native
+                        ? <View style={[{ flex: 1 }, ZERO_BLOCK_MARGIN]}>
+                            <SelectableText spans={toNativeSpans(item.spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                        </View>
+                        : <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={item.spans} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>}
                 </View>
             ))}
         </View>
     );
 }
 
-function RenderNumberedListBlock(props: { items: { number: number, depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, onLinkPress: (url: string) => void }) {
+function RenderNumberedListBlock(props: { items: { number: number, depth: number, spans: MarkdownSpan[] }[], first: boolean, last: boolean, selectable: boolean, native: boolean, onLinkPress: (url: string) => void }) {
     const scaled = useScaledBodyStyle();
     const listStyle = [style.text, style.list, scaled];
+    const native = useNativeBlock(listStyle, scaled);
     return (
         <View style={{ flexDirection: 'column', marginBottom: 8, gap: 6 }}>
             {props.items.map((item, index) => (
                 <View key={index} style={{ flexDirection: 'row', alignItems: 'flex-start', paddingLeft: item.depth * 16 }}>
                     <Text selectable={false} style={[listStyle, { marginRight: 8, marginTop: 1 }]}>{item.number}.</Text>
-                    <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={item.spans} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>
+                    {props.native
+                        ? <View style={[{ flex: 1 }, ZERO_BLOCK_MARGIN]}>
+                            <SelectableText spans={toNativeSpans(item.spans)} textStyle={native.textStyle} onLinkPress={props.onLinkPress} />
+                        </View>
+                        : <Text selectable={props.selectable} style={[listStyle, { flex: 1 }]}><RenderSpans spans={item.spans} baseStyle={listStyle} selectable={props.selectable} onLinkPress={props.onLinkPress} /></Text>}
                 </View>
             ))}
         </View>
     );
 }
 
-function RenderCodeBlock(props: { content: string, language: string | null, first: boolean, last: boolean, selectable: boolean }) {
+function RenderCodeBlock(props: { content: string, language: string | null, first: boolean, last: boolean, selectable: boolean, native: boolean }) {
     const [isHovered, setIsHovered] = React.useState(false);
 
     const copyCode = React.useCallback(guarded(async () => {
@@ -398,6 +459,7 @@ function RenderOptionsBlock(props: {
     first: boolean,
     last: boolean,
     selectable: boolean,
+    native: boolean,
     onOptionPress?: (option: Option) => void
 }) {
     const { armedKey, requireDoubleTap } = useDoubleTap();
@@ -505,6 +567,7 @@ function RenderTableBlock(props: {
     rows: MarkdownSpan[][][],
     onLinkPress: (url: string) => void,
     selectable: boolean,
+    native: boolean,
     first: boolean,
     last: boolean
 }) {

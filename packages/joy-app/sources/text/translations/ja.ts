@@ -237,6 +237,8 @@ export const ja: TranslationStructure = {
         commandPalette: 'コマンドパレット',
         commandPaletteEnabled: '⌘Kで開く',
         commandPaletteDisabled: 'クイックコマンドアクセスは無効',
+        nativeTextSelection: 'その場でテキストを選択',
+        nativeTextSelectionSubtitle: 'iOS: メッセージを長押しして語句を選択',
         markdownCopyV2: 'Markdownコピー v2',
         markdownCopyV2Subtitle: '長押しでコピーモーダルを開く',
         hideInactiveSessions: '非アクティブセッションを非表示',

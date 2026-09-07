@@ -236,6 +236,8 @@ export const ca: TranslationStructure = {
         commandPalette: 'Paleta de comandes',
         commandPaletteEnabled: 'Prem ⌘K per obrir',
         commandPaletteDisabled: 'Accés ràpid a comandes desactivat',
+        nativeTextSelection: 'Selecciona el text al lloc',
+        nativeTextSelectionSubtitle: 'iOS: mantén premut un missatge per seleccionar una frase',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Pulsació llarga obre modal de còpia',
         hideInactiveSessions: 'Amaga les sessions inactives',

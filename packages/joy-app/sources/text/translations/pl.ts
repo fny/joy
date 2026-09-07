@@ -253,6 +253,8 @@ export const pl: TranslationStructure = {
         commandPalette: 'Paleta poleceń',
         commandPaletteEnabled: 'Naciśnij ⌘K, aby otworzyć',
         commandPaletteDisabled: 'Szybki dostęp do poleceń wyłączony',
+        nativeTextSelection: 'Zaznaczanie tekstu w miejscu',
+        nativeTextSelectionSubtitle: 'iOS: przytrzymaj wiadomość, aby zaznaczyć fragment',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Długie naciśnięcie otwiera modal kopiowania',
         hideInactiveSessions: 'Ukryj nieaktywne sesje',

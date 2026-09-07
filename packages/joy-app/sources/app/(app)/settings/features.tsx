@@ -15,6 +15,7 @@ export default function FeaturesSettingsScreen() {
     const [agentInputEnterToSend, setAgentInputEnterToSend] = useSettingMutable('agentInputEnterToSend');
     const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
+    const [nativeTextSelection, setNativeTextSelection] = useLocalSettingMutable('nativeTextSelection');
     const [limitSessionMemory, setLimitSessionMemory] = useLocalSettingMutable('limitSessionMemory');
     const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
@@ -134,6 +135,20 @@ export default function FeaturesSettingsScreen() {
                 title={t('settingsFeatures.experiments')}
                 footer={t('settingsFeatures.experimentsDescription')}
             >
+                {Platform.OS === 'ios' && (
+                    <Item
+                        title={t('settingsFeatures.nativeTextSelection')}
+                        subtitle={t('settingsFeatures.nativeTextSelectionSubtitle')}
+                        icon={<Ionicons name="text-outline" size={29} color="#5856D6" />}
+                        rightElement={
+                            <Switch
+                                value={nativeTextSelection}
+                                onValueChange={setNativeTextSelection}
+                            />
+                        }
+                        showChevron={false}
+                    />
+                )}
                 <Item
                     title={t('settingsFeatures.markdownCopyV2')}
                     subtitle={t('settingsFeatures.markdownCopyV2Subtitle')}

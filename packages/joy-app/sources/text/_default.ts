@@ -262,6 +262,8 @@ export const en = {
         commandPalette: 'Command Palette',
         commandPaletteEnabled: 'Press ⌘K to open',
         commandPaletteDisabled: 'Quick command access disabled',
+        nativeTextSelection: 'Select Text In Place',
+        nativeTextSelectionSubtitle: 'iOS: long press a message to select a phrase',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Long press opens copy modal',
         hideInactiveSessions: 'Hide inactive sessions',

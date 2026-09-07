@@ -237,6 +237,8 @@ export const zhHans: TranslationStructure = {
         commandPalette: '命令面板',
         commandPaletteEnabled: '按 ⌘K 打开',
         commandPaletteDisabled: '快速命令访问已禁用',
+        nativeTextSelection: '就地选择文本',
+        nativeTextSelectionSubtitle: 'iOS：长按消息以选择词句',
         markdownCopyV2: 'Markdown 复制 v2',
         markdownCopyV2Subtitle: '长按打开复制模态框',
         hideInactiveSessions: '隐藏非活跃会话',

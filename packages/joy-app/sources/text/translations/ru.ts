@@ -214,6 +214,8 @@ export const ru: TranslationStructure = {
         commandPalette: 'Command Palette',
         commandPaletteEnabled: 'Нажмите ⌘K для открытия',
         commandPaletteDisabled: 'Быстрый доступ к командам отключён',
+        nativeTextSelection: 'Выделение текста на месте',
+        nativeTextSelectionSubtitle: 'iOS: удерживайте сообщение, чтобы выделить фрагмент',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Долгое нажатие открывает модальное окно копирования',
         hideInactiveSessions: 'Скрывать неактивные сессии',
