@@ -43,6 +43,16 @@ export const MarkdownView = React.memo((props: {
     // we disable the selectable property on individual text segments on mobile only. Instead, the long press
     // will be handled by a wrapper Pressable. If we don't disable the selectable property, then you will see
     // the native copy modal come up at the same time as the long press handler is fired.
+    //
+    // What `selectable` actually buys you on iOS (#641), since the name misleads:
+    // NOTHING resembling selection. RCTParagraphComponentView wires a
+    // UILongPressGestureRecognizer that presents a UIEditMenuInteraction whose
+    // only action is copy:, and copy: puts the WHOLE attributedText on the
+    // pasteboard. No handles, no highlight, no partial selection — on iOS that
+    // is the entire feature. Real phrase-level selection needs a TextInput,
+    // which is exactly what the /text-selection screen below renders. So on
+    // iOS this flag does not trade selection away for copy; turning it ON is
+    // the only way to get selection at all, which is why it now defaults on.
     const markdownCopyV2 = useLocalSetting('markdownCopyV2');
     const selectable = Platform.OS === 'web' || !markdownCopyV2;
     const router = useRouter();

@@ -263,7 +263,7 @@ export const en = {
         commandPaletteEnabled: 'Press ⌘K to open',
         commandPaletteDisabled: 'Quick command access disabled',
         markdownCopyV2: 'Markdown Copy v2',
-        markdownCopyV2Subtitle: 'Long press opens copy modal',
+        markdownCopyV2Subtitle: 'Long press to select and copy text',
         hideInactiveSessions: 'Hide inactive sessions',
         hideInactiveSessionsSubtitle: 'Show only active chats in your list',
         groupToolCalls: 'Group Tool Calls',
