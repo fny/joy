@@ -644,6 +644,20 @@ app.
   succeeds against our own group). Pushed at 6d03905f; all three sent to
   Astra as one batched round. **2 open**: #127 (rollout flag) and #628.
 
+- 2026-09-11 (morning) — Astra's Wave F31 verdicts: #628 **fixed** at
+  daf4bb5e (closed after five rounds); the failed-spawn signalling finding
+  **fixed** at 6d03905f and filed post-hoc as #630 (closed; Astra reproduced
+  400 bad kill syscalls on the parent commit and zero on the fix — it also
+  suggests an upstream Node/libuv report for `child.kill()` on a pid-less
+  ChildProcess, not done here); the adoption epoch (8049b0ae) **partial**:
+  first-completion-wins dropped a genuinely newer terminal/cancelled behind an
+  earlier running adoption, leaving the local command running with no
+  consumer for the cancellation. Fixed in 3d6681a3: cancellation is monotone
+  (late cancel answers are carried, not dropped; the epoch only de-duplicates
+  same-class answers), one closing cancel per turn, and the long terminal
+  wait is woken by the sweep's parked cancellation instead of running to the
+  cap. Pushed; sent to Astra as waveF32. **1 open**: #127 (rollout flag).
+
 ## Campaign summary (as of 2026-09-10 late)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
