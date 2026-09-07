@@ -625,6 +625,13 @@ export const zhHans: TranslationStructure = {
             badgePlan: '计划',
         },
         context: {
+            title: '上下文',
+            used: '已使用',
+            remainingLabel: '剩余',
+            input: '输入 token',
+            output: '输出 token',
+            cacheRead: '缓存读取',
+            cacheWrite: '缓存写入',
             remaining: ({ percent }: { percent: number }) => `剩余 ${percent}%`,
         },
         suggestion: {

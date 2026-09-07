@@ -624,6 +624,13 @@ export const ca: TranslationStructure = {
             badgePlan: 'Planificació',
         },
         context: {
+            title: 'CONTEXT',
+            used: 'Utilitzat',
+            remainingLabel: 'Restant',
+            input: 'Tokens d\'entrada',
+            output: 'Tokens de sortida',
+            cacheRead: 'Lectura de memòria cau',
+            cacheWrite: 'Escriptura de memòria cau',
             remaining: ({ percent }: { percent: number }) => `${percent}% restant`,
         },
         suggestion: {

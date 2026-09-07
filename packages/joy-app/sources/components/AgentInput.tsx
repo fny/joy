@@ -348,6 +348,11 @@ type StatusRowProps = {
      *  nothing is running, so the text stays inert rather than opening an
      *  empty list. */
     onStatusPress?: () => void;
+    /** agent · model · effort · perm opens the same overlay as the cog (#647):
+     *  it names exactly what that overlay changes, so it should be the way in. */
+    onSettingsPress?: () => void;
+    /** The usage segment opens the context breakdown behind the percentage. */
+    onUsagePress?: () => void;
 };
 
 const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRowProps) {
@@ -475,16 +480,39 @@ const AgentInputStatusRow = React.memo(function AgentInputStatusRow(p: StatusRow
                     segments.push(<Text key="cost" style={dim}>{`$${cost}`}</Text>);
                 }
                 if (showPermission) { if (segments.length) pushDot(); segments.push(<Text key="perm" style={{ fontSize: 11, color: permColor, ...Typography.default() }}>{p.permissionLabel}</Text>); }
-                // Usage trails the cluster: agent · model · effort · perm · 67% left
-                // (#637). It keeps its own warning colour — that is the whole point
-                // of the segment — so it is not part of the dim run.
-                if (p.contextWarning) {
-                    if (segments.length) pushDot();
-                    segments.push(<Text key="usage" style={{ fontSize: 11, color: p.contextWarning.color, ...Typography.default() }}>{p.contextWarning.text}</Text>);
-                }
+                // Usage still trails the cluster (#637) but is rendered below as its
+                // own press target, so tapping the percentage opens the context
+                // breakdown rather than the settings overlay.
+                // The label cluster IS the settings overlay's contents in words —
+                // tapping what you want to change is the obvious gesture (#647).
+                // Usage carries its own press target so the two do not fight.
                 return (
                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                        {segments}
+                        <Pressable
+                            onPress={p.onSettingsPress}
+                            disabled={!p.onSettingsPress}
+                            hitSlop={8}
+                            accessibilityRole={p.onSettingsPress ? 'button' : undefined}
+                            accessibilityLabel={p.onSettingsPress ? t('agentInput.permissionMode.title') : undefined}
+                            style={{ flexDirection: 'row', alignItems: 'center' }}
+                        >
+                            {segments}
+                        </Pressable>
+                        {p.contextWarning && (
+                            <Pressable
+                                onPress={p.onUsagePress}
+                                disabled={!p.onUsagePress}
+                                hitSlop={8}
+                                accessibilityRole={p.onUsagePress ? 'button' : undefined}
+                                accessibilityLabel={p.onUsagePress ? t('agentInput.context.title') : undefined}
+                                style={{ flexDirection: 'row', alignItems: 'center' }}
+                            >
+                                {segments.length > 0 && <Text style={dim}>{' · '}</Text>}
+                                <Text style={{ fontSize: 11, color: p.contextWarning.color, ...Typography.default() }}>
+                                    {p.contextWarning.text}
+                                </Text>
+                            </Pressable>
+                        )}
                     </View>
                 );
             })()}
@@ -851,9 +879,19 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     // Settings modal state
     const [showSettings, setShowSettings] = React.useState(false);
 
+    // The context breakdown behind the "% left" segment (#647). Separate state
+    // from the settings overlay so the two can never be open at once.
+    const [showUsage, setShowUsage] = React.useState(false);
+    const handleUsagePress = React.useCallback(() => {
+        hapticsLight();
+        setShowSettings(false);
+        setShowUsage(prev => !prev);
+    }, []);
+
     // Handle settings button press
     const handleSettingsPress = React.useCallback(() => {
         hapticsLight();
+        setShowUsage(false);
         setShowSettings(prev => !prev);
     }, []);
 
@@ -1002,6 +1040,53 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             itemHeight={48}
                         />
                     </View>
+                )}
+
+                {/* Context breakdown — what the "% left" segment is measuring (#647).
+                    Not account rate limits: the app has no such data. This is the
+                    conversation's own context window and the tokens behind it. */}
+                {showUsage && props.usageData && (
+                    <>
+                        <TouchableWithoutFeedback onPress={() => setShowUsage(false)}>
+                            <View style={styles.overlayBackdrop} />
+                        </TouchableWithoutFeedback>
+                        <View style={[
+                            styles.settingsOverlay,
+                            { paddingHorizontal: screenWidth > 700 ? 0 : 8 }
+                        ]}>
+                            <FloatingOverlay maxHeight={320} keyboardShouldPersistTaps="always">
+                                <View style={styles.overlaySection}>
+                                    <Text style={styles.overlaySectionTitle}>{t('agentInput.context.title')}</Text>
+                                    {(() => {
+                                        const u = props.usageData!;
+                                        const usedPct = Math.min(100, (u.contextSize / MAX_CONTEXT_SIZE) * 100);
+                                        const rows: Array<[string, string]> = [
+                                            [t('agentInput.context.used'), `${u.contextSize.toLocaleString()} / ${MAX_CONTEXT_SIZE.toLocaleString()}`],
+                                            [t('agentInput.context.remainingLabel'), `${Math.round(100 - usedPct)}%`],
+                                            [t('agentInput.context.input'), u.inputTokens.toLocaleString()],
+                                            [t('agentInput.context.output'), u.outputTokens.toLocaleString()],
+                                            [t('agentInput.context.cacheRead'), u.cacheRead.toLocaleString()],
+                                            [t('agentInput.context.cacheWrite'), u.cacheCreation.toLocaleString()],
+                                        ];
+                                        return (
+                                            <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
+                                                {/* A bar first: the number is the detail, the fill is the answer. */}
+                                                <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.divider, overflow: 'hidden', marginBottom: 10 }}>
+                                                    <View style={{ width: `${usedPct}%`, height: '100%', backgroundColor: theme.colors.warning }} />
+                                                </View>
+                                                {rows.map(([label, value]) => (
+                                                    <View key={label} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 }}>
+                                                        <Text style={{ fontSize: 13, color: theme.colors.textSecondary, ...Typography.default() }}>{label}</Text>
+                                                        <Text style={{ fontSize: 13, color: theme.colors.text, ...Typography.default() }}>{value}</Text>
+                                                    </View>
+                                                ))}
+                                            </View>
+                                        );
+                                    })()}
+                                </View>
+                            </FloatingOverlay>
+                        </View>
+                    </>
                 )}
 
                 {/* Settings overlay */}
@@ -1274,6 +1359,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     costUsd={props.costUsd}
                     zenMode={props.zenMode}
                     onStatusPress={props.onStatusPress}
+                    onSettingsPress={handleSettingsPress}
+                    onUsagePress={props.usageData ? handleUsagePress : undefined}
                 />
 
                 <AgentInputContextChips

@@ -624,6 +624,13 @@ export const zhHant: TranslationStructure = {
             badgePlan: '計畫',
         },
         context: {
+            title: '上下文',
+            used: '已使用',
+            remainingLabel: '剩餘',
+            input: '輸入 token',
+            output: '輸出 token',
+            cacheRead: '快取讀取',
+            cacheWrite: '快取寫入',
             remaining: ({ percent }: { percent: number }) => `剩餘 ${percent}%`,
         },
         suggestion: {

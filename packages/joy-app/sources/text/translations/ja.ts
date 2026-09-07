@@ -625,6 +625,13 @@ export const ja: TranslationStructure = {
             badgePlan: 'プラン',
         },
         context: {
+            title: 'コンテキスト',
+            used: '使用量',
+            remainingLabel: '残り',
+            input: '入力トークン',
+            output: '出力トークン',
+            cacheRead: 'キャッシュ読み取り',
+            cacheWrite: 'キャッシュ書き込み',
             remaining: ({ percent }: { percent: number }) => `残り ${percent}%`,
         },
         suggestion: {

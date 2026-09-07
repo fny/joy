@@ -622,6 +622,13 @@ export const it: TranslationStructure = {
             badgePlan: 'Pianificazione',
         },
         context: {
+            title: 'CONTESTO',
+            used: 'Usato',
+            remainingLabel: 'Rimanente',
+            input: 'Token in ingresso',
+            output: 'Token in uscita',
+            cacheRead: 'Lettura cache',
+            cacheWrite: 'Scrittura cache',
             remaining: ({ percent }: { percent: number }) => `${percent}% restante`,
         },
         suggestion: {

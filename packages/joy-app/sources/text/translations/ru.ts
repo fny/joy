@@ -640,6 +640,13 @@ export const ru: TranslationStructure = {
             badgePlan: 'Планирование',
         },
         context: {
+            title: 'КОНТЕКСТ',
+            used: 'Использовано',
+            remainingLabel: 'Осталось',
+            input: 'Входные токены',
+            output: 'Выходные токены',
+            cacheRead: 'Чтение кэша',
+            cacheWrite: 'Запись кэша',
             remaining: ({ percent }: { percent: number }) => `Осталось ${percent}%`,
         },
         suggestion: {

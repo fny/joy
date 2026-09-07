@@ -673,6 +673,13 @@ export const en = {
             badgePlan: 'plan',
         },
         context: {
+            title: 'CONTEXT',
+            used: 'Used',
+            remainingLabel: 'Left',
+            input: 'Input tokens',
+            output: 'Output tokens',
+            cacheRead: 'Cache read',
+            cacheWrite: 'Cache write',
             remaining: ({ percent }: { percent: number }) => `${percent}% left`,
         },
         suggestion: {
