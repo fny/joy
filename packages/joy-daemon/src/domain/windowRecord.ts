@@ -67,6 +67,14 @@ export interface WindowRecord {
    *  agent's <joy-title> back to a title from days ago (one session had 3195
    *  copies of the same stale value). */
   lastAiTitle?: string;
+  /** The title the AGENT last set with a <joy-title/> tag. Persisted because
+   *  the agent OWNS the title once it re-titles (#631): Claude re-derives its
+   *  ai-title off the first message of a conversation and never revisits it,
+   *  while a session here lives for days and pivots, so a later ai-title
+   *  carries strictly less information than the agent's tag and must not
+   *  stomp it. Released by a user /title (which takes ownership) or by a
+   *  /clear (which starts a new conversation). */
+  agentTitle?: string;
   /** Agent type — the discriminator recovery uses to reconstruct the right
    *  session class (claude Session vs CodexSession). Absent = claude (legacy). */
   agent?: "claude" | "codex" | "opencode" | "pi" | "agy";
@@ -255,7 +263,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  when the state dir refused the write. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string }; handoff?: JoyHandoffInfo | null; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string }; handoff?: JoyHandoffInfo | null; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
   baseDir = defaultStateDir(),
 ): boolean {
   try {
@@ -282,6 +290,7 @@ export function saveWindowRecord(
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       userTitle: patch.userTitle === null ? undefined : patch.userTitle ?? prev?.userTitle,
       lastAiTitle: patch.lastAiTitle ?? prev?.lastAiTitle,
+      agentTitle: patch.agentTitle === null ? undefined : patch.agentTitle ?? prev?.agentTitle,
       agent: patch.agent ?? prev?.agent,
       codexThreadId: patch.codexThreadId ?? prev?.codexThreadId,
       codexSocketPath: patch.codexSocketPath ?? prev?.codexSocketPath,

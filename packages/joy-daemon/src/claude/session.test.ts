@@ -1136,10 +1136,15 @@ test("dialogFromPane: quoted ready-box ABOVE a real dialog does not un-match it"
 // The two AI title paths: Claude's ai-title transcript entries and the agent's
 // <joy-title/> tag in assistant text. Driven through onTranscriptEntry against
 // a real Session + mock relay — the exact live path minus the file watcher.
+// A UNIQUE id per session: the title state (lock, lastAiTitle, agentTitle) is
+// persisted in the window record, so sharing an id leaks one test's title
+// ownership into the next.
+let titleSeq = 0;
 function titleSession() {
   const summaries: string[] = [];
+  const id = `t1-${++titleSeq}-${process.pid}`;
   const s = new Session(
-    { id: "t1", tmuxWindow: "joy:j-t1", cwd: "/tmp/t", flags: [], status: "active", startedAt: 0, claudeSessionId: "sid-t1" } as any,
+    { id, tmuxWindow: `joy:j-${id}`, cwd: "/tmp/t", flags: [], status: "active", startedAt: 0, claudeSessionId: `sid-${id}` } as any,
     { relayClient: null, broadcast: () => {}, addChatMessage: () => {} } as any,
   );
   const rs: any = {
@@ -1185,10 +1190,33 @@ test("title e2e: stale ai-title re-emission does NOT stomp an agent title; a NEW
   // Stale re-emission (identical value) — must NOT revert the agent title.
   s.onTranscriptEntry({ type: "ai-title", aiTitle: "Disable suggestions", timestamp: ts() } as any);
   expect(s.toJSON().summary).toBe("Queue debugging");
-  // A genuinely NEW ai-title still applies (real re-title, e.g. user renamed in CLI).
+  // A genuinely NEW ai-title must ALSO not apply (#631). This assertion used to
+  // read the other way, and that is precisely the bug: Claude derives its
+  // ai-title from the first message of a conversation and never revisits it, so
+  // "new to us" does not mean "better than the agent's tag" — it usually means
+  // Claude just got around to titling stale context. The agent owns the title
+  // until the user or a /clear takes it back.
   s.onTranscriptEntry({ type: "ai-title", aiTitle: "Brand new topic", timestamp: ts() } as any);
-  expect(s.toJSON().summary).toBe("Brand new topic");
-  expect(summaries).toEqual(["Disable suggestions", "Queue debugging", "Brand new topic"]);
+  expect(s.toJSON().summary).toBe("Queue debugging");
+  expect(summaries).toEqual(["Disable suggestions", "Queue debugging"]);
+});
+
+test("title e2e: a user /clear releases the agent title so the next ai-title applies", () => {
+  const { s, summaries } = titleSession();
+  const ts = () => new Date().toISOString();
+  s.onTranscriptEntry({
+    type: "assistant", uuid: "u-jt-3", timestamp: ts(),
+    message: { role: "assistant", content: [{ type: "text", text: '<joy-title value="Queue debugging" />' }] },
+  } as any);
+  expect(s.toJSON().summary).toBe("Queue debugging");
+  // Ownership holds against a new ai-title...
+  s.onTranscriptEntry({ type: "ai-title", aiTitle: "Something older", timestamp: ts() } as any);
+  expect(s.toJSON().summary).toBe("Queue debugging");
+  // ...until /clear starts a new conversation the agent title no longer describes.
+  s.onTranscriptEntry({ type: "system", subtype: "local_command", timestamp: ts(), content: "<command-name>/clear</command-name>" } as any);
+  s.onTranscriptEntry({ type: "ai-title", aiTitle: "Fresh conversation", timestamp: ts() } as any);
+  expect(s.toJSON().summary).toBe("Fresh conversation");
+  expect(summaries).toEqual(["Queue debugging", "Fresh conversation"]);
 });
 
 // ── retryFromPane: the CLI's API-retry spinner is the ONLY 529 signal ────────

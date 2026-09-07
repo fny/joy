@@ -948,6 +948,15 @@ export class Session {
   // every restart, so the replay saw the stale value as new and stomped the
   // title right back — the "title is stuck" report of 2026-09-03.
   #lastAiTitle: string | null = null;
+  // The title the AGENT last set via <joy-title/>. Once the agent has
+  // re-titled, it OWNS the title: Claude writes its ai-title off the first
+  // message of a conversation and never revisits it, so a later ai-title is
+  // strictly staler than the agent's tag and must not stomp it (#631 — the
+  // 2026-09-03 fix only stopped REPEAT ai-titles, so a genuinely new one
+  // still won). Released by a user /title (which takes ownership outright) or
+  // by a /clear (a new conversation the old agent title no longer describes).
+  // PERSISTED (windowRecord.agentTitle) so a restart keeps the ownership.
+  #agentTitle: string | null = null;
   // The pending delayed-Enter (submit) for a just-typed message. Cancellable so an
   // abort/kill/confirm/timeout in the settle window can't let a stale Enter fire
   // into the pane (re-submitting an aborted message, or submitting into a turn).
@@ -1038,6 +1047,8 @@ export class Session {
     if (!rec?.lastAiTitle && this.#lastAiTitle) {
       saveWindowRecord(this.id, { lastAiTitle: this.#lastAiTitle });
     }
+    this.#agentTitle = rec?.agentTitle ?? null;
+    if (!this.#titleLocked && this.#agentTitle) this.summary = this.#agentTitle;
     this.#deps = deps;
     this.#ledger = deps.ledger ?? ledgerFor();
     // A new generation per object: the previous one (a crashed daemon's, or
@@ -2999,6 +3010,19 @@ export class Session {
    *  Reached from BOTH transcript shapes: legacy user-role string entries and
    *  the current CLI's system/local_command entries (2.1.198 moved the whole
    *  local-command family there — the user-branch fix was dead on arrival). */
+  /** A `/clear` starts a NEW conversation, so whatever the agent last titled
+   *  the session no longer describes it: release the agent's ownership (#631)
+   *  and let the fresh conversation's ai-title through again. Separate from
+   *  #confirmCommandEcho, which returns early unless the command matches an
+   *  in-flight dispatch — a /clear typed straight into the pane has none. */
+  #noteLocalCommandName(content: string): void {
+    const m = /<command-name>([^<]+)<\/command-name>/.exec(content);
+    if (m?.[1]?.trim() !== "/clear" || !this.#agentTitle) return;
+    this.#agentTitle = null;
+    saveWindowRecord(this.id, { agentTitle: null });
+    this.#dlog("/clear released the agent title — a new ai-title may apply again");
+  }
+
   #confirmCommandEcho(content: string): void {
     const m = /<command-name>([^<]+)<\/command-name>/.exec(content);
     const echoedCmd = m?.[1]?.trim();
@@ -3123,16 +3147,31 @@ export class Session {
     if (!t) {
       // Bare /title from the user = UNLOCK + revert to Claude's latest ai-title.
       if (opts?.byUser && this.#titleLocked) {
-        if (!saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false, userTitle: null })) throw new WindowRecordWriteError(this.id, "title unlock");
+        // A bare /title hands the title back to Claude outright: the lock goes,
+        // and so does any agent ownership (#631) — otherwise "give it back"
+        // would silently mean "give it to the agent" and the ai-title below
+        // would be overwritten by the next tag.
+        if (!saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false, userTitle: null, agentTitle: null })) throw new WindowRecordWriteError(this.id, "title unlock");
         this.#titleLocked = false;
+        this.#agentTitle = null;
         const ai = this.#readLatestAiTitle();
         if (ai) { this.summary = ai; void this.#relay?.updateSummary(ai); this.#deps.broadcast("session_update", this.toJSON()); }
       }
       return;
     }
     if (opts?.byUser) {
-      if (!saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true, userTitle: t })) throw new WindowRecordWriteError(this.id, "title");
+      // The user outranks everyone: clear the agent's ownership as well as
+      // setting the lock, so a later bare /title reverts to Claude's ai-title
+      // rather than to a stale agent tag.
+      if (!saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true, userTitle: t, agentTitle: null })) throw new WindowRecordWriteError(this.id, "title");
       this.#titleLocked = true;
+      this.#agentTitle = null;
+    } else {
+      // An agent <joy-title> claims ownership of the title until the user or a
+      // /clear releases it (#631). Persisted so a restart does not hand the
+      // title back to the transcript's ancient ai-title.
+      this.#agentTitle = t;
+      saveWindowRecord(this.id, { launchCwd: this.cwd, agentTitle: t });
     }
     this.summary = t;
     void this.#relay?.updateSummary(t);
@@ -4348,8 +4387,17 @@ export class Session {
       // on resume (observed: 1252 identical entries in one session) — skip so
       // it can't stomp an agent <joy-title> re-title. New values still apply.
       if (title && title !== this.#lastAiTitle) {
+        // Bookkeeping ALWAYS advances, even when the value is not applied: it
+        // is the dedupe baseline, and letting it go stale would make this same
+        // value look new again after a restart.
         this.#lastAiTitle = title;
         saveWindowRecord(this.id, { lastAiTitle: title });
+        // The agent owns the title once it has re-titled (#631). Claude's
+        // ai-title is derived from the first message of the conversation and
+        // never revisited, so it is strictly staler than the agent's tag —
+        // being NEW does not make it better. Only a user /title or a /clear
+        // hands ownership back.
+        if (this.#agentTitle) return;
         if (title !== this.summary) {
           this.summary = title;
           void this.#relay?.updateSummary(title);
@@ -4400,6 +4448,7 @@ export class Session {
     if (entryType === "system" && entry.subtype === "local_command" && typeof entry.content === "string") {
       const sysContent = entry.content as string;
       if (sysContent.startsWith("<command-name>")) {
+        this.#noteLocalCommandName(sysContent);
         this.#confirmCommandEcho(sysContent);
       } else if (sysContent.startsWith("<local-command-stdout>")) {
         const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(sysContent);
@@ -4633,6 +4682,7 @@ export class Session {
         return;
       }
       if (content.startsWith("<command-name>")) {
+        this.#noteLocalCommandName(content);
         this.#confirmCommandEcho(content);
         return;
       }
