@@ -960,7 +960,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // The resume pass used to do this AFTER the orphan pass below, so a
     // crash between the command's `completed` and its outbox row let the
     // boot publish `interrupted` first — the real outcome then only replayed.
-    materializeLedgerTerminals();
+    // Across EVERY session the ledger may hold commands for — live handles,
+    // window records, and the relay's own rows for this daemon — not the
+    // live handles alone (Astra, F21): a session that exists only as a
+    // record now was archived below with its saved `completed` never derived.
+    materializeLedgerTerminals(r.sessions ?? []);
     // A record can point at a row that is NOT the one the relay has this
     // local session bound to (fny 47457b0f, 2026-09-04: a spawn that
     // resolved to an already-bound live session rewrote the record with the
@@ -1108,7 +1112,15 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (!l) return;
     for (const s of rows) {
       if (s.daemonId !== machineId || !s.localSessionId) continue;
-      if (!registry.get(s.localSessionId)) continue; // dead session — reconcileOrphans archives it
+      if (!registry.get(s.localSessionId)) {
+        // Dead session — reconcileOrphans archives it. Its LEDGER is still
+        // consulted (Astra, F21): a turn whose command closed here with no
+        // terminal row gets that row derived from the command, so the saved
+        // outcome — not the archive, not an invented `interrupted` — is what
+        // resolves the orphaned turn. Local and idempotent; no relay read.
+        materializeLedgerTerminalsFor(s.localSessionId);
+        continue;
+      }
       try {
         const st = await api("GET", `/sessions/${s.sessionId}`);
         const ex = st?.execution as { state?: string; turnId?: string } | undefined;
@@ -1218,6 +1230,20 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         joy__sessionId: s.localSessionId,
         v2: { sessionId: s.sessionId, relay: relayUrl, localSessionId: s.localSessionId },
       };
+      // The ledger may still owe this session's LAST WORD (Astra, F21): a
+      // command that closed with a relay turn and no terminal row — the
+      // process died between the two commits — for a session that is only
+      // a record now. The row is derived from the command first
+      // (idempotent), and the archive waits until that outcome's delivery
+      // is ARRANGED and landed: while a terminal row for the session is
+      // still unacked, the archive is owed to the retry loop, which lands it
+      // after the saved terminal — never ahead of it, never instead of it.
+      materializeLedgerTerminalsFor(s.localSessionId);
+      if (owesTerminal(s.localSessionId)) {
+        log(`reconcile: archive ${s.sessionId.slice(0, 8)} deferred — local ${s.localSessionId} still owes a saved terminal to the relay; it lands first`);
+        deferArchive({ v2SessionId: s.sessionId, localSessionId: s.localSessionId, card, keyB64: key ? Buffer.from(key).toString("base64") : null });
+        continue;
+      }
       let sealed: { encryptedMetadata: string; carried: number | null };
       try { sealed = sealSessionCard(s.localSessionId, s.sessionId, card, key); }
       catch (e) {
@@ -2069,12 +2095,34 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (seqs) sender.wake(localId);
     return true;
   }
-  function materializeLedgerTerminals(): void {
-    const sessions = (registry as { list?: () => AgentSession[] }).list?.() ?? [];
-    for (const s of sessions) {
-      for (const row of ledger.listCommands(s.id)) if (row.relayTurnId && isTerminalState(row.state)) materializeLedgerTerminal(row, s.id);
-    }
+  /** Every terminal command of ONE local session that still owes its relay
+   *  turn a terminal row gets it derived (idempotent). Works from the ledger
+   *  alone — no live handle needed (Astra, F21). */
+  function materializeLedgerTerminalsFor(localId: string): void {
+    let rows: CommandRow[];
+    try { rows = ledger.listCommands(localId); } catch { return; } // unreadable: the next pass retries
+    for (const row of rows) if (row.relayTurnId && isTerminalState(row.state)) materializeLedgerTerminal(row, localId);
   }
+  /** The same across every session the ledger may hold commands for: the
+   *  live handles, the window records (a session that ended or died while
+   *  the daemon was down exists only there), and the relay's own rows for
+   *  this daemon (`rows`) — so a saved outcome is derived BEFORE the boot
+   *  archives a record-only session, not lost to that archive (Astra, F21). */
+  function materializeLedgerTerminals(rows: Array<{ daemonId: string; localSessionId?: string | null }> = []): void {
+    const ids = new Set<string>();
+    for (const s of (registry as { list?: () => AgentSession[] }).list?.() ?? []) ids.add(s.id);
+    try { for (const rec of registry.listRecords()) ids.add(rec.id); } catch { /* records unreadable: the relay rows still name the sessions */ }
+    for (const s of rows) if (s.daemonId === machineId && s.localSessionId) ids.add(s.localSessionId);
+    for (const id of ids) materializeLedgerTerminalsFor(id);
+  }
+  /** Does the session still have a terminal row the relay has not acked
+   *  (a saved outcome whose delivery is arranged but not landed)? A row the
+   *  relay refused for good is settled as dropped and owes nothing. An
+   *  outbox the ledger cannot READ is an unknown, never a clean slate: the
+   *  archive waits for the next pass rather than overtake an outcome. */
+  const owesTerminal = (localId: string): boolean => {
+    try { return ledger.pendingOutbound(localId).some((r) => r.kind === "terminal"); } catch { return true; }
+  };
   /** Is a relay turn's command still pending in the ledger (a worker here)? */
   const pendingLedgerTurn = (turnId: string): boolean => { const r = ledger.commandForRelayTurn(turnId); return !!r && !isTerminalState(r.state); };
 
@@ -2178,6 +2226,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function runArchiveJob(job: ArchiveRowJob): Promise<boolean> {
     const l = lease;
     if (!l) return false;
+    if (owesTerminal(job.localSessionId)) {
+      // The saved outcome goes first (Astra, F21): the sender is delivering
+      // it; this attempt counts and the backoff retries the archive after.
+      archiveAttempts.set(job.v2SessionId, (archiveAttempts.get(job.v2SessionId) ?? 0) + 1);
+      return false;
+    }
     const key = job.keyB64 ? new Uint8Array(Buffer.from(job.keyB64, "base64")) : null;
     try {
       // Seals INSIDE the try: an unreadable budget record is a failed

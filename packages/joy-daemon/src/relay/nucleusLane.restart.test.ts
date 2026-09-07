@@ -36,7 +36,8 @@ type Prior =
   | "adoption_unavailable"       // before /start; the relay answers reconcile{running} 503 for good
   | "parked_then_terminal"       // before /start; parked adoption_pending, then the relay answers the retry with a terminal it holds (the turn was closed `completed` elsewhere) while the runtime keeps running
   | "parked_then_cancelling"     // before /start; parked adoption_pending, then the app requests a cancel — the retry adopts `cancelling`
-  | "terminal_before_outbox";    // /start applied; the command COMPLETED in the ledger, the process died before its terminal row was committed
+  | "terminal_before_outbox"     // /start applied; the command COMPLETED in the ledger, the process died before its terminal row was committed
+  | "terminal_record_only";      // as above, and the session exists only as a window record now — no live handle (the window died with the daemon)
 
 let dir = "";
 let prevHome: string | undefined;
@@ -137,7 +138,8 @@ async function scenario(prior: Prior) {
   await settle();
   first.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "RuntimeTurn" });
   expect(c.state(row.id)).toBe("running");
-  if (prior === "terminal_before_outbox") {
+  const savedTerminal = prior === "terminal_before_outbox" || prior === "terminal_record_only";
+  if (savedTerminal) {
     // The runtime finished and the ledger committed `completed`; the process
     // died before the lane committed the terminal outbox row.
     first.emit({ kind: "turn_ended", runtimeTurnId: "RuntimeTurn", status: "completed" });
@@ -175,9 +177,12 @@ async function scenario(prior: Prior) {
   c = coordinatorFor(ledger);
   c.adopt(id, next);
   next.ready();
-  await until(() => c.state(row.id) === (prior === "terminal_before_outbox" ? "completed" : "running"));
+  await until(() => c.state(row.id) === (savedTerminal ? "completed" : "running"));
   const s: any = { id, status: "active", cwd: dir, agentFlavor: "codex", busy: () => c.busy(id), abort: () => c.abortRunning(id), toJSON: () => ({ id, cwd: dir, status: "active", agent: "codex" }) };
-  const registry: any = { get: (x: string) => (x === id ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [{ id, v2SessionId: sid }], saveRecord: () => {} };
+  // Record-only: the registry has NO handle for the session — its window
+  // record (and the relay's row) is all that names it.
+  const recordOnly = prior === "terminal_record_only";
+  const registry: any = { get: (x: string) => (x === id && !recordOnly ? s : undefined), list: () => (recordOnly ? [] : [s]), create: async () => s, chatHistory: () => [], listRecords: () => [{ id, v2SessionId: sid, launchCwd: dir }], saveRecord: () => {} };
   retire = async () => { c.retire(id, "restart"); await settle(); };
   const logs: string[] = [];
   // Parked priors: the bounded backoff (1 + 2 retries) is refused, the turn
@@ -190,7 +195,8 @@ async function scenario(prior: Prior) {
   const turnRow = async () => (await r.db.query("SELECT state, terminal_state, lease_epoch FROM turns WHERE id = $1", [turnId])).rows[0] as { state: string; terminal_state: string | null; lease_epoch: string | number };
   // The in-loop adoption backoff is shortened (a test seam); production waits 1s, 2s, 4s, 8s.
   // The slow (parked) retry cadence is shortened too: production asks every 30s.
-  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400], ...(parked ? { adoptionPendingRetryMs: 300 } : {}) });
+  // The owed-archive backoff is shortened for the record-only case: production waits 2s…60s.
+  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400], ...(parked ? { adoptionPendingRetryMs: 300 } : {}), ...(recordOnly ? { archiveRetryMs: { min: 200, max: 400 } } : {}) });
   return { id, sid, turnId, row, ledger, next, logs, starts, adoptions, reconcileRunning, terminalAnswers, execution, events, turnRow, lane: () => lane!, coordinator: () => c, r };
 }
 
@@ -404,4 +410,41 @@ test("real relay: parked adoption_pending, then the app requests a cancel — th
   expect(await t.events("turn.terminal")).toBe(1);
   expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "cancelled" });
   expect(t.reconcileRunning()).toBe(asked);
+}, 30_000);
+
+test("real relay + SQLite: the command COMPLETED in the ledger, the session exists only as a window record (no live handle), no terminal row — boot derives the terminal from the command, the relay turn closes `completed` ONCE, and only THEN is the record-only session archived (F21)", async () => {
+  const t = await scenario("terminal_record_only");
+  // Derived from the ledger with no handle in the registry…
+  await until(() => t.logs.some((l) => /completed in the ledger with no terminal row/.test(l)));
+  expect(t.ledger.hasOutboundEvent(`term:${t.turnId}`)).toBe(true);
+  // …and the archive waits for it: the boot pass owes it to the retry loop.
+  await until(() => t.logs.some((l) => /archive .* deferred — local c9session still owes a saved terminal/.test(l)));
+  expect(t.logs.some((l) => /archived orphan/.test(l))).toBe(false);
+  // The saved outcome lands first.
+  await until(async () => (await t.turnRow()).state === "terminal");
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  await until(() => !t.ledger.hasTerminalFor(t.turnId)); // acked
+  // Then the archive.
+  await until(() => t.logs.some((l) => /archived replacement row .* for ended session c9session/.test(l)), 10_000);
+  const sessionRow = async () => (await t.r.db.query("SELECT state FROM native_sessions WHERE id = $1", [t.sid])).rows[0] as { state: string };
+  expect((await sessionRow()).state).toBe("archived");
+  // The relay's own clocks agree: the turn was closed before the row was archived.
+  const order = await t.r.db.query("SELECT (s.updated_at >= tu.terminal_at) AS after_terminal, tu.terminal_at IS NOT NULL AS closed FROM native_sessions s, turns tu WHERE s.id = $1 AND tu.id = $2", [t.sid, t.turnId]);
+  expect(order.rows[0]).toMatchObject({ after_terminal: true, closed: true });
+  const iDeferred = t.logs.findIndex((l) => /deferred — local c9session still owes/.test(l));
+  const iArchived = t.logs.findIndex((l) => /archived replacement row/.test(l));
+  expect(iDeferred).toBeGreaterThanOrEqual(0);
+  expect(iArchived).toBeGreaterThan(iDeferred);
+  await sleep(500);
+  // ONE terminal, the saved `completed` — never `interrupted`, never doubled.
+  expect(await t.events("turn.terminal")).toBe(1);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "completed" });
+  expect((await t.execution()).state).toBe("idle");
+  expect(t.logs.some((l) => /was orphaned → interrupted/.test(l))).toBe(false);
+  expect(t.logs.some((l) => /archived orphan/.test(l))).toBe(false);
+  expect(t.logs.filter((l) => /archived replacement row/.test(l))).toHaveLength(1);
+  expect(t.starts()).toBe(0);
+  expect(t.adoptions()).toBe(0);
+  expect(t.coordinator().state(t.row.id)).toBe("completed");
+  expect(t.lane().relayTurns()).toEqual([]);
 }, 30_000);
