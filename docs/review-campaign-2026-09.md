@@ -667,6 +667,16 @@ app.
   last full runs (1832 / 122 at f10f5acf). **Campaign complete**: 630 issues,
   629 closed, #127 open by design.
 
+- 2026-09-11 (afternoon) — **Deployed at 173996c8 on the user's go**: relay
+  stable + dev via deploy.sh (capabilities probe OK on 4997 and 14997);
+  the daemon on this box restarted from source (lease re-acquired, sessions
+  recovered) and main pushed to `release` for the other daemon installs;
+  app OTA to preview — mobile update group 4bea512e (android + ios, runtime
+  21) and the desktop build promoted to production. Metro hung on the
+  box's watchman; the publish ran with watchman stubbed out. The pairing
+  account-flavour flag stays OFF until every app build in the field sends
+  the proof; #127 stays open for that flip.
+
 ## Campaign summary (as of 2026-09-11)
 
 **Scope.** 630 issues filed from the September coverage review (Astra/gpt-6-astra
@@ -699,10 +709,12 @@ six waves; the last code commit is 3d6681a3.
   adapters), durable message links, per-key recoverable decrypt gaps with a
   visible placeholder, sealed spawn specs, app-side pairing proof.
 
-**Deploy order when the user decides to ship:** relay first only for the
-metadata/tunnel changes; for pairing, daemons first (or together) and the
-account-flavour flag last, after every app build sends the proof. Nothing
-was deployed by the campaign.
+**Deploy status.** Relay, this box's daemon, the `release` branch and both
+app targets shipped at 173996c8 on 2026-09-11 (see the log). Remaining: the
+user's other daemon installs pull from `release`; the pairing account-flavour
+flag (`JOY_RELAY_PAIRING_PROOF_ACCOUNT=1` in `~/joy-relay.env` on the box,
+then restart `joy-relay.service`) flips only after every app build sends the
+proof, and #127 closes with it.
 
 **Verification hygiene learned.** Run the daemon suite as three shards with a
 2400 s budget (a `timeout` kill reads as exit 143); union-merging test files
