@@ -40,7 +40,8 @@ type Prior =
   | "terminal_record_only"       // as above, and the session exists only as a window record now — no live handle (the window died with the daemon)
   | "terminal_record_read_failure"  // record-only + a saved terminal, and the ledger's COMMAND SCAN throws (SQLITE_IOERR) until the test heals it
   | "terminal_record_write_failure" // record-only + a saved terminal, and the terminal's outbox WRITE is refused (held in memory) until the test heals it
-  | "sweep_then_cancelled";      // before /start; the loop parks adoption_pending for good, and the ORPHAN SWEEP's own reconcile is answered terminal/cancelled (the turn closed between the sweep's GET and its reconcile)
+  | "sweep_then_cancelled"       // before /start; the loop parks adoption_pending for good, and the ORPHAN SWEEP's own reconcile is answered terminal/cancelled (the turn closed between the sweep's GET and its reconcile)
+  | "sweep_during_retry";        // as above, but the loop's OWN adoption retry is IN FLIGHT (held) while the sweep answers cancelled — the two answers overlap (F30)
 
 let dir = "";
 let prevHome: string | undefined;
@@ -77,9 +78,15 @@ function interceptFetch(
   unavailable: (n: number) => boolean = () => false,
   closeRemotely: (n: number) => boolean = () => false,
   closeOnSweep = false,
-): { starts: () => number; adoptions: () => number; reconcileRunning: () => number; terminalAnswers: () => number; sweepClosed: () => boolean } {
+  holdRetry = false,
+): { starts: () => number; adoptions: () => number; reconcileRunning: () => number; terminalAnswers: () => number; sweepClosed: () => boolean; retryHeld: () => boolean; releaseRetry: () => void } {
   const real = globalThis.fetch;
   let starts = 0, adoptions = 0, reconciles = 0, terminalAnswers = 0, sweepClosed = false;
+  // The loop's OWN adoption retry, parked mid-flight so the sweep's answer
+  // and the loop's overlap (F30). `releaseRetry` lets it reach the relay.
+  let retryHeld = false, retryReleased = false;
+  let releaseRetry: () => void = () => {};
+  const retryGate = new Promise<void>((res) => { releaseRetry = () => { retryReleased = true; res(); }; });
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? "GET";
@@ -100,6 +107,13 @@ function interceptFetch(
             if (!closed.ok) throw new Error(`the racing close failed: ${closed.status}`);
             sweepClosed = true;
           }
+        } else if (holdRetry && body.meta?.reason === "adoption_retry") {
+          // The LOOP's own retry reconcile is HELD here — in flight, awaiting
+          // the relay — for as long as the test wants: the sweep above
+          // answers `cancelled` and clears the pending marker underneath it.
+          // Released, it reaches the real relay (which now holds the turn
+          // terminal/cancelled), so BOTH sides have a resolved answer.
+          if (!retryReleased) { retryHeld = true; await retryGate; }
         } else {
           // The LOOP's own adoption (daemon_restart / adoption_retry) never
           // reaches the relay: the turn stays parked `adoption_pending`
@@ -122,8 +136,8 @@ function interceptFetch(
     }
     return res;
   }) as typeof fetch;
-  restoreFetch = () => { globalThis.fetch = real; };
-  return { starts: () => starts, adoptions: () => adoptions, reconcileRunning: () => reconciles, terminalAnswers: () => terminalAnswers, sweepClosed: () => sweepClosed };
+  restoreFetch = () => { globalThis.fetch = real; releaseRetry(); };
+  return { starts: () => starts, adoptions: () => adoptions, reconcileRunning: () => reconciles, terminalAnswers: () => terminalAnswers, sweepClosed: () => sweepClosed, retryHeld: () => retryHeld, releaseRetry: () => releaseRetry() };
 }
 
 async function scenario(prior: Prior) {
@@ -147,7 +161,7 @@ async function scenario(prior: Prior) {
   expect((await d1.received(offer.deliveryId)).status).toBe(200);
   expect((await d1.submitted(offer.turnId)).status).toBe(200);
   const turnId = offer.turnId as string;
-  const beforeStart: readonly Prior[] = ["dispatching", "closed_remotely", "adoption_unavailable_twice", "adoption_unavailable", "parked_then_terminal", "parked_then_cancelling", "sweep_then_cancelled"];
+  const beforeStart: readonly Prior[] = ["dispatching", "closed_remotely", "adoption_unavailable_twice", "adoption_unavailable", "parked_then_terminal", "parked_then_cancelling", "sweep_then_cancelled", "sweep_during_retry"];
   const parked = prior === "parked_then_terminal" || prior === "parked_then_cancelling";
   if (!beforeStart.includes(prior)) {
     expect((await d1.start(turnId, { runtimeEventId: `start:${turnId}` })).status).toBe(200);
@@ -183,7 +197,8 @@ async function scenario(prior: Prior) {
   await r.db.query("UPDATE daemon_leases SET expires_at = now() - interval '1 second' WHERE id = $1", [d1.leaseId]);
   await r.core.sweepExpiredLeases();
   expect((await r.call("GET", `/joy/v2/sessions/${sid}`)).json.execution.state).toBe("orphaned");
-  if (prior === "sweep_then_cancelled") {
+  const sweepAdopts = prior === "sweep_then_cancelled" || prior === "sweep_during_retry";
+  if (sweepAdopts) {
     // A queued successor is what makes the ordinary every-tick sweep inspect
     // this orphan at all: from the session list it looks wedged — work
     // queued, nothing executing.
@@ -240,15 +255,15 @@ async function scenario(prior: Prior) {
   // parks `adoption_pending`; the slow retry then gets a real answer.
   const unavailable = prior === "adoption_unavailable" ? () => true : prior === "adoption_unavailable_twice" ? (n: number) => n <= 2 : parked ? (n: number) => n <= 3 : undefined;
   const closeRemotely = prior === "parked_then_terminal" ? (n: number) => n === 4 : undefined;
-  const { starts, adoptions, reconcileRunning, terminalAnswers, sweepClosed } = interceptFetch(unavailable, closeRemotely, prior === "sweep_then_cancelled");
+  const { starts, adoptions, reconcileRunning, terminalAnswers, sweepClosed, retryHeld, releaseRetry } = interceptFetch(unavailable, closeRemotely, sweepAdopts, prior === "sweep_during_retry");
   const execution = async () => (await r.call("GET", `/joy/v2/sessions/${sid}`)).json.execution as { state: string; turnId: string | null; cancelRequested: boolean };
   const events = async (kind: string) => (await r.db.query("SELECT count(*)::int AS n FROM session_events WHERE session_id = $1 AND kind = $2", [sid, kind])).rows[0].n as number;
   const turnRow = async () => (await r.db.query("SELECT state, terminal_state, lease_epoch FROM turns WHERE id = $1", [turnId])).rows[0] as { state: string; terminal_state: string | null; lease_epoch: string | number };
   // The in-loop adoption backoff is shortened (a test seam); production waits 1s, 2s, 4s, 8s.
   // The slow (parked) retry cadence is shortened too: production asks every 30s.
   // The owed-archive backoff is shortened for the record-only case: production waits 2s…60s.
-  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400], ...(parked ? { adoptionPendingRetryMs: 300 } : {}), ...(prior === "sweep_then_cancelled" ? { adoptionPendingRetryMs: 1_000 } : {}), ...(recordOnly ? { archiveRetryMs: { min: 200, max: 400 } } : {}) });
-  return { id, sid, turnId, row, ledger, next, logs, faults, starts, adoptions, reconcileRunning, terminalAnswers, sweepClosed, execution, events, turnRow, lane: () => lane!, coordinator: () => c, r };
+  lane = startNucleusLane({ registry, relayUrl: r.base, token: "app-token", machineId: machine, log: (x: string) => logs.push(x), adoptionRetryMs: [200, 400], ...(parked ? { adoptionPendingRetryMs: 300 } : {}), ...(prior === "sweep_then_cancelled" ? { adoptionPendingRetryMs: 1_000 } : {}), ...(prior === "sweep_during_retry" ? { adoptionPendingRetryMs: 150 } : {}), ...(recordOnly ? { archiveRetryMs: { min: 200, max: 400 } } : {}) });
+  return { id, sid, turnId, row, ledger, next, logs, faults, starts, adoptions, reconcileRunning, terminalAnswers, sweepClosed, retryHeld, releaseRetry, execution, events, turnRow, lane: () => lane!, coordinator: () => c, r };
 }
 
 test.each(["dispatching", "running", "acknowledged"] as const)(
@@ -529,6 +544,48 @@ test("real relay: the ORPHAN SWEEP's own reconcile is answered terminal/cancelle
   await until(() => !t.lane().relayTurns().some((x) => x.turnId === t.turnId), 10_000);
   expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "cancelled" });
 }, 60_000);
+
+test("real relay: the ORPHAN SWEEP answers terminal/cancelled while the loop's OWN adoption retry is still IN FLIGHT — the two answers overlap and the FIRST complete one wins: no TypeError over the marker the sweep cleared, the local command is cancelled once, and no synthetic `failed` terminal is invented over a live runtime (F30)", async () => {
+  const t = await scenario("sweep_during_retry");
+  // Every terminal this lane commits for the turn, in order: the F30 defect
+  // published a synthetic `failed` from resumeTurn's catch — over a command
+  // that was still running, with nothing ever cancelled.
+  const terminals: string[] = [];
+  const realEnqueue = t.ledger.enqueueOutbound.bind(t.ledger);
+  vi.spyOn(t.ledger, "enqueueOutbound").mockImplementation((rows: NewOutbound[]) => {
+    for (const x of rows) if (x.kind === "terminal" && x.relayTurnId === t.turnId) terminals.push(String((x.body as { terminalState?: string }).terminalState));
+    return realEnqueue(rows);
+  });
+  // The loop parks (its own daemon_restart adoption is refused), then its
+  // slow retry fires — and is HELD mid-flight at the relay.
+  await until(() => t.retryHeld(), 20_000);
+  expect(t.coordinator().state(t.row.id)).toBe("running");
+  // While it hangs there the SWEEP gets the relay's only answer — cancelled —
+  // and clears the pending marker the retry is standing on.
+  await until(() => t.sweepClosed(), 25_000);
+  await until(() => t.logs.some((l) => /was orphaned but .* still runs it here → adopted \(terminal\)/.test(l)), 10_000);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "cancelled" });
+  // Now the retry's own reconcile completes. It must NOT read the marker back
+  // across its await (`entry.adoptionPending.attempts` threw TypeError here)
+  // and must NOT apply a second answer: the sweep's was complete first, so
+  // the sweep's is the one honoured — through the same honourAdoption.
+  t.releaseRetry();
+  await until(() => t.next.interrupts.length > 0, 20_000);
+  expect(t.logs.some((l) => /TypeError/.test(l))).toBe(false);
+  expect(t.logs.some((l) => / error: /.test(l))).toBe(false);
+  await until(() => t.logs.some((l) => /the relay closed this turn cancelled \(orphan sweep, which answered first\) → cancelled locally/.test(l)), 10_000);
+  expect(t.ledger.getCommand(t.row.id)?.cancelRequestedAt).not.toBeNull();
+  expect(t.next.interrupts).toHaveLength(1);
+  // No /start was ever posted for a turn the relay had closed.
+  expect(t.starts()).toBe(0);
+  // The runtime confirms the interrupt: the turn closes cancelled, and the
+  // ONLY terminal ever committed for it is that `cancelled`.
+  t.next.emit({ kind: "turn_ended", runtimeTurnId: "RuntimeTurn", status: "cancelled" });
+  await until(() => t.coordinator().state(t.row.id) === "cancelled");
+  await until(() => !t.lane().relayTurns().some((x) => x.turnId === t.turnId), 10_000);
+  expect(terminals).toEqual(["cancelled"]);
+  expect(await t.turnRow()).toMatchObject({ state: "terminal", terminal_state: "cancelled" });
+}, 90_000);
 
 test("real relay + SQLite: the ledger's COMMAND SCAN throws while a saved `completed` is still owed — a readable-but-empty outbox after a FAILED scan is not a clean slate: nothing is archived, and once the ledger reads again the derived terminal lands BEFORE the archive (F28)", async () => {
   const t = await scenario("terminal_record_read_failure");
