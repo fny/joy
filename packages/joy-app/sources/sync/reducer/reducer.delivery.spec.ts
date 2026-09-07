@@ -42,6 +42,54 @@ describe('optimistic delivery stages', () => {
         expect(userRows(state)[0].deliveryStage).toBe('agent');
     });
 
+    it('applies turn lifecycle that arrived BEFORE the turn was bound (#634)', () => {
+        const state = createReducer();
+        reducer(state, [optimistic('l1')]);
+        expect(userRows(state)[0].deliveryStage).toBe('local');
+
+        // A page read carrying turn.receipted/turn.started can land before the
+        // POST ack binds the turn. These used to be dropped on the floor and
+        // nothing ever re-applied them, so the bubble stayed dim forever.
+        expect(advanceDeliveryStage(state, { turnId: 'turn-A' }, 'daemon')).toHaveLength(0);
+        expect(advanceDeliveryStage(state, { turnId: 'turn-A' }, 'agent')).toHaveLength(0);
+        expect(userRows(state)[0].deliveryStage).toBe('local');
+
+        // The binding arrives late; the parked stage applies with it.
+        expect(bindTurnToLocal(state, 'l1', 'turn-A')).toHaveLength(1);
+        expect(userRows(state)[0].deliveryStage).toBe('agent');
+        expect(state.pendingTurnStages.size).toBe(0);
+    });
+
+    it('parks only the highest stage, and never regresses a row on binding', () => {
+        const state = createReducer();
+        reducer(state, [optimistic('l1')]);
+        advanceDeliveryStage(state, { localId: 'l1' }, 'relay');
+
+        // Out-of-order arrivals: the highest wins, the lower is discarded.
+        advanceDeliveryStage(state, { turnId: 'turn-A' }, 'agent');
+        advanceDeliveryStage(state, { turnId: 'turn-A' }, 'daemon');
+        expect(state.pendingTurnStages.get('turn-A')).toBe('agent');
+
+        bindTurnToLocal(state, 'l1', 'turn-A');
+        expect(userRows(state)[0].deliveryStage).toBe('agent');
+    });
+
+    it('does not park a stage keyed only by an unknown localId', () => {
+        const state = createReducer();
+        advanceDeliveryStage(state, { localId: 'never-sent' }, 'agent');
+        expect(state.pendingTurnStages.size).toBe(0);
+    });
+
+    it('bounds the parked map so turns from other devices cannot grow it forever', () => {
+        const state = createReducer();
+        for (let i = 0; i < 200; i++) {
+            advanceDeliveryStage(state, { turnId: `foreign-${i}` }, 'agent');
+        }
+        expect(state.pendingTurnStages.size).toBeLessThanOrEqual(64);
+        // The most recent turns are the ones still worth binding.
+        expect(state.pendingTurnStages.has('foreign-199')).toBe(true);
+    });
+
     it("the relay's own row reconciles into the optimistic one — one row, seq learned, turn learned, stage ≥ relay", () => {
         const state = createReducer();
         reducer(state, [optimistic('l2')]);

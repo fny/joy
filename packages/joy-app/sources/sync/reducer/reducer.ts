@@ -137,6 +137,13 @@ export type ReducerState = {
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
     turnIds: Map<string, string>; // relay turnId -> internalId (user prompts only)
+    /** Turn lifecycle that arrived BEFORE the turn was bound to its optimistic
+     *  row (#634). The POST ack is what binds turnId -> localId, and a page
+     *  read carrying turn.receipted/turn.started can land first; the stage was
+     *  then dropped on the floor and nothing ever re-applied it, so the bubble
+     *  stayed dim forever even though the message had plainly been delivered.
+     *  Held here until the binding arrives, highest stage wins. */
+    pendingTurnStages: Map<string, DeliveryStage>;
     messages: Map<string, ReducerMessage>;
     sidechains: Map<string, ReducerMessage[]>; // owning call id -> children
     tracerState: TracerState; // Tracer state for sidechain processing
@@ -170,6 +177,7 @@ export function createReducer(sessionId?: string | null): ReducerState {
         localIds: new Map(),
         messageIds: new Map(),
         turnIds: new Map(),
+        pendingTurnStages: new Map(),
         sidechains: new Map(),
         tracerState: createTracer(),
         maxSeq: null,
@@ -409,10 +417,33 @@ export function bindTurnToLocal(state: ReducerState, localId: string, turnId: st
     const m = internalId ? state.messages.get(internalId) : undefined;
     if (!internalId || !m) return [];
     state.turnIds.set(turnId, internalId);
-    if (m.turnId === turnId) return [];
+    // Lifecycle that raced ahead of this binding now applies (#634).
+    const parked = state.pendingTurnStages.get(turnId);
+    if (parked) {
+        state.pendingTurnStages.delete(turnId);
+        if (m.deliveryStage && STAGE_ORDER[m.deliveryStage] < STAGE_ORDER[parked]) {
+            m.deliveryStage = parked;
+        }
+    }
+    if (m.turnId === turnId && !parked) return [];
     m.turnId = turnId;
     const converted = convertReducerMessageToMessage(m, state);
     return converted ? [converted] : [];
+}
+
+/** Park a turn's stage until its optimistic row is bound. Bounded: a session
+ *  sees turns from other devices that will never bind here, and an unbounded
+ *  map would grow for the life of the session. */
+const MAX_PENDING_TURN_STAGES = 64;
+function rememberPendingTurnStage(state: ReducerState, turnId: string, stage: DeliveryStage): void {
+    const prev = state.pendingTurnStages.get(turnId);
+    if (prev && STAGE_ORDER[prev] >= STAGE_ORDER[stage]) return;
+    state.pendingTurnStages.set(turnId, stage);
+    while (state.pendingTurnStages.size > MAX_PENDING_TURN_STAGES) {
+        const oldest = state.pendingTurnStages.keys().next().value;
+        if (oldest === undefined) break;
+        state.pendingTurnStages.delete(oldest);
+    }
 }
 
 /** Advance an optimistic send's delivery stage — by localId (our own ack) or
@@ -427,7 +458,14 @@ export function advanceDeliveryStage(
     const internalId = (ref.localId ? state.localIds.get(ref.localId) : undefined)
         ?? (ref.turnId ? state.turnIds.get(ref.turnId) : undefined);
     const m = internalId ? state.messages.get(internalId) : undefined;
-    if (!internalId || !m || !m.deliveryStage) return [];
+    if (!internalId || !m) {
+        // Not bound yet: park it rather than lose it (#634). Only turn-keyed
+        // stages are worth parking — a localId we do not know is a row this
+        // device never sent.
+        if (ref.turnId) rememberPendingTurnStage(state, ref.turnId, stage);
+        return [];
+    }
+    if (!m.deliveryStage) return [];
     if (STAGE_ORDER[m.deliveryStage] >= STAGE_ORDER[stage]) return [];
     m.deliveryStage = stage;
     const converted = convertReducerMessageToMessage(m, state);
