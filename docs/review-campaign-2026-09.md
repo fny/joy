@@ -581,6 +581,15 @@ app.
   quarantined). Full daemon regression 1234 tests in three shards; app
   1832; relay 119. No agents running. **11 open**, all awaiting Astra.
 
+- 2026-09-10 (midday) — pushed: #627 adaptive insertion-cap plan (728397f3:
+  ordinal walk on a covering index or byte-range plan, chosen per insert by a
+  bounded probe; sparse workload 1708 → 105 ms), #550 continuation-first
+  (410356b3: claims survive list() during a create; a selected transcript is
+  launched with `--resume <id>`), #498 round three (6287fc4a: no open-turn
+  shortcut, attempt identity in pending refs and in `turn_started`,
+  known-foreign prompts block the window fallback). Closed #69. In flight:
+  lane restart round three. **11 open.**
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
