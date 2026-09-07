@@ -603,13 +603,16 @@ app.
   acked). Astra verified and closed #495 #498 #550 #625 #627. **2 open**:
   #127 (rollout flag by design) and #628 (third round in flight).
 
-## Campaign summary (as of 2026-09-09 afternoon)
+## Campaign summary (as of 2026-09-10 late)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
 findings plus Fable's own), executed in six waves with an implement → commit →
 Astra verification → residual-round loop; tunnel/auth/gate files reviewed by
-Fable security agents instead of Astra. 22 issues remain open, every one of
-them either awaiting a verdict on a pushed fix or a flaky-test low.
+Fable security agents instead of Astra. Of the 605, 603 are closed with an
+Astra (or Fable security) verdict or explicit evidence; the two still open
+are #127 (the pairing account-flavour flag flips only after every app build
+sends the proof — a rollout step, not code) and #628 (its third round is
+landing). Roughly 50 residual rounds followed the six waves.
 
 **Architecture that landed.**
 - Daemon: SQLite ledger + outbox (C1) replacing every JSON store; session
@@ -640,9 +643,9 @@ install their own node_modules (a `pnpm add` through a symlink rewrote the
 main checkout once); the Codex TUI can silently downgrade Astra's model —
 check the footer before trusting verdicts.
 
-**Left open by design (see the won't-fix criteria below):** flaky-test lows
-are fixed as they surface; the remaining design follow-ups (#127 flag flip)
-wait on rollout, not code.
+**Left open by design (see the won't-fix criteria below):** #127's flag flip
+waits on rollout, not code; every flaky-test low surfaced during the campaign
+(#623 #624 #626 #627) was fixed at its root rather than retried.
 
 ## Won't-fix criteria
 
