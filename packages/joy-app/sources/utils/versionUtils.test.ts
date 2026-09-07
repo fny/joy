@@ -91,3 +91,29 @@ describe('versionUtils', () => {
         });
     });
 });
+// ── #645: the daemon's version label ─────────────────────────────────────────
+
+describe('legacy joy-daemon version labels', () => {
+    it('parses a name-prefixed version instead of rejecting it', () => {
+        expect(parseVersion('joy-daemon/0.1.0')).toEqual({ major: 0, minor: 1, patch: 0 });
+        expect(parseVersion('joy-daemon/1.11.3')).toEqual({ major: 1, minor: 11, patch: 3 });
+    });
+
+    it('gives the honest verdict for an old daemon rather than the unparseable one', () => {
+        // 0.1.0 really is below the 0.10.0 minimum — the point is that this is
+        // now a COMPARISON, not a parse failure that happened to look the same.
+        expect(isVersionSupported('joy-daemon/0.1.0', MINIMUM_CLI_VERSION)).toBe(false);
+        expect(isVersionSupported('joy-daemon/1.11.3', MINIMUM_CLI_VERSION)).toBe(true);
+    });
+
+    it('accepts the bare semver current daemons send', () => {
+        expect(isVersionSupported('1.11.3', MINIMUM_CLI_VERSION)).toBe(true);
+    });
+
+    it('still rejects things that are not versions', () => {
+        expect(parseVersion('joy-daemon/')).toBeNull();
+        expect(parseVersion('joy-daemon/nope')).toBeNull();
+        expect(parseVersion('/1.2.3')).toBeNull();
+        expect(parseVersion('')).toBeNull();
+    });
+});

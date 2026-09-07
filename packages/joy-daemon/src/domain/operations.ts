@@ -13,6 +13,7 @@
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
 import { parseJoyCommand, type Session } from "../claude/session";
+import { DAEMON_VERSION_LABEL } from "../version";
 import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
 import type { AgentSession } from "./agentSession";
@@ -1449,7 +1450,7 @@ export const machineOps: MachineOp[] = [
       messages: registry.chatHistory().length,
       sessions: registry.size,
       clients: registry.sseClientCount,
-      version: "joy-daemon/0.1.0",
+      version: DAEMON_VERSION_LABEL,
       uptimeMs: Date.now() - registry.startedAt,
       claude: registry.claudeInfo(),
       pid: process.pid,

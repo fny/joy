@@ -15,6 +15,7 @@
 //   transcript.ts — JSONL tail mechanics; fileOps.ts — bash/file/grep handlers
 
 import { moduleDir } from "./esm";
+import { DAEMON_VERSION, DAEMON_VERSION_LABEL } from "./version";
 import { join } from "path";
 import { homedir, hostname, platform as osPlatform } from "os";
 import { readFileSync } from "fs";
@@ -97,7 +98,7 @@ function writeDaemonState(port: number): void {
     writeSecretFileAtomic(join(STATE_DIR, "daemon.json"), JSON.stringify({
       token: SERVER_TOKEN, pid: process.pid, port,
       relay: joyRelayUrl(), relayKey: joyRelayKey(),
-      startedAt: Date.now(), version: "joy-daemon/0.1.0",
+      startedAt: Date.now(), version: DAEMON_VERSION_LABEL,
       // Process identity for `joy stop` (#495): the kernel's start identity
       // for THIS pid (the one thing a reused pid cannot reproduce), the entry
       // script this daemon runs (process.argv[1] — absolute, the way the
@@ -153,7 +154,10 @@ const relayClient = initRelay();
 const machineMetadata = {
   host: hostname(),
   platform: osPlatform(),
-  joyDaemonVersion: "joy-daemon/0.1.0",
+  // BARE semver: the app parses this to decide if the daemon is out of date
+  // (#645). A `name/x.y.z` string does not parse and read as "outdated" for
+  // every daemon ever built.
+  joyDaemonVersion: DAEMON_VERSION,
   homeDir: homedir(),
   joyHomeDir: joyRelayCredsDir(),
   joyLibDir: __dirname,

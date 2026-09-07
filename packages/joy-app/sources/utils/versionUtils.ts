@@ -14,9 +14,18 @@ const VERSION_RE = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+(
 
 type ParsedVersion = { major: number; minor: number; patch: number };
 
+// Daemons before #645 reported `joy-daemon/0.1.0` — a hardcoded label, not a
+// version. It failed to parse, so isVersionSupported said "outdated" for every
+// daemon that ever ran, and because the string never changed, dismissing the
+// warning once suppressed it permanently for that machine. Stripping the
+// `name/` prefix lets those old daemons compare honestly (0.1.0 IS below the
+// minimum, which is the correct verdict for one that old) instead of falling
+// into the unparseable branch. Current daemons send bare semver.
+const LABEL_PREFIX_RE = /^[A-Za-z][A-Za-z0-9._-]*\//;
+
 function parseStrict(version: string): ParsedVersion | null {
     if (typeof version !== 'string') return null;
-    const m = VERSION_RE.exec(version.trim());
+    const m = VERSION_RE.exec(version.trim().replace(LABEL_PREFIX_RE, ''));
     if (!m) return null;
     const parts = [m[1], m[2] ?? '0', m[3] ?? '0'].map(Number);
     // Digit-only matches are non-negative; guard the safe-integer range so a
