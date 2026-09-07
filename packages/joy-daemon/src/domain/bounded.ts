@@ -426,6 +426,13 @@ function groupCollectable(rec: SpawnedGroup): boolean {
  *  next process to hold its number, so recording it as identity would only
  *  license an unproven signal later (#628 F29).
  *
+ *  `leaderHere` is the caller's assertion that the pid POSITIVELY holds the
+ *  incarnation the record was opened for — a recorded start time equal to the
+ *  current one — and nothing weaker (#628 F30). It is the only thing that
+ *  turns the bare pgid, and an unreadable marker on a candidate, into
+ *  ownership; without it the sole admissible evidence is a marker the
+ *  candidate's own environment proves.
+ *
  *  Returns whether the group was actually SEARCHED: false when there was no
  *  admissible way to look (no leader and no marker) and false when the
  *  platform could not list processes at all. An empty result from a scan that
@@ -444,15 +451,29 @@ function captureMembers(pgid: number, marker: string | undefined, leaderHere: bo
 }
 
 /** Widen ONE record's captured membership. The leader counts as "here" only
- *  when it is positively the incarnation this record was opened for: an
- *  unreadable start time (`?`) matches nothing, not even another `?`. */
+ *  when it is POSITIVELY the incarnation this record was opened for: the start
+ *  time recorded at spawn equals the one the pid reports now. An unreadable
+ *  start time (`?`) matches nothing, not even another `?` — and neither does a
+ *  start time that was never read at all (#628 F30).
+ *
+ *  `rec.start === undefined` is the launcher that had already exited when
+ *  registerGroup sampled it, so no incarnation was ever recorded. Reading that
+ *  as "the leader is present" made the pgid proof again: after the number was
+ *  reused, this refresh enrolled the NEW incarnation's children into the OLD
+ *  record — and killProcessGroup, which correctly refuses to signal the
+ *  launcher pid itself, still SIGTERMed those captured strangers individually.
+ *  Holding the old generation's lease does not help when the refresh
+ *  contaminates that very record. With no positive proof the record captures
+ *  NOTHING and stays unconfirmed: its kill finds nothing of its own, cannot
+ *  claim the group was searched, and reports termination unconfirmed. Only a
+ *  marker read from a candidate's own environment can still enrol members. */
 function refreshRecord(rec: SpawnedGroup, force = false): void {
   const now = Date.now();
   if (!force && now - rec.lastScanAt < GROUP_SCAN_INTERVAL_MS) return;
   rec.lastScanAt = now;
   const leader = processProbe.identityOf(rec.pid);
   const leaderHere = leader !== null
-    && (rec.start === undefined || (rec.start !== UNKNOWN_START && leader.start === rec.start));
+    && rec.start !== undefined && rec.start !== UNKNOWN_START && leader.start === rec.start;
   captureMembers(rec.pid, rec.marker, leaderHere, rec.members);
 }
 
@@ -716,11 +737,21 @@ export async function killProcessGroup(pid: number, opts: KillProcessGroupOption
  *
  * `searched` reports whether the platform could enumerate at all: an empty
  * list with `searched: false` means "nowhere to look", not "nothing there".
+ *
+ * `unclassified` counts the live processes the enumeration DID list under this
+ * pgid whose ownership could not be decided — `hasMarker` returned `null`,
+ * i.e. there is no /proc to read an environment from, or the candidate turned
+ * into a zombie mid-scan (#628 F30). A search that ran but classified nothing
+ * is not a conclusive absence: on a platform where only `ps` can enumerate,
+ * EVERY candidate is unclassified, and reporting that as an empty group let a
+ * caller conclude the pgid was free and start a replacement on top of a live
+ * descendant. "Nothing of ours is here" therefore requires
+ * `searched && unclassified === 0`.
  */
 export function ownedGroupMembers(
   pgid: number,
   opts: { marker?: string; members?: Iterable<readonly [number, string]> } = {},
-): { searched: boolean; pids: number[] } {
+): { searched: boolean; pids: number[]; unclassified: number } {
   const rec = currentRecord(pgid);
   const marker = opts.marker ?? rec?.marker;
   const captured = new Map<number, string>(opts.members ?? rec?.members ?? []);
@@ -731,14 +762,23 @@ export function ownedGroupMembers(
     if (now !== null && !now.zombie && now.start === start) pids.add(p);
   }
   let searched = false;
+  let unclassified = 0;
   if (marker !== undefined) {
     const rows = processProbe.membersOf(pgid);
     if (rows !== null) {
       searched = true;
-      for (const m of rows) { if (!m.zombie && processProbe.hasMarker(m.pid, marker) === true) pids.add(m.pid); }
+      for (const m of rows) {
+        if (m.zombie) continue;
+        const proof = processProbe.hasMarker(m.pid, marker);
+        // `true` is ours; `false` is positively someone else's; `null` is no
+        // answer at all — and an undecided candidate must not pass for one
+        // that was ruled out.
+        if (proof === true) pids.add(m.pid);
+        else if (proof === null && !pids.has(m.pid)) unclassified++;
+      }
     }
   }
-  return { searched, pids: [...pids] };
+  return { searched, pids: [...pids], unclassified };
 }
 
 // ── descriptor lifecycle ─────────────────────────────────────────────────────

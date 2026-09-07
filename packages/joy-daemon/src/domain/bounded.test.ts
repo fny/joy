@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import v8 from "node:v8";
 import vm from "node:vm";
-import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, BoundedTail, PGROUP_MARKER_ENV, registerGroup, refreshGroupMembers, forgetGroup, spawnedGroupIdentity, type GroupRegistration } from "./bounded";
+import { withDeadline, spawnSyncBounded, retireChildProcess, killProcessGroup, processGroupMembers, processProbe, pidAlive, withFd, boundedWriter, BoundedTail, PGROUP_MARKER_ENV, registerGroup, refreshGroupMembers, forgetGroup, spawnedGroupIdentity, ownedGroupMembers, type GroupRegistration } from "./bounded";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const waitExit = async (p: ChildProcess) => { for (let i = 0; i < 100 && p.exitCode === null && p.signalCode === null; i++) await sleep(20); };
@@ -380,6 +380,71 @@ describe("killProcessGroup", () => {
       } finally { kill.mockRestore(); held?.release(); forgetGroup(pid); }
     },
   );
+
+  test("a launcher that exited before its start time was sampled captures nothing from the incarnation that reused its pid (#628 F30)", async () => {
+    // No /proc on this platform, so `hasMarker` can answer nothing, AND the
+    // launcher was already gone when registerGroup looked at it — the record
+    // therefore holds no start time at all. The number is then reused, and the
+    // new incarnation forks a child into its own group. Reading "no recorded
+    // start" as "the leader is present" made the bare pgid proof again: the
+    // refresh at the top of the kill enrolled the STRANGER's child into this
+    // record, and killProcessGroup — which correctly refuses to signal the
+    // launcher pid itself — SIGTERMed that child individually. Holding the old
+    // generation's lease is no defence when the refresh contaminates the very
+    // record the lease points at. Nothing real is touched here: the probes
+    // describe the pids.
+    const pid = 991343;
+    const child = pid + 1;
+    let phase: "register" | "kill" = "register";
+    let childLive = true;
+    processProbe.identityOf = (p) => {
+      if (phase === "register") return null; // the launcher exited before it was sampled
+      if (p === pid) return { start: "new-incarnation", zombie: false };
+      return p === child && childLive ? { start: "new-child", zombie: false } : null;
+    };
+    processProbe.membersOf = () => phase === "register" ? [] : [
+      { pid, start: "new-incarnation", zombie: false },
+      ...(childLive ? [{ pid: child, start: "new-child", zombie: false }] : []),
+    ];
+    processProbe.hasMarker = () => null; // no /proc: no candidate can prove anything
+    const held = registerGroup(pid, { marker: "tok-f30" });
+    expect(spawnedGroupIdentity(pid)).toMatchObject({ start: undefined, members: [] });
+    phase = "kill"; // the pid is recycled; the new leader forks a child of its own
+    held.refresh(true); // the opportunistic widening a spawn site does
+    expect(spawnedGroupIdentity(pid)!.members).toEqual([]); // still nothing provably ours
+    const signals: Array<[number, string | number | undefined]> = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((p: number, s: NodeJS.Signals) => {
+      signals.push([p, s]);
+      if (p === child) childLive = false;
+      return true;
+    }) as typeof process.kill);
+    const logs: string[] = [];
+    try {
+      await expect(killProcessGroup(pid, { group: held, marker: "tok-f30", graceMs: 0, log: (l) => logs.push(l) })).resolves.toBe(false);
+      expect(signals).toEqual([]); // not the stranger leader, and not its child
+      expect(childLive).toBe(true);
+      expect(logs.some((l) => l.includes("termination unconfirmed"))).toBe(true);
+    } finally { kill.mockRestore(); held.release(); forgetGroup(pid); }
+  });
+
+  test("ownedGroupMembers tells 'searched and conclusive' apart from 'searched but unreadable' (#628 F30)", () => {
+    // The group CAN be enumerated, and lists a live process — but without
+    // /proc no candidate's JOY_PGROUP can be read, so the search classifies
+    // nothing. An empty `pids` from that scan says as little as one from a
+    // scan that never ran, and a caller must be able to tell the difference.
+    const pgid = 991344;
+    const child = pgid + 1;
+    processProbe.identityOf = (p) => (p === child ? { start: "child-start", zombie: false } : null);
+    processProbe.membersOf = () => [{ pid: child, start: "child-start", zombie: false }];
+    processProbe.hasMarker = () => null; // unreadable: undecided, NOT "not ours"
+    expect(ownedGroupMembers(pgid, { marker: "tok-f30" })).toEqual({ searched: true, pids: [], unclassified: 1 });
+    processProbe.hasMarker = () => false; // readable, and positively someone else's
+    expect(ownedGroupMembers(pgid, { marker: "tok-f30" })).toEqual({ searched: true, pids: [], unclassified: 0 });
+    processProbe.hasMarker = () => true; // readable, and ours
+    expect(ownedGroupMembers(pgid, { marker: "tok-f30" })).toEqual({ searched: true, pids: [child], unclassified: 0 });
+    processProbe.membersOf = () => null; // nowhere to look at all
+    expect(ownedGroupMembers(pgid, { marker: "tok-f30" })).toEqual({ searched: false, pids: [], unclassified: 0 });
+  });
 
   test("an already-dead pid resolves true without escalation", async () => {
     const p = spawn("true", [], { stdio: "ignore" });

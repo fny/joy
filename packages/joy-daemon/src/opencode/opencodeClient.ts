@@ -327,17 +327,19 @@ export async function killOpencodeServerPid(pid: number, marker?: string, spawnS
  * reused, so the recorded spawn identity (launcher start time + JOY_PGROUP)
  * is verified BEFORE anything is signalled.
  *
- *  - "unowned" — the pid is not ours AND a search that actually ran found
- *    nothing marker-proven it left behind: nothing was signalled, and the
- *    caller may start a fresh server;
+ *  - "unowned" — the pid is not ours AND a search that actually ran classified
+ *    every process it listed under the group as not ours: nothing was
+ *    signalled, and the caller may start a fresh server;
  *  - "gone"    — our recorded server was found and is now terminated;
  *  - "alive"   — it survived SIGKILL (or could not be confirmed dead): the
  *    caller must NOT start a second server on top of it;
- *  - "unknown" — the search could not be RUN at all (#628 F29): the platform
- *    listed no processes, so "nothing found" is the absence of a search, not
- *    the absence of the server. Never treat this as unowned — the caller
- *    should retry rather than start a second server on top of descendants it
- *    never proved were gone.
+ *  - "unknown" — the search reached no conclusion: the platform listed no
+ *    processes at all (#628 F29), or it listed descendants whose ownership
+ *    could not be read (no /proc to check `JOY_PGROUP` against — #628 F30).
+ *    "Nothing proven ours" is then the absence of an answer, not the absence
+ *    of the server. Never treat this as unowned — the caller should retry
+ *    rather than start a second server on top of descendants it never proved
+ *    were gone.
  */
 export async function reapRecordedOpencodeServer(pid: number, identity: OpencodeServerIdentity = {}): Promise<"unowned" | "gone" | "alive" | "unknown"> {
   const occupant = processProbe.identityOf(pid);
@@ -370,9 +372,18 @@ export async function reapRecordedOpencodeServer(pid: number, identity: Opencode
       process.stderr.write(`[opencode] recorded server ${pid} is ${occupant === null ? "gone" : "not the process we spawned"} but left ${descendants.join(",")} behind — reaping before allowing a replacement\n`);
       return (await killOpencodeServerPid(pid, identity.marker, identity.start)) ? "gone" : "alive";
     }
-    // Nothing found — but only a search that RAN is evidence of absence.
-    if (identity.marker !== undefined && !left.searched) {
-      process.stderr.write(`[opencode] recorded server ${pid}: no process listing available, so nothing proves its group is gone — deferring\n`);
+    // Nothing found — but only a CONCLUSIVE search is evidence of absence: it
+    // has to have run at all, and every process it listed under the pgid has
+    // to have been positively classified. A search that listed live
+    // descendants and could read none of their markers (no /proc, so
+    // `hasMarker` answers `null` for all of them) knows exactly as much as one
+    // that never ran, and answering "unowned" there is what let a second
+    // server start on top of a live one (#628 F30).
+    if (identity.marker !== undefined && (!left.searched || left.unclassified > 0)) {
+      const why = left.searched
+        ? `${left.unclassified} listed process(es) could not be classified`
+        : "no process listing available";
+      process.stderr.write(`[opencode] recorded server ${pid}: ${why}, so nothing proves its group is gone — deferring\n`);
       return "unknown";
     }
   }

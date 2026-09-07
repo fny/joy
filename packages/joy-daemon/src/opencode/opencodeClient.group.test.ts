@@ -190,6 +190,26 @@ describe("recovery proves absence before allowing a replacement (#628 F29)", () 
     } finally { kill.mockRestore(); }
   }, 20_000);
 
+  it("reports 'unknown' — never 'unowned' — when a listed descendant's ownership cannot be read (#628 F30)", async () => {
+    const launcher = 993004;
+    const child = 993005;
+    // The recorded launcher is gone and the platform CAN enumerate its group:
+    // a live process is listed under the pgid. But there is no /proc to read
+    // JOY_PGROUP from, so nothing classifies that process either way. A search
+    // that ran and concluded nothing knows exactly as much as one that never
+    // ran; calling it "unowned" is what let a second server start on top of a
+    // server the first one had left behind.
+    processProbe.identityOf = (p) => (p === child ? { start: "child-start", zombie: false } : p === launcher ? null : original.identityOf(p));
+    processProbe.membersOf = (g) => (g === launcher ? [{ pid: child, start: "child-start", zombie: false }] : original.membersOf(g));
+    processProbe.hasMarker = (p, m) => (m === "tok-f30-unreadable" ? null : original.hasMarker(p, m));
+    const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    try {
+      await expect(reapRecordedOpencodeServer(launcher, { start: "recorded", marker: "tok-f30-unreadable" })).resolves.toBe("unknown");
+      expect(killGroup).not.toHaveBeenCalled();
+      expect(kill).not.toHaveBeenCalled(); // the unclassified process is never signalled either
+    } finally { kill.mockRestore(); }
+  }, 20_000);
+
   it("reports 'unknown' — never 'unowned' — when the group could not be listed at all", async () => {
     const launcher = 993003;
     // The recorded launcher is gone and this platform lists no processes: what
