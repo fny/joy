@@ -596,6 +596,13 @@ app.
   registrations, marker-based recorded recovery). **7 open**, all awaiting
   verdicts on pushed fixes or inside those two agents.
 
+- 2026-09-10 (late) — pushed lane restart round three (21f2e7d3: every
+  adoption answer clears the parked marker and the loop takes one fresh
+  bounded wait; a remote terminal is honoured once; record-only sessions get
+  their durable terminal derived and the archive is deferred until it is
+  acked). Astra verified and closed #495 #498 #550 #625 #627. **2 open**:
+  #127 (rollout flag by design) and #628 (third round in flight).
+
 ## Campaign summary (as of 2026-09-09 afternoon)
 
 **Scope.** 605 issues filed from the September coverage review (Astra/gpt-6-astra
