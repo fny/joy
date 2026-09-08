@@ -4,6 +4,8 @@
 - **Stale daemons can now say so.** The daemon reported a fixed version string that never changed, so the app's "update your CLI" warning read every daemon as out of date and, once dismissed, stayed silent forever — including for a daemon three days behind that could not serve the terminal. The daemon now reports its real version.
 - **Tap the model, effort and permission labels** to open the same settings you get from the cog — that line names exactly what the cog changes, so it is now the way in.
 - **Tap the context percentage** to see what it is measuring: how much of the context window is used, how much is left, and the input, output and cache tokens behind it.
+- **"% left" now reports your account quota, not the conversation's context.** It used to divide context by a fixed 190,000 for every model, so anything with a bigger window sat at "0% left" permanently — including straight after a reset. It now shows the tightest real quota window, from the same server data as the limits page, and tapping it lists every window with how much is left and when it resets.
+- **A reset time can no longer read "1h 60m."**
 
 # Sep 8 (4) — Device pass
 

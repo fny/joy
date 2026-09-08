@@ -623,6 +623,10 @@ export const zhHant: TranslationStructure = {
             badgeYolo: 'YOLO',
             badgePlan: '計畫',
         },
+        limits: {
+            title: '使用限額',
+            unavailable: '無法從此機器讀取配額。',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: '此模型的上下文視窗大小未知，因此不顯示百分比。',

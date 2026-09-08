@@ -624,6 +624,10 @@ export const zhHans: TranslationStructure = {
             badgeYolo: 'YOLO',
             badgePlan: '计划',
         },
+        limits: {
+            title: '使用限额',
+            unavailable: '无法从此机器读取配额。',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: '该模型的上下文窗口大小未知，因此不显示百分比。',

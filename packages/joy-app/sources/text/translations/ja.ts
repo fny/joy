@@ -624,6 +624,10 @@ export const ja: TranslationStructure = {
             badgeYolo: 'YOLO',
             badgePlan: 'プラン',
         },
+        limits: {
+            title: '使用量の上限',
+            unavailable: 'このマシンから使用量を読み取れませんでした。',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: 'このモデルのコンテキストウィンドウのサイズが不明なため、割合は表示されません。',

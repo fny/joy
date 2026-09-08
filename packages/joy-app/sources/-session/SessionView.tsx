@@ -1220,6 +1220,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             metadata={session.metadata}
             connectionStatus={connectionStatus}
             onStatusPress={hasBackgroundWork ? () => setBgSheetOpen((v) => !v) : undefined}
+            machineId={machineId}
             blockSend={false}
             onSend={handleSend}
             onMicPress={isDisconnected ? undefined : handleMicrophonePress}

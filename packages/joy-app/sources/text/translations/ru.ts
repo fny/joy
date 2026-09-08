@@ -639,6 +639,10 @@ export const ru: TranslationStructure = {
             badgeYolo: 'YOLO',
             badgePlan: 'Планирование',
         },
+        limits: {
+            title: 'ЛИМИТЫ ИСПОЛЬЗОВАНИЯ',
+            unavailable: 'Не удалось прочитать квоту с этой машины.',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: 'Размер контекстного окна этой модели неизвестен, поэтому процент не показывается.',

@@ -672,6 +672,10 @@ export const en = {
             badgeYolo: 'yolo',
             badgePlan: 'plan',
         },
+        limits: {
+            title: 'USAGE LIMITS',
+            unavailable: 'Quota could not be read from this machine.',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: 'Context window size for this model is unknown, so no percentage is shown.',

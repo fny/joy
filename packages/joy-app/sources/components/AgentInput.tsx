@@ -31,6 +31,8 @@ import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
 import { contextWindowFor, formatTokens } from './contextWindow';
+import { useMachineLimits } from '@/hooks/useMachineLimits';
+import { tightestLimit, limitWindowName, limitResetLabel } from '@/utils/limitsFormat';
 
 interface AgentInputProps {
     // `initialValue` seeds the uncontrolled textarea once; keystrokes never
@@ -85,6 +87,8 @@ interface AgentInputProps {
     agentType?: 'claude' | 'codex' | 'gemini' | 'openclaw' | 'opencode';
     onAgentClick?: () => void;
     machineName?: string | null;
+    /** Which machine's account quota the status segment reports (#646). */
+    machineId?: string | null;
     onMachineClick?: () => void;
     currentPath?: string | null;
     onPathClick?: () => void;
@@ -708,6 +712,22 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         )
         : null;
 
+    // Account QUOTA is what the segment should report (#646): it is real server
+    // truth (the limits page's own source) and it is what actually runs out and
+    // stops you working. Context only ever measured this conversation, and
+    // against a window the app had to guess. Quota wins when we have it; the
+    // context reading stays as the fallback.
+    const limits = useMachineLimits(props.machineId);
+    const tightest = tightestLimit(limits?.rows);
+    const quotaWarning = tightest
+        ? {
+            text: t('agentInput.context.remaining', { percent: Math.max(0, Math.round(100 - tightest.usedPercent)) }),
+            color: tightest.usedPercent >= 90 ? theme.colors.warningCritical
+                : tightest.usedPercent >= 80 ? theme.colors.warning
+                    : theme.colors.textSecondary,
+        }
+        : null;
+
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
 
 
@@ -1064,10 +1084,10 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     </View>
                 )}
 
-                {/* Context breakdown — what the "% left" segment is measuring (#647).
-                    Not account rate limits: the app has no such data. This is the
-                    conversation's own context window and the tokens behind it. */}
-                {showUsage && props.usageData && (
+                {/* What the "% left" segment measures (#646). Account quota when
+                    the daemon can read it — the limits page's own source — and
+                    the conversation's context only as a fallback. */}
+                {showUsage && (
                     <>
                         <TouchableWithoutFeedback onPress={() => setShowUsage(false)}>
                             <View style={styles.overlayBackdrop} />
@@ -1076,44 +1096,62 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             styles.settingsOverlay,
                             { paddingHorizontal: screenWidth > 700 ? 0 : 8 }
                         ]}>
-                            <FloatingOverlay maxHeight={320} keyboardShouldPersistTaps="always">
+                            <FloatingOverlay maxHeight={340} keyboardShouldPersistTaps="always">
                                 <View style={styles.overlaySection}>
-                                    <Text style={styles.overlaySectionTitle}>{t('agentInput.context.title')}</Text>
-                                    {(() => {
-                                        const u = props.usageData!;
-                                        const win = contextWindowFor(props.metadata?.currentModelCode as string | undefined);
-                                        const usedPct = win ? Math.min(100, (u.contextSize / win) * 100) : null;
-                                        const rows: Array<[string, string]> = [
-                                            // With no known window there is no "of N" and no percentage
-                                            // to state — the token count is the whole honest answer (#646).
-                                            [t('agentInput.context.used'), win ? `${u.contextSize.toLocaleString()} / ${win.toLocaleString()}` : u.contextSize.toLocaleString()],
-                                            ...(usedPct !== null ? [[t('agentInput.context.remainingLabel'), `${Math.round(100 - usedPct)}%`] as [string, string]] : []),
-                                            [t('agentInput.context.input'), u.inputTokens.toLocaleString()],
-                                            [t('agentInput.context.output'), u.outputTokens.toLocaleString()],
-                                            [t('agentInput.context.cacheRead'), u.cacheRead.toLocaleString()],
-                                            [t('agentInput.context.cacheWrite'), u.cacheCreation.toLocaleString()],
-                                        ];
-                                        return (
-                                            <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
-                                                {/* A bar first: the number is the detail, the fill is the answer. */}
-                                                {usedPct !== null ? (
-                                                    <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.divider, overflow: 'hidden', marginBottom: 10 }}>
-                                                        <View style={{ width: `${usedPct}%`, height: '100%', backgroundColor: theme.colors.warning }} />
-                                                    </View>
-                                                ) : (
-                                                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 8, ...Typography.default() }}>
-                                                        {t('agentInput.context.windowUnknown')}
-                                                    </Text>
-                                                )}
-                                                {rows.map(([label, value]) => (
+                                    <Text style={styles.overlaySectionTitle}>
+                                        {limits?.rows.length ? t('agentInput.limits.title') : t('agentInput.context.title')}
+                                    </Text>
+                                    <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
+                                        {limits?.rows.length ? (
+                                            // One row per quota window, worst first — the one about to
+                                            // bite is the one you opened this to see.
+                                            [...limits.rows]
+                                                .sort((a, b) => b.usedPercent - a.usedPercent)
+                                                .map((row) => {
+                                                    const pct = Math.max(0, Math.min(100, row.usedPercent));
+                                                    const resets = limitResetLabel(row.resetsAt);
+                                                    const hot = pct >= 90 ? theme.colors.warningCritical : pct >= 80 ? theme.colors.warning : theme.colors.success;
+                                                    return (
+                                                        <View key={row.id} style={{ paddingVertical: 6 }}>
+                                                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                                                                <Text style={{ fontSize: 13, color: theme.colors.text, ...Typography.default() }}>{limitWindowName(row)}</Text>
+                                                                <Text style={{ fontSize: 13, color: theme.colors.text, ...Typography.default() }}>{Math.round(100 - pct)}% left</Text>
+                                                            </View>
+                                                            <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.divider, overflow: 'hidden' }}>
+                                                                <View style={{ width: `${pct}%`, height: '100%', backgroundColor: hot }} />
+                                                            </View>
+                                                            {!!resets && (
+                                                                <Text style={{ fontSize: 11, color: theme.colors.textSecondary, marginTop: 3, ...Typography.default() }}>{resets}</Text>
+                                                            )}
+                                                        </View>
+                                                    );
+                                                })
+                                        ) : props.usageData ? (
+                                            // No quota reading (machine offline, or the daemon could not
+                                            // read its credentials): fall back to the context tokens.
+                                            <>
+                                                <Text style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 8, ...Typography.default() }}>
+                                                    {t('agentInput.limits.unavailable')}
+                                                </Text>
+                                                {([
+                                                    [t('agentInput.context.used'), formatTokens(props.usageData.contextSize)],
+                                                    [t('agentInput.context.input'), props.usageData.inputTokens.toLocaleString()],
+                                                    [t('agentInput.context.output'), props.usageData.outputTokens.toLocaleString()],
+                                                    [t('agentInput.context.cacheRead'), props.usageData.cacheRead.toLocaleString()],
+                                                    [t('agentInput.context.cacheWrite'), props.usageData.cacheCreation.toLocaleString()],
+                                                ] as Array<[string, string]>).map(([label, value]) => (
                                                     <View key={label} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 }}>
                                                         <Text style={{ fontSize: 13, color: theme.colors.textSecondary, ...Typography.default() }}>{label}</Text>
                                                         <Text style={{ fontSize: 13, color: theme.colors.text, ...Typography.default() }}>{value}</Text>
                                                     </View>
                                                 ))}
-                                            </View>
-                                        );
-                                    })()}
+                                            </>
+                                        ) : (
+                                            <Text style={{ fontSize: 13, color: theme.colors.textSecondary, ...Typography.default() }}>
+                                                {t('agentInput.limits.unavailable')}
+                                            </Text>
+                                        )}
+                                    </View>
                                 </View>
                             </FloatingOverlay>
                         </View>
@@ -1379,7 +1417,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
                 <AgentInputStatusRow
                     connectionStatus={props.connectionStatus}
-                    contextWarning={contextWarning}
+                    contextWarning={quotaWarning ?? contextWarning}
                     displayPermissionMode={displayPermissionMode}
                     permissionModeKey={permissionModeKey}
                     isSandboxedYoloMode={isSandboxedYoloMode}
@@ -1391,7 +1429,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     zenMode={props.zenMode}
                     onStatusPress={props.onStatusPress}
                     onSettingsPress={handleSettingsPress}
-                    onUsagePress={props.usageData ? handleUsagePress : undefined}
+                    onUsagePress={(limits?.rows.length || props.usageData) ? handleUsagePress : undefined}
                 />
 
                 <AgentInputContextChips

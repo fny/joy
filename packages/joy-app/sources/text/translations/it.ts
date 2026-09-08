@@ -621,6 +621,10 @@ export const it: TranslationStructure = {
             badgeYolo: 'YOLO',
             badgePlan: 'Pianificazione',
         },
+        limits: {
+            title: 'LIMITI DI UTILIZZO',
+            unavailable: 'Non è stato possibile leggere la quota da questa macchina.',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: 'La dimensione della finestra di contesto di questo modello è sconosciuta, quindi non viene mostrata alcuna percentuale.',

@@ -623,6 +623,10 @@ export const ca: TranslationStructure = {
             badgeYolo: 'YOLO',
             badgePlan: 'Planificació',
         },
+        limits: {
+            title: 'LÍMITS D\'ÚS',
+            unavailable: 'No s\'ha pogut llegir la quota d\'aquesta màquina.',
+        },
         context: {
             used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
             windowUnknown: 'Es desconeix la mida de la finestra de context d\'aquest model, per això no es mostra cap percentatge.',
