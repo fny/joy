@@ -4,6 +4,7 @@ import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 import { formatPathRelativeToHome } from './pathUtils';
+import { stabilizeOnline, sameOnlineState, OFFLINE_GRACE_MS, type OnlineHysteresisState } from './onlineHysteresis';
 
 export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
 
@@ -53,8 +54,45 @@ function paletteBase(state: SessionState): Pick<SessionStatus, 'state' | 'isConn
 // above the 30s keepalive) as offline at render time too.
 const SESSION_STALE_AFTER_MS = 90_000;
 
+/**
+ * The online reading, debounced in the offline direction only (#649).
+ *
+ * Going offline replaces the whole composer with the Resume button, so a
+ * momentary blip — one late keepalive against the 90s window — was showing
+ * that button and taking it away again. It also ticks, because the raw
+ * reading is time-based and would otherwise flip on an unrelated render.
+ */
+function useStableOnline(raw: boolean): boolean {
+    const [state, setState] = React.useState<OnlineHysteresisState>(
+        () => ({ stable: raw, offlineSince: raw ? null : Date.now() }),
+    );
+
+    // Re-render on a cadence so the staleness boundary is crossed deliberately
+    // rather than whenever something else happens to render.
+    const [, tick] = React.useReducer((c: number) => c + 1, 0);
+    React.useEffect(() => {
+        const id = setInterval(tick, 2_000);
+        return () => clearInterval(id);
+    }, []);
+
+    // Runs every render (the raw reading changes without a dep to key on) and
+    // returns the SAME object when nothing moved, so this cannot loop.
+    React.useEffect(() => {
+        setState((prev) => {
+            const next = stabilizeOnline({ ...prev, raw, now: Date.now(), graceMs: OFFLINE_GRACE_MS });
+            return sameOnlineState(prev, next) ? prev : next;
+        });
+    });
+
+    return state.stable;
+}
+
 export function useSessionStatus(session: Session): SessionStatus {
-    const isOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
+    // Instantaneous reading. It depends on Date.now(), so nothing re-renders
+    // when the staleness window lapses — useStableOnline supplies both the
+    // clock and the hysteresis (#649).
+    const rawOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
+    const isOnline = useStableOnline(rawOnline);
     const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
 
     const vibingMessage = React.useMemo(() => {
