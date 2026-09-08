@@ -1474,29 +1474,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {props.zenMode && <View style={{ flex: 1 }} />}
                                 {!props.zenMode && <View style={styles.actionButtonsLeft}>
 
-                                {/* Settings button */}
-                                {props.onPermissionModeChange && (
-                                    <Pressable
-                                        onPress={handleSettingsPress}
-                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
-                                        style={(p) => ({
-                                            flexDirection: 'row',
-                                            alignItems: 'center',
-                                            borderRadius: Platform.select({ default: 16, android: 20 }),
-                                            paddingHorizontal: 4,
-                                            paddingVertical: 6,
-                                            justifyContent: 'center',
-                                            height: 32,
-                                            opacity: p.pressed ? 0.7 : 1,
-                                        })}
-                                    >
-                                        <Octicons
-                                            name={'gear'}
-                                            size={16}
-                                            color={theme.colors.button.secondary.tint}
-                                        />
-                                    </Pressable>
-                                )}
+                                {/* The settings cog lived here. Removed (#649): the
+                                    agent · model · effort · permission line right
+                                    above opens the same overlay, and it names what
+                                    the overlay changes — a second, wordless door to
+                                    the same room was just clutter. Both were shown
+                                    under identical conditions (not zen mode), so
+                                    nothing is stranded by dropping this one. */}
 
                                 {/* Image picker / attach button. NOTE: this group is
                                     overflow:hidden, so on very narrow screens the tail of

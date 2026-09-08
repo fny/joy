@@ -7,6 +7,7 @@
 - **"% left" now reports your account quota, not the conversation's context.** It used to divide context by a fixed 190,000 for every model, so anything with a bigger window sat at "0% left" permanently — including straight after a reset. It now shows the tightest real quota window, from the same server data as the limits page, and tapping it lists every window with how much is left and when it resets.
 - **A reset time can no longer read "1h 60m."**
 - **A finished session no longer lingers as "working."** When the agent's completion signal did not arrive, the fallback that notices an idle pane was held back for nearly three minutes before it was allowed to act; it now clears as soon as the turn has produced output.
+- **The settings cog is gone from the composer.** The model, effort and permission labels open the same settings, and they say what they change — a second wordless button to the same place was only clutter.
 
 # Sep 8 (4) — Device pass
 
