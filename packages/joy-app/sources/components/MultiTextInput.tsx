@@ -3,6 +3,7 @@ import { Text, TextInput, Platform, View, NativeSyntheticEvent, TextInputKeyPres
 import { useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { isNewlineInsertedAtSelection, PendingNewlineSwallow } from './newlineSwallow';
+import { composerHeight, shouldCommitHeight } from './composerHeight';
 
 export type SupportedKey = 'Enter' | 'Escape' | 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight' | 'Tab';
 
@@ -86,6 +87,20 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
     // Synchronous mirror so imperative getText() never lags a state commit.
     const latestTextRef = React.useRef<string>(text);
     latestTextRef.current = text;
+    // Explicit height (#648). iOS grows a multiline TextInput to its content
+    // but does not shrink it when the text is cleared through `value`, so a
+    // long message left the empty field stuck at maxHeight. Height is state
+    // now: measured from onContentSizeChange, collapsed unconditionally when
+    // the text is empty (a stale measurement is exactly what went wrong).
+    const [measuredHeight, setMeasuredHeight] = React.useState<number | null>(null);
+    // One line plus the field's own vertical padding — the floor to collapse to.
+    const minHeight = Math.ceil(lineHeight + (props.paddingTop ?? 0) + (props.paddingBottom ?? 0));
+    const handleContentSizeChange = React.useCallback((e: { nativeEvent: { contentSize: { height: number } } }) => {
+        const next = e?.nativeEvent?.contentSize?.height;
+        if (typeof next !== 'number') return;
+        setMeasuredHeight((prev) => (shouldCommitHeight(prev, next, minHeight) ? next : prev));
+    }, [minHeight]);
+
     // Caret to apply after an imperative text set. Applied in a layout effect
     // so it runs once the new `value` is committed to the native view, using
     // TextInput.setSelection() (Fabric's supported imperative caret API).
@@ -111,6 +126,8 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
         fontSize,
         lineHeight,
         maxHeight,
+        // Driven, not intrinsic — see composerHeight.
+        height: composerHeight({ measured: measuredHeight, isEmpty: text.length === 0, minHeight, maxHeight }),
         color: theme.colors.input.text,
         textAlignVertical: 'top' as const,
         padding: 0,
@@ -296,6 +313,7 @@ export const MultiTextInput = React.memo(React.forwardRef<MultiTextInputHandle, 
                     onKeyPress={handleKeyPress}
                     onSelectionChange={handleSelectionChange}
                     multiline={true}
+                    onContentSizeChange={handleContentSizeChange}
                     autoCapitalize={isCommandLine ? 'none' : 'sentences'}
                     autoCorrect={!isCommandLine}
                     spellCheck={!isCommandLine}

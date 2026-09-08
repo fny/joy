@@ -9,6 +9,7 @@
 - **A finished session no longer lingers as "working."** When the agent's completion signal did not arrive, the fallback that notices an idle pane was held back for nearly three minutes before it was allowed to act; it now clears as soon as the turn has produced output.
 - **The settings cog is gone from the composer.** The model, effort and permission labels open the same settings, and they say what they change — a second wordless button to the same place was only clutter.
 - **Drafts keep their attachments.** Saving a draft used to take the text and leave the images behind in the composer; they now travel with it, and a draft can be images alone. If a stashed image later disappears from the device's storage the draft says so plainly and will not send quietly without it — you can drop the missing ones and send deliberately.
+- **The composer shrinks back after a long message.** On iOS it kept the height of whatever you last sent, so an empty box could sit four lines tall until you restarted the app.
 
 # Sep 8 (4) — Device pass
 
