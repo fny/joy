@@ -5,6 +5,7 @@ import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 import { formatPathRelativeToHome } from './pathUtils';
 import { stabilizeOnline, sameOnlineState, OFFLINE_GRACE_MS, type OnlineHysteresisState } from './onlineHysteresis';
+import { isAgentBusy } from '@/sync/sessionLiveness';
 
 export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
 
@@ -180,7 +181,10 @@ export function useSessionStatus(session: Session): SessionStatus {
     // Ephemeral flag (live socket) OR the persisted mirror — the mirror is what
     // survives an app cold start; it's only trusted while presence is live
     // (isOnline gates this whole branch), so a dead daemon can't freeze it.
-    if (session.thinking === true || session.metadata?.joy__thinking != null) {
+    // Same predicate the send gate uses (#652) — they must never disagree
+    // about whether the agent is working. isOnline is already true here, which
+    // is the liveness half of it.
+    if (isAgentBusy(session)) {
         return withBg({
             ...paletteBase('thinking'),
             statusText: vibingMessage,

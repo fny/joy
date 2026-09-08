@@ -34,3 +34,33 @@ export function isSessionInActiveGroup(session: { active: boolean; activeAt: num
     const joyState = session.metadata?.joy__state;
     return isSessionActive(session) && joyState !== 'detached' && joyState !== 'archived';
 }
+
+/**
+ * Is the agent busy right now — the ONE definition (#652).
+ *
+ * There were two, and they disagreed. The status line showed "clauding…" on
+ * `thinking === true || metadata.joy__thinking != null`, while the send gate
+ * queued a message only on `thinking === true`. The ephemeral flag reaches
+ * connected clients only, so after a cold start, a reconnect or a session
+ * eviction it is absent while the persisted mirror is the thing that is true:
+ * the screen said the agent was working and the gate sent the message straight
+ * out anyway, where it appeared as a chat bubble instead of a queue row.
+ *
+ * Both signals are guarded the same way — the mirror is only trusted while the
+ * session's presence is live and fresh, so a dead daemon cannot freeze either
+ * of them. That was the original objection to the mirror, and it is answered
+ * by the liveness check rather than by ignoring the mirror.
+ *
+ * Anything deciding "is it busy" must call this, so the two can never drift
+ * apart again.
+ */
+export function isAgentBusy(session: {
+    thinking?: boolean;
+    presence?: 'online' | number;
+    activeAt: number;
+    metadata?: { joy__thinking?: { since: number } | null } | null;
+}): boolean {
+    const live = session.presence === 'online' && isFresh(session);
+    if (!live) return false;
+    return session.thinking === true || session.metadata?.joy__thinking != null;
+}

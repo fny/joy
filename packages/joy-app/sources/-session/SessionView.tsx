@@ -77,6 +77,7 @@ import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
 import { machineSetMode, machineSendKeys, machineSetModel, machineSessionUsage } from '@/sync/v2/machine';
 import { useHarnessModels } from '@/hooks/useHarnessModels';
+import { isAgentBusy } from '@/sync/sessionLiveness';
 
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
@@ -949,9 +950,11 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // wrongly-held message is worse than a wrongly-immediate one (the
         // daemon/TUI queue absorbs the latter; the former ate sends, boite
         // Workspace/18, 2026-07-11).
-        const busy = latest?.thinking === true
-            && latest?.presence === 'online'
-            && isFresh(latest);
+        // ONE definition, shared with the status line (#652). These used to
+        // differ: the status believed the persisted joy__thinking mirror and
+        // the gate did not, so a message sent while the screen said
+        // "clauding…" bypassed the queue and landed in the chat as a bubble.
+        const busy = !!latest && isAgentBusy(latest);
         // NOTE: offline sends are NOT diverted here. They go through the normal
         // send path (optimistic echo + durable outbox, which auto-retries and
         // re-flushes on reconnect); their delivery state shows as a per-message

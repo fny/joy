@@ -13,6 +13,7 @@
 - **The Resume button no longer flashes on a live session.** One late heartbeat used to make a session look dead for a moment, swapping the whole composer for Resume and back. A session must now look offline for a sustained few seconds before the app believes it; coming back is still instant.
 - **File chips open again.** Tapping a file the agent linked showed "path required" instead of the file — the link carried the path in a form the viewer could not read, so it arrived empty. Every such chip was dead on tap, which also blocked downloading those files.
 - **A waiting message now looks like one.** Messages held while the agent is busy were drawn the same as a sent message that had not been acknowledged, so a queue that was working read as messages escaping to the server. Waiting rows now carry their own marking, and the WAITING header is legible rather than faint.
+- **Messages sent while the agent is working stay in the queue.** The status line and the send decision used different rules for "is it busy", so in the window where only the saved state was available — after a cold start, a reconnect, or a session being unloaded — the screen said the agent was working while the message went straight out and appeared in the chat. Both now use the same rule.
 
 # Sep 8 (4) — Device pass
 
