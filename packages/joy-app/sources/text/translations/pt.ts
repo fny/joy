@@ -391,6 +391,12 @@ export const pt: TranslationStructure = {
             process: 'Processo de longa duração',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `Faltam ${count} de ${total} imagens`,
+        attachmentsMissingTitle: 'Imagens em falta',
+        attachmentsMissingBody: ({ count }: { count: number }) => `${count} imagens deste rascunho já não estão no armazenamento deste dispositivo. Enviar sem elas?`,
+        sendWithout: 'Enviar sem elas',
+    },
     joyDialog: {
         label: 'AÇÃO NECESSÁRIA',
         fallbackTitle: 'O Claude Code está fazendo uma pergunta',

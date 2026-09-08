@@ -1018,10 +1018,16 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // never sent to joy-tmux until the user sends them from the draft strip.
     const handleSaveDraft = React.useCallback(() => {
         const text = composerHandleRef.current?.getMessage() ?? '';
-        if (!text.trim()) return;
-        useDraftQueueStore.getState().add(sessionId, text, 'draft');
+        // Attachments ride along with the draft now (#650). They used to stay
+        // behind in the composer while the text left, which reads as losing
+        // them. A draft that is ONLY images is worth stashing too, so empty
+        // text no longer aborts when something is attached.
+        const attachments = selectedImages;
+        if (!text.trim() && attachments.length === 0) return;
+        useDraftQueueStore.getState().add(sessionId, text, 'draft', attachments.length > 0 ? attachments : undefined);
         composerHandleRef.current?.clearMessage();
-    }, [sessionId]);
+        if (attachments.length > 0) clearImages();
+    }, [sessionId, selectedImages, clearImages]);
 
     const handleAbort = React.useCallback(() => {
         storage.getState().resetSessionAgentOverrides(sessionId);

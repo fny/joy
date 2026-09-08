@@ -24,7 +24,12 @@ import { t } from '@/text';
  *    driven, persisted mirror) are joy's.
  */
 
-type SendFn = (sessionId: string, text: string, localId: string) => Promise<SendMessageResult>;
+type SendFn = (
+    sessionId: string,
+    text: string,
+    localId: string,
+    attachments?: ReadonlyArray<{ uri: string }>,
+) => Promise<SendMessageResult>;
 /** Cancels the relay turn an accepted send became (sync wires v2CancelTurn). */
 export type CancelTurnFn = (sessionId: string, turnId: string) => Promise<void>;
 /** One accepted send as the relay's POST ack described it (#134). */
@@ -257,12 +262,18 @@ export function initDraftQueueRelease(send: SendFn, cancelTurn?: CancelTurnFn): 
             // draft regenerated the same localId as its pre-edit send — the
             // server's dedupe then acked old text A for new text B. Retries
             // stay stable because markReleasing persists the minted id.
+            // A draft whose images have been purged from the cache does NOT
+            // auto-release (#650): sending two of the three pictures it
+            // promises, silently, is the failure this whole check exists to
+            // prevent. It stays queued and visibly flagged; releasing it is
+            // then a deliberate tap.
+            if ((head.missingAttachments?.length ?? 0) > 0) continue;
             const releaseLocalId = head.releaseLocalId ?? randomUUID();
             inFlightUntil.set(sessionId, now + RELEASE_BACKSTOP_MS);
             const token = nextAttemptToken++;
             attemptTokens.set(draftKey(sessionId, head.id), token);
             useDraftQueueStore.getState().markReleasing(sessionId, head.id, releaseLocalId, now + RELEASE_LEASE_MS);
-            void send(sessionId, head.text, releaseLocalId)
+            void send(sessionId, head.text, releaseLocalId, head.attachments)
                 .then((res) => {
                     // {ok} means the send reached the in-memory outbox — NOT
                     // durable (5.6-sol audit #3: the app dying before the POST

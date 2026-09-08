@@ -520,6 +520,12 @@ export const ru: TranslationStructure = {
             process: 'Длительный процесс',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `Нет ${count} из ${total} изображений`,
+        attachmentsMissingTitle: 'Изображения отсутствуют',
+        attachmentsMissingBody: ({ count }: { count: number }) => `${count} изображений этого черновика больше нет в памяти устройства. Отправить без них?`,
+        sendWithout: 'Отправить без них',
+    },
     joyDialog: {
         label: 'ТРЕБУЕТСЯ ДЕЙСТВИЕ',
         fallbackTitle: 'Claude Code задаёт вопрос',

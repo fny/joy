@@ -409,6 +409,12 @@ export const pl: TranslationStructure = {
             process: 'Proces długotrwały',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `Brakuje ${count} z ${total} obrazów`,
+        attachmentsMissingTitle: 'Brakuje obrazów',
+        attachmentsMissingBody: ({ count }: { count: number }) => `${count} obrazów z tej wersji roboczej nie ma już w pamięci urządzenia. Wysłać bez nich?`,
+        sendWithout: 'Wyślij bez nich',
+    },
     joyDialog: {
         label: 'WYMAGANE DZIAŁANIE',
         fallbackTitle: 'Claude Code zadaje pytanie',

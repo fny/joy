@@ -393,6 +393,12 @@ export const zhHans: TranslationStructure = {
             process: '长时间运行的进程',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `${total} 张图片中有 ${count} 张丢失`,
+        attachmentsMissingTitle: '图片丢失',
+        attachmentsMissingBody: ({ count }: { count: number }) => `此草稿的 ${count} 张图片已不在本设备存储中。要不带它们发送吗？`,
+        sendWithout: '不带图片发送',
+    },
     joyDialog: {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提问',

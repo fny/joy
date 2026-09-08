@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { relayScopedMMKV } from '@/sync/serverConfig';
+import type { AttachmentPreview } from '@/sync/attachmentTypes';
 
 // On-device draft queue. Drafts are messages the user has composed but not yet
 // sent — they live ONLY in the app (never propagated to joy-tmux) until the user
@@ -34,11 +35,26 @@ export interface QueuedDraft {
     leaseUntil?: number;
     attempt?: number;
     lastError?: string;
+    /** Images stashed with the draft (#650). These are LOCAL cache-directory
+     *  URIs: nothing in the app deletes them (releaseAttachmentUris is a
+     *  web-only blob revoke), but iOS and Android both purge their cache
+     *  directories under storage pressure — never on a schedule, and only
+     *  while the app is not running. So a long-lived draft on a full phone can
+     *  come back pointing at files that are gone. That is accepted; what is
+     *  not accepted is finding out silently, hence `missing` below. */
+    attachments?: AttachmentPreview[];
+    /** URIs from `attachments` that no longer exist on disk, as of the last
+     *  check. Set by the drafts view when it verifies; drives the visible
+     *  warning and blocks an auto-release that would send fewer images than
+     *  the draft promises. */
+    missingAttachments?: string[];
 }
 
 interface DraftQueueState {
     bySession: Record<string, QueuedDraft[]>;
-    add: (sessionId: string, text: string, reason?: DraftReason) => void;
+    add: (sessionId: string, text: string, reason?: DraftReason, attachments?: AttachmentPreview[]) => void;
+    /** Record which of a draft's attachments have gone missing from disk. */
+    noteMissingAttachments: (sessionId: string, id: string, missing: string[]) => void;
     update: (sessionId: string, id: string, text: string) => void;
     remove: (sessionId: string, id: string) => void;
     /** Two-phase release: take the lease (persisted) before sendMessage. Keeps
@@ -102,13 +118,19 @@ function persistDebounced(get: () => DraftQueueState) {
 
 export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
     bySession: load(),
-    add: (sessionId, text, reason = 'draft') => {
+    add: (sessionId, text, reason = 'draft', attachments) => {
         set((s) => ({
             bySession: {
                 ...s.bySession,
                 [sessionId]: [
                     ...(s.bySession[sessionId] ?? []),
-                    { id: `${Date.now()}_${Math.random().toString(36).slice(2)}`, text, reason, queuedAt: Date.now() },
+                    {
+                        id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                        text,
+                        reason,
+                        queuedAt: Date.now(),
+                        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+                    },
                 ],
             },
         }));
@@ -138,6 +160,30 @@ export const useDraftQueueStore = create<DraftQueueState>((set, get) => ({
             },
         }));
         persist(get().bySession);
+    },
+    noteMissingAttachments: (sessionId, id, missing) => {
+        set((s) => {
+            const list = s.bySession[sessionId] ?? [];
+            const prev = list.find((d) => d.id === id);
+            // Same set as last time → no state change, so a periodic re-check
+            // cannot loop the store.
+            const same = prev
+                && (prev.missingAttachments ?? []).length === missing.length
+                && (prev.missingAttachments ?? []).every((u) => missing.includes(u));
+            if (!prev || same) return s;
+            return {
+                bySession: {
+                    ...s.bySession,
+                    [sessionId]: list.map((d) => (d.id === id
+                        ? (missing.length > 0 ? { ...d, missingAttachments: missing } : (() => {
+                            const { missingAttachments, ...rest } = d;
+                            return rest;
+                        })())
+                        : d)),
+                },
+            };
+        });
+        persistDebounced(get);
     },
     markReleasing: (sessionId, id, releaseLocalId, leaseUntil) => {
         set((s) => ({

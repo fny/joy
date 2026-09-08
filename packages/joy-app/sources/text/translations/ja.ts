@@ -393,6 +393,12 @@ export const ja: TranslationStructure = {
             process: '長時間実行プロセス',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `${total} 件中 ${count} 件の画像がありません`,
+        attachmentsMissingTitle: '画像がありません',
+        attachmentsMissingBody: ({ count }: { count: number }) => `この下書きの画像 ${count} 件が端末のストレージにありません。それらなしで送信しますか？`,
+        sendWithout: 'なしで送信',
+    },
     joyDialog: {
         label: '要対応',
         fallbackTitle: 'Claude Code が質問しています',

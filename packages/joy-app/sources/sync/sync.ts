@@ -282,7 +282,13 @@ class Sync {
         // control-lane cancel sessionAbort uses, keyed on the ack's turnId.
         void import('@/-session/draftQueueRelease').then(({ initDraftQueueRelease }) => {
             initDraftQueueRelease(
-                (sessionId, text, localId) => this.sendMessage(sessionId, text, { source: 'chat', localId }),
+                (sessionId, text, localId, attachments) => this.sendMessage(sessionId, text, {
+                    source: 'chat',
+                    localId,
+                    // A draft's stashed images (#650) — the release path only
+                    // gets here when none of them have gone missing.
+                    ...(attachments && attachments.length > 0 ? { attachments: attachments as never } : {}),
+                }),
                 async (sessionId, turnId) => {
                     const v2link = storage.getState().sessions[sessionId]?.metadata?.v2;
                     if (!v2link?.sessionId) throw new Error('session has no relay link');

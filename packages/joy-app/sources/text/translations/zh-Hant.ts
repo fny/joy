@@ -392,6 +392,12 @@ export const zhHant: TranslationStructure = {
             process: '長時間執行的程序',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `${total} 張圖片中有 ${count} 張遺失`,
+        attachmentsMissingTitle: '圖片遺失',
+        attachmentsMissingBody: ({ count }: { count: number }) => `此草稿的 ${count} 張圖片已不在本裝置儲存空間中。要不帶它們傳送嗎？`,
+        sendWithout: '不帶圖片傳送',
+    },
     joyDialog: {
         label: '需要操作',
         fallbackTitle: 'Claude Code 正在提問',

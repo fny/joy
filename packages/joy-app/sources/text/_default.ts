@@ -438,6 +438,12 @@ export const en = {
             process: 'Long-running process',
         },
     },
+    drafts: {
+        attachmentsMissing: ({ count, total }: { count: number; total: number }) => `${count} of ${total} images missing`,
+        attachmentsMissingTitle: 'Images missing',
+        attachmentsMissingBody: ({ count }: { count: number }) => `${count} of this draft's images are gone from this device's storage. Send it without them?`,
+        sendWithout: 'Send without them',
+    },
     joyDialog: {
         label: 'ACTION NEEDED',
         fallbackTitle: 'Claude Code is asking a question',
