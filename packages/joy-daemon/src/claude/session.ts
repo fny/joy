@@ -830,6 +830,14 @@ export class Session {
   // only 529/overload signal since api_error transcript entries disappeared.
   #paneRetryKey: string | null = null;
   #turn5xxStatus: number | null = null;
+  // Has THIS turn produced assistant output yet? The thinking lease exists for
+  // one failure — a long PRE-OUTPUT think, where a broken pane matcher read
+  // idle six seconds into a minutes-long turn — and once output has appeared,
+  // that failure is no longer possible for this turn. Without this, a turn
+  // whose Stop hook never arrived stayed "working" until the FULL 170s lease
+  // expired before the idle tie-breaker was even allowed to look, so a session
+  // that had plainly finished sat blue for minutes (#647).
+  #turnProducedOutput = false;
   #lastUserText: string | null = null;
   // joy: Claude is compacting its context (the PreCompact hook fired). Surfaced
   // as a "compacting" status; cleared by the compact_boundary transcript record
@@ -3576,6 +3584,9 @@ export class Session {
   #thinkingLeaseUntil = 0;
 
   #setThinking(thinking: boolean): void {
+    // The flag only means anything while thinking is true, so clearing is the
+    // one place it can be reset without hunting every turn-close path (#647).
+    if (!thinking) this.#turnProducedOutput = false;
     if (!thinking) this.#thinkingLeaseUntil = 0; // any accepted clear ends the lease
     this.#thinking = thinking;
     this.#relay?.setThinking(thinking);
@@ -4187,7 +4198,9 @@ export class Session {
             this.#idlePolls += 1;
             if (this.#idlePolls >= HOOK_TIEBREAK_IDLE_POLLS) {
               this.#idlePolls = 0;
-              if (Date.now() >= this.#thinkingLeaseUntil) {
+              // Past the lease, OR this turn already produced output — the
+              // lease guards the pre-output window and nothing else (#647).
+              if (Date.now() >= this.#thinkingLeaseUntil || this.#turnProducedOutput) {
                 process.stderr.write(`[hook] ${this.id} pane idle for ${HOOK_TIEBREAK_IDLE_POLLS} polls with no Stop — tie-breaker clears thinking\n`);
                 this.#setThinking(false);
               }
@@ -4878,6 +4891,10 @@ export class Session {
           this.#setTitle(newTitle); // agent re-title — never locks
         }
       }
+      // Output has appeared for this turn. Recorded AFTER the turn-open block
+      // below would reset it — the first output entry is what OPENS the turn,
+      // so setting it earlier means opening the turn wipes it (#647).
+      if (this.#relay && blocks.length > 0) this.#turnProducedOutput = true;
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
