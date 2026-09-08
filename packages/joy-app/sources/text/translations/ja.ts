@@ -625,6 +625,8 @@ export const ja: TranslationStructure = {
             badgePlan: 'プラン',
         },
         context: {
+            used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
+            windowUnknown: 'このモデルのコンテキストウィンドウのサイズが不明なため、割合は表示されません。',
             title: 'コンテキスト',
             used: '使用量',
             remainingLabel: '残り',

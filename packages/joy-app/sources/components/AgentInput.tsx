@@ -30,6 +30,7 @@ import { hackMode, hackModes } from '@/sync/modeHacks';
 import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
+import { contextWindowFor, formatTokens } from './contextWindow';
 
 interface AgentInputProps {
     // `initialValue` seeds the uncontrolled textarea once; keystrokes never
@@ -105,7 +106,10 @@ interface AgentInputProps {
     onSaveDraft?: () => void;
 }
 
-const MAX_CONTEXT_SIZE = 190000;
+// Context windows live in their own module so they can be tested without
+// pulling in this component (#646). There is deliberately NO default: an
+// unknown window shows tokens, never a percentage of a guess.
+// (imported below as contextWindowFor / formatTokens)
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -312,8 +316,21 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
     },
 }));
 
-const getContextWarning = (contextSize: number, alwaysShow: boolean = false, theme: Theme) => {
-    const percentageUsed = (contextSize / MAX_CONTEXT_SIZE) * 100;
+const getContextWarning = (
+    contextSize: number,
+    alwaysShow: boolean = false,
+    theme: Theme,
+    window: number | null = null,
+) => {
+    // Unknown window: report what we actually know — how much context is in
+    // play — instead of a percentage of a number we invented (#646). Neutral
+    // colour, since with no window there is no threshold to warn against.
+    if (window === null) {
+        return alwaysShow
+            ? { text: t('agentInput.context.used_short', { tokens: formatTokens(contextSize) }), color: theme.colors.textSecondary }
+            : null;
+    }
+    const percentageUsed = (contextSize / window) * 100;
     const percentageRemaining = Math.max(0, Math.min(100, 100 - percentageUsed));
 
     if (percentageRemaining <= 5) {
@@ -683,7 +700,12 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     // Calculate context warning
     const contextWarning = props.usageData?.contextSize
-        ? getContextWarning(props.usageData.contextSize, props.alwaysShowContextSize ?? false, theme)
+        ? getContextWarning(
+            props.usageData.contextSize,
+            props.alwaysShowContextSize ?? false,
+            theme,
+            contextWindowFor(props.metadata?.currentModelCode as string | undefined),
+        )
         : null;
 
     const agentInputEnterToSend = useSetting('agentInputEnterToSend');
@@ -1059,10 +1081,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     <Text style={styles.overlaySectionTitle}>{t('agentInput.context.title')}</Text>
                                     {(() => {
                                         const u = props.usageData!;
-                                        const usedPct = Math.min(100, (u.contextSize / MAX_CONTEXT_SIZE) * 100);
+                                        const win = contextWindowFor(props.metadata?.currentModelCode as string | undefined);
+                                        const usedPct = win ? Math.min(100, (u.contextSize / win) * 100) : null;
                                         const rows: Array<[string, string]> = [
-                                            [t('agentInput.context.used'), `${u.contextSize.toLocaleString()} / ${MAX_CONTEXT_SIZE.toLocaleString()}`],
-                                            [t('agentInput.context.remainingLabel'), `${Math.round(100 - usedPct)}%`],
+                                            // With no known window there is no "of N" and no percentage
+                                            // to state — the token count is the whole honest answer (#646).
+                                            [t('agentInput.context.used'), win ? `${u.contextSize.toLocaleString()} / ${win.toLocaleString()}` : u.contextSize.toLocaleString()],
+                                            ...(usedPct !== null ? [[t('agentInput.context.remainingLabel'), `${Math.round(100 - usedPct)}%`] as [string, string]] : []),
                                             [t('agentInput.context.input'), u.inputTokens.toLocaleString()],
                                             [t('agentInput.context.output'), u.outputTokens.toLocaleString()],
                                             [t('agentInput.context.cacheRead'), u.cacheRead.toLocaleString()],
@@ -1071,9 +1096,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                         return (
                                             <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
                                                 {/* A bar first: the number is the detail, the fill is the answer. */}
-                                                <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.divider, overflow: 'hidden', marginBottom: 10 }}>
-                                                    <View style={{ width: `${usedPct}%`, height: '100%', backgroundColor: theme.colors.warning }} />
-                                                </View>
+                                                {usedPct !== null ? (
+                                                    <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.divider, overflow: 'hidden', marginBottom: 10 }}>
+                                                        <View style={{ width: `${usedPct}%`, height: '100%', backgroundColor: theme.colors.warning }} />
+                                                    </View>
+                                                ) : (
+                                                    <Text style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 8, ...Typography.default() }}>
+                                                        {t('agentInput.context.windowUnknown')}
+                                                    </Text>
+                                                )}
                                                 {rows.map(([label, value]) => (
                                                     <View key={label} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 }}>
                                                         <Text style={{ fontSize: 13, color: theme.colors.textSecondary, ...Typography.default() }}>{label}</Text>

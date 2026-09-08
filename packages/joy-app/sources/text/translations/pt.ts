@@ -623,6 +623,8 @@ export const pt: TranslationStructure = {
             badgePlan: 'Planejamento',
         },
         context: {
+            used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
+            windowUnknown: 'O tamanho da janela de contexto deste modelo é desconhecido, por isso nenhuma percentagem é mostrada.',
             title: 'CONTEXTO',
             used: 'Usado',
             remainingLabel: 'Restante',

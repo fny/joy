@@ -625,6 +625,8 @@ export const zhHans: TranslationStructure = {
             badgePlan: '计划',
         },
         context: {
+            used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
+            windowUnknown: '该模型的上下文窗口大小未知，因此不显示百分比。',
             title: '上下文',
             used: '已使用',
             remainingLabel: '剩余',

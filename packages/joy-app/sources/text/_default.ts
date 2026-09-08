@@ -673,6 +673,8 @@ export const en = {
             badgePlan: 'plan',
         },
         context: {
+            used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
+            windowUnknown: 'Context window size for this model is unknown, so no percentage is shown.',
             title: 'CONTEXT',
             used: 'Used',
             remainingLabel: 'Left',

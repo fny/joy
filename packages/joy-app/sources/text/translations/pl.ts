@@ -640,6 +640,8 @@ export const pl: TranslationStructure = {
             badgePlan: 'Planowanie',
         },
         context: {
+            used_short: ({ tokens }: { tokens: string }) => `${tokens} ctx`,
+            windowUnknown: 'Rozmiar okna kontekstu tego modelu jest nieznany, więc procent nie jest pokazywany.',
             title: 'KONTEKST',
             used: 'Wykorzystano',
             remainingLabel: 'Pozostało',
