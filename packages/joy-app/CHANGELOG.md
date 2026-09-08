@@ -11,6 +11,7 @@
 - **Drafts keep their attachments.** Saving a draft used to take the text and leave the images behind in the composer; they now travel with it, and a draft can be images alone. If a stashed image later disappears from the device's storage the draft says so plainly and will not send quietly without it — you can drop the missing ones and send deliberately.
 - **The composer shrinks back after a long message.** On iOS it kept the height of whatever you last sent, so an empty box could sit four lines tall until you restarted the app.
 - **The Resume button no longer flashes on a live session.** One late heartbeat used to make a session look dead for a moment, swapping the whole composer for Resume and back. A session must now look offline for a sustained few seconds before the app believes it; coming back is still instant.
+- **File chips open again.** Tapping a file the agent linked showed "path required" instead of the file — the link carried the path in a form the viewer could not read, so it arrived empty. Every such chip was dead on tap, which also blocked downloading those files.
 
 # Sep 8 (4) — Device pass
 

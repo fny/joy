@@ -4,6 +4,7 @@ import { Text } from '@/components/StyledText';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
+import { encodePathParam } from '@/utils/pathParam';
 
 /**
  * Inline file link for <joy-file/> tags — the agent points the user at a file
@@ -24,7 +25,12 @@ export const JoyFileChip = React.memo((props: {
     const label = props.name ?? (props.line ? `${basename}:${props.line}` : basename);
 
     const onPress = React.useCallback(() => {
-        const params = new URLSearchParams({ path: props.path });
+        // ENCODED, like every other link into the file viewer (#650). The
+        // viewer decodes with decodePathParam, so a plain path fails base64url,
+        // fails the atob fallback, and comes back as '' — the viewer then
+        // reports "path required" and the chip is simply dead. It has never
+        // opened a file.
+        const params = new URLSearchParams({ path: encodePathParam(props.path) });
         if (props.line) params.set('line', String(props.line));
         router.push(`/session/${props.sessionId}/file?${params.toString()}` as never);
     }, [router, props.sessionId, props.path, props.line]);
