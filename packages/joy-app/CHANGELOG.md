@@ -1,3 +1,10 @@
+# Sep 8 (6) — Voice works again
+
+- **Voice connects and stays connected.** Every call was being refused by ElevenLabs the moment it came up: the app overrode the agent's system prompt and first message on each connect, and an agent that does not allow those overrides closes the call on the spot. On the phone that looked like "Voice live" for a second, then quiet standby, then a wake on the next sound into the same wall. The default mode is now **Stays on**, the way voice originally worked: one conversation from the mic tap until you end it, no idle hang-up, no wake-ups, and nothing sent that the agent has to permit — a stock agent works as is. The briefing arrives as context right after connect instead.
+- **Standby is still there, as an option.** Settings → Voice → Conversation → Standby brings back the idle hang-up and the event and sound wake-ups. It needs the system-prompt and first-message overrides enabled on the agent's Security tab, and the settings say so.
+- **A refused call says why.** A call that ends right after connecting, before anything was said, now shows the reason (the server's own message on desktop, the likely override on the phone) and stops, instead of retrying four times and going silent.
+- **Suggested system prompt.** Settings → Voice offers the operating notes as a copyable prompt for the agent's dashboard.
+
 # Sep 8 (5) — See what is running
 
 - **Tap the status line to see what is running in the background.** It used to report only a count — "3/6 tasks" — which cannot tell you *which* thing is stuck, and that is exactly the case worth understanding: an outstanding count also holds back the turn-done notification, so one wedged job quietly costs you pushes for hours. The sheet lists each background command, agent and long-running process with the label the agent gave it, how long it has been going, and a warning once it has been running long enough to doubt.

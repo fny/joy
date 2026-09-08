@@ -1,7 +1,15 @@
 export interface VoiceSessionConfig {
     sessionId: string;
+    /**
+     * Session briefing handed over as the `initialConversationContext` dynamic
+     * variable, for a dashboard prompt that references it (the original joy
+     * setup). Dynamic variables need no override permission.
+     */
+    initialContext?: string;
+    /** System-prompt OVERRIDE. Only sent when set; the agent must allow it. */
     systemPrompt?: string;
-    /** Empty string = the agent waits for the user (used on event-driven wakes). */
+    /** First-message OVERRIDE; empty string = the agent waits for the user
+     *  (event-driven wakes). Only sent when set; the agent must allow it. */
     firstMessage?: string;
     /** WebRTC conversation token minted with the user's key (private agents). */
     conversationToken?: string;

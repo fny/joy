@@ -39,6 +39,28 @@ export function buildVoiceSystemPrompt(options: {
     return sections.join('\n\n');
 }
 
+/**
+ * The classic-mode briefing, sent as a contextual update the moment the line
+ * is up. Same material as the prompt override, but a contextual update needs
+ * no permission from the agent — the dashboard prompt stays in charge of the
+ * persona and this tells the agent what it is looking at and how joy works.
+ */
+export function buildVoiceBriefing(options: {
+    sessionContext: string;
+    isContinuation: boolean;
+    voiceTranscript?: string | null;
+}): string {
+    const sections = ['# Joy operating notes\n' + VOICE_SYSTEM_PROMPT_BASE];
+    if (options.isContinuation) sections.push(CONTINUATION_NOTICE);
+    if (options.sessionContext.trim()) {
+        sections.push(`# Sessions right now\n${options.sessionContext.trim()}`);
+    }
+    if (options.isContinuation && options.voiceTranscript?.trim()) {
+        sections.push(`# Recent voice conversation\n${options.voiceTranscript.trim()}`);
+    }
+    return sections.join('\n\n');
+}
+
 export function buildVoiceFirstMessage(options: { isContinuation: boolean; silentWake: boolean; soundWake: boolean }): string {
     // An event-driven wake must not greet: the pending update is sent as a
     // user message right after connect and the agent answers THAT.

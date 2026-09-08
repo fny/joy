@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { canListenWhileIdle, classifyDisconnect } from './voiceRules';
+import { canListenWhileIdle, classifyDisconnect, isRejectedAfterConnect, REJECTED_AFTER_CONNECT_MS } from './voiceRules';
 
 const listening = {
+    mode: 'standby' as const,
     armed: true,
     wakeOnSound: true,
     connecting: false,
@@ -55,5 +56,36 @@ describe('classifyDisconnect (#343)', () => {
         expect(classifyDisconnect({ reason: 'user' })).toBe('dropped');
         expect(classifyDisconnect(undefined)).toBe('dropped');
         expect(classifyDisconnect(null)).toBe('dropped');
+    });
+});
+
+describe('classic mode never listens while idle', () => {
+    it('is off whatever the other inputs say', () => {
+        expect(canListenWhileIdle({ ...listening, mode: 'classic' })).toBe(false);
+        expect(canListenWhileIdle({ ...listening, mode: 'standby' })).toBe(true);
+    });
+});
+
+describe('isRejectedAfterConnect', () => {
+    const now = 1_000_000;
+
+    it('a call that ends within the window with nothing said was refused', () => {
+        expect(isRejectedAfterConnect({ connectedAt: now - 800, lastTurnAt: null, now })).toBe(true);
+    });
+
+    it('a turn spoken since the connect means it was a real call', () => {
+        expect(isRejectedAfterConnect({ connectedAt: now - 800, lastTurnAt: now - 200, now })).toBe(false);
+    });
+
+    it('a turn from BEFORE this connect (the surviving transcript) does not count', () => {
+        expect(isRejectedAfterConnect({ connectedAt: now - 800, lastTurnAt: now - 5_000, now })).toBe(true);
+    });
+
+    it('past the window it is a drop, whatever was said', () => {
+        expect(isRejectedAfterConnect({ connectedAt: now - REJECTED_AFTER_CONNECT_MS - 1, lastTurnAt: null, now })).toBe(false);
+    });
+
+    it('never connected: not refused (the connect failed on its own)', () => {
+        expect(isRejectedAfterConnect({ connectedAt: null, lastTurnAt: null, now })).toBe(false);
     });
 });

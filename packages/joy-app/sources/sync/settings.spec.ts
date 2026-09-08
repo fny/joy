@@ -253,6 +253,7 @@ describe('settings', () => {
                 voiceWakeOnEvents: true,
                 voiceWakeOnSound: true,
                 voiceIdleTimeoutSec: 45,
+                voiceMode: 'classic',
                 joy__tmuxServerUrl: null,
                 reviewPromptAnswered: false,
                 reviewPromptLikedApp: null,

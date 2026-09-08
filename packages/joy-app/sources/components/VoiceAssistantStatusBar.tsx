@@ -1,7 +1,9 @@
 /**
  * Voice status strip under the chat header (phone) or in the sidebar
  * (tablet/desktop). Three states: connecting, live, standing by (armed but
- * hung up). Tap toggles live ↔ standing by; the × ends voice for good.
+ * hung up). In standby mode a tap toggles live ↔ standing by and the × ends
+ * voice for good; in classic mode there is nothing to stand by for, so a tap
+ * on a live call ends it too.
  */
 import * as React from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
@@ -25,6 +27,7 @@ export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: 
     const realtimeMode = useRealtimeMode();
     const armedSessionId = useVoiceArmedSessionId();
     const wakeOnSound = useSetting('voiceWakeOnSound');
+    const classic = useSetting('voiceMode') !== 'standby';
 
     if (realtimeStatus === 'disconnected' && armedSessionId === null) {
         return null;
@@ -43,20 +46,20 @@ export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: 
             break;
         case 'connected':
             color = theme.colors.status.connected;
-            text = t('voice.statusLive'); hint = t('voice.tapToPause');
+            text = t('voice.statusLive'); hint = classic ? t('voice.tapToEnd') : t('voice.tapToPause');
             break;
         case 'error':
             color = theme.colors.status.error;
-            text = t('voice.statusError'); hint = t('voice.tapToTalk');
+            text = t('voice.statusError'); hint = t('voice.tapToRetry');
             break;
         default:
             color = theme.colors.status.default;
-            text = t('voice.statusArmed'); hint = wakeOnSound ? t('voice.listeningHint') : t('voice.tapToTalk');
+            text = t('voice.statusArmed'); hint = !classic && wakeOnSound ? t('voice.listeningHint') : t('voice.tapToTalk');
     }
 
     const handlePress = () => {
         if (realtimeStatus === 'connecting') return;
-        if (realtimeStatus === 'connected') { void hangUp(); return; }
+        if (realtimeStatus === 'connected') { void (classic ? endVoice() : hangUp()); return; }
         if (armedSessionId) void startVoice(armedSessionId);
     };
     const handleEnd = () => { void endVoice(); };

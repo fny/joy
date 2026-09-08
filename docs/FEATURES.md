@@ -403,23 +403,39 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   use". The key lives in synced settings (end-to-end encrypted) and is used
   only on the device to mint single-use WebRTC conversation tokens; no server
   is involved (`sources/realtime/elevenLabs.ts`).
-- The composer mic arms voice for the open session and connects. States
-  (`sources/realtime/RealtimeSession.ts`): ARMED (no connection, nothing
-  billed) ↔ LIVE (conversation open). Idle hang-up after
-  `voiceIdleTimeoutSec` of silence; session events (turn ended, held
-  approval, `<joy-options>` question) wake an armed voice when
-  `voiceWakeOnEvents` is on; a local sound-level detector
-  (`realtime/soundWake.ts`, expo-audio metering natively / AnalyserNode on
-  web, foreground only) reconnects on speech-like sound when
-  `voiceWakeOnSound` is on. The spoken transcript survives hang-ups and is
-  replayed on reconnect (continuation prompt); × on the voice bar disarms.
+- Two conversation modes, `voiceMode` (`realtime/voiceRules.ts`):
+  - **classic** (default): the composer mic opens one conversation and it
+    stays LIVE until the user ends it (tap the bar or ×). No idle hang-up, no
+    sound or event wake. Nothing is sent that the agent has to allow — no
+    prompt or first-message override — so a stock dashboard agent works as
+    is. The briefing (operating notes + session directory + focused session
+    + transcript on reconnect) goes over as a contextual update the moment
+    the line is up, and as the `initialConversationContext` dynamic variable
+    for a dashboard prompt that references it. A drop still reconnects with
+    backoff; the agent's own `end_call` turns voice off.
+  - **standby**: ARMED (no connection, nothing billed) ↔ LIVE. Idle hang-up
+    after `voiceIdleTimeoutSec` of silence; session events (turn ended, held
+    approval, `<joy-options>` question) wake an armed voice when
+    `voiceWakeOnEvents` is on; a local sound-level detector
+    (`realtime/soundWake.ts`, expo-audio metering natively / AnalyserNode on
+    web, foreground only) reconnects on speech-like sound when
+    `voiceWakeOnSound` is on. The spoken transcript survives hang-ups and is
+    replayed on reconnect. Silent wakes are an empty first-message override
+    and the briefing a prompt override: **both must be enabled on the
+    agent's Security tab**, or ElevenLabs closes every call the moment the
+    initiation data arrives.
+- A call that ends within 8s of coming up before either side said a word is
+  treated as refused by the agent's configuration, not dropped
+  (`isRejectedAfterConnect`): voice parks in error with an alert naming the
+  server's close reason (web) or the likely override (native, where the SDK
+  only reports the agent participant leaving). No reconnect loop, no quiet
+  standby.
 - Context feed (`realtime/hooks/voiceHooks.ts`): focus changes and new
   messages are silent contextual updates; turn end, approvals and questions
   are prompts the agent speaks. Client tools the agent must declare:
   `sendMessageToSession(sessionId, message)` and
-  `processPermissionRequest(requestId, decision)`. The system prompt and
-  first message are overridden on every connect (dashboard overrides must be
-  enabled).
+  `processPermissionRequest(requestId, decision)`. Settings → Voice offers
+  the operating notes as a copyable system prompt for the dashboard.
 - Native modules: `@elevenlabs/react-native` over LiveKit/WebRTC (pinned to
   the versions in the July 3 native build; `@elevenlabs/react` on web).
   `patches/fix-livekit-room-reuse.cjs` forces the `/rtc` v0 path.

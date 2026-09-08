@@ -1,7 +1,8 @@
 /**
  * Voice settings: the ElevenLabs agents the user brought (public = agent id
- * alone; private = agent id + API key), which one is in use, and the
- * standing-by behavior (event wake, idle hang-up).
+ * alone; private = agent id + API key), which one is in use, how a
+ * conversation lives (classic: stays on until ended; standby: idle hang-up
+ * with event and sound wake) and, for standby, its knobs.
  */
 import React from 'react';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -15,6 +16,7 @@ import { Modal } from '@/modal';
 import { t } from '@/text';
 import { useUnistyles } from 'react-native-unistyles';
 import type { Settings } from '@/sync/settings';
+import { VOICE_SYSTEM_PROMPT_BASE } from '@/realtime/voiceSystemPrompt';
 
 type VoiceAgent = Settings['voiceAgents'][number];
 
@@ -22,6 +24,8 @@ export default React.memo(function VoiceSettingsScreen() {
     const { theme } = useUnistyles();
     const [agents, setAgents] = useSettingMutable('voiceAgents');
     const [activeAgentId, setActiveAgentId] = useSettingMutable('voiceActiveAgentId');
+    const [mode, setMode] = useSettingMutable('voiceMode');
+    const standby = mode === 'standby';
     const [wakeOnEvents, setWakeOnEvents] = useSettingMutable('voiceWakeOnEvents');
     const [wakeOnSound, setWakeOnSound] = useSettingMutable('voiceWakeOnSound');
     const [idleTimeoutSec, setIdleTimeoutSec] = useSettingMutable('voiceIdleTimeoutSec');
@@ -127,6 +131,28 @@ export default React.memo(function VoiceSettingsScreen() {
                 />
             </ItemGroup>
 
+            <ItemGroup title={t('settingsVoice.modeTitle')}>
+                <Item
+                    title={t('settingsVoice.modeClassic')}
+                    subtitle={t('settingsVoice.modeClassicSubtitle')}
+                    subtitleLines={0}
+                    icon={<Ionicons name="radio-button-on-outline" size={29} color={theme.colors.accents.green} />}
+                    rightElement={!standby ? <Ionicons name="checkmark" size={20} color={theme.colors.textLink} /> : undefined}
+                    showChevron={false}
+                    onPress={() => setMode('classic')}
+                />
+                <Item
+                    title={t('settingsVoice.modeStandby')}
+                    subtitle={t('settingsVoice.modeStandbySubtitle')}
+                    subtitleLines={0}
+                    icon={<Ionicons name="moon-outline" size={29} color={theme.colors.accents.indigo} />}
+                    rightElement={standby ? <Ionicons name="checkmark" size={20} color={theme.colors.textLink} /> : undefined}
+                    showChevron={false}
+                    onPress={() => setMode('standby')}
+                />
+            </ItemGroup>
+
+            {standby && (
             <ItemGroup title={t('settingsVoice.behaviorTitle')}>
                 <Item
                     title={t('settingsVoice.wakeOnEvents')}
@@ -151,6 +177,7 @@ export default React.memo(function VoiceSettingsScreen() {
                     onPress={handleIdleTimeout}
                 />
             </ItemGroup>
+            )}
 
             <ItemGroup title={t('settingsVoice.setupTitle')}>
                 <Item
@@ -158,6 +185,14 @@ export default React.memo(function VoiceSettingsScreen() {
                     titleStyle={{ fontSize: 13 }}
                     showChevron={false}
                     copy={t('settingsVoice.setupFooter')}
+                />
+                <Item
+                    title={t('settingsVoice.setupPrompt')}
+                    subtitle={t('settingsVoice.setupPromptSubtitle')}
+                    subtitleLines={0}
+                    icon={<Ionicons name="document-text-outline" size={29} color={theme.colors.accents.blue} />}
+                    showChevron={false}
+                    copy={VOICE_SYSTEM_PROMPT_BASE}
                 />
             </ItemGroup>
         </ItemList>

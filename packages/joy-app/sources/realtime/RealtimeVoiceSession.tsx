@@ -60,13 +60,23 @@ class RealtimeVoiceSessionImpl implements VoiceSession {
                 ...(config.conversationToken
                     ? { conversationToken: config.conversationToken }
                     : { agentId: config.agentId }),
-                dynamicVariables: { sessionId: config.sessionId },
-                overrides: {
-                    agent: {
-                        ...(config.systemPrompt ? { prompt: { prompt: config.systemPrompt } } : {}),
-                        ...(config.firstMessage !== undefined ? { firstMessage: config.firstMessage } : {}),
-                    },
+                dynamicVariables: {
+                    sessionId: config.sessionId,
+                    ...(config.initialContext ? { initialConversationContext: config.initialContext } : {}),
                 },
+                // Overrides only when the orchestrator asked for them: an
+                // agent that does not allow a field closes the call the moment
+                // it sees it, so classic mode sends none.
+                ...(config.systemPrompt !== undefined || config.firstMessage !== undefined
+                    ? {
+                        overrides: {
+                            agent: {
+                                ...(config.systemPrompt !== undefined ? { prompt: { prompt: config.systemPrompt } } : {}),
+                                ...(config.firstMessage !== undefined ? { firstMessage: config.firstMessage } : {}),
+                            },
+                        },
+                    }
+                    : {}),
             };
             // Both stages — the SDK call and the wait for the room — settle
             // on onConnect, a pre-connect onError/onDisconnect, an endSession
@@ -156,7 +166,7 @@ export const RealtimeVoiceSession: React.FC = () => {
             // The SDK reports reason 'agent' only when the agent participant
             // left — its end_call tool, on the user's request (#343).
             if (classifyDisconnect(details) === 'agent-ended') notifyVoiceAgentEnded();
-            else notifyVoiceUnexpectedDisconnect();
+            else notifyVoiceUnexpectedDisconnect(details?.reason === 'error' ? details.message : undefined);
         },
         onMessage: (data) => {
             if (!controller.owns(id)) return;

@@ -34,13 +34,23 @@ class RealtimeVoiceSessionImpl implements VoiceSession {
             // lit after every hang-up, one more track per reconnect (#101).
             if (!config.conversationToken && !config.agentId) throw new Error('no agent');
             const sessionConfig: any = {
-                dynamicVariables: { sessionId: config.sessionId },
-                overrides: {
-                    agent: {
-                        ...(config.systemPrompt ? { prompt: { prompt: config.systemPrompt } } : {}),
-                        ...(config.firstMessage !== undefined ? { firstMessage: config.firstMessage } : {}),
-                    },
+                dynamicVariables: {
+                    sessionId: config.sessionId,
+                    ...(config.initialContext ? { initialConversationContext: config.initialContext } : {}),
                 },
+                // Overrides only when the orchestrator asked for them: an
+                // agent that does not allow a field closes the call the moment
+                // it sees it, so classic mode sends none.
+                ...(config.systemPrompt !== undefined || config.firstMessage !== undefined
+                    ? {
+                        overrides: {
+                            agent: {
+                                ...(config.systemPrompt !== undefined ? { prompt: { prompt: config.systemPrompt } } : {}),
+                                ...(config.firstMessage !== undefined ? { firstMessage: config.firstMessage } : {}),
+                            },
+                        },
+                    }
+                    : {}),
                 // A minted token is a WebRTC credential; the bare agent id
                 // goes over the default websocket transport.
                 ...(config.conversationToken
@@ -92,8 +102,11 @@ export const RealtimeVoiceSession: React.FC = () => {
             // The end_call tool ends the session with reason 'agent' and an
             // 'end_call' CloseEvent; a WebRTC room drop also says 'agent' but
             // with a plain 'close' event and must keep reconnecting (#343).
+            // A server close carries its reason here (code 1008: "Override
+            // for field 'prompt' is not allowed by config"); it is what the
+            // user needs to read.
             if (classifyDisconnect(details) === 'agent-ended') notifyVoiceAgentEnded();
-            else notifyVoiceUnexpectedDisconnect();
+            else notifyVoiceUnexpectedDisconnect(details?.reason === 'error' ? details.message : undefined);
         },
         onMessage: (data) => {
             recordVoiceMessage(data);

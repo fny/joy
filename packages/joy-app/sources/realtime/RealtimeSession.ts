@@ -17,18 +17,24 @@
 //             until a tap or a session event retries (#20).
 //
 // Ending voice from the status bar disarms: clears the transcript, no wakes.
+//
+// That is `voiceMode: 'standby'`. The default, 'classic', is the original
+// behaviour: the tap opens one conversation and it stays LIVE until the user
+// ends it — no idle hang-up, no sound or event wake, nothing sent that the
+// agent must allow (see voiceRules.VoiceMode). A drop still reconnects.
 import type { VoiceSession } from './types';
 import { Modal } from '@/modal';
 import { t } from '@/text';
 import { requestMicrophonePermission, showMicrophonePermissionDeniedAlert } from '@/utils/microphonePermissions';
 import { storage } from '@/sync/storage';
 import { isLatest, nextGen, retire } from '@/utils/latest';
-import { buildVoiceFirstMessage, buildVoiceSystemPrompt } from './voiceSystemPrompt';
-import { clearVoiceTranscript, getRecentVoiceTranscript, hasVoiceTranscript } from './voiceTranscript';
+import { buildVoiceBriefing, buildVoiceFirstMessage, buildVoiceSystemPrompt } from './voiceSystemPrompt';
+import { clearVoiceTranscript, getRecentVoiceTranscript, hasVoiceTranscript, lastVoiceTurnAt } from './voiceTranscript';
 import { activeVoiceAgent, mintConversationToken } from './elevenLabs';
 import { flushPendingPrompts, hasPendingPrompts, voiceHooks } from './hooks/voiceHooks';
 import { startSoundWake, stopSoundWake } from './soundWake';
-import { canListenWhileIdle } from './voiceRules';
+import { canListenWhileIdle, isRejectedAfterConnect, type VoiceMode } from './voiceRules';
+import type { VoiceSessionConfig } from './types';
 import { AppState } from 'react-native';
 
 let voiceSession: VoiceSession | null = null;
@@ -38,6 +44,12 @@ let currentSessionId: string | null = null;
 let contextSessionId: string | null = null;
 let connectedAt: number | null = null;
 let connecting = false;
+// Classic mode: the briefing the connect could not put in a prompt override,
+// sent as a contextual update the moment the line is up.
+let pendingBriefing: string | null = null;
+// Whether the last connect sent overrides — the usual reason a call is
+// refused right after it comes up, named in the alert.
+let lastConnectSentOverrides = false;
 
 // One generation per startVoice. hangUp/endVoice retire it, and startVoice
 // re-checks after every await, so closing the strip while the token or the
@@ -61,6 +73,7 @@ function clearIdleTimer(): void {
 }
 
 function status() { return storage.getState().realtimeStatus; }
+export function voiceMode(): VoiceMode { return storage.getState().settings.voiceMode === 'standby' ? 'standby' : 'classic'; }
 export function isVoiceConnected(): boolean { return status() === 'connected'; }
 export function isVoiceArmed(): boolean { return storage.getState().voiceArmedSessionId !== null; }
 export function getVoiceSession(): VoiceSession | null { return voiceSession; }
@@ -82,6 +95,7 @@ export function noteVoiceActivity(): void {
 
 function armIdleTimer(): void {
     clearIdleTimer();
+    if (voiceMode() === 'classic') return; // stays on until ended
     const secs = storage.getState().settings.voiceIdleTimeoutSec;
     if (!secs || secs <= 0) return;
     idleTimer = setTimeout(onIdleTimer, secs * 1000);
@@ -132,15 +146,12 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
     // are the focused session at that moment, not the one captured when the
     // call was made (#338). currentSessionId is what onSessionFocus moves.
     const focused = () => currentSessionId ?? sessionId;
-    const buildPrompt = (forSession: string) => {
+    const brief = (forSession: string) => {
         const sessionContext = voiceHooks.onVoiceStarted(forSession);
         contextSessionId = forSession;
-        return buildVoiceSystemPrompt({
-            sessionContext,
-            isContinuation,
-            voiceTranscript: isContinuation ? getRecentVoiceTranscript() : null,
-        });
+        return sessionContext;
     };
+    const classic = voiceMode() === 'classic';
 
     let outcome: StartOutcome = 'failed';
     try {
@@ -159,8 +170,7 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
             return false;
         }
 
-        let systemPrompt = buildPrompt(focused());
-        const firstMessage = buildVoiceFirstMessage({ isContinuation, silentWake: opts.silentWake === true, soundWake: opts.soundWake === true });
+        let sessionContext = brief(focused());
 
         let conversationToken: string | undefined;
         if (agent.apiKey) {
@@ -169,11 +179,24 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
         }
         // Focus moved while the token was minted: brief the agent about the
         // session that is on screen now, not the one the prompt was built for.
-        if (focused() !== contextSessionId) systemPrompt = buildPrompt(focused());
+        if (focused() !== contextSessionId) sessionContext = brief(focused());
+        const voiceTranscript = isContinuation ? getRecentVoiceTranscript() : null;
+        // Classic sends no overrides at all — an agent that does not allow
+        // one closes the call as soon as it arrives — and hands the briefing
+        // over as a contextual update once connected (and as the dynamic
+        // variable the original joy dashboard prompt referenced). Standby
+        // needs the overrides: its silent wakes are an empty first message.
+        const briefing: Partial<VoiceSessionConfig> = classic
+            ? { initialContext: sessionContext }
+            : {
+                systemPrompt: buildVoiceSystemPrompt({ sessionContext, isContinuation, voiceTranscript }),
+                firstMessage: buildVoiceFirstMessage({ isContinuation, silentWake: opts.silentWake === true, soundWake: opts.soundWake === true }),
+            };
+        pendingBriefing = classic ? buildVoiceBriefing({ sessionContext, isContinuation, voiceTranscript }) : null;
+        lastConnectSentOverrides = !classic;
         await voiceSession.startSession({
             sessionId: contextSessionId ?? sessionId,
-            systemPrompt,
-            firstMessage,
+            ...briefing,
             ...(conversationToken ? { conversationToken } : { agentId: agent.agentId }),
         });
         if (cancelled()) {
@@ -202,7 +225,7 @@ export async function startVoice(sessionId: string, opts: ConnectOptions = {}): 
         // sound-wake connect left voice armed with no listener (#337).
         connecting = false;
         // No line came of this attempt: what it briefed is forgotten (#340).
-        if (outcome !== 'connected') voiceHooks.onVoiceDisconnected();
+        if (outcome !== 'connected') { voiceHooks.onVoiceDisconnected(); pendingBriefing = null; }
         if (outcome === 'failed') {
             // Parked and visible in the strip. canListenWhileIdle does not
             // listen in 'error', so the detector cannot retry-and-fail on
@@ -246,6 +269,7 @@ function disarm(): void {
 export function maybeListenWhileIdle(): void {
     const s = storage.getState();
     const ok = canListenWhileIdle({
+        mode: voiceMode(),
         armed: s.voiceArmedSessionId !== null,
         wakeOnSound: s.settings.voiceWakeOnSound,
         connecting,
@@ -293,6 +317,7 @@ export async function endVoice(): Promise<void> {
 /** A session event wants the agent to speak. Connects if armed and hung up. */
 export function wakeForEvent(sessionId: string): void {
     const s = storage.getState();
+    if (voiceMode() === 'classic') return; // nothing to wake: classic is live or ended
     if (s.voiceArmedSessionId === null || !s.settings.voiceWakeOnEvents) return;
     if (connecting || isVoiceConnected() || status() === 'connecting') return;
     console.log('[voice] event wake for', sessionId);
@@ -305,6 +330,12 @@ export function notifyVoiceConnected(): void {
     clearReconnectTimer();
     connectedAt = Date.now();
     armIdleTimer();
+    // Classic: the briefing goes first, before deferred updates and prompts
+    // that assume the agent already knows the sessions.
+    if (pendingBriefing !== null && voiceSession) {
+        try { voiceSession.sendContextualUpdate(pendingBriefing); } catch (e) { console.error('[voice] briefing failed:', e); }
+    }
+    pendingBriefing = null;
     // What changed in the briefed sessions while the line was coming up is
     // delivered before anything else is said about them (#340).
     voiceHooks.onVoiceConnected();
@@ -313,28 +344,62 @@ export function notifyVoiceConnected(): void {
     setTimeout(flushPendingPrompts, 300);
 }
 
+/** Was the call that just ended refused by the agent's configuration? Read
+ *  BEFORE connectedAt is cleared. */
+function endedBeforeAWord(): boolean {
+    return isRejectedAfterConnect({ connectedAt, lastTurnAt: lastVoiceTurnAt(), now: Date.now() });
+}
+
+/** The call was refused right after it came up: park in error, visibly,
+ *  with the server's reason when one came through (web) and otherwise the
+ *  likely one. Still armed — a tap retries — but nothing else does: in
+ *  standby the next sound or event would only walk into the same wall. */
+function parkRefused(reason: string | undefined): void {
+    clearReconnectTimer();
+    reconnectAttempts = 0;
+    console.warn('[voice] call refused right after connect:', reason ?? '(no reason reported)');
+    storage.getState().setRealtimeStatus('error');
+    const detail = reason?.trim() || t(lastConnectSentOverrides ? 'voice.refusedOverrides' : 'voice.refusedNoReason');
+    Modal.alert(t('voice.refusedTitle'), t('voice.refusedMessage', { reason: detail }));
+}
+
 /** SDK onDisconnect because the agent itself ended the call — its end_call
- *  tool, on the user's say-so. Stay armed and hung up; reconnecting would
- *  undo the hang-up the user just asked for (#343). */
+ *  tool, on the user's say-so. Standby stays armed and hung up; reconnecting
+ *  would undo the hang-up the user just asked for (#343). Classic has no
+ *  hung-up state to go to, so voice is over.
+ *
+ *  Native reports an agent that was never allowed to start the same way —
+ *  the agent participant left — so a call that ends before a word is said
+ *  is told apart first. */
 export function notifyVoiceAgentEnded(): void {
+    const refused = endedBeforeAWord();
     clearIdleTimer();
     clearReconnectTimer();
     reconnectAttempts = 0;
     connectedAt = null;
     intentionalStop = false;
+    pendingBriefing = null;
     voiceHooks.onVoiceDisconnected();
+    if (refused) { parkRefused(undefined); return; }
+    if (voiceMode() === 'classic') { void endVoice(); return; }
     maybeListenWhileIdle();
 }
 
 /** SDK onDisconnect for a drop the user did not ask for. Reconnects with
- *  backoff while armed; gives up after MAX_RECONNECT_ATTEMPTS. */
-export function notifyVoiceUnexpectedDisconnect(): void {
+ *  backoff while armed; gives up after MAX_RECONNECT_ATTEMPTS. `reason` is
+ *  the server's close reason when the SDK passes one (web). */
+export function notifyVoiceUnexpectedDisconnect(reason?: string): void {
+    const refused = endedBeforeAWord();
     clearIdleTimer();
     connectedAt = null;
+    pendingBriefing = null;
     // A reconnect briefs the agent afresh; until then nothing is deferred.
     voiceHooks.onVoiceDisconnected();
     if (intentionalStop) { intentionalStop = false; return; }
     if (!isVoiceArmed()) return;
+    // Refused, not dropped: retrying sends the same thing and is refused the
+    // same way, four times, then parks in error with no word about why.
+    if (refused) { parkRefused(reason); return; }
     const sessionId = currentSessionId;
     if (!sessionId) return;
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
