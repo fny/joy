@@ -10,9 +10,10 @@ import { sync } from '@/sync/sync';
 // cover the lifecycle edges; this covers the remaining gap codex flagged: a
 // FOREGROUND tab whose socket silently stops delivering with no status change.
 //
-// While the user is looking at a LIVE turn — Claude thinking, OR a message sent
-// in the last ~90s (the send trigger is independent of `thinking` precisely
-// because a missed turn-start ephemeral is one of the things we're repairing) —
+// While the user is looking at a LIVE turn — a turn open in any phase, OR a
+// message sent in the last ~90s (the send trigger is independent of the turn
+// state precisely because a missed turn-start ephemeral is one of the things
+// we're repairing) —
 // this forward-syncs the session every 10–15s (jittered), then stops the instant
 // the turn goes idle. This is a repair loop, NOT data polling: it runs only
 // during an active turn the user is watching, and forward-sync returns nothing
@@ -23,12 +24,15 @@ const RECENT_SEND_WINDOW_MS = 90_000;
 
 export function useSessionMessageBackstop(
     sessionId: string,
-    thinking: boolean,
+    /** Is a turn open, in any phase? Ask isTurnActive rather than the ephemeral
+     *  flag: a stalled socket is precisely when the flag is the signal missing,
+     *  which made the repair loop skip the case it exists to repair. */
+    turnActive: boolean,
     lastUserSentAt: number | null,
 ) {
     React.useEffect(() => {
         const isActive = () =>
-            thinking || (lastUserSentAt != null && Date.now() - lastUserSentAt < RECENT_SEND_WINDOW_MS);
+            turnActive || (lastUserSentAt != null && Date.now() - lastUserSentAt < RECENT_SEND_WINDOW_MS);
         if (!isActive()) return;
 
         let cancelled = false;
@@ -47,5 +51,5 @@ export function useSessionMessageBackstop(
             cancelled = true;
             clearTimeout(timer);
         };
-    }, [sessionId, thinking, lastUserSentAt]);
+    }, [sessionId, turnActive, lastUserSentAt]);
 }

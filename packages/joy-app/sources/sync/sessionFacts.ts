@@ -22,7 +22,7 @@
  * the only way to ask a question.
  */
 
-import { isAgentBusy } from './sessionLiveness';
+import { isAgentBusy, isFresh } from './sessionLiveness';
 
 /** Process lifecycle, reported by the daemon (`joy__state`). Distinct from the
  *  transport question of whether we can currently hear from it: 'detached'
@@ -186,6 +186,18 @@ export function sessionFacts(session: SessionFactsInput, online: boolean): Sessi
     };
 }
 
+/**
+ * Facts for a consumer that is not a rendered status line.
+ *
+ * The two ladders inject `online` because they differ deliberately: the header
+ * debounces the reading, the sidebar does not. Everything else — eviction,
+ * unread, the repair loop, the voice hooks — wants the plain reading, and
+ * getting it here means none of them re-derives presence and freshness by hand.
+ */
+export function liveFacts(session: SessionFactsInput): SessionFacts {
+    return sessionFacts(session, session.presence === 'online' && isFresh(session));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Projections. Each consumer takes the part of the product it needs; only the
 // status badge does the lossy collapse, and it does it in exactly one place.
@@ -244,6 +256,21 @@ export function statusState(facts: SessionFacts): SessionState {
  */
 export function isTurnActive(facts: SessionFacts): boolean {
     return facts.turn !== 'idle';
+}
+
+/**
+ * Did the session just finish everything it was doing?
+ *
+ * The falling edge behind the unread marker. "Doing something" is deliberately
+ * wider than a live turn: an outstanding permission request or a pane-owning
+ * prompt is work the session is still in the middle of, so stopping at one is
+ * not finishing — you have not been handed a result, you have been asked a
+ * question, and the status says so already.
+ */
+export function finishedWork(before: SessionFacts, after: SessionFacts): boolean {
+    const wasBusy = isTurnActive(before) || before.permission || before.blocked !== null;
+    const nowIdle = !isTurnActive(after) && after.online && !after.permission && after.blocked === null;
+    return wasBusy && nowIdle;
 }
 
 /** Is anything at all running behind this session, foreground or background? */

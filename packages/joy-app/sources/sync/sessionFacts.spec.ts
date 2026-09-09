@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-    sessionFacts, statusState, isTurnActive, hasWorkInFlight,
+    sessionFacts, liveFacts, statusState, isTurnActive, hasWorkInFlight, finishedWork,
     type SessionFactsInput, type SessionState,
 } from './sessionFacts';
 
@@ -235,5 +235,51 @@ describe('isTurnActive — the question eviction, unread and the send gate all m
         const f = sessionFacts(base({ metadata: { joy__tasks: { done: 1, total: 2 } } }), true);
         expect(isTurnActive(f)).toBe(false);
         expect(hasWorkInFlight(f)).toBe(true);
+    });
+});
+
+describe('finishedWork — the falling edge behind the unread marker', () => {
+    const live = (over: Partial<SessionFactsInput> = {}) => liveFacts(base(over));
+    const idle = () => live();
+
+    it('fires when a turn ends, whichever signal was carrying it', () => {
+        const carriers: Array<[string, Partial<SessionFactsInput>]> = [
+            ['ephemeral flag', { thinking: true }],
+            ['persisted mirror', { metadata: { joy__thinking: { since: 0 } } }],
+            ['compaction', { metadata: { joy__compacting: { trigger: 'auto', since: 0 } } }],
+            ['retry backoff', { metadata: { joy__retry: { attempt: 1, total: 3 } } }],
+        ];
+        for (const [name, over] of carriers) {
+            expect(finishedWork(live(over), idle()), name).toBe(true);
+        }
+    });
+
+    it('does not fire when nothing was happening', () => {
+        expect(finishedWork(idle(), idle())).toBe(false);
+    });
+
+    it('does not fire while the turn is still open', () => {
+        expect(finishedWork(live({ thinking: true }), live({ thinking: true }))).toBe(false);
+    });
+
+    it('does not fire when the session merely went quiet because it needs you', () => {
+        // Stopping at a question is not finishing: no result has been produced,
+        // and the status already says what is being asked.
+        const asks: Array<[string, Partial<SessionFactsInput>]> = [
+            ['a permission request', { agentState: { requests: { 'r1': {} } } }],
+            ['a login prompt', { metadata: { joy__login: { url: 'https://example.test' } } }],
+            ['a terminal dialog', { metadata: { joy__dialog: { title: null, options: [] } } }],
+            ['a codex approval', { metadata: { joy__codexApproval: { title: 'rm -rf', kind: 'command' } } }],
+        ];
+        for (const [name, over] of asks) {
+            expect(finishedWork(live({ thinking: true }), live(over)), name).toBe(false);
+            // ...and clearing it afterwards IS the finish.
+            expect(finishedWork(live(over), idle()), name).toBe(true);
+        }
+    });
+
+    it('does not fire when the session went offline instead of finishing', () => {
+        const gone = liveFacts({ thinking: false, presence: 600_000, activeAt: 0 });
+        expect(finishedWork(live({ thinking: true }), gone)).toBe(false);
     });
 });

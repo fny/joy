@@ -27,7 +27,7 @@ import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
-import { sessionFacts, statusState, isTurnActive, type BlockedKind } from "./sessionFacts";
+import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, type BlockedKind } from "./sessionFacts";
 import { sessionsToRetain } from "./sessionMemory";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
@@ -106,8 +106,7 @@ export interface SessionRowData {
 
 /** Is a turn open, by the same definition the status badge uses? */
 function hasLiveTurn(session: Session | undefined): boolean {
-    if (!session) return false;
-    return isTurnActive(sessionFacts(session, session.presence === "online" && isFresh(session)));
+    return !!session && isTurnActive(liveFacts(session));
 }
 
 function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
@@ -646,21 +645,25 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             });
 
-            // Track unread: detect when agent finishes all work for a request.
-            // "Was active" = thinking or had pending permission requests.
-            // "Now idle" = online, not thinking, no pending permissions.
+            // Track unread: detect when the agent finishes all work for a request,
+            // as the falling edge of "something was in flight".
+            //
+            // Both halves used to be spelled out here, and the "was active" half
+            // was the narrowest reading in the app — a bare `thinking === true`.
+            // A turn carried by the persisted mirror, or one that ended in
+            // compaction or a retry backoff, never counted as having started, so
+            // finishing it marked nothing unread. Both halves now ask the shared
+            // facts, and a session that has stopped only because something is
+            // waiting on a human has not finished: a pane-owning prompt blocks
+            // the edge exactly as an outstanding permission request already did.
             let unreadSessionIds = state.unreadSessionIds;
             sessions.forEach(session => {
                 const oldSession = state.sessions[session.id];
                 if (!oldSession) return;
-                const wasActive = oldSession.thinking === true
-                    || (oldSession.agentState?.requests && Object.keys(oldSession.agentState.requests).length > 0);
                 const newSession = mergedSessions[session.id];
-                if (!newSession || !wasActive) return;
-                const isNowIdle = newSession.thinking !== true
-                    && newSession.presence === 'online'
-                    && (!newSession.agentState?.requests || Object.keys(newSession.agentState.requests).length === 0);
-                if (isNowIdle && state.currentViewingSessionId !== session.id) {
+                if (!newSession) return;
+                const justFinished = finishedWork(liveFacts(oldSession), liveFacts(newSession));
+                if (justFinished && state.currentViewingSessionId !== session.id) {
                     if (!unreadSessionIds.has(session.id)) {
                         unreadSessionIds = new Set(unreadSessionIds);
                         unreadSessionIds.add(session.id);

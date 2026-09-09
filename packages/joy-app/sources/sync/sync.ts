@@ -42,6 +42,7 @@ import { isDemoSession } from './demoSession';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import type { Message } from './typesMessage';
 
+import { liveFacts, isTurnActive } from './sessionFacts';
 // Sentinel used as `before_seq` for the very first backward fetch of a
 // session. It must exceed any real `seq` value the server can produce; the
 // relay stores `seq` as BIGINT, but a session would need two billion events
@@ -2076,15 +2077,35 @@ class Sync {
         presence?: "online" | number;
     })[]) => {
         // Voice: a working → idle transition is "the turn ended".
-        const before = storage.getState().sessions;
-        const finished: string[] = [];
-        if (storage.getState().voiceArmedSessionId !== null) {
+        //
+        // Read as the falling edge of the SHARED turn predicate, before and
+        // after the merge. It used to compare the raw ephemeral thinking flag on
+        // the incoming row against the stored one, which missed a turn carried
+        // by the persisted mirror — the cold-start and reconnect case — and
+        // missed a turn that ended out of compaction or a retry backoff. Voice
+        // simply never heard "ready" for those, and sat waiting.
+        //
+        // The "after" side reads the MERGED row rather than the incoming patch:
+        // an update carrying only some fields would otherwise look idle purely
+        // because the fields that say otherwise were absent from it.
+        const armed = storage.getState().voiceArmedSessionId !== null;
+        const wasActive = new Map<string, boolean>();
+        if (armed) {
+            const before = storage.getState().sessions;
             for (const s of sessions) {
-                if (before[s.id]?.thinking === true && s.thinking === false) finished.push(s.id);
+                const prev = before[s.id];
+                wasActive.set(s.id, !!prev && isTurnActive(liveFacts(prev)));
             }
         }
         storage.getState().applySessions(sessions);
-        for (const id of finished) voiceHooks.onReady(id);
+        if (armed) {
+            const after = storage.getState().sessions;
+            for (const s of sessions) {
+                if (!wasActive.get(s.id)) continue;
+                const now = after[s.id];
+                if (now && !isTurnActive(liveFacts(now))) voiceHooks.onReady(s.id);
+            }
+        }
     }
 
 }

@@ -79,6 +79,7 @@ import { machineSetMode, machineSendKeys, machineSetModel, machineSessionUsage }
 import { useHarnessModels } from '@/hooks/useHarnessModels';
 import { isAgentBusy } from '@/sync/sessionLiveness';
 
+import { liveFacts, isTurnActive } from '@/sync/sessionFacts';
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
 // "switch immediately" mid-turn (model-config.md) and /btw runs while Claude
@@ -572,7 +573,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         return null;
     }, [messages]);
     // Repair loop against silently-dropped socket events while watching a live turn.
-    useSessionMessageBackstop(sessionId, session.thinking === true, lastUserSentAt);
+    useSessionMessageBackstop(sessionId, isTurnActive(liveFacts(session)), lastUserSentAt);
     const acknowledgedCliVersions = useLocalSetting('acknowledgedCliVersions');
     const zenMode = useLocalSetting('zenMode');
     const headerHeight = useHeaderHeight();
