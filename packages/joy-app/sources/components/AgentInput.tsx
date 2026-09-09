@@ -12,7 +12,7 @@ import { MultiTextInput, KeyPressEvent, MULTI_TEXT_INPUT_FONT_SIZE, MULTI_TEXT_I
 import { Typography } from '@/constants/Typography';
 import { useChatFontScale } from '@/hooks/useChatFontScale';
 import { PermissionMode, ModelMode } from './PermissionModeSelector';
-import { EffortLevel } from './modelModeOptions';
+import { EffortLevel, type ModeOption } from './modelModeOptions';
 import { hapticsLight, hapticsError } from './haptics';
 import { Shaker, ShakeInstance } from './Shaker';
 import { StatusDot } from './StatusDot';
@@ -21,6 +21,8 @@ import { AutocompleteDismissal, dismissalAt, isDismissalActive } from './autocom
 import { useActiveSuggestions } from './autocomplete/useActiveSuggestions';
 import { AgentInputAutocomplete } from './AgentInputAutocomplete';
 import { FloatingOverlay } from './FloatingOverlay';
+import { SessionSettingsPanel } from './SessionSettingsPanel';
+import type { SettingsSection, SettingsSectionLevel } from './settingsPanel';
 import { TextInputState, MultiTextInputHandle } from './MultiTextInput';
 import { applySuggestion } from './autocomplete/applySuggestion';
 import { GitStatusBadge, useHasMeaningfulGitStatus } from './GitStatusBadge';
@@ -178,54 +180,6 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         paddingHorizontal: 16,
         paddingBottom: 4,
         ...Typography.default('semiBold'),
-    },
-    overlayDivider: {
-        height: 1,
-        backgroundColor: theme.colors.divider,
-        marginHorizontal: 16,
-    },
-
-    // Selection styles
-    selectionItem: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        paddingHorizontal: 16,
-        paddingVertical: 8,
-        backgroundColor: 'transparent',
-    },
-    selectionItemPressed: {
-        backgroundColor: theme.colors.surfacePressed,
-    },
-    radioButton: {
-        width: 16,
-        height: 16,
-        borderRadius: 8,
-        borderWidth: 2,
-        alignItems: 'center',
-        justifyContent: 'center',
-        marginRight: 12,
-    },
-    radioButtonActive: {
-        borderColor: theme.colors.radio.active,
-    },
-    radioButtonInactive: {
-        borderColor: theme.colors.radio.inactive,
-    },
-    radioButtonDot: {
-        width: 6,
-        height: 6,
-        borderRadius: 3,
-        backgroundColor: theme.colors.radio.dot,
-    },
-    selectionLabel: {
-        fontSize: 14,
-        ...Typography.default(),
-    },
-    selectionLabelActive: {
-        color: theme.colors.radio.active,
-    },
-    selectionLabelInactive: {
-        color: theme.colors.text,
     },
 
     // Status styles
@@ -626,7 +580,7 @@ const AgentInputContextChips = React.memo(function AgentInputContextChips(p: Con
 export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, AgentInputProps>((props, ref) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
-    const screenWidth = useWindowDimensions().width;
+    const { width: screenWidth, height: screenHeight } = useWindowDimensions();
     const isSendBlocked = props.blockSend ?? false;
 
     // Chat font size setting: the composer text mirrors the chat scale so
@@ -678,6 +632,46 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     ), [props.availableModes]);
     const availableModels = props.availableModels ?? [];
     const availableEffortLevels = props.availableEffortLevels ?? [];
+
+    // What the settings panel offers. A setting with no options — or with no
+    // handler to apply one — is not a row: the harness capability table means
+    // a session can legitimately have no permission surface, and offering an
+    // empty list to drill into is worse than offering nothing.
+    const settingsSections = React.useMemo<SettingsSection[]>(() => ([
+        {
+            level: 'permission',
+            label: t('agentInput.settingsPanel.permission'),
+            title: isCodex ? t('agentInput.codexPermissionMode.title') : isGemini ? t('agentInput.geminiPermissionMode.title') : t('agentInput.permissionMode.title'),
+            options: props.onPermissionModeChange ? availableModes : [],
+            selectedKey: permissionModeKey,
+        },
+        {
+            level: 'model',
+            label: t('agentInput.settingsPanel.model'),
+            title: t('agentInput.model.title'),
+            options: props.onModelModeChange ? availableModels : [],
+            selectedKey: props.modelMode?.key ?? null,
+        },
+        {
+            level: 'effort',
+            label: t('agentInput.settingsPanel.effort'),
+            title: t('agentInput.effort.title'),
+            options: props.onEffortLevelChange ? availableEffortLevels : [],
+            selectedKey: props.effortLevel?.key ?? null,
+        },
+    ]), [
+        isCodex, isGemini, availableModes, availableModels, availableEffortLevels,
+        permissionModeKey, props.modelMode?.key, props.effortLevel?.key,
+        props.onPermissionModeChange, props.onModelModeChange, props.onEffortLevelChange,
+    ]);
+    const hasSettingsSections = settingsSections.some((s) => s.options.length > 0);
+    // The card is pinned above the composer and grows upward, so its ceiling
+    // has to clear the keyboard AND the header on the smallest phone. A
+    // fraction of the screen rather than the old flat 400pt, which on a short
+    // device could push the top of the panel off-screen — and the top is
+    // where the back chevron lives. Measuring the real available space is the
+    // better fix; this is the safe bound until then.
+    const settingsMaxHeight = Math.min(360, Math.round(screenHeight * 0.4));
     const isSandboxEnabled = React.useMemo(() => {
         const sandbox = props.metadata?.sandbox as unknown;
         if (!sandbox) {
@@ -937,12 +931,14 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
         setShowSettings(prev => !prev);
     }, []);
 
-    // Handle settings selection
-    const handleSettingsSelect = React.useCallback((mode: PermissionMode) => {
-        hapticsLight();
-        props.onPermissionModeChange?.(mode);
-        setShowSettings(false);
-    }, [props.onPermissionModeChange]);
+    // A choice made in the settings panel. The panel itself decides whether
+    // to return to its root or close (settingsPanel.levelAfterSelect); this
+    // only applies the value.
+    const handleSettingsChoice = React.useCallback((level: SettingsSectionLevel, option: ModeOption) => {
+        if (level === 'permission') props.onPermissionModeChange?.(option);
+        else if (level === 'model') props.onModelModeChange?.(option);
+        else props.onEffortLevelChange?.(option);
+    }, [props.onPermissionModeChange, props.onModelModeChange, props.onEffortLevelChange]);
 
     // Handle abort button press
     const handleAbortPress = React.useCallback(async () => {
@@ -1158,8 +1154,8 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     </>
                 )}
 
-                {/* Settings overlay */}
-                {showSettings && (
+                {/* Settings overlay — one list at a time (SessionSettingsPanel). */}
+                {showSettings && hasSettingsSections && (
                     <>
                         <TouchableWithoutFeedback onPress={() => setShowSettings(false)}>
                             <View style={styles.overlayBackdrop} />
@@ -1168,249 +1164,13 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                             styles.settingsOverlay,
                             { paddingHorizontal: screenWidth > 700 ? 0 : 8 }
                         ]}>
-                            <FloatingOverlay maxHeight={400} keyboardShouldPersistTaps="always">
-                                {/* Permission Mode Section */}
-                                <View style={styles.overlaySection}>
-                                    <Text style={styles.overlaySectionTitle}>
-                                        {isCodex ? t('agentInput.codexPermissionMode.title') : isGemini ? t('agentInput.geminiPermissionMode.title') : t('agentInput.permissionMode.title')}
-                                    </Text>
-                                    {availableModes.map((mode) => {
-                                        const isSelected = permissionModeKey === mode.key;
-
-                                        return (
-                                            <Pressable
-                                                key={mode.key}
-                                                onPress={() => handleSettingsSelect(mode)}
-                                                style={({ pressed }) => ({
-                                                    flexDirection: 'row',
-                                                    alignItems: 'flex-start',
-                                                    paddingHorizontal: 16,
-                                                    paddingVertical: 8,
-                                                    backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent'
-                                                })}
-                                            >
-                                                <View style={{
-                                                    width: 16,
-                                                    height: 16,
-                                                    borderRadius: 8,
-                                                    borderWidth: 2,
-                                                    borderColor: isSelected ? theme.colors.radio.active : theme.colors.radio.inactive,
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    marginRight: 12,
-                                                    marginTop: 2,
-                                                }}>
-                                                    {isSelected && (
-                                                        <View style={{
-                                                            width: 6,
-                                                            height: 6,
-                                                            borderRadius: 3,
-                                                            backgroundColor: theme.colors.radio.dot
-                                                        }} />
-                                                    )}
-                                                </View>
-                                                <View style={{ flex: 1 }}>
-                                                    <Text style={{
-                                                        fontSize: 14,
-                                                        color: isSelected ? theme.colors.radio.active : theme.colors.text,
-                                                        ...Typography.default()
-                                                    }}>
-                                                        {withSandboxSuffix(mode.name, mode.key)}
-                                                    </Text>
-                                                    {!!mode.description && (
-                                                        <Text style={{
-                                                            fontSize: 11,
-                                                            color: theme.colors.textSecondary,
-                                                            ...Typography.default()
-                                                        }}>
-                                                            {mode.description}
-                                                        </Text>
-                                                    )}
-                                                </View>
-                                            </Pressable>
-                                        );
-                                    })}
-                                </View>
-
-                                {/* Divider */}
-                                <View style={{
-                                    height: 1,
-                                    backgroundColor: theme.colors.divider,
-                                    marginHorizontal: 16
-                                }} />
-
-                                {/* Model + Effort side by side */}
-                                <View style={{ flexDirection: 'row' }}>
-                                    {/* Model Section */}
-                                    <View style={{ paddingVertical: 8, flex: 1 }}>
-                                        <Text style={{
-                                            fontSize: 12,
-                                            fontWeight: '600',
-                                            color: theme.colors.textSecondary,
-                                            paddingHorizontal: 16,
-                                            paddingBottom: 4,
-                                            ...Typography.default('semiBold')
-                                        }}>
-                                            {t('agentInput.model.title')}
-                                        </Text>
-                                        {availableModels.length > 0 ? (
-                                            availableModels.map((model) => {
-                                                const isSelected = props.modelMode?.key === model.key;
-
-                                                return (
-                                                    <Pressable
-                                                        key={model.key}
-                                                        onPress={() => {
-                                                            hapticsLight();
-                                                            props.onModelModeChange?.(model);
-                                                            setShowSettings(false);
-                                                        }}
-                                                        style={({ pressed }) => ({
-                                                            flexDirection: 'row',
-                                                            alignItems: 'flex-start',
-                                                            paddingHorizontal: 16,
-                                                            paddingVertical: 8,
-                                                            backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent'
-                                                        })}
-                                                    >
-                                                        <View style={{
-                                                            width: 16,
-                                                            height: 16,
-                                                            borderRadius: 8,
-                                                            borderWidth: 2,
-                                                            borderColor: isSelected ? theme.colors.radio.active : theme.colors.radio.inactive,
-                                                            alignItems: 'center',
-                                                            justifyContent: 'center',
-                                                            marginRight: 12,
-                                                            marginTop: 2,
-                                                        }}>
-                                                            {isSelected && (
-                                                                <View style={{
-                                                                    width: 6,
-                                                                    height: 6,
-                                                                    borderRadius: 3,
-                                                                    backgroundColor: theme.colors.radio.dot
-                                                                }} />
-                                                            )}
-                                                        </View>
-                                                        <View>
-                                                            <Text style={{
-                                                                fontSize: 14,
-                                                                color: isSelected ? theme.colors.radio.active : theme.colors.text,
-                                                                ...Typography.default()
-                                                            }}>
-                                                                {model.name}
-                                                            </Text>
-                                                            {!!model.description && (
-                                                                <Text style={{
-                                                                    fontSize: 11,
-                                                                    color: theme.colors.textSecondary,
-                                                                    ...Typography.default()
-                                                                }}>
-                                                                    {model.description}
-                                                                </Text>
-                                                            )}
-                                                        </View>
-                                                    </Pressable>
-                                                );
-                                            })
-                                        ) : (
-                                            <Text style={{
-                                                fontSize: 13,
-                                                color: theme.colors.textSecondary,
-                                                paddingHorizontal: 16,
-                                                paddingVertical: 8,
-                                                ...Typography.default()
-                                            }}>
-                                                {t('agentInput.model.configureInCli')}
-                                            </Text>
-                                        )}
-                                    </View>
-
-                                    {/* Effort Level Section — second column */}
-                                    {availableEffortLevels.length > 0 && props.onEffortLevelChange && (
-                                        <>
-                                            <View style={{
-                                                width: 1,
-                                                backgroundColor: theme.colors.divider,
-                                                marginVertical: 8,
-                                            }} />
-                                            <View style={{ paddingVertical: 8, flex: 1 }}>
-                                                <Text style={{
-                                                    fontSize: 12,
-                                                    fontWeight: '600',
-                                                    color: theme.colors.textSecondary,
-                                                    paddingHorizontal: 16,
-                                                    paddingBottom: 4,
-                                                    ...Typography.default('semiBold')
-                                                }}>
-                                                    {t('agentInput.effort.title')}
-                                                </Text>
-                                                {availableEffortLevels.map((level) => {
-                                                    const isSelected = props.effortLevel?.key === level.key;
-
-                                                    return (
-                                                        <Pressable
-                                                            key={level.key}
-                                                            onPress={() => {
-                                                                hapticsLight();
-                                                                props.onEffortLevelChange?.(level);
-                                                                setShowSettings(false);
-                                                            }}
-                                                            style={({ pressed }) => ({
-                                                                flexDirection: 'row',
-                                                                alignItems: 'flex-start',
-                                                                paddingHorizontal: 16,
-                                                                paddingVertical: 8,
-                                                                backgroundColor: pressed ? theme.colors.surfacePressed : 'transparent'
-                                                            })}
-                                                        >
-                                                            <View style={{
-                                                                width: 16,
-                                                                height: 16,
-                                                                borderRadius: 8,
-                                                                borderWidth: 2,
-                                                                borderColor: isSelected ? theme.colors.radio.active : theme.colors.radio.inactive,
-                                                                alignItems: 'center',
-                                                                justifyContent: 'center',
-                                                                marginRight: 12,
-                                                                marginTop: 2,
-                                                            }}>
-                                                                {isSelected && (
-                                                                    <View style={{
-                                                                        width: 6,
-                                                                        height: 6,
-                                                                        borderRadius: 3,
-                                                                        backgroundColor: theme.colors.radio.dot
-                                                                    }} />
-                                                                )}
-                                                            </View>
-                                                            <View>
-                                                                <Text style={{
-                                                                    fontSize: 14,
-                                                                    color: isSelected ? theme.colors.radio.active : theme.colors.text,
-                                                                    ...Typography.default()
-                                                                }}>
-                                                                    {level.name}
-                                                                </Text>
-                                                                {!!level.description && (
-                                                                    <Text style={{
-                                                                        fontSize: 11,
-                                                                        color: theme.colors.textSecondary,
-                                                                        ...Typography.default()
-                                                                    }}>
-                                                                        {level.description}
-                                                                    </Text>
-                                                                )}
-                                                            </View>
-                                                        </Pressable>
-                                                    );
-                                                })}
-                                            </View>
-                                        </>
-                                    )}
-                                </View>
-                            </FloatingOverlay>
+                            <SessionSettingsPanel
+                                sections={settingsSections}
+                                onSelect={handleSettingsChoice}
+                                onClose={() => setShowSettings(false)}
+                                maxHeight={settingsMaxHeight}
+                                backLabel={t('common.back')}
+                            />
                         </View>
                     </>
                 )}

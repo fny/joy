@@ -618,6 +618,14 @@ export const ru: TranslationStructure = {
             title: 'МОДЕЛЬ',
             configureInCli: 'Настройте модели в настройках CLI',
         },
+        // Row labels on the settings panel's root list, where the
+        // all-caps section titles above would read as headers.
+        settingsPanel: {
+            permission: 'Режим разрешений',
+            model: 'Модель',
+            effort: 'Усилие',
+        },
+
         effort: {
             title: 'УСИЛИЕ',
         },

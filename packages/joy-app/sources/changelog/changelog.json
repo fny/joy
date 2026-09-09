@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 9 (4) — One setting at a time",
+      "summary": "",
+      "markdown": "- **The settings panel above the composer shows one list at a time.** It used to stack permission mode, model and effort into one card pinned above the input — fourteen rows, which already overflowed the card's limit at four models and cut off flat, with the scrollbar switched off, so it looked like the list simply ended. Now the panel opens on what each setting is currently on, tapping a row opens just that setting's options, and choosing one takes you back — so changing model and effort is one visit, not two. Tapping outside still dismisses. A setting with nothing to choose from is no longer offered an empty list to open, and when a session has only one setting, the panel opens straight into it."
+    },
+    {
       "title": "Sep 9 (3) — Every harness gets the full new-session page",
       "summary": "",
       "markdown": "- **The new-session page offers each agent everything its daemon can take.** It used to give Claude the full set and the others a thin slice: pi had no model picker at all, codex could not fork or list past sessions, opencode and pi had no permission mode or effort, and extra arguments stopped at codex. The page now renders from a capability table the machine's daemon reports per harness: a model picker for any harness with a catalog, effort where the harness or the picked model has levels, the harness's own permission modes, continue, fork, resume by id, a past-sessions list with titles, fallback model, history backfill, and extra arguments as either command-line args or codex `key=value` overrides. What is sent is exactly what the table allows.\n- **Session settings follow the same table.** Model and effort can be switched live where the daemon supports it (codex and opencode through the daemon, Claude through its slash commands) and are shown read-only where it does not; the status row shows effort for any harness that reports one.\n- **Settings → Models trims the catalogs.** An opencode install lists a few hundred models and a picker that cycles through all of them is useless. Each harness starts on the daemon's recommended short list; switch models on or off per harness, or enable them all, with a filter for long lists. Catalogs are read from the machine you pick at the top; the choice applies to every machine, and the model a session is on is always listed.\n- **An older daemon keeps its old rows.** A machine that has not been updated publishes no table, and the page falls back to exactly what that daemon accepts, so nothing appears that would be ignored."
@@ -381,5 +386,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 9 (3) — Every harness gets the full new-session page"
+  "latestTitle": "Sep 9 (4) — One setting at a time"
 }

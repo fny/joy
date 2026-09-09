@@ -602,6 +602,14 @@ export const zhHant: TranslationStructure = {
             title: '模型',
             configureInCli: '在 CLI 設定中配置模型',
         },
+        // Row labels on the settings panel's root list, where the
+        // all-caps section titles above would read as headers.
+        settingsPanel: {
+            permission: '權限模式',
+            model: '模型',
+            effort: '工作量',
+        },
+
         effort: {
             title: '工作量',
         },

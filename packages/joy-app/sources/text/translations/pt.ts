@@ -601,6 +601,14 @@ export const pt: TranslationStructure = {
             title: 'MODELO',
             configureInCli: 'Configurar modelos nas configurações do CLI',
         },
+        // Row labels on the settings panel's root list, where the
+        // all-caps section titles above would read as headers.
+        settingsPanel: {
+            permission: 'Modo de permissão',
+            model: 'Modelo',
+            effort: 'Esforço',
+        },
+
         effort: {
             title: 'ESFORÇO',
         },

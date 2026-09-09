@@ -1,3 +1,7 @@
+# Sep 9 (4) — One setting at a time
+
+- **The settings panel above the composer shows one list at a time.** It used to stack permission mode, model and effort into one card pinned above the input — fourteen rows, which already overflowed the card's limit at four models and cut off flat, with the scrollbar switched off, so it looked like the list simply ended. Now the panel opens on what each setting is currently on, tapping a row opens just that setting's options, and choosing one takes you back — so changing model and effort is one visit, not two. Tapping outside still dismisses. A setting with nothing to choose from is no longer offered an empty list to open, and when a session has only one setting, the panel opens straight into it.
+
 # Sep 9 (3) — Every harness gets the full new-session page
 
 - **The new-session page offers each agent everything its daemon can take.** It used to give Claude the full set and the others a thin slice: pi had no model picker at all, codex could not fork or list past sessions, opencode and pi had no permission mode or effort, and extra arguments stopped at codex. The page now renders from a capability table the machine's daemon reports per harness: a model picker for any harness with a catalog, effort where the harness or the picked model has levels, the harness's own permission modes, continue, fork, resume by id, a past-sessions list with titles, fallback model, history backfill, and extra arguments as either command-line args or codex `key=value` overrides. What is sent is exactly what the table allows.

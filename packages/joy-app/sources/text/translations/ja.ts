@@ -603,6 +603,14 @@ export const ja: TranslationStructure = {
             title: 'モデル',
             configureInCli: 'CLIの設定でモデルを構成',
         },
+        // Row labels on the settings panel's root list, where the
+        // all-caps section titles above would read as headers.
+        settingsPanel: {
+            permission: '権限モード',
+            model: 'モデル',
+            effort: 'エフォート',
+        },
+
         effort: {
             title: 'エフォート',
         },

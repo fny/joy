@@ -651,6 +651,14 @@ export const en = {
             title: 'MODEL',
             configureInCli: 'Configure models in CLI settings',
         },
+        // Row labels on the settings panel's root list, where the
+        // all-caps section titles above would read as headers.
+        settingsPanel: {
+            permission: 'Permission mode',
+            model: 'Model',
+            effort: 'Effort',
+        },
+
         effort: {
             title: 'EFFORT',
         },

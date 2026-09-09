@@ -311,7 +311,16 @@ every relay; machines register per account.
   (`onContextMenu` in MarkdownView) — unless text is selected, in which case
   the browser's own menu is left alone.
 - Cmd/Ctrl+F in-session search with match cycling.
-- Composer info line: agent · model · reasoning · permissions.
+- Composer info line: agent · model · reasoning · permissions. Tapping it
+  opens the settings panel (`SessionSettingsPanel`), a two-level picker:
+  a root of current values, one list per setting on drill-in, back to the
+  root on choose so model and effort are one visit. One list at a time —
+  the card is pinned above the composer and grows upward, so three lists
+  at once overflowed its cap and clipped with the scroll indicator off
+  (four models was already over). A single section skips the root and a
+  choice closes; a section with no options is not offered
+  (`settingsPanel.ts`). Height is capped at 40% of the screen so the top
+  of the card clears the keyboard and header on a short phone.
 
 ## Terminal (pane) view
 
