@@ -31,6 +31,7 @@ const HTTP_SHAPED: Record<string, (op: MachineOp) => HttpResponses> = {
   create: () => ({ "201": { description: "Created", schema: SESSION_RECORD }, "400": err("cwd required"), "500": err("spawn failed — {error}") }),
   get: (op) => ({ "200": success(op), "404": err("session_not_found") }),
   kill: (op) => ({ "200": success(op), "404": err("session_not_found"), "409": err("status_mismatch — ifStatus did not match the live status") }),
+  sessionProcesses: (op) => ({ "200": success(op), "404": err("session_not_found — no live session and no tmux pane for this id") }),
   send: (op) => ({ "200": success(op), "400": err("empty"), "404": err("session_not_found"), "409": err("busy | mode_not_scriptable"), "503": err("not_durable") }),
   queueList: (op) => ({ "200": success(op), "404": err("session_not_found") }),
   queueGet: (op) => ({ "200": success(op), "404": err("session_not_found | command_not_found") }),

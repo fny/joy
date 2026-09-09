@@ -325,12 +325,14 @@ describe("nucleusLane on the coordinator", () => {
 
     // Output lands: the stall clears on the next recheck — the turn was alive.
     lastOutputAt = Date.now();
-    await expectSoon("stall cleared after output", () => stalls.length === 2 && stalls[1] === null);
+    // ">= 2": the clear is followed by a fresh stall 300 ms later (the output was
+    // a single instant), and the poll can land after both.
+    await expectSoon("stall cleared after output", () => stalls.length >= 2 && stalls[1] === null);
     expect(aborts).toBe(0);
     expect(relay.terminal("tst1")).toBeUndefined();
 
     // Quiet again, long enough to be reported a second time — still no action.
-    await expectSoon("second stall report", () => stalls.length === 3 && stalls[2] !== null);
+    await expectSoon("second stall report", () => stalls.length >= 3 && stalls[2] !== null);
     expect(aborts).toBe(0);
 
     // The runtime's OWN end is the terminal fact, and it takes the flag with it.
