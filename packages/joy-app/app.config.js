@@ -53,7 +53,20 @@ export default {
         name,
         slug: "joy",
         version: "1.2.0",
-        runtimeVersion: "21",
+        // The OTA fence. An update only reaches a binary whose runtime version
+        // matches, so this MUST rise whenever the native surface changes —
+        // a new Expo module, a native dependency, a config plugin.
+        //
+        // It did not rise when modules/joy-selectable-text landed on 2026-09-07,
+        // so the July build (no view) and the September build (view) both read
+        // "21". JS that needed the native view was delivered to a binary
+        // without it, Fabric rendered the unregistered view as an empty box,
+        // and every iOS message read blank with no error for two days.
+        //
+        // 22 = the selectable-text module. This takes effect at the next
+        // native build; the JS-side probe in that module is what protects the
+        // binaries already in the field.
+        runtimeVersion: "22",
         orientation: "default",
         icon: "./sources/assets/images/icon.png",
         scheme: "joy",
