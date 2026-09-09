@@ -24,18 +24,7 @@ import { t } from '@/text';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { DROPPED_COLOR } from '@/-session/EventBudgetBar';
 
-import type { BlockedKind } from '@/sync/sessionFacts';
-
-/** Names the prompt holding the pane. Without this a blocked row would fall
- *  through to "online" under a yellow dot — the same contradiction between the
- *  dot and the text that tasks/compacting/retrying used to produce. */
-function blockedLabel(kind: BlockedKind | null): string {
-    switch (kind) {
-        case 'login': return t('status.signInRequired');
-        case 'approval': return t('status.approvalRequired');
-        default: return t('status.waitingInTerminal');
-    }
-}
+import { statusText as statusTextFor } from '@/utils/statusLabel';
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
         flex: 1,
@@ -383,46 +372,17 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     }, [session.state]);
 
     // Full state→text map, matching the in-session view (useSessionStatus):
-    // tasks/compacting/retrying previously fell through to "online" here while
-    // the dot showed the state color — sidebar text contradicted the session.
-    const statusText = session.hasUnread
+    // Wording comes from statusLabel.ts, shared with the session header. This
+    // used to be an open-coded chain plus its own copy of the background suffix,
+    // and any state it had not been taught fell through to "online" while the
+    // dot showed that state's colour — the sidebar text contradicting the
+    // session it described.
+    const statusTextWithBg = session.hasUnread
         ? t('status.unread')
-        : session.state === 'thinking'
-            ? vibingMessage
-            : session.state === 'detached'
-                ? t('status.detached')
-                : session.state === 'disconnected'
-                    ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
-                    : session.state === 'blocked'
-                        ? blockedLabel(session.blockedKind)
-                    : session.state === 'permission_required'
-                        ? t('status.permissionRequired')
-                        : session.state === 'agents' && session.agentsTotal != null
-                            ? t('status.agentsRunning', { done: session.agentsDone ?? 0, total: session.agentsTotal })
-                        : session.state === 'tasks' && session.tasksTotal != null
-                            ? t('status.tasksCompleted', { done: session.tasksDone ?? 0, total: session.tasksTotal })
-                            : session.state === 'compacting'
-                                ? t('status.compacting')
-                                : session.state === 'retrying' && session.retryAttempt != null
-                                    ? t('status.retrying', { attempt: session.retryAttempt, total: session.retryTotal ?? 0 })
-                                    : t('status.online');
-
-    // Background counts as a suffix on live non-count states (mirrors
-    // useSessionStatus.withBg): "brewing…, 1/3 agents". Offline/detached rows
-    // skip it — their metadata is a snapshot of a dead session, not live work.
-    const bgSuffixParts: string[] = [];
-    if (session.state !== 'disconnected' && session.state !== 'detached' && !session.hasUnread) {
-        if (session.state !== 'agents' && session.agentsTotal != null && session.agentsTotal > 0) {
-            bgSuffixParts.push(t('status.agentsRunning', { done: session.agentsDone ?? 0, total: session.agentsTotal }));
-        }
-        if (session.state !== 'tasks' && session.tasksTotal != null && session.tasksTotal > 0) {
-            bgSuffixParts.push(t('status.tasksCompleted', { done: session.tasksDone ?? 0, total: session.tasksTotal }));
-        }
-    }
-    // Space (not comma) after a trailing ellipsis — "brewing… 1/3 agents".
-    const statusTextWithBg = bgSuffixParts.length > 0
-        ? statusText + (statusText.endsWith('…') ? ' ' : ', ') + bgSuffixParts.join(', ')
-        : statusText;
+        : statusTextFor(session.state, session.facts, {
+            vibing: vibingMessage,
+            lastSeen: t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) }),
+        });
 
     const handlePress = React.useCallback(() => {
         navigateToSession(session.id);

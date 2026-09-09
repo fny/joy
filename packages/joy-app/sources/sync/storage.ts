@@ -27,7 +27,7 @@ import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
-import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, type BlockedKind } from "./sessionFacts";
+import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, type SessionFacts } from "./sessionFacts";
 import { sessionsToRetain } from "./sessionMemory";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
@@ -96,9 +96,9 @@ export interface SessionRowData {
     // The relay refused this session's output for good (joy__eventBudget,
     // #130): the row carries a warning marker next to its status.
     outputDropped: boolean;
-    /** Which pane-owning prompt is waiting on a human, when state is 'blocked' —
-     *  carried so the row can name it instead of falling through to "online". */
-    blockedKind: BlockedKind | null;
+    /** Everything the row's status is derived from, so the sidebar renders the
+     *  same wording as the session header instead of keeping its own chain. */
+    facts: SessionFacts;
     hasUnread: boolean;
     isJoyDaemon: boolean;
     joySessionId: string | null;
@@ -149,7 +149,7 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         retryAttempt: facts.retry?.attempt ?? null,
         retryTotal: facts.retry?.total ?? null,
         outputDropped: facts.budgetExhausted,
-        blockedKind: facts.blocked?.kind ?? null,
+        facts,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
         isJoyDaemon: isJoyDaemonSource(session.metadata?.joy__source),
         joySessionId: session.metadata?.joy__sessionId ?? null,

@@ -7,6 +7,8 @@
 - **"New results" marks sessions it used to miss.** The unread marker fired on the same narrow signal, so finishing a turn that had been carried by the saved signal, or that ended out of compaction or a retry, marked nothing. It also no longer counts a session as finished when it has only gone quiet because it needs you: stopping at a permission request or a terminal prompt is being asked a question, not being handed a result.
 - **A frozen chat repairs itself in more of the cases it was built for.** The loop that re-syncs an open session when the connection silently stalls only ran while the live signal was set — which is exactly the signal a stalled connection loses, so it skipped the case it exists to repair.
 
+- **Waiting messages look the way they did before.** The outline and left rail added to queued rows are gone.
+
 
 # Sep 9 — Reading stays put
 

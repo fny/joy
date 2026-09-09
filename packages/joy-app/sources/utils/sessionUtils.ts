@@ -6,6 +6,7 @@ import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from 
 import { formatPathRelativeToHome } from './pathUtils';
 import { stabilizeOnline, sameOnlineState, OFFLINE_GRACE_MS, type OnlineHysteresisState } from './onlineHysteresis';
 import { sessionFacts, statusState, type SessionFacts } from '@/sync/sessionFacts';
+import { statusText as statusTextFor } from './statusLabel';
 
 // SessionState moved next to the facts it projects (sessionFacts.ts); re-exported
 // here so the components that render a badge keep importing it from one place.
@@ -113,87 +114,22 @@ export function useSessionStatus(session: Session): SessionStatus {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, facts.permission, session.thinking]);
 
-    // Long-running processes (servers/daemons the agent tagged <joy-bg
-    // long-running>) never complete, so they're NOT in the N/M — they're appended
-    // to whatever the real status is, in its normal color, e.g.
-    // "ready, 3 background processes". withBg is the single exit point that
-    // appends the suffix to every online status below.
-    //
-    // This suffix is the badge's lossiness showing through: agents, tasks and
-    // long-running processes run CONCURRENTLY with whatever won the ladder, so
-    // the one-state answer has to hand them back as text. They are on `facts`
-    // as structured values for anything that wants to render them properly.
-    const withBg = (status: SessionStatus): SessionStatus => {
-        const parts: string[] = [];
-        if (facts.agents && status.state !== 'agents') parts.push(t('status.agentsRunning', facts.agents));
-        if (facts.tasks && status.state !== 'tasks') parts.push(t('status.tasksCompleted', facts.tasks));
-        if (facts.longRunning > 0) parts.push(t('status.backgroundProcesses', { count: facts.longRunning }));
-        if (parts.length === 0) return status;
-        // After a trailing ellipsis ("brewing…") a comma reads badly — join
-        // the suffix with a plain space there; comma elsewhere ("ready, …").
-        const sep = status.statusText.endsWith('…') ? ' ' : ', ';
-        return { ...status, statusText: status.statusText + sep + parts.join(', ') };
+    // The wording lives in statusLabel.ts, shared with the sidebar row — which
+    // used to keep its own chain and its own copy of the background suffix, and
+    // fell through to "online" under a coloured dot for any state it had not
+    // been taught. Only what needs this component's clock stays here.
+    const statusText = statusTextFor(state, facts, {
+        vibing: vibingMessage,
+        lastSeen: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
+    });
+
+    return {
+        ...paletteBase(state),
+        statusText,
+        // "ready" is the absence of news, so the session screen stays quiet for
+        // it — unless there are long-running processes worth naming.
+        shouldShowStatus: state !== 'waiting' || facts.longRunning > 0,
     };
-
-    const show = (text: string, shouldShowStatus = true): SessionStatus =>
-        ({ ...paletteBase(state), statusText: text, shouldShowStatus });
-
-    switch (state) {
-        // Claude died but the daemon still serves the window. Shown red. Only
-        // honored while the session's OWN presence is live — joy-tmux keeps
-        // heartbeating a detached session, so when the daemon dies presence
-        // lapses and it falls back to plain offline (we no longer know it's
-        // detached). Offline states skip the background suffix: whatever was
-        // running behind them is no longer observable.
-        case 'detached':
-            return show(t('status.detached'));
-        case 'disconnected':
-            return show(t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }));
-
-        // Something interactive owns the agent's pane and is waiting on a human:
-        // a login prompt, a CLI dialog (model picker, "Switch model?"), or a codex
-        // approval. Each already had its own pinned bar; none reached the status,
-        // so the badge could report a streaming reply while nothing could move.
-        case 'blocked':
-            switch (facts.blocked?.kind) {
-                case 'login': return withBg(show(t('status.signInRequired')));
-                case 'approval': return withBg(show(t('status.approvalRequired')));
-                default: return withBg(show(t('status.waitingInTerminal')));
-            }
-
-        // 500-error auto-retry in progress: the daemon is re-sending a failed
-        // turn on a backoff schedule. Shown amber + pulsing, with the attempt
-        // count. `facts.retry` is non-null exactly when this state is reached.
-        case 'retrying':
-            return withBg(show(t('status.retrying', facts.retry ?? { attempt: 0, total: 0 })));
-
-        // Claude is summarizing its context to free up tokens. Can run for
-        // minutes, so it's worth surfacing. Purple + pulsing.
-        case 'compacting':
-            return withBg(show(t('status.compacting')));
-
-        case 'permission_required':
-            return withBg(show(t('status.permissionRequired')));
-
-        // A reply is streaming — the strongest "you can converse right now"
-        // signal, which is why it outranks the background counts (they used to
-        // mask it entirely) and they become the withBg suffix instead.
-        case 'thinking':
-            return withBg(show(vibingMessage));
-
-        // Foreground idle with background work in flight: the counts ARE the
-        // headline (magenta agents above teal shell tasks). Long-running
-        // processes are excluded from the N/M — they're the withBg suffix.
-        case 'agents':
-            return withBg(show(t('status.agentsRunning', facts.agents ?? { done: 0, total: 0 })));
-        case 'tasks':
-            return withBg(show(t('status.tasksCompleted', facts.tasks ?? { done: 0, total: 0 })));
-
-        // Idle. If background processes are running, surface them next to
-        // "ready" in the normal (green) color, e.g. "ready, 3 processes".
-        case 'waiting':
-            return withBg(show(t('status.online'), facts.longRunning > 0));
-    }
 }
 
 /** The derived facts behind a session's status, for anything that needs more

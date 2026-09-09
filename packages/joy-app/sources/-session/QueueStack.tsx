@@ -147,7 +147,7 @@ const styles = StyleSheet.create((theme) => ({
     wrap: { marginBottom: 8, gap: 6 },
     headerRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, minHeight: 28 },
     headerSpacer: { flex: 1 },
-    header: { fontSize: 11, letterSpacing: 0.4, color: theme.colors.warning, ...Typography.default('semiBold') },
+    header: { fontSize: 11, letterSpacing: 0.4, color: theme.colors.textSecondary, ...Typography.default('semiBold') },
     more: { fontSize: 11, color: theme.colors.textSecondary, ...Typography.default() },
     notice: {
         flexDirection: 'row', alignItems: 'center', gap: 8,
@@ -160,17 +160,7 @@ const styles = StyleSheet.create((theme) => ({
     inputWrap: { position: 'relative' },
     input: {
         minHeight: 60, maxHeight: 120, borderRadius: 12,
-        // A queued row must not borrow the pending-bubble look (#651). It used
-        // to be plain input.background with no outline, so a message WAITING to
-        // send and a message SENT but unacknowledged rendered identically —
-        // read live as "it hit the relay instead of staying queued". The rail
-        // and border say "held here", and nothing in the chat has them.
-        borderWidth: 1,
-        borderColor: theme.colors.divider,
-        borderLeftWidth: 3,
-        borderLeftColor: theme.colors.warning,
         paddingHorizontal: 12, paddingVertical: 8, paddingRight: 76,
-        paddingLeft: 12,
         fontSize: 15, ...Typography.default(),
     },
     actions: { position: 'absolute', right: 6, top: 0, bottom: 0, flexDirection: 'row', alignItems: 'center', gap: 4 },
