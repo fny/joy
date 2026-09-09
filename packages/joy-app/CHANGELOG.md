@@ -24,6 +24,8 @@
 
 - **The app no longer burns CPU at idle.** The session list is re-read every 2.5 seconds as the baseline live channel, and every read decrypted every session on the account — an asymmetric key open plus a card open per row — whether anything had changed or not. On the web that was a steady 20% of a core doing nothing. A row whose bytes match the last read is now reused without any crypto, and a session's key is opened once and kept; an idle read does no decryption at all.
 
+- **Settings → Machines → Storage shows what every session leaves behind, and deletes it.** Each machine's daemon now reports every session's footprint under `~/.joy` — media, record, queue, receipts, ledger rows — with size and age, and the relay reports each session's event rows and bytes. The page lists them biggest first across all your machines; pick any number and delete them in one press. A running session is killed first, and the relay row goes with its events. Shared files (the ledger, the usage cache) and orphaned files nobody names any more are reported but never touched. Needs an updated daemon on the machine.
+
 
 # Sep 9 — Reading stays put
 

@@ -43,6 +43,8 @@ import { hostname, platform, release, arch } from "os";
 import { spawn, execFile, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
 
+import { scanStorage, nukeSessionStorage, type NukeResult } from "./footprint";
+import { ledgerFor } from "./ledger";
 /** Accepted git URL shapes for a git-URL session spawn. */
 export const GIT_URL_RE = /^(https?:\/\/|git@|ssh:\/\/)\S+$/;
 
@@ -1026,6 +1028,43 @@ export const machineOps: MachineOp[] = [
       if (r.error === "status_mismatch") return { status: 409, body: result };
       if (r.error === "record_not_terminated") return { status: 503, body: result };
       return { status: r.ok ? 200 : 404, body: result };
+    },
+  },
+  {
+    name: "storage",
+    scope: "machine",
+    rpcName: "joy-storage",
+    summary: "What every session leaves under ~/.joy on this machine — media, record, queue, receipts, ledger rows — with size and age, plus the shared and orphaned remainder (domain/footprint.ts)",
+    http: { method: "GET", path: "/storage" },
+    result: { type: "object", properties: { ok: { type: "boolean" }, homeDir: { type: "string" }, totalBytes: { type: "number" }, sessions: { type: "array", items: { type: "object" } }, shared: { type: "object" } } },
+    handler: (registry) => {
+      const live = registry.list().map((s) => ({ id: s.id, status: s.status, cwd: s.cwd, title: s.summary ?? null }));
+      return { ok: true, ...scanStorage({ live, records: registry.listRecords(), ledger: ledgerFor() }) };
+    },
+  },
+  {
+    name: "storageNuke",
+    scope: "machine",
+    rpcName: "joy-storage-nuke",
+    summary: "Remove everything the storage scan attributed to the given sessions: media, record, queue, receipts and ledger rows. A live session is killed first only with killLive; otherwise it is reported and left alone. The relay row is the app's to delete afterwards",
+    http: { method: "POST", path: "/storage/nuke" },
+    params: { type: "object", required: ["ids"], properties: { ids: { type: "array", items: { type: "string" } }, killLive: { type: "boolean" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, bytesFreed: { type: "number" }, results: { type: "array", items: { type: "object" } } } },
+    handler: async (registry, params) => {
+      const ids = Array.isArray(params.ids) ? params.ids.filter((x): x is string => typeof x === "string") : [];
+      const killLive = params.killLive === true;
+      const results: NukeResult[] = [];
+      for (const id of ids) {
+        const session = registry.get(id);
+        if (session) {
+          if (!killLive) { results.push({ id, ok: false, bytesFreed: 0, removed: [], error: "live" }); continue; }
+          // Same path as joy-kill-session: a detached process needs forceKill.
+          if (session.status === "ended") session.forceKill(); else session.end("killed");
+          if (!(await session.awaitArchive())) { results.push({ id, ok: false, bytesFreed: 0, removed: [], error: "archive_failed" }); continue; }
+        }
+        results.push(nukeSessionStorage(id, { ledger: ledgerFor() }));
+      }
+      return { ok: results.every((r) => r.ok), bytesFreed: results.reduce((n, r) => n + r.bytesFreed, 0), results };
     },
   },
   {

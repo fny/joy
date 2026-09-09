@@ -109,6 +109,24 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
 
   // ── client: sessions ──────────────────────────────────────────────────────
   route('GET', '/sessions', {}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
+  // What each session costs the relay: its event rows and their ciphertext
+  // bytes, oldest and newest. On demand for the storage page only — never on
+  // the list the app polls, which must stay a plain row read.
+  route('GET', '/sessions/storage', { summary: 'Per-session event count and ciphertext bytes for the account (the storage/cleanup page)' }, async (ctx) => {
+    const { rows } = await db.query(
+      `SELECT s.id AS session_id, COUNT(e.seq)::int AS events,
+              COALESCE(SUM(LENGTH(e.ciphertext)), 0)::bigint AS bytes,
+              MIN(e.created_at) AS oldest, MAX(e.created_at) AS newest, s.state
+         FROM native_sessions s LEFT JOIN session_events e ON e.session_id = s.id
+        WHERE s.account_id = $1
+        GROUP BY s.id, s.state`, [ctx.accountId]);
+    return {
+      sessions: rows.map((r) => ({
+        sessionId: r.session_id, state: r.state, events: Number(r.events), bytes: Number(r.bytes),
+        oldest: r.oldest ? new Date(r.oldest).getTime() : null, newest: r.newest ? new Date(r.newest).getTime() : null,
+      })),
+    };
+  });
   route('POST', '/sessions', {}, async (ctx, m, body) => core.createSession(ctx.accountId, ctx.actorId, body));
   route('GET', '/sessions/([\\w-]+)', {}, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
   // Optional `?ifStatus=a,b` (#173): the record goes only while its state is

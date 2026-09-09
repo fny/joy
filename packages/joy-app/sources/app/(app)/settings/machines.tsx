@@ -63,6 +63,12 @@ export default React.memo(function MachinesSettingsScreen() {
                     icon={<Ionicons name="trash-bin-outline" size={29} color={theme.colors.textSecondary} />}
                     onPress={() => router.push('/settings/cleanup')}
                 />
+                <Item
+                    title="Storage"
+                    subtitle="What each session leaves on disk and on the relay — pick and delete"
+                    icon={<Ionicons name="server-outline" size={29} color={theme.colors.textSecondary} />}
+                    onPress={() => router.push('/settings/storage' as any)}
+                />
             </ItemGroup>
         </ItemList>
     );

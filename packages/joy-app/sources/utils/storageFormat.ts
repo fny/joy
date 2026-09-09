@@ -1,0 +1,50 @@
+/**
+ * Pure helpers behind the Storage page — sizes, ages and selection maths — so
+ * the arithmetic is tested without rendering anything.
+ */
+
+export function formatBytes(n: number | null | undefined): string {
+    if (n == null || !Number.isFinite(n) || n < 0) return '—';
+    if (n < 1024) return `${n} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let v = n / 1024; let i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+/** "3h ago", "12d ago", "—" — whole units, no seconds. */
+export function ageLabel(at: number | null | undefined, now = Date.now()): string {
+    if (at == null || !Number.isFinite(at)) return '—';
+    const ms = Math.max(0, now - at);
+    const m = Math.floor(ms / 60_000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    if (d < 60) return `${d}d ago`;
+    return `${Math.floor(d / 30)}mo ago`;
+}
+
+export interface Selectable { id: string; bytes: number; live: boolean; relayEvents?: number; relayBytes?: number }
+
+export interface SelectionSummary { count: number; bytes: number; relayBytes: number; relayEvents: number; live: number }
+
+export function summarizeSelection(rows: Selectable[], selected: ReadonlySet<string>): SelectionSummary {
+    const out: SelectionSummary = { count: 0, bytes: 0, relayBytes: 0, relayEvents: 0, live: 0 };
+    for (const r of rows) {
+        if (!selected.has(r.id)) continue;
+        out.count++; out.bytes += r.bytes; out.relayBytes += r.relayBytes ?? 0; out.relayEvents += r.relayEvents ?? 0;
+        if (r.live) out.live++;
+    }
+    return out;
+}
+
+/** The confirm text: what goes, and the part that needs saying twice. */
+export function describeNuke(s: SelectionSummary): string {
+    const parts = [`${s.count} session${s.count === 1 ? '' : 's'}`, `${formatBytes(s.bytes)} on the machine`];
+    if (s.relayEvents > 0) parts.push(`${s.relayEvents} relay event${s.relayEvents === 1 ? '' : 's'} (${formatBytes(s.relayBytes)})`);
+    let text = `Delete ${parts.join(', ')}. This cannot be undone.`;
+    if (s.live > 0) text += `\n\n${s.live} ${s.live === 1 ? 'is' : 'are'} still running and will be killed first.`;
+    return text;
+}

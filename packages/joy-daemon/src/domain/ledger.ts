@@ -1390,6 +1390,16 @@ export class Ledger {
     return deleted;
   }
 
+  /** How many rows a session holds across the per-session tables — the
+   *  ledger's share of its on-disk footprint (domain/footprint.ts). */
+  sessionRowCount(sessionId: string): number {
+    let n = 0;
+    for (const table of ["commands", "outbox", "observations", "checkpoints", "jobs", "receipts"]) {
+      n += Number(this.#get(`SELECT COUNT(*) AS n FROM ${table} WHERE session_id=?`, sessionId)?.n ?? 0);
+    }
+    return n;
+  }
+
   /** Drop everything a session left (its record is being deleted for good). */
   forgetSession(sessionId: string): void {
     this.tx(() => {

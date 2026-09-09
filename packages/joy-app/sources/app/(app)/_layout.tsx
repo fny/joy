@@ -198,6 +198,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/storage"
+                options={{
+                    headerTitle: 'Storage',
+                }}
+            />
+            <Stack.Screen
                 name="settings/joy-http"
                 options={{
                     headerTitle: t('settings.joyHttp'),

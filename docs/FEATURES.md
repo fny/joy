@@ -417,6 +417,12 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- Storage page (Settings → Machines → Storage): every session's footprint on
+  each machine's disk (`joy-storage`: media, record, queue, receipts, ledger
+  rows, with size and age; shared and orphaned bytes reported separately) and
+  on the relay (`GET /sessions/storage`: event rows and bytes), biggest first;
+  multi-select and delete in one press — the daemon nukes its files first
+  (killing a live session if you said so), then the relay row and its events.
 - Dev tools: always-on developer pages, OTA identity + manual update check,
   in-app changelog (What's New), 10-tap dev mode.
 

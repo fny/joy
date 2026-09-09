@@ -124,6 +124,8 @@ export interface V2SessionState {
 
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
+    /** Per-session event rows and ciphertext bytes on the relay (Settings → Storage). */
+    sessionsStorage: (): Promise<{ sessions: Array<{ sessionId: string; state: string; events: number; bytes: number; oldest: number | null; newest: number | null }> }> => v2fetch('GET', '/sessions/storage'),
     listMachines: (): Promise<{ machines: V2Machine[] }> => v2fetch('GET', '/machines'),
     deleteMachine: (id: string) => v2fetch('DELETE', `/machines/${id}`),
     /** CAS update of the sealed machine metadata; `version-mismatch` returns the current record. */

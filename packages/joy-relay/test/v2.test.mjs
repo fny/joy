@@ -229,6 +229,34 @@ describe('v2 sessions + messages lifecycle', () => {
 });
 
 describe('v2 send idempotency', () => {
+  it('sessions/storage lists the account\'s sessions with their event cost, and only the account\'s', async () => {
+    const d = makeDaemon('m-storage'); await d.acquire();
+    const mine = await makeSession(d);
+    // Another account's session, under its own daemon lease.
+    const od = await call('POST', '/joy/v2/daemon/leases', { body: { machineId: 'm-other' }, token: 'other-token' });
+    expect(od.status).toBe(200);
+    const theirs = await call('POST', '/joy/v2/sessions', {
+      token: 'other-token',
+      body: { mode: 'announce_existing', creationIntentId: randomUUID(), daemonId: 'm-other', localSessionId: randomUUID().slice(0, 8), sessionKeyEnvelope: 'wrapped-key' },
+    });
+    expect(theirs.status).toBe(200);
+    const r = await call('GET', '/joy/v2/sessions/storage');
+    expect(r.status).toBe(200);
+    const ids = r.json.sessions.map((s) => s.sessionId);
+    expect(ids).toContain(mine);
+    expect(ids).not.toContain(theirs.json.sessionId);
+    const row = r.json.sessions.find((s) => s.sessionId === mine);
+    // A freshly announced session may already carry its lifecycle event; the
+    // shape is what is asserted, and the numbers agree with each other.
+    expect(typeof row.events).toBe('number');
+    expect(typeof row.bytes).toBe('number');
+    expect(row.state).toBeTypeOf('string');
+    if (row.events === 0) expect(row).toMatchObject({ bytes: 0, oldest: null, newest: null });
+    else { expect(row.newest).toBeGreaterThanOrEqual(row.oldest); expect(row.bytes).toBeGreaterThanOrEqual(0); }
+    const anon = await fetch(`${base}/joy/v2/sessions/storage`);
+    expect(anon.status).toBe(401);
+  });
+
   it('capabilities probe answers without auth', async () => {
     const r = await fetch(`${base}/joy/v2/capabilities`);
     expect(r.status).toBe(200);
