@@ -27,7 +27,8 @@ import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
-import { sessionFacts, statusState } from "./sessionFacts";
+import { sessionFacts, statusState, isTurnActive } from "./sessionFacts";
+import { sessionsToRetain } from "./sessionMemory";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
 
@@ -98,6 +99,12 @@ export interface SessionRowData {
     hasUnread: boolean;
     isJoyDaemon: boolean;
     joySessionId: string | null;
+}
+
+/** Is a turn open, by the same definition the status badge uses? */
+function hasLiveTurn(session: Session | undefined): boolean {
+    if (!session) return false;
+    return isTurnActive(sessionFacts(session, session.presence === "online" && isFresh(session)));
 }
 
 function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
@@ -997,27 +1004,29 @@ export const storage = create<StorageState>()((set, get) => {
         // Record a session as most-recently-viewed and (when limitSessionMemory is
         // on) unload the message history of sessions beyond the 5 most-recent — so
         // browsing many chats doesn't keep every history resident. Never unloads
-        // the visible session or any session with a live turn (thinking) so an
-        // in-flight reducer state is preserved; an unloaded session is refetched
-        // when reopened (onSessionVisible invalidates its message sync).
+        // the visible session or any session with a live turn so an in-flight
+        // reducer state is preserved; an unloaded session is refetched when
+        // reopened (onSessionVisible invalidates its message sync).
+        //
+        // "A live turn" has to be the SAME question the status asks. It used to
+        // be the narrowest of the several spellings in this app — a bare
+        // `thinking === true` — which misses a turn carried by the persisted
+        // joy__thinking mirror, and misses compaction and retry backoff
+        // entirely. Those are exactly the conditions after a cold start or a
+        // reconnect, so a session that was mid-turn got its history evicted
+        // underneath it and came back blank until the refetch landed.
         noteSessionVisible: (sessionId: string) => set((state) => {
             const mru = [sessionId, ...state.sessionMessageMru.filter((id) => id !== sessionId)];
-            // null/empty or a non-positive number → keep all (no eviction).
-            const limit = state.localSettings.limitSessionMemory;
-            if (limit == null || limit <= 0) {
-                return { ...state, sessionMessageMru: mru };
-            }
-            const keep = new Set(mru.slice(0, limit));
-            const loadedIds = Object.keys(state.sessionMessages);
+            const retained = sessionsToRetain({
+                loadedIds: Object.keys(state.sessionMessages),
+                mru,
+                limit: state.localSettings.limitSessionMemory,
+                hasLiveTurn: (sid) => hasLiveTurn(state.sessions[sid]),
+            });
+            // null = the limit is off, or nothing would be dropped.
+            if (!retained) return { ...state, sessionMessageMru: mru };
             const next: Record<string, SessionMessages> = {};
-            for (const sid of loadedIds) {
-                if (keep.has(sid) || state.sessions[sid]?.thinking === true) {
-                    next[sid] = state.sessionMessages[sid];
-                }
-            }
-            if (Object.keys(next).length === loadedIds.length) {
-                return { ...state, sessionMessageMru: mru }; // nothing evicted
-            }
+            for (const sid of retained) next[sid] = state.sessionMessages[sid];
             return { ...state, sessionMessageMru: mru, sessionMessages: next };
         }),
         applyOlderMessagesPagination: (sessionId: string, info: { hasMore: boolean }) => set((state) => {
