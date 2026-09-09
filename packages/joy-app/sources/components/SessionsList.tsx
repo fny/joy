@@ -24,6 +24,18 @@ import { t } from '@/text';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { DROPPED_COLOR } from '@/-session/EventBudgetBar';
 
+import type { BlockedKind } from '@/sync/sessionFacts';
+
+/** Names the prompt holding the pane. Without this a blocked row would fall
+ *  through to "online" under a yellow dot — the same contradiction between the
+ *  dot and the text that tasks/compacting/retrying used to produce. */
+function blockedLabel(kind: BlockedKind | null): string {
+    switch (kind) {
+        case 'login': return t('status.signInRequired');
+        case 'approval': return t('status.approvalRequired');
+        default: return t('status.waitingInTerminal');
+    }
+}
 const stylesheet = StyleSheet.create((theme) => ({
     container: {
         flex: 1,
@@ -381,6 +393,8 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                 ? t('status.detached')
                 : session.state === 'disconnected'
                     ? t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) })
+                    : session.state === 'blocked'
+                        ? blockedLabel(session.blockedKind)
                     : session.state === 'permission_required'
                         ? t('status.permissionRequired')
                         : session.state === 'agents' && session.agentsTotal != null

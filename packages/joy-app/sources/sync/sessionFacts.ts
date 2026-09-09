@@ -198,7 +198,7 @@ export function sessionFacts(session: SessionFactsInput, online: boolean): Sessi
  * `withBg` suffix.
  */
 export type SessionState =
-    | 'disconnected' | 'detached' | 'retrying' | 'compacting'
+    | 'disconnected' | 'detached' | 'blocked' | 'retrying' | 'compacting'
     | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
 
 /**
@@ -210,6 +210,10 @@ export type SessionState =
  *                 live, since joy-tmux keeps heartbeating a detached session and
  *                 a dead daemon should read as plain offline instead.
  *   disconnected  we cannot hear from it at all.
+ *   blocked       a prompt owns the pane. Ranked this high because it is the only
+ *                 state that will NOT clear on its own — and because it usually
+ *                 explains the ones below it, a turn that looks stuck or a retry
+ *                 that keeps failing being downstream of the prompt nobody saw.
  *   retrying      the daemon is re-sending a failed turn on a backoff.
  *   compacting    the turn is effectively paused while Claude summarises.
  *   permission    a human answer is needed before anything continues.
@@ -220,6 +224,7 @@ export type SessionState =
 export function statusState(facts: SessionFacts): SessionState {
     if (facts.online && facts.lifecycle === 'detached') return 'detached';
     if (!facts.online) return 'disconnected';
+    if (facts.blocked) return 'blocked';
     if (facts.turn === 'retrying') return 'retrying';
     if (facts.turn === 'compacting') return 'compacting';
     if (facts.permission) return 'permission_required';

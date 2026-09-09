@@ -6,9 +6,13 @@ import {
 
 /**
  * The ladder EXACTLY as buildSessionRowData spelled it inline, kept here as an
- * oracle. The point of the refactor is that this expression stops existing in
+ * oracle. The point of the refactor was that this expression stops existing in
  * two places; the point of this test is that the replacement agrees with it on
  * every input, not just the ones somebody thought to try.
+ *
+ * Scope: the axes the old ladder could actually read. It had never heard of a
+ * pane-owning prompt, so `blocked` is a deliberate divergence, asserted
+ * separately below rather than smuggled past this oracle.
  */
 function legacyState(s: SessionFactsInput, isOnline: boolean): SessionState {
     const hasPermissions = !!(s.agentState?.requests && Object.keys(s.agentState.requests).length > 0);
@@ -77,6 +81,25 @@ describe('statusState is the ladder that storage.ts and sessionUtils.ts each had
         // Guard the guard: a generator that silently yields nothing would pass.
         expect(checked).toBe(2 * 4 * 2 * 2 * 2 * 2 * 2 * 3 * 3);
     });
+
+    it('a pane-owning prompt wins from every state we can still hear from', () => {
+        // The one intended divergence, asserted across the whole space rather
+        // than on the handful of combinations that came to mind: whatever else
+        // is true, if something is waiting on a human at the terminal that is
+        // what the badge says — unless we cannot reach the session at all, or
+        // Claude itself is gone, which are both worse news.
+        for (const { session, online } of everyCombination()) {
+            const blocked = {
+                ...session,
+                metadata: { ...session.metadata, joy__dialog: { title: 'Switch model?', options: ['Yes', 'No'] } },
+            };
+            const got = statusState(sessionFacts(blocked, online));
+            const expected = !online ? 'disconnected'
+                : session.metadata?.joy__state === 'detached' ? 'detached'
+                : 'blocked';
+            expect(got).toBe(expected);
+        }
+    });
 });
 
 const base = (over: Partial<SessionFactsInput> = {}): SessionFactsInput => ({
@@ -104,15 +127,37 @@ describe('facts the ladder used to throw away', () => {
         expect(statusState(f)).toBe('waiting');
     });
 
-    it('reports the pane-blocking prompt the status ladder never knew about', () => {
+    it('reports a pane-blocking prompt over a turn that cannot be progressing', () => {
         const dialog = sessionFacts(base({
             thinking: true,
             metadata: { joy__thinking: { since: 0 }, joy__dialog: { title: 'Switch model?', options: ['Yes', 'No'] } },
         }), true);
         expect(dialog.blocked).toEqual({ kind: 'dialog', title: 'Switch model?' });
-        // Documents today's behaviour, which is the bug: a dialog owns the pane
-        // and nothing will move, yet the badge still says a reply is streaming.
-        expect(statusState(dialog)).toBe('thinking');
+        // The turn is still open as far as the thinking signals go, but a dialog
+        // owns the pane so nothing is going to move. The badge used to say a
+        // reply was streaming while the terminal sat on a model picker.
+        expect(dialog.turn).toBe('thinking');
+        expect(statusState(dialog)).toBe('blocked');
+    });
+
+    it('ranks a pane prompt above the states it usually explains', () => {
+        const blocking = { joy__login: { url: 'https://example.test' } };
+        for (const other of [
+            { joy__retry: { attempt: 2, total: 5 } },
+            { joy__compacting: { trigger: 'auto' as const, since: 0 } },
+        ]) {
+            expect(statusState(sessionFacts(base({ metadata: { ...blocking, ...other } }), true))).toBe('blocked');
+        }
+        // A permission request can coexist with a pane prompt; the prompt wins,
+        // because the permission cannot be reached until the pane clears.
+        expect(statusState(sessionFacts(base({
+            agentState: { requests: { 'req-1': {} } }, metadata: blocking,
+        }), true))).toBe('blocked');
+    });
+
+    it('still reads as offline when we cannot hear from the session at all', () => {
+        const stale = { thinking: false, presence: 600_000, activeAt: 0, metadata: { joy__dialog: { title: null, options: [] } } };
+        expect(statusState(sessionFacts(stale, false))).toBe('disconnected');
     });
 
     it('ranks pane-owning prompts most-blocking first', () => {
@@ -133,8 +178,8 @@ describe('facts the ladder used to throw away', () => {
         }), true);
         expect(f.blocked?.kind).toBe('dialog');
         expect(f.permission).toBe(true);
-        // Unchanged: permission still wins the badge, as it did before.
-        expect(statusState(f)).toBe('permission_required');
+        // Both are true at once; the pane prompt is the one to act on first.
+        expect(statusState(f)).toBe('blocked');
     });
 
     it('surfaces the queue, including a halted auto-drain', () => {

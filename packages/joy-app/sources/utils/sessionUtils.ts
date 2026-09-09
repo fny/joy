@@ -37,6 +37,9 @@ export const STATUS_PALETTE: Record<SessionState, { color: string; dotColor: str
     retrying:            { color: '#FF9500', dotColor: '#FF9500', isPulsing: true,  isConnected: true },
     compacting:          { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true,  isConnected: true },
     permission_required: { color: '#FFCC00', dotColor: '#FFCC00', isPulsing: true,  isConnected: true },
+    // Same "waiting on you" family as permission_required, but not pulsing:
+    // nothing is in progress behind it, which is the point.
+    blocked:             { color: '#FFCC00', dotColor: '#FFCC00', isPulsing: false, isConnected: true },
     tasks:               { color: '#30B0C7', dotColor: '#30B0C7', isPulsing: true,  isConnected: true },
     agents:              { color: '#FF2D95', dotColor: '#FF2D95', isPulsing: true,  isConnected: true },
     thinking:            { color: '#007AFF', dotColor: '#007AFF', isPulsing: true,  isConnected: true },
@@ -146,6 +149,17 @@ export function useSessionStatus(session: Session): SessionStatus {
             return show(t('status.detached'));
         case 'disconnected':
             return show(t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }));
+
+        // Something interactive owns the agent's pane and is waiting on a human:
+        // a login prompt, a CLI dialog (model picker, "Switch model?"), or a codex
+        // approval. Each already had its own pinned bar; none reached the status,
+        // so the badge could report a streaming reply while nothing could move.
+        case 'blocked':
+            switch (facts.blocked?.kind) {
+                case 'login': return withBg(show(t('status.signInRequired')));
+                case 'approval': return withBg(show(t('status.approvalRequired')));
+                default: return withBg(show(t('status.waitingInTerminal')));
+            }
 
         // 500-error auto-retry in progress: the daemon is re-sending a failed
         // turn on a backoff schedule. Shown amber + pulsing, with the attempt
