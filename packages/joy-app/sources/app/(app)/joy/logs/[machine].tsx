@@ -109,8 +109,8 @@ export default React.memo(function JoyLogsListScreen() {
                     logs.map((log) => (
                         <Item
                             key={log.sessionId}
-                            title={log.sessionId.slice(0, 8)}
-                            subtitle={`${new Date(log.mtimeMs).toLocaleString()} · ${formatBytes(log.sizeBytes)}`}
+                            title={log.title || log.sessionId.slice(0, 8)}
+                            subtitle={`${log.title ? `${log.sessionId.slice(0, 8)} · ` : ''}${new Date(log.mtimeMs).toLocaleString()} · ${formatBytes(log.sizeBytes)}`}
                             subtitleLines={1}
                             icon={<Ionicons name="document-text-outline" size={28} color={theme.colors.text} />}
                             onPress={() => openLog(log.sessionId)}

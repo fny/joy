@@ -285,11 +285,11 @@ export function pastSessionsSpec(machineId: string, cwd: string, agent: 'claude'
             const r = await machineHistoryLogs(ctx, cwd);
             const logs = r.data?.logs;
             if (!isDaemonSuccess(r) || !Array.isArray(logs)) return { kind: 'error', reason: daemonError('history', r) };
-            const list = logs as unknown as { sessionId: string; sizeBytes: number; mtimeMs: number }[];
+            const list = logs as unknown as { sessionId: string; sizeBytes: number; mtimeMs: number; title?: string | null }[];
             return {
                 kind: 'ok',
                 data: list
-                    .map((l) => ({ id: l.sessionId, title: null, updatedAt: l.mtimeMs, sizeBytes: l.sizeBytes }))
+                    .map((l) => ({ id: l.sessionId, title: l.title ?? null, updatedAt: l.mtimeMs, sizeBytes: l.sizeBytes }))
                     .sort((a, b) => b.updatedAt - a.updatedAt),
             };
         },

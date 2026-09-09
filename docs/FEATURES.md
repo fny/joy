@@ -22,7 +22,10 @@ every relay; machines register per account.
   Settings → Agent Defaults). All agents always shown; the daemon rejects
   unknown ones loudly ("run joy update?").
 - **Resume / fork claude sessions**: new-session page lists past transcripts
-  in the chosen directory (radio picker); session actions offer Fork (new
+  in the chosen directory (radio picker) by TITLE — the user's /title, the
+  agent's `<joy-title>`, Claude's last ai-title or the first prompt, with the
+  short id alongside (`joy-list-logs` returns `title`/`titleSource`; the
+  session-logs and projects pages show the same); session actions offer Fork (new
   claude session id via `--resume --fork-session`) and Duplicate. Fresh
   sessions are pinned to a generated `--session-id` so several can share a cwd.
 - **Adopt & restart**: daemon recovers live tmux windows at boot; sessions can

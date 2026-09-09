@@ -132,6 +132,11 @@ export interface JoyLogEntry {
     sessionId: string;   // the .jsonl basename = Claude session UUID
     sizeBytes: number;
     mtimeMs: number;
+    /** The conversation's title: the user's /title, the agent's <joy-title>,
+     *  Claude's ai-title, or its first prompt — null when the daemon could
+     *  derive none (or predates titles in this list). */
+    title?: string | null;
+    titleSource?: 'user' | 'agent' | 'ai' | 'prompt' | null;
 }
 
 // A single back-and-forth message previewed from a transcript.

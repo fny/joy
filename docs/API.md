@@ -98,7 +98,7 @@ annotations are incremental (permissive objects where absent).
 | `joy-resize` | POST /sessions/:id/resize | Drive tmux window cols/rows (every agent runs on its own tmux server `joy-<id>`, session `joy-<id>`, window `agent`; `tmux_window` in session JSON is the target `joy-<id>:agent`) |
 | `joy-transcript` | GET /sessions/:id/transcript | Parsed transcript slice |
 | `joy-session-log` | GET /sessions/:id/log | Raw log tail |
-| `joy-list-logs` / `joy-read-log` | GET /logs, /logs/messages | Past-session transcript browser (per cwd) |
+| `joy-list-logs` / `joy-read-log` | GET /logs, /logs/messages | Past-session transcript browser (per cwd). Each listed log carries `title` + `titleSource` (`user` = the window record's /title; `agent` = `<joy-title>` in the transcript tail; `ai` = Claude's last `ai-title`; `prompt` = the first user prompt; null when none) — bounded tail/head reads via `claude/logTitle.ts`, cached by size+mtime |
 | `joy-usage` | GET /usage | Cost/token report from local transcripts (persistent cache in `~/.joy/usage-cache.json`, background-warmed 2h) |
 | `joy-session-usage` | GET /usage/sessions | Per-session cost rows |
 | `joy-limits` | GET /limits | SERVER-truth account quota: claude 5h/weekly via local OAuth token → `api.anthropic.com/api/oauth/usage`; codex from newest rollout `rate_limits` |

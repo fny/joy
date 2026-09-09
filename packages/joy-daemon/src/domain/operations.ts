@@ -22,7 +22,7 @@ import { queueFor } from "./queueFacade";
 import type { SessionRegistry } from "./registry";
 import { claimTranscript, transcriptClaims, type TranscriptClaim } from "./transcriptClaims";
 import { processTreeStats } from "./procStats";
-import { loadWindowRecord } from "./windowRecord";
+import { listWindowRecords, loadWindowRecord, type WindowRecord } from "./windowRecord";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
 import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, loadHandoffJob, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots, withPathLock } from "./fileOps";
@@ -30,6 +30,7 @@ import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
+import { readLogTitle, type LogTitleSource } from "../claude/logTitle";
 import { joySessionDir, canonicalCwd } from "../paths";
 import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
@@ -319,6 +320,20 @@ export function readLastLogMessages(file: string, limit: number, chunkBytes = 25
       }
     } finally { closeSync(fd); }
   } catch { return []; }
+}
+
+/** Title for a listed transcript: the user's own /title (window record) is
+ *  the one thing the transcript cannot tell us; after that the transcript
+ *  itself, then whatever the record remembered when the file has nothing
+ *  readable (e.g. an agent title set in a session whose transcript was
+ *  truncated). Exported for its test. */
+export function logTitleFor(file: string, record: WindowRecord | undefined): { title: string | null; titleSource: LogTitleSource | "user" | null } {
+  if (record?.userTitle?.trim()) return { title: record.userTitle.trim(), titleSource: "user" };
+  const fromFile = readLogTitle(file);
+  if (fromFile) return { title: fromFile.title, titleSource: fromFile.source };
+  if (record?.agentTitle?.trim()) return { title: record.agentTitle.trim(), titleSource: "agent" };
+  if (record?.lastAiTitle?.trim()) return { title: record.lastAiTitle.trim(), titleSource: "ai" };
+  return { title: null, titleSource: null };
 }
 
 /** JSON-Schema fragment used for OpenAPI emission (transports/openapi.ts).
@@ -1607,19 +1622,27 @@ export const machineOps: MachineOp[] = [
     http: { method: "GET", path: "/logs" },
     // List every Claude transcript JSONL for a project directory (one per
     // conversation Claude has had in that cwd), newest first. `directory` is the
-    // absolute cwd; we map it to ~/.claude/projects/<encoded>/ ourselves. Just
-    // stats (id + size + mtime) — no file reads, so it stays fast.
+    // absolute cwd; we map it to ~/.claude/projects/<encoded>/ ourselves. Stats
+    // (id + size + mtime) plus a title: the user's /title from the window
+    // record when joy launched that conversation, else what the transcript's
+    // own tail/head carries (agent <joy-title>, Claude ai-title, first prompt
+    // — claude/logTitle.ts; bounded reads, cached by mtime). The lists this
+    // feeds showed eight characters of a UUID per conversation.
     handler: (_registry, params) => {
       const directory = String(params.directory ?? "");
       if (!directory) return { ok: false, error: "directory required", directory: "", logs: [] };
       const dir = cwdToTranscriptDir(directory);
-      const logs: Array<{ sessionId: string; sizeBytes: number; mtimeMs: number }> = [];
+      const logs: Array<{ sessionId: string; sizeBytes: number; mtimeMs: number; title: string | null; titleSource: LogTitleSource | "user" | null }> = [];
+      const records = new Map<string, WindowRecord>();
+      for (const r of listWindowRecords()) if (r.claudeSessionId) records.set(r.claudeSessionId, r);
       try {
         for (const f of readdirSync(dir)) {
           if (!f.endsWith(".jsonl")) continue;
           try {
-            const st = statSync(join(dir, f));
-            logs.push({ sessionId: f.slice(0, -".jsonl".length), sizeBytes: st.size, mtimeMs: st.mtimeMs });
+            const file = join(dir, f);
+            const st = statSync(file);
+            const sessionId = f.slice(0, -".jsonl".length);
+            logs.push({ sessionId, sizeBytes: st.size, mtimeMs: st.mtimeMs, ...logTitleFor(file, records.get(sessionId)) });
           } catch { /* vanished mid-scan */ }
         }
       } catch { /* no transcript dir for this cwd yet → empty */ }

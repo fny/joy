@@ -748,10 +748,10 @@ function NewJoyTmuxSessionScreen() {
                                         size={13}
                                         color={resumeId === ps.id ? theme.colors.textLink : theme.colors.textSecondary}
                                     />
-                                    <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                                        {ps.id.slice(0, 18)}…
+                                    <Text style={[styles.configLabel, { color: ps.title ? theme.colors.text : theme.colors.textSecondary }]} numberOfLines={1}>
+                                        {ps.title || `${ps.id.slice(0, 18)}…`}
                                     </Text>
-                                    <Text style={styles.configHint} numberOfLines={1}>{ocAge(ps.updatedAt)} · {Math.max(1, Math.round((ps.sizeBytes ?? 0) / 1024))}KB</Text>
+                                    <Text style={styles.configHint} numberOfLines={1}>{ps.title ? `${ps.id.slice(0, 8)} · ` : ''}{ocAge(ps.updatedAt)} · {Math.max(1, Math.round((ps.sizeBytes ?? 0) / 1024))}KB</Text>
                                 </Pressable>
                             ))}
                             </>)}

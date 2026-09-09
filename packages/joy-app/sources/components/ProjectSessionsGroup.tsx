@@ -146,9 +146,9 @@ const SessionRow = React.memo(function SessionRow({
         >
             <Ionicons name="document-text-outline" size={24} color={theme.colors.text} style={{ marginRight: 12 }} />
             <View style={{ flex: 1 }}>
-                <Text style={[styles.rowTitle, { color: theme.colors.text }]}>{log.sessionId.slice(0, 8)}</Text>
+                <Text style={[styles.rowTitle, { color: theme.colors.text }]} numberOfLines={1}>{log.title || log.sessionId.slice(0, 8)}</Text>
                 <Text style={[styles.rowSub, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                    {new Date(log.mtimeMs).toLocaleString()} · {formatLastSeen(log.mtimeMs)}
+                    {log.title ? `${log.sessionId.slice(0, 8)} · ` : ''}{new Date(log.mtimeMs).toLocaleString()} · {formatLastSeen(log.mtimeMs)}
                 </Text>
                 {excerpt ? (
                     <Text style={[styles.rowExcerpt, { color: theme.colors.textSecondary }]} numberOfLines={2}>{excerpt}</Text>

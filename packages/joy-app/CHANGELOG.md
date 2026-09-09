@@ -1,3 +1,7 @@
+# Sep 9 (2) — Past sessions by name
+
+- **Past sessions have titles.** The session logs page, the projects pages and the past-sessions picker on the new-session page listed each old conversation as the first eight characters of its id, which tells you nothing about which one you want. They now show the conversation's title: your own `/title` if you set one, else the agent's own title, else the title Claude gave it, else its first prompt. The short id sits alongside for the cases where you know it. Needs the daemon on that machine to be updated; an older daemon keeps showing ids.
+
 # Sep 9 (2) — One answer to “is it working?”
 
 - **A chat you come back to is no longer blank.** The app unloads the history of chats you have not looked at recently, and is supposed to never unload one that is mid-turn. It asked the narrowest of the several ways this app had of asking that — the live “working” signal only — which is exactly the signal that is missing after a cold start or a reconnect, when the saved one is carrying the turn instead. So a session that really was working looked idle, had its history dropped underneath it, and came back empty until the refetch landed.
