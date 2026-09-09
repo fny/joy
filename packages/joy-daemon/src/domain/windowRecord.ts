@@ -293,6 +293,7 @@ export function saveWindowRecord(
       hookLaunchId: patch.hookLaunchId ?? prev?.hookLaunchId,
       v2AnnounceEnvelope: patch.v2AnnounceEnvelope ?? prev?.v2AnnounceEnvelope,
       handoff: patch.handoff === null ? undefined : patch.handoff ?? prev?.handoff,
+      notificationsMuted: patch.notificationsMuted ?? prev?.notificationsMuted,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       userTitle: patch.userTitle === null ? undefined : patch.userTitle ?? prev?.userTitle,
       lastAiTitle: patch.lastAiTitle ?? prev?.lastAiTitle,

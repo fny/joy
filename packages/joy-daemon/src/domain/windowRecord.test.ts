@@ -43,3 +43,23 @@ test("lastAiTitle survives a restart and merges without clobbering the lock", ()
   saveWindowRecord("ttl00001", { titleLockedByUser: true }, dir);
   expect(loadWindowRecord("ttl00001", dir)?.lastAiTitle).toBe("Disable suggestions");
 });
+
+// saveWindowRecord assembles its output field by field, so a key added to the
+// patch TYPE but not to that object typechecks and is silently dropped —
+// which is how the mute first shipped: the op answered {ok:true} and the flag
+// was gone by the next read (caught live, not by a test).
+test("notificationsMuted round-trips, and an unmute is recorded rather than forgotten", () => {
+  saveWindowRecord("aa11bb22", { launchCwd: "/w" }, dir);
+  saveWindowRecord("aa11bb22", { notificationsMuted: true }, dir);
+  expect(loadWindowRecord("aa11bb22", dir)?.notificationsMuted).toBe(true);
+
+  // An unrelated patch must not drop it.
+  saveWindowRecord("aa11bb22", { claudeSessionId: "c1" }, dir);
+  expect(loadWindowRecord("aa11bb22", dir)?.notificationsMuted).toBe(true);
+
+  // false is a value, not an absence: the unmute has to stick.
+  saveWindowRecord("aa11bb22", { notificationsMuted: false }, dir);
+  expect(loadWindowRecord("aa11bb22", dir)?.notificationsMuted).toBe(false);
+  saveWindowRecord("aa11bb22", { claudeSessionId: "c2" }, dir);
+  expect(loadWindowRecord("aa11bb22", dir)?.notificationsMuted).toBe(false);
+});
