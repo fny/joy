@@ -90,6 +90,14 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="session/[id]/processes"
+                options={{
+                    headerShown: true,
+                    headerTitle: 'Processes',
+                    headerBackTitle: t('common.back'),
+                }}
+            />
+            <Stack.Screen
                 name="session/[id]/projects"
                 options={{
                     headerShown: true,

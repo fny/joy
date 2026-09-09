@@ -291,9 +291,9 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                     <Item
                         title="CPU · Memory"
                         detail={`${live.process.cpuPercent.toFixed(0)}% · ${formatBytes(live.process.rssBytes)}`}
-                        subtitle={`${live.process.processCount} process${live.process.processCount === 1 ? '' : 'es'} under the agent`}
+                        subtitle={`${live.process.processCount} process${live.process.processCount === 1 ? '' : 'es'} under the agent — tap to list them`}
                         icon={<Ionicons name="pulse-outline" size={29} color="#FF2D55" />}
-                        showChevron={false}
+                        onPress={() => router.push(`/session/${session.id}/processes` as any)}
                     />
                 )}
                 {!!live?.flags?.length && (
@@ -304,12 +304,20 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
             {/* Actions */}
             <ItemGroup title="Actions">
                 {machineId && joySessionId && (
-                    <Item
-                        title="Open Terminal"
-                        subtitle="Live tmux pane with raw key input"
-                        icon={<Ionicons name="open-outline" size={29} color="#007AFF" />}
-                        onPress={() => router.push(`/joy/pane/${machineId}/${joySessionId}`)}
-                    />
+                    <>
+                        <Item
+                            title="Processes"
+                            subtitle="Every process under the agent, with CPU and memory"
+                            icon={<Ionicons name="git-network-outline" size={29} color="#FF2D55" />}
+                            onPress={() => router.push(`/session/${session.id}/processes` as any)}
+                        />
+                        <Item
+                            title="Open Terminal"
+                            subtitle="Live tmux pane with raw key input"
+                            icon={<Ionicons name="open-outline" size={29} color="#007AFF" />}
+                            onPress={() => router.push(`/joy/pane/${machineId}/${joySessionId}`)}
+                        />
+                    </>
                 )}
                 {canRestart && (
                     <Item

@@ -28,6 +28,8 @@
 
 - **Settings → Relay shows the relay box.** CPU, memory, disk, the database's size and row counts, how many daemons hold a lease and how many apps are streaming, uptime and version — the same rows every machine page has, for the relay itself. Needs the updated relay.
 
+- **A session's processes, listed.** The session info screen's CPU · Memory row is now a button: it opens every process under the agent — tool shells, dev servers, test runners, subagents — in tree order, each with its own CPU right now, memory and age, re-read every five seconds while you look. Needs the updated daemon on the machine.
+
 
 # Sep 9 — Reading stays put
 

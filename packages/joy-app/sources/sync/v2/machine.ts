@@ -230,6 +230,12 @@ export const machineGrep = (ctx: MachineCtx, q: string, opts?: { path?: string; 
         + (opts?.maxResults ? `&maxResults=${opts.maxResults}` : ''));
 
 // ── terminal ───────────────────────────────────────────────────────────────
+/** Every process under the session's agent, tree order, with CPU right now and RSS (Session → Processes). */
+export interface SessionProcessRow { pid: number; ppid: number; depth: number; name: string; args: string; cpuPercent: number; rssBytes: number; elapsedSeconds: number | null }
+export interface SessionProcesses { ok?: boolean; roots?: number[]; sampledAt?: number; totals?: { cpuPercent: number; rssBytes: number; processCount: number }; processes?: SessionProcessRow[]; error?: string }
+export const machineSessionProcesses = (ctx: MachineCtx) =>
+    j<SessionProcesses>(ctx, 'GET', `/v2/sessions/${ctx.localSessionId}/processes`);
+
 export const machinePane = (ctx: MachineCtx, color = false) =>
     j<{ ok?: boolean; text?: string; error?: string }>(ctx, 'GET',
         `/v2/sessions/${ctx.localSessionId}/terminal?color=${color ? 1 : 0}`);

@@ -421,6 +421,10 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- Processes (session info → CPU · Memory row, or Actions → Processes): every
+  process under the session's agent — tool shells, dev servers, test runners,
+  subagents — in tree order with CPU right now, resident memory and age
+  (`joy-session-processes`), re-sampled every 5 s while open.
 - Storage page (Settings → Machines → Storage): every session's footprint on
   each machine's disk (`joy-storage`: media, record, queue, receipts, ledger
   rows, with size and age, and whether the agent is running, detached or gone
