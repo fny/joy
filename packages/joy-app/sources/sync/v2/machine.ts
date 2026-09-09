@@ -357,19 +357,29 @@ export { TunnelError };
 
 // ── sealed environment store (provider keys every new session inherits) ────
 /** What each session leaves under ~/.joy on the machine (Settings → Storage). */
+export type StorageSessionKind = 'running' | 'detached' | 'record';
+export interface StorageTmuxPane { pid: number | null; command: string; title: string }
+export interface StorageTmuxServer { label: string; alive: boolean; windows: number; panes: StorageTmuxPane[]; createdAt: number | null; activityAt: number | null }
+export interface StorageLooseTmux extends StorageTmuxServer { sessionId: string | null; socketPath: string }
 export interface StorageSession {
     id: string; v2SessionId: string | null; cwd: string; title: string | null;
+    /** running = agent up; detached = registry holds it, process gone; record = files only. */
+    kind?: StorageSessionKind;
     live: boolean; status: string | null; bytes: number; files: number; ledgerRows: number;
     newestAt: number | null; oldestAt: number | null; parts: string[];
+    /** The session's own tmux server, when up or when its socket lingers. */
+    tmux?: StorageTmuxServer | null;
 }
 export interface StorageReport {
     ok?: boolean; homeDir?: string; totalBytes?: number; sessions?: StorageSession[];
     shared?: { ledgerBytes: number; usageCacheBytes: number; importedBytes: number; orphanBytes: number; orphanFiles: number };
+    /** tmux servers and stale sockets under the joy socket dir that nothing owns. */
+    looseTmux?: StorageLooseTmux[];
     error?: string;
 }
 export const machineStorage = (ctx: MachineOnlyCtx) => jm<StorageReport>(ctx, 'GET', '/v2/storage');
-export const machineStorageNuke = (ctx: MachineOnlyCtx, ids: string[], killLive: boolean) =>
-    jm<{ ok?: boolean; bytesFreed?: number; results?: Array<{ id: string; ok: boolean; bytesFreed: number; removed: string[]; error?: string }>; error?: string }>(ctx, 'POST', '/v2/storage/nuke', { ids, killLive });
+export const machineStorageNuke = (ctx: MachineOnlyCtx, body: { ids: string[]; tmux?: string[]; killLive: boolean }) =>
+    jm<{ ok?: boolean; bytesFreed?: number; results?: Array<{ id: string; ok: boolean; bytesFreed: number; removed: string[]; error?: string }>; tmux?: Array<{ label: string; killed: boolean; unlinked: boolean; error?: string }>; error?: string }>(ctx, 'POST', '/v2/storage/nuke', body);
 
 export const machineEnvList = (ctx: MachineOnlyCtx) =>
     jm<{ ok?: boolean; names?: string[]; error?: string }>(ctx, 'GET', '/v2/env');

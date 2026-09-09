@@ -423,7 +423,9 @@ sync can no longer overwrite its replacement's status. An older daemon (no
   records, delete machines.
 - Storage page (Settings → Machines → Storage): every session's footprint on
   each machine's disk (`joy-storage`: media, record, queue, receipts, ledger
-  rows, with size and age; shared and orphaned bytes reported separately) and
+  rows, with size and age, and whether the agent is running, detached or gone
+  with only files left; shared and orphaned bytes reported separately), loose
+  tmux servers nothing owns (live with their panes, or stale sockets), and
   on the relay (`GET /sessions/storage`: event rows and bytes), biggest first;
   multi-select and delete in one press — the daemon nukes its files first
   (killing a live session if you said so), then the relay row and its events.

@@ -17,7 +17,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useAllMachines } from '@/sync/storage';
 import { isMachineOnline } from '@/utils/machineUtils';
 import { sync } from '@/sync/sync';
-import { machineStorage, machineStorageNuke, type StorageReport, type StorageSession } from '@/sync/v2/machine';
+import { machineStorage, machineStorageNuke, type StorageReport, type StorageSession, type StorageLooseTmux } from '@/sync/v2/machine';
 import { v2 } from '@/sync/v2/api';
 import { sessionDelete } from '@/sync/ops';
 import { Modal } from '@/modal';
@@ -71,37 +71,48 @@ export default function StorageScreen() {
     const key = (machineId: string, id: string) => `${machineId}:${id}`;
     const toggle = (k: string) => setSelected((prev) => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; });
 
-    const allRows = React.useMemo(() => reports.flatMap((m) => (m.report?.sessions ?? []).map((s) => {
-        const rr = s.v2SessionId ? relay.get(s.v2SessionId) : undefined;
-        return { id: key(m.machineId, s.id), machineId: m.machineId, session: s, bytes: s.bytes, live: s.live, relayEvents: rr?.events ?? 0, relayBytes: rr?.bytes ?? 0 };
-    })), [reports, relay]);
+    // Sessions and loose tmux servers share one selection; a loose row carries
+    // `tmux` and no session, and the summary keeps them apart.
+    const tmuxKey = (machineId: string, label: string) => `${machineId}:tmux:${label}`;
+    const allRows = React.useMemo(() => reports.flatMap((m) => [
+        ...(m.report?.sessions ?? []).map((s) => {
+            const rr = s.v2SessionId ? relay.get(s.v2SessionId) : undefined;
+            return { id: key(m.machineId, s.id), machineId: m.machineId, session: s as StorageSession | null, loose: null as StorageLooseTmux | null, bytes: s.bytes, running: s.kind ? s.kind === 'running' : s.live, relayEvents: rr?.events ?? 0, relayBytes: rr?.bytes ?? 0, tmux: undefined as { alive: boolean } | undefined };
+        }),
+        ...(m.report?.looseTmux ?? []).map((l) => ({ id: tmuxKey(m.machineId, l.label), machineId: m.machineId, session: null as StorageSession | null, loose: l as StorageLooseTmux | null, bytes: 0, running: false, relayEvents: 0, relayBytes: 0, tmux: { alive: l.alive } as { alive: boolean } | undefined })),
+    ]), [reports, relay]);
     const summary = summarizeSelection(allRows, selected);
 
     const nuke = async () => {
-        if (summary.count === 0) return;
-        const ok = await Modal.confirm('Delete sessions?', describeNuke(summary), { confirmText: `Delete ${summary.count}`, destructive: true });
+        if (summary.count + summary.tmux === 0) return;
+        const total = summary.count + summary.tmux;
+        const ok = await Modal.confirm(summary.count > 0 ? 'Delete sessions?' : 'Kill loose tmux servers?', describeNuke(summary), { confirmText: `Delete ${total}`, destructive: true });
         if (!ok) return;
         setBusy('Deleting…');
         let freed = 0; const failed: string[] = [];
         for (const m of reports) {
             const mine = allRows.filter((r) => r.machineId === m.machineId && selected.has(r.id));
             if (mine.length === 0) continue;
+            const sessions = mine.filter((r) => r.session).map((r) => r.session!);
+            const labels = mine.filter((r) => r.loose).map((r) => r.loose!.label);
             const ctx = sync.machineOnlyCtx(m.machineId);
-            if (!ctx) { failed.push(...mine.map((r) => r.session.id)); continue; }
-            const r = await machineStorageNuke(ctx, mine.map((x) => x.session.id), true).catch(() => null);
+            if (!ctx) { failed.push(...sessions.map((s) => s.id), ...labels); continue; }
+            const r = await machineStorageNuke(ctx, { ids: sessions.map((s) => s.id), tmux: labels, killLive: true }).catch(() => null);
             const results = r?.data?.results ?? [];
-            for (const row of mine) {
-                const res = results.find((x) => x.id === row.session.id);
-                if (!res?.ok) { failed.push(row.session.id); continue; }
+            for (const s of sessions) {
+                const res = results.find((x) => x.id === s.id);
+                if (!res?.ok) { failed.push(s.id); continue; }
                 freed += res.bytesFreed;
                 // Daemon done: the relay row (and its events) can go.
-                if (row.session.v2SessionId) await sessionDelete(row.session.v2SessionId).catch(() => { /* already gone, or archived elsewhere */ });
+                if (s.v2SessionId) await sessionDelete(s.v2SessionId).catch(() => { /* already gone, or archived elsewhere */ });
             }
+            for (const t of r?.data?.tmux ?? []) if (t.error) failed.push(t.label);
+            if (!r?.data?.tmux && labels.length) failed.push(...labels);
         }
         setSelected(new Set());
         setBusy(null);
         await load();
-        if (failed.length > 0) await Modal.alert('Some could not be deleted', `${failed.length} left in place (${failed.map((f) => f.slice(0, 8)).join(', ')}). Freed ${formatBytes(freed)}.`);
+        if (failed.length > 0) await Modal.alert('Some could not be deleted', `${failed.length} left in place (${failed.map((f) => f.length > 12 ? f.slice(0, 12) + '…' : f).join(', ')}). Freed ${formatBytes(freed)}.`);
     };
 
     const selectAllOn = (machineId: string) => setSelected((prev) => {
@@ -135,6 +146,30 @@ export default function StorageScreen() {
                                     {m.report.shared ? ` · shared: ledger ${formatBytes(m.report.shared.ledgerBytes)}, usage cache ${formatBytes(m.report.shared.usageCacheBytes)}${m.report.shared.importedBytes ? `, v1 import ${formatBytes(m.report.shared.importedBytes)}` : ''}${m.report.shared.orphanFiles ? `, ${m.report.shared.orphanFiles} orphaned file${m.report.shared.orphanFiles === 1 ? '' : 's'} (${formatBytes(m.report.shared.orphanBytes)})` : ''}` : ''}
                                 </Text>
                                 {(m.report.sessions ?? []).length === 0 ? <Text style={styles.muted}>nothing attributable to a session</Text> : null}
+                                {(m.report.looseTmux ?? []).length > 0 ? (
+                                    <>
+                                        <Text style={[styles.muted, { marginTop: 8 }]}>Loose tmux servers — nothing owns these. A live one may still have a process inside; a stale socket is just a file.</Text>
+                                        {(m.report.looseTmux ?? []).map((l: StorageLooseTmux) => {
+                                            const k = tmuxKey(m.machineId, l.label);
+                                            const on = selected.has(k);
+                                            const inside = l.alive ? (l.panes.length ? l.panes.map((p) => `${p.command}${p.pid ? ` (${p.pid})` : ''}`).join(', ') : 'no panes') : 'stale socket — no server';
+                                            return (
+                                                <Pressable key={k} onPress={() => toggle(k)} style={[styles.row, on && styles.rowOn]}>
+                                                    <Ionicons name={on ? 'checkbox' : 'square-outline'} size={22} color={on ? theme.colors.textLink : theme.colors.textSecondary} style={styles.check} />
+                                                    <View style={{ flex: 1 }}>
+                                                        <View style={styles.rowTop}>
+                                                            <Text style={styles.title} numberOfLines={1}>{l.label}</Text>
+                                                            <Text style={[styles.bytes, l.alive && { color: '#FF9500' }]}>{l.alive ? 'live' : 'stale'}</Text>
+                                                        </View>
+                                                        <Text style={styles.sub} numberOfLines={2}>
+                                                            {[l.sessionId ? `session ${l.sessionId}` : null, inside, l.alive ? `${l.windows} window${l.windows === 1 ? '' : 's'}` : null, ageLabel(l.activityAt ?? l.createdAt)].filter(Boolean).join('  ·  ')}
+                                                        </Text>
+                                                    </View>
+                                                </Pressable>
+                                            );
+                                        })}
+                                    </>
+                                ) : null}
                                 {(m.report.sessions ?? []).map((s: StorageSession) => {
                                     const k = key(m.machineId, s.id);
                                     const on = selected.has(k);
@@ -149,7 +184,7 @@ export default function StorageScreen() {
                                                     <Text style={styles.bytes}>{formatBytes(s.bytes)}</Text>
                                                 </View>
                                                 <Text style={styles.sub} numberOfLines={2}>
-                                                    {[s.id, s.live ? `● ${s.status}` : null, folderName(s.cwd), s.parts.join(' · ') || 'nothing on disk', relayText, ageLabel(s.newestAt ?? rr?.newest ?? null)].filter(Boolean).join('  ·  ')}
+                                                    {[s.id, s.kind === 'running' ? '● running' : s.kind === 'detached' ? '○ detached — no agent' : (s.tmux?.alive ? '○ tmux up, no agent' : null), folderName(s.cwd), s.parts.join(' · ') || 'nothing on disk', relayText, ageLabel(s.newestAt ?? rr?.newest ?? null)].filter(Boolean).join('  ·  ')}
                                                 </Text>
                                             </View>
                                         </Pressable>
@@ -161,12 +196,12 @@ export default function StorageScreen() {
                 ))}
                 <View style={{ height: 96 }} />
             </ScrollView>
-            {summary.count > 0 ? (
+            {summary.count + summary.tmux > 0 ? (
                 <View style={styles.bar}>
-                    <Text style={styles.barText}>{summary.count} selected · {formatBytes(summary.bytes)}{summary.relayEvents ? ` + ${summary.relayEvents} relay events` : ''}{summary.live ? ` · ${summary.live} running` : ''}</Text>
+                    <Text style={styles.barText}>{summary.count + summary.tmux} selected · {formatBytes(summary.bytes)}{summary.relayEvents ? ` + ${summary.relayEvents} relay events` : ''}{summary.live ? ` · ${summary.live} running` : ''}{summary.tmux ? ` · ${summary.tmux} tmux` : ''}</Text>
                     <Pressable onPress={() => setSelected(new Set())} hitSlop={8}><Text style={styles.link}>clear</Text></Pressable>
                     <Pressable onPress={() => void nuke()} disabled={!!busy} style={[styles.nukeBtn, busy && { opacity: 0.5 }]}>
-                        <Text style={styles.nukeText}>{busy ?? `Delete ${summary.count}`}</Text>
+                        <Text style={styles.nukeText}>{busy ?? `Delete ${summary.count + summary.tmux}`}</Text>
                     </Pressable>
                 </View>
             ) : null}

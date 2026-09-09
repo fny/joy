@@ -26,25 +26,40 @@ export function ageLabel(at: number | null | undefined, now = Date.now()): strin
     return `${Math.floor(d / 30)}mo ago`;
 }
 
-export interface Selectable { id: string; bytes: number; live: boolean; relayEvents?: number; relayBytes?: number }
+export interface Selectable {
+    id: string; bytes: number;
+    /** An agent is up: deleting kills it. */
+    running?: boolean;
+    /** @deprecated alias of running */
+    live?: boolean;
+    relayEvents?: number; relayBytes?: number;
+    /** A loose tmux server (not a session): counted separately, killed if alive. */
+    tmux?: { alive: boolean };
+}
 
-export interface SelectionSummary { count: number; bytes: number; relayBytes: number; relayEvents: number; live: number }
+export interface SelectionSummary { count: number; bytes: number; relayBytes: number; relayEvents: number; live: number; tmux: number; tmuxAlive: number }
 
 export function summarizeSelection(rows: Selectable[], selected: ReadonlySet<string>): SelectionSummary {
-    const out: SelectionSummary = { count: 0, bytes: 0, relayBytes: 0, relayEvents: 0, live: 0 };
+    const out: SelectionSummary = { count: 0, bytes: 0, relayBytes: 0, relayEvents: 0, live: 0, tmux: 0, tmuxAlive: 0 };
     for (const r of rows) {
         if (!selected.has(r.id)) continue;
+        if (r.tmux) { out.tmux++; if (r.tmux.alive) out.tmuxAlive++; continue; }
         out.count++; out.bytes += r.bytes; out.relayBytes += r.relayBytes ?? 0; out.relayEvents += r.relayEvents ?? 0;
-        if (r.live) out.live++;
+        if (r.running ?? r.live) out.live++;
     }
     return out;
 }
 
-/** The confirm text: what goes, and the part that needs saying twice. */
+/** The confirm text: what goes, and the parts that need saying twice. */
 export function describeNuke(s: SelectionSummary): string {
-    const parts = [`${s.count} session${s.count === 1 ? '' : 's'}`, `${formatBytes(s.bytes)} on the machine`];
+    const parts: string[] = [];
+    if (s.count > 0) parts.push(`${s.count} session${s.count === 1 ? '' : 's'}`, `${formatBytes(s.bytes)} on the machine`);
     if (s.relayEvents > 0) parts.push(`${s.relayEvents} relay event${s.relayEvents === 1 ? '' : 's'} (${formatBytes(s.relayBytes)})`);
+    if (s.tmux > 0) parts.push(`${s.tmux} loose tmux server${s.tmux === 1 ? '' : 's'}`);
     let text = `Delete ${parts.join(', ')}. This cannot be undone.`;
-    if (s.live > 0) text += `\n\n${s.live} ${s.live === 1 ? 'is' : 'are'} still running and will be killed first.`;
+    const warnings: string[] = [];
+    if (s.live > 0) warnings.push(`${s.live} session${s.live === 1 ? ' is' : 's are'} still running and will be killed first.`);
+    if (s.tmuxAlive > 0) warnings.push(`${s.tmuxAlive} tmux server${s.tmuxAlive === 1 ? ' is' : 's are'} still up — whatever runs inside dies with ${s.tmuxAlive === 1 ? 'it' : 'them'}.`);
+    if (warnings.length) text += `\n\n${warnings.join(' ')}`;
     return text;
 }

@@ -14,17 +14,46 @@
 
 import * as fs from "node:fs";
 import { join } from "node:path";
-import { joyHomeDir, joySessionDir, joyStateDir } from "../paths";
+import { spawnSync } from "node:child_process";
+import { joyHomeDir, joySessionDir, joyStateDir, joyRelayKey } from "../paths";
 import { deleteWindowRecord, listWindowRecords, type WindowRecord } from "./windowRecord";
+
+export type SessionKind =
+  /** The registry holds it and its agent is up. */
+  | "running"
+  /** The registry holds it but the agent process is gone (the red "detached"). */
+  | "detached"
+  /** Only files: no registry entry. A tmux server may still be up for it. */
+  | "record";
+
+export interface TmuxPane { pid: number | null; command: string; title: string }
+export interface TmuxServerInfo {
+  label: string;
+  alive: boolean;
+  windows: number;
+  panes: TmuxPane[];
+  createdAt: number | null;
+  activityAt: number | null;
+}
+
+/** A tmux server on the joy socket dir that no session or record owns. */
+export interface LooseTmux extends TmuxServerInfo {
+  /** The session id the label names, if it parses as one. */
+  sessionId: string | null;
+  socketPath: string;
+}
 
 export interface SessionFootprint {
   id: string;
   v2SessionId: string | null;
   cwd: string;
   title: string | null;
-  /** A live process in the registry right now (active or detached). */
+  kind: SessionKind;
+  /** A live process in the registry right now (running or detached). */
   live: boolean;
   status: string | null;
+  /** This session's own tmux server, when one is up (or its socket lingers). */
+  tmux: TmuxServerInfo | null;
   bytes: number;
   files: number;
   ledgerRows: number;
@@ -48,7 +77,95 @@ export interface StorageReport {
   homeDir: string;
   sessions: SessionFootprint[];
   shared: SharedFootprint;
+  /** Servers and stale sockets under the tmux socket dir that nothing owns. */
+  looseTmux: LooseTmux[];
   totalBytes: number;
+}
+
+/** `tmux <args>` — injectable so the scan is testable without tmux. */
+export type TmuxRunner = (args: string[]) => { ok: boolean; out: string; err: string };
+
+export const realTmux: TmuxRunner = (args) => {
+  const r = spawnSync("tmux", args, { encoding: "utf8", timeout: 5_000 });
+  return { ok: r.status === 0, out: r.stdout ?? "", err: r.stderr ?? "" };
+};
+
+/** Where tmux keeps its sockets for this user (`-L` labels live here). */
+export function tmuxSocketDir(): string {
+  const base = process.env.TMUX_TMPDIR || "/tmp";
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return join(base, `tmux-${uid}`);
+}
+
+/** The socket labels a session's server may carry: current and legacy schemes. */
+export function tmuxLabelsFor(sessionId: string, relayKey = joyRelayKey()): string[] {
+  return [`joy-${sessionId}`, `joy-${relayKey}-s-${sessionId}`];
+}
+
+function sessionIdFromLabel(label: string, relayKey: string): string | null {
+  let m = /^joy-([0-9a-f]{8})$/.exec(label);
+  if (m) return m[1];
+  m = new RegExp(`^joy-${relayKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-s-([0-9a-f]{8})$`).exec(label);
+  return m ? m[1] : null;
+}
+
+/** What one server holds. `alive:false` means the socket file is there but
+ *  nothing answers on it — a leftover to unlink, not a session. */
+export function inspectTmuxServer(label: string, tmux: TmuxRunner): TmuxServerInfo {
+  const ls = tmux(["-L", label, "list-sessions", "-F", "#{session_created}\t#{session_activity}\t#{session_windows}"]);
+  if (!ls.ok) return { label, alive: false, windows: 0, panes: [], createdAt: null, activityAt: null };
+  let createdAt: number | null = null, activityAt: number | null = null, windows = 0;
+  for (const line of ls.out.split("\n").filter(Boolean)) {
+    const [c, a, w] = line.split("\t");
+    const cs = Number(c) * 1000, as = Number(a) * 1000;
+    if (Number.isFinite(cs) && cs > 0) createdAt = createdAt === null ? cs : Math.min(createdAt, cs);
+    if (Number.isFinite(as) && as > 0) activityAt = activityAt === null ? as : Math.max(activityAt, as);
+    windows += Number(w) || 0;
+  }
+  const lp = tmux(["-L", label, "list-panes", "-a", "-F", "#{pane_pid}\t#{pane_current_command}\t#{pane_title}"]);
+  const panes: TmuxPane[] = lp.ok
+    ? lp.out.split("\n").filter(Boolean).map((line) => { const [pid, command, ...title] = line.split("\t"); return { pid: Number(pid) || null, command: command ?? "", title: title.join("\t") }; })
+    : [];
+  return { label, alive: true, windows, panes, createdAt, activityAt };
+}
+
+/** Every joy-labelled socket in the tmux dir: known ids get their server
+ *  attached to the session row; the rest are loose. */
+export function scanTmux(deps: { socketDir?: string; relayKey?: string; known: Set<string>; tmux?: TmuxRunner }): { byId: Map<string, TmuxServerInfo>; loose: LooseTmux[] } {
+  const dir = deps.socketDir ?? tmuxSocketDir();
+  const relayKey = deps.relayKey ?? joyRelayKey();
+  const tmux = deps.tmux ?? realTmux;
+  const byId = new Map<string, TmuxServerInfo>();
+  const loose: LooseTmux[] = [];
+  let names: string[];
+  try { names = fs.readdirSync(dir); } catch { return { byId, loose }; }
+  for (const label of names) {
+    if (!label.startsWith("joy-")) continue;
+    const info = inspectTmuxServer(label, tmux);
+    const sessionId = sessionIdFromLabel(label, relayKey);
+    if (sessionId && deps.known.has(sessionId)) byId.set(sessionId, info);
+    else loose.push({ ...info, sessionId, socketPath: join(dir, label) });
+  }
+  loose.sort((a, b) => Number(b.alive) - Number(a.alive) || (b.activityAt ?? 0) - (a.activityAt ?? 0));
+  return { byId, loose };
+}
+
+/** Kill a server (if answering) and remove its socket file. Best effort:
+ *  a socket that was already gone is not a failure. */
+export function killTmuxServer(label: string, deps: { socketDir?: string; tmux?: TmuxRunner } = {}): { label: string; killed: boolean; unlinked: boolean; error?: string } {
+  const tmux = deps.tmux ?? realTmux;
+  const dir = deps.socketDir ?? tmuxSocketDir();
+  const alive = tmux(["-L", label, "list-sessions"]).ok;
+  let killed = false, error: string | undefined;
+  if (alive) {
+    const r = tmux(["-L", label, "kill-server"]);
+    killed = r.ok;
+    if (!r.ok) error = `kill-server: ${r.err.trim() || "failed"}`;
+  }
+  let unlinked = false;
+  const p = join(dir, label);
+  if (fs.existsSync(p)) { try { fs.rmSync(p, { force: true }); unlinked = true; } catch (e) { error = error ?? `unlink: ${e instanceof Error ? e.message : String(e)}`; } }
+  return { label, killed, unlinked, ...(error ? { error } : {}) };
 }
 
 export interface LedgerLike {
@@ -66,6 +183,10 @@ export interface ScanDeps {
   live: LiveSession[];
   ledger: LedgerLike | null;
   now?: () => number;
+  /** tmux socket dir + runner; omit `tmux` to skip the tmux scan entirely (tests without it). */
+  tmuxSocketDir?: string;
+  tmux?: TmuxRunner | null;
+  relayKey?: string;
 }
 
 interface DirStat { bytes: number; files: number; newest: number | null; oldest: number | null }
@@ -130,6 +251,10 @@ export function scanStorage(deps: ScanDeps): StorageReport {
     for (const d of fs.readdirSync(sessionsRoot)) if (/^[0-9a-f]{8}$/.test(d)) { ids.add(d); if (!byId.has(d)) byId.set(d, {}); }
   } catch { /* no media yet */ }
 
+  // tmux: which known ids have a server up, and what is loose.
+  const tmuxScan = deps.tmux === null ? { byId: new Map<string, TmuxServerInfo>(), loose: [] as LooseTmux[] }
+    : scanTmux({ socketDir: deps.tmuxSocketDir, relayKey: deps.relayKey, known: ids, tmux: deps.tmux });
+
   const claimed = new Set<string>();
   const sessions: SessionFootprint[] = [];
   for (const id of ids) {
@@ -146,11 +271,16 @@ export function scanStorage(deps: ScanDeps): StorageReport {
     const ledgerRows = deps.ledger ? deps.ledger.sessionRowCount(id) : 0;
     if (ledgerRows > 0) parts.push(`ledger ${ledgerRows}`);
     if (record?.updatedAt) acc.newest = acc.newest === null ? record.updatedAt : Math.max(acc.newest, record.updatedAt);
+    const tmux = tmuxScan.byId.get(id) ?? null;
+    if (tmux?.activityAt) acc.newest = acc.newest === null ? tmux.activityAt : Math.max(acc.newest, tmux.activityAt);
+    if (tmux) parts.push(tmux.alive ? `tmux ${tmux.panes.length} pane${tmux.panes.length === 1 ? "" : "s"}` : "stale socket");
+    // ended in the registry = the agent process is gone: the red "detached".
+    const kind: SessionKind = l ? (l.status === "ended" ? "detached" : "running") : "record";
     sessions.push({
       id, v2SessionId: v2,
       cwd: l?.cwd ?? record?.launchCwd ?? "",
       title: l?.title ?? (record as { lastAiTitle?: string } | undefined)?.lastAiTitle ?? (record as { agentTitle?: string } | undefined)?.agentTitle ?? null,
-      live: !!l, status: l?.status ?? null,
+      kind, live: !!l, status: l?.status ?? null, tmux,
       bytes: acc.bytes, files: acc.files, ledgerRows,
       newestAt: acc.newest, oldestAt: acc.oldest, parts,
     });
@@ -178,21 +308,33 @@ export function scanStorage(deps: ScanDeps): StorageReport {
 
   sessions.sort((a, b) => b.bytes - a.bytes || (b.newestAt ?? 0) - (a.newestAt ?? 0));
   const totalBytes = sessions.reduce((n, s) => n + s.bytes, 0) + shared.ledgerBytes + shared.usageCacheBytes + shared.importedBytes + shared.orphanBytes;
-  return { homeDir, sessions, shared, totalBytes };
+  return { homeDir, sessions, shared, looseTmux: tmuxScan.loose, totalBytes };
 }
 
 export interface NukeResult { id: string; ok: boolean; bytesFreed: number; removed: string[]; error?: string }
 
 /** Remove everything the scan attributed to one session. The record goes
  *  through deleteWindowRecord so a refused unlink is tombstoned, never
- *  silently kept. Shared files are never touched. */
-export function nukeSessionStorage(id: string, deps: { homeDir?: string; stateDir?: string; records?: WindowRecord[]; ledger: LedgerLike | null }): NukeResult {
+ *  silently kept. Shared files are never touched.
+ *
+ *  The session's own tmux server goes FIRST: a record-only session (nothing
+ *  in the registry, so no forceKill ran) can still have its server up, and
+ *  deleting the record while it runs would manufacture a loose server. */
+export function nukeSessionStorage(id: string, deps: { homeDir?: string; stateDir?: string; records?: WindowRecord[]; ledger: LedgerLike | null; tmux?: TmuxRunner | null; tmuxSocketDir?: string; relayKey?: string }): NukeResult {
   const homeDir = deps.homeDir ?? joyHomeDir();
   const stateDir = deps.stateDir ?? joyStateDir();
   const record = (deps.records ?? listWindowRecords(stateDir)).find((r) => r.id === id);
   const removed: string[] = [];
   let bytesFreed = 0;
   let error: string | undefined;
+  if (deps.tmux !== null) {
+    for (const label of tmuxLabelsFor(id, deps.relayKey)) {
+      const k = killTmuxServer(label, { socketDir: deps.tmuxSocketDir, tmux: deps.tmux });
+      if (k.killed) removed.push("tmux");
+      else if (k.unlinked) removed.push("socket");
+      if (k.error) error = error ?? `tmux ${label}: ${k.error}`;
+    }
+  }
   const rm = (p: string, label: string) => {
     const st = statPath(p);
     if (st.files === 0) return;

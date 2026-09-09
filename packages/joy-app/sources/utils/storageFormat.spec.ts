@@ -41,13 +41,23 @@ describe('summarizeSelection + describeNuke', () => {
         { id: 'b', bytes: 2000, live: true, relayEvents: 0, relayBytes: 0 },
         { id: 'c', bytes: 4000, live: false },
     ];
-    it('sums only what is selected', () => {
-        expect(summarizeSelection(rows, new Set(['a', 'b']))).toEqual({ count: 2, bytes: 3000, relayBytes: 500, relayEvents: 10, live: 1 });
-        expect(summarizeSelection(rows, new Set())).toEqual({ count: 0, bytes: 0, relayBytes: 0, relayEvents: 0, live: 0 });
+    const loose = [
+        { id: 't1', bytes: 0, tmux: { alive: true } },
+        { id: 't2', bytes: 0, tmux: { alive: false } },
+    ];
+    it('sums only what is selected, sessions and loose servers apart', () => {
+        expect(summarizeSelection(rows, new Set(['a', 'b']))).toEqual({ count: 2, bytes: 3000, relayBytes: 500, relayEvents: 10, live: 1, tmux: 0, tmuxAlive: 0 });
+        expect(summarizeSelection([...rows, ...loose], new Set(['t1', 't2']))).toEqual({ count: 0, bytes: 0, relayBytes: 0, relayEvents: 0, live: 0, tmux: 2, tmuxAlive: 1 });
+        expect(summarizeSelection(rows, new Set())).toEqual({ count: 0, bytes: 0, relayBytes: 0, relayEvents: 0, live: 0, tmux: 0, tmuxAlive: 0 });
     });
     it('says what goes, and says twice when something is running', () => {
         const s = summarizeSelection(rows, new Set(['a', 'b']));
-        expect(describeNuke(s)).toBe('Delete 2 sessions, 2.9 KB on the machine, 10 relay events (500 B). This cannot be undone.\n\n1 is still running and will be killed first.');
+        expect(describeNuke(s)).toBe('Delete 2 sessions, 2.9 KB on the machine, 10 relay events (500 B). This cannot be undone.\n\n1 session is still running and will be killed first.');
         expect(describeNuke(summarizeSelection(rows, new Set(['c'])))).toBe('Delete 1 session, 3.9 KB on the machine. This cannot be undone.');
+    });
+    it('names loose tmux servers and warns when one is still up', () => {
+        const s = summarizeSelection([...rows, ...loose], new Set(['c', 't1', 't2']));
+        expect(describeNuke(s)).toBe('Delete 1 session, 3.9 KB on the machine, 2 loose tmux servers. This cannot be undone.\n\n1 tmux server is still up — whatever runs inside dies with it.');
+        expect(describeNuke(summarizeSelection(loose, new Set(['t2'])))).toBe('Delete 1 loose tmux server. This cannot be undone.');
     });
 });

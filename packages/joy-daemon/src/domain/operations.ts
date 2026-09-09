@@ -43,7 +43,7 @@ import { hostname, platform, release, arch } from "os";
 import { spawn, execFile, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
 
-import { scanStorage, nukeSessionStorage, type NukeResult } from "./footprint";
+import { scanStorage, nukeSessionStorage, killTmuxServer, type NukeResult } from "./footprint";
 import { ledgerFor } from "./ledger";
 /** Accepted git URL shapes for a git-URL session spawn. */
 export const GIT_URL_RE = /^(https?:\/\/|git@|ssh:\/\/)\S+$/;
@@ -1048,10 +1048,11 @@ export const machineOps: MachineOp[] = [
     rpcName: "joy-storage-nuke",
     summary: "Remove everything the storage scan attributed to the given sessions: media, record, queue, receipts and ledger rows. A live session is killed first only with killLive; otherwise it is reported and left alone. The relay row is the app's to delete afterwards",
     http: { method: "POST", path: "/storage/nuke" },
-    params: { type: "object", required: ["ids"], properties: { ids: { type: "array", items: { type: "string" } }, killLive: { type: "boolean" } } },
-    result: { type: "object", properties: { ok: { type: "boolean" }, bytesFreed: { type: "number" }, results: { type: "array", items: { type: "object" } } } },
+    params: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, tmux: { type: "array", items: { type: "string" }, description: "Loose tmux socket labels from the storage report (kill-server + unlink)" }, killLive: { type: "boolean" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, bytesFreed: { type: "number" }, results: { type: "array", items: { type: "object" } }, tmux: { type: "array", items: { type: "object" } } } },
     handler: async (registry, params) => {
       const ids = Array.isArray(params.ids) ? params.ids.filter((x): x is string => typeof x === "string") : [];
+      const labels = Array.isArray(params.tmux) ? params.tmux.filter((x): x is string => typeof x === "string" && /^joy-[\w.-]+$/.test(x)) : [];
       const killLive = params.killLive === true;
       const results: NukeResult[] = [];
       for (const id of ids) {
@@ -1064,7 +1065,8 @@ export const machineOps: MachineOp[] = [
         }
         results.push(nukeSessionStorage(id, { ledger: ledgerFor() }));
       }
-      return { ok: results.every((r) => r.ok), bytesFreed: results.reduce((n, r) => n + r.bytesFreed, 0), results };
+      const tmux = labels.map((label) => killTmuxServer(label));
+      return { ok: results.every((r) => r.ok) && tmux.every((t) => !t.error), bytesFreed: results.reduce((n, r) => n + r.bytesFreed, 0), results, tmux };
     },
   },
   {
