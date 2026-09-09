@@ -1,3 +1,8 @@
+# Sep 9 (5) — See the whole file behind a change
+
+- **Changes now has a "Whole file" view, next to Unified and Split.** Opening a changed file showed only the edited hunks with a few lines around them; there was no way to see the change in the context of the rest of the file without leaving for the file viewer. The new mode shows the complete file with the change marked in place. If the file has been edited since the diff was taken, it keeps showing the hunks rather than a reconstruction that might be wrong.
+- **The diff toggle now appears on phones too.** It was web-only because the split view is; unified and whole-file work everywhere, so the control does now, minus the Split button.
+
 # Sep 9 (4) — One setting at a time
 
 - **The settings panel above the composer shows one list at a time.** It used to stack permission mode, model and effort into one card pinned above the input — fourteen rows, which already overflowed the card's limit at four models and cut off flat, with the scrollbar switched off, so it looked like the list simply ended. Now the panel opens on what each setting is currently on, tapping a row opens just that setting's options, and choosing one takes you back — so changing model and effort is one visit, not two. Tapping outside still dismisses. A setting with nothing to choose from is no longer offered an empty list to open, and when a session has only one setting, the panel opens straight into it.

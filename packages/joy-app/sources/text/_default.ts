@@ -847,6 +847,11 @@ export const en = {
     },
 
     files: {
+        // The Changes view's view-mode toggle. "Whole file" shows the
+        // change against the complete file instead of the patch hunks.
+        diffUnified: 'Unified',
+        diffSplit: 'Split',
+        diffWholeFile: 'Whole file',
         changes: 'Changes',
         searchPlaceholder: 'Search files...',
         detachedHead: 'detached HEAD',

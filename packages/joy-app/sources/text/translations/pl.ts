@@ -814,6 +814,11 @@ export const pl: TranslationStructure = {
     },
 
     files: {
+        // The Changes view's view-mode toggle. "Whole file" shows the
+        // change against the complete file instead of the patch hunks.
+        diffUnified: 'Scalony',
+        diffSplit: 'Podzielony',
+        diffWholeFile: 'Cały plik',
         changes: 'Zmiany',
         searchPlaceholder: 'Wyszukaj pliki...',
         detachedHead: 'odłączony HEAD',

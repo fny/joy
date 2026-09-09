@@ -44,6 +44,7 @@ vi.mock('@/sync/storage', () => ({
     storage: { getState: () => ({ socketStatus: 'connected', sessions: {} }), subscribe: () => () => {} },
     useSession: () => ({ metadata: { path: '/repo' } }),
     useSettingMutable: () => ['unified', () => {}],
+    useLocalSettingMutable: () => [false, () => {}],
 }));
 vi.mock('@/sync/ops', () => ({
     sessionReadFile: (_s: string, path: string) => new Promise<ReadAnswer>((resolve) => { reads.push({ path, resolve }); }),

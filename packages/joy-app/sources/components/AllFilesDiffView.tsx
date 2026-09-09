@@ -8,7 +8,7 @@ import { PierreDiffView } from '@/components/diff/PierreDiffView';
 import { getPatchDiffStats } from '@/components/diff/calculateDiff';
 import { isBinaryPath, isImagePath } from '@/utils/binaryFile';
 import { JoyImage } from '@/components/JoyImage';
-import { useSession, useSettingMutable } from '@/sync/storage';
+import { useSession, useSettingMutable, useLocalSettingMutable } from '@/sync/storage';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import { useGitStatusResource } from '@/sync/gitStatusResource';
 import type { GitFileStatus } from '@/sync/gitStatusModel';
@@ -19,6 +19,7 @@ import { layout } from '@/components/layout';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { diffSignature, rowsByPath } from './allFilesDiffSignature';
+import { reconstructOldText } from '@/components/diff/reversePatch';
 
 interface AllFilesDiffViewProps {
     /** Show ONLY this file's diff (one-at-a-time mode). Absent → all files. */
@@ -29,6 +30,10 @@ interface AllFilesDiffViewProps {
     /** Publishes the right-side controls (file count + diff style toggle) into the chat header. */
     onHeaderRightSlotChange: (slot: React.ReactNode) => void;
 }
+
+/** What the toggle offers. 'whole' is not a diff style — it is how much of
+ *  the file to show — but it is the third button in the same control. */
+type DiffViewMode = 'unified' | 'split' | 'whole';
 
 type DiffContent =
     | { kind: 'patch'; patch: string }
@@ -42,6 +47,10 @@ type FileDiffResult = {
     error: string | null;
     /** The content is the last good value and the newest revalidation failed (retryable). */
     stale: string | null;
+    /** The file as it stands, fetched only for whole-file mode: a patch shows
+     *  its hunks, and the complete file has to be read separately. undefined =
+     *  not asked for, null = asked for but not here yet (or unreadable). */
+    currentText?: string | null;
 };
 
 /** What a file's section needs from the daemon — a fetch through ONE of the
@@ -49,7 +58,8 @@ type FileDiffResult = {
 type DiffData = string | FileContents;
 type SectionPlan =
     | { kind: 'static'; result: FileDiffResult }
-    | { kind: 'patch' | 'newFile'; file: GitFileStatus; spec: ResourceSpec<DiffData> };
+    | { kind: 'newFile'; file: GitFileStatus; spec: ResourceSpec<DiffData> }
+    | { kind: 'patch'; file: GitFileStatus; spec: ResourceSpec<DiffData>; absolutePath: string };
 
 function planSection(sessionId: string, sessionPath: string | null, file: GitFileStatus, version: string): SectionPlan {
     const fixed = (content: DiffContent | null, error: string | null): SectionPlan => ({ kind: 'static', result: { file, content, error, stale: null } });
@@ -72,7 +82,7 @@ function planSection(sessionId: string, sessionPath: string | null, file: GitFil
     }
     // Working tree vs HEAD through the daemon's git route: no shell, so the
     // path is never interpolated (#5, #92).
-    return { kind: 'patch', file, spec: gitDiffSpec(sessionId, gitDiffPath, { head: true }, version) as ResourceSpec<DiffData> };
+    return { kind: 'patch', file, spec: gitDiffSpec(sessionId, gitDiffPath, { head: true }, version) as ResourceSpec<DiffData>, absolutePath: resolved.absolutePath };
 }
 
 function resultFromEntry(plan: Exclude<SectionPlan, { kind: 'static' }>, entry: ResourceEntry<DiffData> | undefined): FileDiffResult | null {
@@ -119,6 +129,17 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     const notRepo = status.entry.hasData && status.entry.data === null;
     const sessionPath = useSession(sessionId)?.metadata?.path ?? null;
     const [diffStyle, setDiffStyle] = useSettingMutable('diffStyle');
+    // Whole-file is a third button beside Unified and Split, but it is not a
+    // diff STYLE — it says how much of the file to show. Kept device-local and
+    // separate so turning it off returns to the unified/split preference the
+    // user actually set (and so it never lands in Settings → Appearance).
+    const [wholeFile, setWholeFile] = useLocalSettingMutable('diffWholeFile');
+    const viewMode: DiffViewMode = wholeFile ? 'whole' : diffStyle;
+    const setViewMode = React.useCallback((mode: DiffViewMode) => {
+        if (mode === 'whole') { setWholeFile(true); return; }
+        setWholeFile(false);
+        setDiffStyle(mode);
+    }, [setWholeFile, setDiffStyle]);
     const scrollRef = React.useRef<ScrollView>(null);
     const fileOffsets = React.useRef<Map<string, number>>(new Map());
 
@@ -165,9 +186,20 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         () => files.map((f) => planSection(sessionId, sessionPath, f, diffSignature(statusRowsByPath.get(f.fullPath) ?? [f], revision))),
         [files, sessionId, sessionPath, statusRowsByPath, revision],
     );
+    // Whole-file mode needs the file itself as well as the patch: the patch
+    // carries the removed lines (so the previous file can be rebuilt) but not
+    // the untouched ones. Untracked files already ARE their whole contents.
+    const contentSpecs = React.useMemo(
+        () => (wholeFile
+            ? plans.flatMap((p) => (p.kind === 'patch'
+                ? [{ ...fileContentsSpec(sessionId, p.absolutePath), staleTime: Infinity } as ResourceSpec<DiffData>]
+                : []))
+            : []),
+        [wholeFile, plans, sessionId],
+    );
     const specs = React.useMemo(
-        () => plans.flatMap((p) => (p.kind === 'static' ? [] : [p.spec])),
-        [plans],
+        () => [...plans.flatMap((p) => (p.kind === 'static' ? [] : [p.spec])), ...contentSpecs],
+        [plans, contentSpecs],
     );
     const entries = useResources(specs);
     const entryByKey = React.useMemo(() => new Map(entries.map((e) => [e.key, e])), [entries]);
@@ -183,10 +215,16 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         const out: FileDiffResult[] = [];
         for (const plan of plans) {
             const r = plan.kind === 'static' ? plan.result : resultFromEntry(plan, entryByKey.get(plan.spec.key));
-            if (r) out.push(r);
+            if (!r) continue;
+            if (wholeFile && plan.kind === 'patch') {
+                const entry = entryByKey.get(fileContentsSpec(sessionId, plan.absolutePath).key);
+                const contents = entry?.hasData ? (entry.data as FileContents) : null;
+                r.currentText = contents && !contents.isBinary && contents.content !== null ? contents.content : null;
+            }
+            out.push(r);
         }
         return out;
-    }, [plans, entryByKey]);
+    }, [plans, entryByKey, wholeFile, sessionId]);
     const hasLoadedOnce = results.length > 0 || files.length === 0;
 
     // Initial-mount spinner: only show until results have ever been populated
@@ -241,12 +279,12 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
         onHeaderRightSlotChange(
             <DiffHeaderRight
                 fileCount={files.length}
-                diffStyle={diffStyle}
-                onDiffStyleChange={setDiffStyle}
+                viewMode={viewMode}
+                onViewModeChange={setViewMode}
             />
         );
         return () => onHeaderRightSlotChange(null);
-    }, [files.length, diffStyle, setDiffStyle, onHeaderRightSlotChange]);
+    }, [files.length, viewMode, setViewMode, onHeaderRightSlotChange]);
 
     if (statusFailed) {
         return (
@@ -308,6 +346,7 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
                             sessionId={sessionId}
                             result={result}
                             diffStyle={diffStyle}
+                            wholeFile={wholeFile}
                             isHighlighted={scrollToFile === result.file.fullPath}
                             onLayout={(y) => fileOffsets.current.set(result.file.fullPath, y)}
                             onRetry={retryPath}
@@ -319,15 +358,16 @@ export const AllFilesDiffView = React.memo(function AllFilesDiffView({
     );
 });
 
-/** Right-side header controls for the diff overlay: file count + (web-only) Unified | Split toggle. */
+/** Right-side header controls for the diff overlay: file count + the
+ *  Unified | Split | Whole file toggle. */
 const DiffHeaderRight = React.memo(function DiffHeaderRight({
     fileCount,
-    diffStyle,
-    onDiffStyleChange,
+    viewMode,
+    onViewModeChange,
 }: {
     fileCount: number;
-    diffStyle: 'unified' | 'split';
-    onDiffStyleChange: (v: 'unified' | 'split') => void;
+    viewMode: DiffViewMode;
+    onViewModeChange: (v: DiffViewMode) => void;
 }) {
     const { theme } = useUnistyles();
     return (
@@ -335,9 +375,10 @@ const DiffHeaderRight = React.memo(function DiffHeaderRight({
             <Text style={[styles.headerRightCount, { color: theme.colors.textSecondary }]}>
                 {t('files.changedFiles', { count: fileCount })}
             </Text>
-            {Platform.OS === 'web' && (
-                <DiffStyleToggle value={diffStyle} onChange={onDiffStyleChange} />
-            )}
+            {/* Split is web-only (the native renderer has no two-column mode),
+                but whole-file is not — so the toggle itself now shows
+                everywhere and drops just that one button off the web. */}
+            <DiffViewModeToggle value={viewMode} onChange={onViewModeChange} />
         </>
     );
 });
@@ -347,6 +388,7 @@ const FileDiffSection = React.memo(function FileDiffSection({
     sessionId,
     result,
     diffStyle,
+    wholeFile,
     isHighlighted,
     onLayout,
     onRetry,
@@ -354,14 +396,27 @@ const FileDiffSection = React.memo(function FileDiffSection({
     sessionId: string;
     result: FileDiffResult;
     diffStyle: 'unified' | 'split';
+    /** Show the change against the complete file rather than its hunks. */
+    wholeFile: boolean;
     isHighlighted: boolean;
     onLayout: (y: number) => void;
     /** Fetch this file's diff again after a failed read (#200). */
     onRetry: (path: string) => void;
 }) {
     const { theme } = useUnistyles();
-    const { file, content, error, stale } = result;
+    const { file, content, error, stale, currentText } = result;
     const [collapsed, setCollapsed] = React.useState(false);
+
+    // Whole-file mode rebuilds the previous revision from the current file
+    // plus the patch, so the renderer can diff the two in full. Null when the
+    // file has not arrived yet, or when the patch does not describe it any
+    // more (the working tree moved between the two reads) — either way the
+    // patch view stands rather than a reconstruction that might be wrong.
+    const wholeFilePair = React.useMemo(() => {
+        if (!wholeFile || content?.kind !== 'patch' || typeof currentText !== 'string') return null;
+        const oldText = reconstructOldText(currentText, content.patch);
+        return oldText === null ? null : { oldText, newText: currentText };
+    }, [wholeFile, content, currentText]);
 
     const fileName = file.fileName; // display text; file.fullPath stays the identity
     const isBinary = content?.kind === 'binary';
@@ -461,6 +516,14 @@ const FileDiffSection = React.memo(function FileDiffSection({
                     <View style={styles.sectionMessage}>
                         <Text style={{ color: theme.colors.textSecondary, ...Typography.default() }}>{t('files.noChanges')}</Text>
                     </View>
+                ) : wholeFilePair ? (
+                    <PierreDiffView
+                        key={`whole-${diffStyle}`}
+                        oldFile={{ name: fileName, contents: wholeFilePair.oldText }}
+                        newFile={{ name: fileName, contents: wholeFilePair.newText }}
+                        diffStyle={diffStyle}
+                        disableFileHeader
+                    />
                 ) : content.kind === 'patch' ? (
                     <PierreDiffView
                         key={diffStyle}
@@ -482,7 +545,7 @@ const FileDiffSection = React.memo(function FileDiffSection({
     );
 });
 
-const DiffStyleToggle = React.memo<{ value: 'unified' | 'split'; onChange: (v: 'unified' | 'split') => void }>(({ value, onChange }) => {
+const DiffViewModeToggle = React.memo<{ value: DiffViewMode; onChange: (v: DiffViewMode) => void }>(({ value, onChange }) => {
     const { theme } = useUnistyles();
     const buttonStyle = (active: boolean) => ({
         paddingHorizontal: 10,
@@ -497,11 +560,16 @@ const DiffStyleToggle = React.memo<{ value: 'unified' | 'split'; onChange: (v: '
     });
     return (
         <View style={[toggleStyles.container, { backgroundColor: theme.colors.groupped.background, borderColor: theme.colors.divider }]}>
-            <Pressable onPress={() => onChange('unified')} style={buttonStyle(value === 'unified')}>
-                <Text style={textStyle(value === 'unified')}>Unified</Text>
+            <Pressable onPress={() => onChange('unified')} style={buttonStyle(value === 'unified')} testID="diff-mode-unified">
+                <Text style={textStyle(value === 'unified')}>{t('files.diffUnified')}</Text>
             </Pressable>
-            <Pressable onPress={() => onChange('split')} style={buttonStyle(value === 'split')}>
-                <Text style={textStyle(value === 'split')}>Split</Text>
+            {Platform.OS === 'web' && (
+                <Pressable onPress={() => onChange('split')} style={buttonStyle(value === 'split')} testID="diff-mode-split">
+                    <Text style={textStyle(value === 'split')}>{t('files.diffSplit')}</Text>
+                </Pressable>
+            )}
+            <Pressable onPress={() => onChange('whole')} style={buttonStyle(value === 'whole')} testID="diff-mode-whole">
+                <Text style={textStyle(value === 'whole')}>{t('files.diffWholeFile')}</Text>
             </Pressable>
         </View>
     );

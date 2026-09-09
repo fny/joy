@@ -799,6 +799,11 @@ export const ja: TranslationStructure = {
     },
 
     files: {
+        // The Changes view's view-mode toggle. "Whole file" shows the
+        // change against the complete file instead of the patch hunks.
+        diffUnified: '統合',
+        diffSplit: '分割',
+        diffWholeFile: 'ファイル全体',
         changes: '変更',
         searchPlaceholder: 'ファイルを検索...',
         detachedHead: 'detached HEAD',

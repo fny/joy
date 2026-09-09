@@ -798,6 +798,11 @@ export const zhHant: TranslationStructure = {
     },
 
     files: {
+        // The Changes view's view-mode toggle. "Whole file" shows the
+        // change against the complete file instead of the patch hunks.
+        diffUnified: '統一',
+        diffSplit: '分欄',
+        diffWholeFile: '完整檔案',
         changes: '變更',
         searchPlaceholder: '搜尋檔案...',
         detachedHead: '游離 HEAD',

@@ -420,6 +420,19 @@ retry through the sync backoff on transport failure and a stopped project
 sync can no longer overwrite its replacement's status. An older daemon (no
 `v=2`) still lists files, without line counts.
 
+The **Changes** view (`AllFilesDiffView`, all files or one) renders each
+change through the same diff component with a Unified | Split | Whole file
+toggle in the header (Split is web-only; the toggle itself now shows on
+native too, which had none). **Whole file** shows the change against the
+complete file rather than the patch's hunks: the view already holds the
+current file, and `diff/reversePatch.ts` rebuilds the previous revision from
+it plus the patch — verifying every line the patch claims, honouring the
+`\ No newline at end of file` markers, and returning null (so the patch view
+stands) when the working tree has moved on. Verified against 157 real
+commits of this repo. The mode is device-local (`diffWholeFile`), so turning
+it off returns to the synced unified/split preference; it reads every
+changed file's contents while on.
+
 ## Account & extras
 
 - Account: backup-key reveal/restore, QR device-link approval, terminal-auth

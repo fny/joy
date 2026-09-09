@@ -798,6 +798,11 @@ export const ca: TranslationStructure = {
     },
 
     files: {
+        // The Changes view's view-mode toggle. "Whole file" shows the
+        // change against the complete file instead of the patch hunks.
+        diffUnified: 'Unificat',
+        diffSplit: 'Dividit',
+        diffWholeFile: 'Fitxer sencer',
         changes: 'Canvis',
         searchPlaceholder: 'Cerca fitxers...',
         detachedHead: 'HEAD separat',
