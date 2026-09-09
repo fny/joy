@@ -51,6 +51,8 @@
 
 - **A Codex session that needs a sign-in now says so.** Codex runs behind its app-server, so the daemon never looked at its screen — a session whose ChatGPT token had lapsed sat on "Sign in with ChatGPT … Press enter to continue" for twenty minutes with its first message held behind it and nothing in the app to explain. The daemon now watches the Codex screen: the sign-in chooser shows as a dialog bar, the device-code screen as a sign-in bar with the link and the one-time code to enter in the browser, the "Press enter to continue" screens are pressed through for you, and a token that dies mid-conversation shows as a sign-in notice. The status reads *sign-in required* the whole time. Needs the updated daemon.
 
+- **Long messages no longer arrive truncated — or twice.** A message of several thousand characters was typed into the terminal in one go, which can overflow the terminal's input buffer while the agent is busy drawing; the rest was silently dropped. Claude then worked on a shortened prompt, and because what it received no longer matched what was sent, the daemon took it for something typed at the terminal and showed it in the chat a second time, then timed the send out and paused the queue. Text is now typed in small pieces with a pause between them, and if a message still comes back short the chat says exactly how much reached the agent. Needs the updated daemon.
+
 
 # Sep 9 — Reading stays put
 

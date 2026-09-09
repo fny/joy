@@ -450,6 +450,14 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- Long messages reach Claude whole: a line is typed in pieces of at most
+  1,024 characters with a short gap between them (`claude/typing.ts`), because
+  one oversized `send-keys` overflows the pty's 4 KB input queue while the TUI
+  is mid-render and the kernel drops the rest (fny 4477e540 lost 1,649 of
+  7,345 chars). If an echo still comes back short it is recognised as the
+  dispatch in flight — confirmed, not mirrored to the app a second time, and
+  a note in the chat says how much landed — instead of being taken for a
+  human's terminal input and timing the dispatch out into a paused queue.
 - Codex sign-in is surfaced like Claude's: the daemon watches the Codex TUI
   pane (`codex/codexPane.ts`, quick while starting or while a sign-in screen
   is up) — the sign-in chooser becomes a dialog bar, the device-code screen a

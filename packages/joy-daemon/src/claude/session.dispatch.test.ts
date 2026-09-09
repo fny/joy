@@ -180,6 +180,44 @@ test("#35 abort() during the typing window cancels that dispatch instead of trea
   s.end("killed");
 });
 
+// ── typing: pty input queue ──────────────────────────────────────────────────
+
+test("a long line is typed in pieces the pty queue can hold, and rejoins exactly", async () => {
+  const { st, driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("chunked"), driver);
+  const text = "R".repeat(7_345); // the fny 4477e540 message that lost 1,649 chars at 4,042
+  queueFor(s).accept(text, { visible: true });
+  await vi.waitFor(() => expect(st.typed.join("")).toBe(text));
+  expect(st.typed.length).toBe(Math.ceil(7_345 / 1024));
+  expect(st.typed.every((t) => t.length <= 1024)).toBe(true);
+  s.end("killed");
+});
+
+test("a truncated echo of the dispatch in flight is OUR echo: confirmed, not mirrored twice, and said so", async () => {
+  const chat: any[] = [];
+  const { st, driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("garbled"), driver, { claudeSessionId: "sid" }, { relayClient: null, broadcast: () => {}, addChatMessage: (m: any) => chat.push(m) });
+  const { rs, userRows } = relayStub("rs-garbled");
+  s.attachRelay(rs, true);
+  const full = "A".repeat(4_042) + "B".repeat(3_303);
+  const item = queueFor(s).accept(full, { visible: true });
+  await vi.waitFor(() => expect(st.typed.join("")).toBe(full));
+  await settle(600); // the Enter lands; the dispatch is in flight awaiting its echo
+  const mirroredBefore = userRows().length;
+  // Claude echoes what actually reached it: the first 4,042 plus a bit.
+  s.onTranscriptEntry({ type: "user", uuid: "u-short", timestamp: new Date().toISOString(), message: { role: "user", content: "A".repeat(4_042) + "B".repeat(1_654) } } as any);
+  // Not a second bubble — the app already has the full send.
+  expect(userRows().length).toBe(mirroredBefore);
+  expect(userRows().some((r) => r.content?.text?.length === 5_696)).toBe(false);
+  // The dispatch is paired with its attempt, not left to time out and pause the queue.
+  await vi.waitFor(() => expect(queueFor(s).state().inFlight).toBeNull());
+  expect(queueFor(s).state().paused).toBe(false);
+  expect(["delivered", "running", "completed"]).toContain(queueFor(s).itemState(item.id));
+  // And the chat says what landed.
+  expect(chat.some((m) => m.role === "assistant" && /truncated.*5,696 of 7,345/.test(String(m.content)))).toBe(true);
+  s.end("killed");
+});
+
 // ── #475 ─────────────────────────────────────────────────────────────────────
 
 test("#475 Stop during the 5xx retry backoff cancels the scheduled retry even though the pane is idle", async () => {

@@ -40,6 +40,7 @@ import { saveWindowRecord, loadWindowRecord, deleteWindowRecord, WindowRecordWri
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, tailJsonl, type TranscriptTailer } from "./transcript";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 
+import { chunkForTyping, garbledEchoOf, TYPE_CHUNK_GAP_MS } from "./typing";
 export type SessionStatus = "starting" | "active" | "ended";
 
 // Startup watchdog cadence. If Claude shows no sign of life within the deadline
@@ -2858,7 +2859,7 @@ export class Session {
       const lines = script.split(/\r\n|\r|\n/);
       for (let i = 0; i < lines.length; i++) {
         if (i > 0 && !(await this.#tmux.key(this.tmuxWindow, "Enter")).ok) return { ok: false, segments: lines.length, error: "tmux send-keys failed" };
-        if (lines[i] !== "" && !(await this.#tmux.literal(this.tmuxWindow, lines[i])).ok) return { ok: false, segments: lines.length, error: "tmux send-keys failed" };
+        if (!(await this.#typeChunked(lines[i]))) return { ok: false, segments: lines.length, error: "tmux send-keys failed" };
       }
       return { ok: true, segments: lines.length };
     }
@@ -3159,7 +3160,18 @@ export class Session {
     const lines = text.split(/\r\n|\r|\n/);
     for (let i = 0; i < lines.length; i++) {
       if (i > 0 && !(await this.#tmux.key(this.tmuxWindow, "C-j")).ok) return false;
-      if (lines[i] !== "" && !(await this.#tmux.literal(this.tmuxWindow, lines[i])).ok) return false;
+      if (!(await this.#typeChunked(lines[i]))) return false;
+    }
+    return true;
+  }
+
+  /** One line, in pieces the pty's input queue can hold, with a breath between
+   *  them for a TUI that is mid-render (see typing.ts — a 7 KB line lost 1.6 KB). */
+  async #typeChunked(line: string): Promise<boolean> {
+    const parts = chunkForTyping(line);
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, TYPE_CHUNK_GAP_MS));
+      if (!(await this.#tmux.literal(this.tmuxWindow, parts[i])).ok) return false;
     }
     return true;
   }
@@ -4841,8 +4853,29 @@ export class Session {
           if (wasQueued && !this.#dispatchInFlight && this.#queuePaused && this.#pauseReason === "dispatch_timeout") this.resumeQueue();
           return; // self-echo of a relay/HTTP/RPC send — don't double-record locally
         }
-        // No attempt match: the persisted attempts already cover the restart
-        // case the old in-memory pending queue + `received` backstop existed for.
+        // No attempt match. Before calling this direct input: is it the ONE
+        // dispatch in flight, arrived short? A prompt that shares a long prefix
+        // with it is ours — the pty dropped the tail (typing.ts). Pair it with
+        // its attempt so the command runs and the queue does not pause on an
+        // echo timeout; do NOT mirror it (the app already shows the full send);
+        // and say in the chat what landed, since Claude is working on less
+        // than what was sent.
+        const inflight = this.#dispatchInFlight;
+        const fullRef = inflight ? flattenForMatch(inflight.text) : null;
+        const short = fullRef && !this.#hasUuid(uuid) ? garbledEchoOf(matchContent, fullRef) : null;
+        if (short && fullRef) {
+          const att = this.#ledger.matchAttemptByRef(this.id, fullRef) ?? this.#ledger.attemptByRef(this.id, fullRef);
+          if (att) this.#noteUuid(uuid, { commandId: att.commandId, attemptId: att.id });
+          this.#driver.emit({ kind: "echo", runtimeRef: fullRef });
+          this.#confirmDispatchIfAwaiting();
+          if (!isSystemPromptEntry(entry, content)) this.#lastUserText = content;
+          this.#relay!.stampReceiptOnLastQueued({ uuid, turn: "" });
+          this.#dlog(`echo of ${inflight!.id} arrived short — ${short.landed} of ${short.total} chars reached Claude`);
+          this.#emitAgentNote(`Your message reached Claude truncated — ${short.landed.toLocaleString()} of ${short.total.toLocaleString()} characters landed (the terminal dropped the rest). Claude is working on the shorter text; re-send if the missing part matters.`, entryTimeMs, this.claudeSessionId);
+          return;
+        }
+        // The persisted attempts already cover the restart case the old
+        // in-memory pending queue + `received` backstop existed for.
         if (!this.#hasUuid(uuid)) {
           // Unmatched = direct input (pane view, `tmux attach`, …). Trust the log: it's a
           // real message Claude received, so mirror it to every client. Single user, one
