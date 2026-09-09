@@ -617,6 +617,7 @@ export const machineOps: MachineOp[] = [
         resume_limit_mb: { type: "number", description: "claude only" },
         forkSession: { type: "boolean", description: "With resume_id: continue under a NEW id (claude: --fork-session; codex/pi/agy: the history is copied first; opencode: refused)" },
         extraArgs: { type: "string", description: "claude/pi/agy: raw CLI arguments appended to the launch (pi/agy shell-split); codex: `key=value` config overrides; opencode: refused" },
+        headless: { type: "boolean", description: "Nobody is watching: kept out of the app's session list and sends no turn-done push. A session that needs a HUMAN (approval, sign-in) still surfaces and still pushes — hiding the one case you must act on is how an unattended job wedges unnoticed" },
       },
     },
     result: { type: "object", properties: { session: { type: "object", description: "SessionRecord" }, error: { type: "string" } } },
@@ -665,6 +666,14 @@ export const machineOps: MachineOp[] = [
         detached: params.detached === true,
         extraArgs: typeof params.extraArgs === "string" ? params.extraArgs : undefined,
       });
+      // Applied after the session exists rather than threaded through five
+      // per-harness create paths: the record is what a later attach reads, and
+      // the relay session is what suppresses the push. Set before the first
+      // turn can end, so no "finished" escapes a headless session.
+      if (params.headless === true) {
+        saveWindowRecord(session.id, { headless: true });
+        relaySessionFor(session.id)?.setHeadless(true);
+      }
       return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };
     },
     // Legacy HTTP contract: 201 with the unwrapped SessionRecord.

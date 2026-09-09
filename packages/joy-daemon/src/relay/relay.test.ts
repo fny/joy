@@ -612,3 +612,59 @@ test("mute is published as joy__muted so the app can show it, and cleared on unm
   await vi.waitFor(() => expect(published.length).toBe(2));
   expect(published[1].joy__muted).toBeNull();
 });
+
+// Headless means "nobody is watching", not "never tell me anything": the one
+// push a headless session must still send is the one asking for a human.
+test("a headless session sends no turn-done push, but still asks for a human", async () => {
+  const pushes: Array<string> = [];
+  registerV2CardPublisher(ID, async () => {});
+  const s = new RelaySession({
+    client: { sendSessionPushEvent: async (_i: string, kind: string) => { pushes.push(kind); } } as any,
+    relaySessionId: ID,
+    metadata: { path: "/x", host: "box" },
+  });
+
+  s.setHeadless(true);
+  expect(s.isHeadless).toBe(true);
+  s.notify("done");
+  s.notifyCustom("Deploy finished", null);   // the agent's own announcement
+  expect(pushes).toEqual([]);
+
+  s.notify("permission");
+  s.notify("question");
+  expect(pushes).toEqual(["permission", "question"]);
+
+  s.setHeadless(false);
+  s.notify("done");
+  expect(pushes).toEqual(["permission", "question", "done"]);
+});
+
+test("headless is published as joy__headless, and cleared when it is turned off", async () => {
+  const published: Array<Record<string, unknown>> = [];
+  registerV2CardPublisher(ID, async (m) => { published.push({ ...m }); });
+  const s = newSession();
+  s.setHeadless(true);
+  await vi.waitFor(() => expect(published.length).toBe(1));
+  expect(published[0].joy__headless).toBe(true);
+  s.setHeadless(true);                       // same fact: no republish
+  await new Promise((r) => setTimeout(r, 20));
+  expect(published.length).toBe(1);
+  s.setHeadless(false);
+  await vi.waitFor(() => expect(published.length).toBe(2));
+  expect(published[1].joy__headless).toBeNull();
+});
+
+// A mute silences everything; headless silences only "finished". Both at once
+// must stay silent, including the human-needed pushes the mute covers.
+test("mute still outranks headless for the pushes headless would allow", async () => {
+  const pushes: string[] = [];
+  registerV2CardPublisher(ID, async () => {});
+  const s = new RelaySession({
+    client: { sendSessionPushEvent: async (_i: string, kind: string) => { pushes.push(kind); } } as any,
+    relaySessionId: ID, metadata: { path: "/x" },
+  });
+  s.setHeadless(true);
+  s.setNotificationsMuted(true);
+  s.notify("permission");
+  expect(pushes).toEqual([]);
+});

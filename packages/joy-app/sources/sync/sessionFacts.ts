@@ -93,6 +93,8 @@ export interface SessionFacts {
      *  ladder and never becomes the badge — a muted session still shows
      *  whatever it is doing. */
     muted: boolean;
+    /** Created with `joy new --headless`: nobody is watching it. */
+    headless: boolean;
     queue: QueueFacts | null;
 }
 
@@ -116,6 +118,7 @@ export interface SessionFactsInput {
         joy__tasks?: { done: number; total: number } | null;
         joy__longRunning?: number | null;
         joy__muted?: boolean | null;
+        joy__headless?: boolean | null;
         joy__eventBudget?: { since: number; dropped: number } | null;
         joy__login?: { url?: string; code?: string; error?: string } | null;
         joy__dialog?: { title?: string | null; options: string[] } | null;
@@ -198,6 +201,7 @@ export function sessionFacts(session: SessionFactsInput, online: boolean): Sessi
         longRunning: m?.joy__longRunning ?? 0,
         budgetExhausted: (m?.joy__eventBudget?.dropped ?? 0) > 0,
         muted: m?.joy__muted === true,
+        headless: m?.joy__headless === true,
         queue: q
             ? { depth: q.queue.length, inFlight: q.inFlight != null, paused: q.paused, pauseReason: q.pauseReason }
             : null,
@@ -299,4 +303,18 @@ export function finishedWork(before: SessionFacts, after: SessionFacts): boolean
 /** Is anything at all running behind this session, foreground or background? */
 export function hasWorkInFlight(facts: SessionFacts): boolean {
     return isTurnActive(facts) || facts.agents !== null || facts.tasks !== null;
+}
+
+
+/**
+ * Should this session be kept out of the list?
+ *
+ * Headless means "nobody is watching", not "never show me this". A headless
+ * session that is blocked on an approval or a sign-in is exactly the case
+ * where hiding it costs you the day, so it comes back the moment it needs a
+ * human — the same rule a collapsed group follows: compress, never conceal.
+ */
+export function hiddenFromList(facts: SessionFacts): boolean {
+    if (!facts.headless) return false;
+    return !facts.blocked && !facts.permission;
 }

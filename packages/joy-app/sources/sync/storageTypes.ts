@@ -153,6 +153,10 @@ export const MetadataSchema = z.object({
     // Published by the daemon, which is where the mute is enforced, so the
     // list and header can show a session as quiet without asking for it.
     joy__muted: z.boolean().nullable().optional(),
+    // `joy new --headless`: nobody is watching. Kept out of the session list
+    // while healthy — but NOT while it needs a human, which is the one case
+    // hiding it would cost you (see sessionFacts.headless).
+    joy__headless: z.boolean().nullable().optional(),
     // WHAT is running behind the session, alongside the counts above (#646).
     // The counts alone say a number is stuck but never which thing — and an
     // outstanding count also suppresses the turn-done push, so this is what

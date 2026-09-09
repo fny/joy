@@ -1,3 +1,9 @@
+# Sep 9 (10) — Headless sessions
+
+- **`joy new --headless` makes a session that stays out of your session list.** For work nobody is watching — a script, a scheduled job, one agent asking another. It also sends no "finished" notification.
+- **Except when it needs you.** A headless session waiting on an approval or a sign-in appears in the list and still notifies you, because that is the one moment hiding it would cost you a day. Once it is unblocked it goes quiet again.
+- Nothing becomes headless on its own — only the flag does it.
+
 # Sep 9 (9) — Messages are readable again on iOS
 
 - **Agent messages were rendering blank on iOS.** Since Sep 7, message text has been drawn by a native text view so you can select a phrase out of it — but that view only exists in an app built after Sep 7, and an over-the-air update reaches whatever app you already have. On an older build the view simply is not there, and iOS draws nothing for it: every paragraph and list item collapsed to empty, leaving only the spacing. No error, no clue — just blank messages.

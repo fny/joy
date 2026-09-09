@@ -1530,6 +1530,11 @@ async function cmdAbout(rest: string[]): Promise<number> {
 export async function cmdNew(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const readOnly = takeBool(rest, "--read-only");
+  // Headless: nobody is watching this one. It stays out of the app's session
+  // list and sends no turn-done push — but a headless session that needs a
+  // HUMAN (an approval, a sign-in) still surfaces and still pushes, because
+  // hiding the one case you must act on is how a job wedges for a day.
+  const headless = takeBool(rest, "--headless");
   const cont = takeBool(rest, "--continue");
   const model = takeFlag(rest, "--model");
   const effort = takeFlag(rest, "--effort");
@@ -1537,7 +1542,7 @@ export async function cmdNew(rest: string[]): Promise<number> {
   const agent = takeFlag(rest, "--agent") || "claude";
   const msg = takeFlag(rest, "-m") ?? takeFlag(rest, "--message");
   const dir = rest[0];
-  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m] [--effort e] [--read-only] [--continue|--resume id] [--json]"); return 2; }
+  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m] [--effort e] [--read-only] [--headless] [--continue|--resume id] [--json]"); return 2; }
   const mode = permissionModeFor(agent, readOnly);
   if (!mode.ok) { console.error(`${bad} ${mode.error}`); return 2; }
   const cwd = resolve(expandTilde(dir));
@@ -1545,6 +1550,7 @@ export async function cmdNew(rest: string[]): Promise<number> {
     cwd, createDir: true, model, effort,
     agent,
     permissionMode: mode.mode,
+    headless: headless || undefined,
     continue: cont || undefined,
     resume_id: resumeId || undefined,
     forceNew: !cont && !resumeId ? true : undefined, // "new" means new (#41)
@@ -1907,7 +1913,9 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("check")}        Can it be talked to right now?  joy check <session>  → exit 0 idle · 3 busy · 6 needs input · 1 gone
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
   ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m]
-                 [--effort e] [--read-only] [--continue|--resume <id>] [--json]  → prints session id
+                 [--effort e] [--read-only] [--headless] [--continue|--resume <id>] [--json]  → prints session id
+                 (--headless: keep it out of the app's session list and send no turn-done push;
+                  it still surfaces and pushes when it needs a human)
                  (a -m message the daemon did not accept fails the command with the send's exit code; the id is still printed)
   ${c.b("run")}          One-shot (ephemeral, like claude -p): create → prompt → print response → kill session.
                  joy run <prompt...> [--dir d] [--agent a] [--model m] [--read-only] [--timeout s] [--json]

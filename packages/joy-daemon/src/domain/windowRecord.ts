@@ -75,6 +75,10 @@ export interface WindowRecord {
    *  stomp it. Released by a user /title (which takes ownership) or by a
    *  /clear (which starts a new conversation). */
   agentTitle?: string;
+  /** Created with `joy new --headless`: nobody is watching it, so it stays out
+   *  of the app's session list and sends no turn-done push. Persisted because
+   *  the property belongs to the session, not to the process that made it. */
+  headless?: boolean;
   /** Push notifications for this session are silenced. Persisted here rather
    *  than in app settings because the DAEMON is the only place a mute can be
    *  enforced: a remote notification is displayed by the phone's OS before the
@@ -269,7 +273,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  when the state dir refused the write. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string; permissionMode?: string; effort?: string }; piSettings?: { model?: string; sessionId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; agySettings?: { model?: string; conversationId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; handoff?: JoyHandoffInfo | null; notificationsMuted?: boolean; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string; permissionMode?: string; effort?: string }; piSettings?: { model?: string; sessionId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; agySettings?: { model?: string; conversationId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; handoff?: JoyHandoffInfo | null; notificationsMuted?: boolean; headless?: boolean; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
   baseDir = defaultStateDir(),
 ): boolean {
   try {
@@ -294,6 +298,7 @@ export function saveWindowRecord(
       v2AnnounceEnvelope: patch.v2AnnounceEnvelope ?? prev?.v2AnnounceEnvelope,
       handoff: patch.handoff === null ? undefined : patch.handoff ?? prev?.handoff,
       notificationsMuted: patch.notificationsMuted ?? prev?.notificationsMuted,
+      headless: patch.headless ?? prev?.headless,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       userTitle: patch.userTitle === null ? undefined : patch.userTitle ?? prev?.userTitle,
       lastAiTitle: patch.lastAiTitle ?? prev?.lastAiTitle,

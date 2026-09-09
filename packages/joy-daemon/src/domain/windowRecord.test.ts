@@ -63,3 +63,11 @@ test("notificationsMuted round-trips, and an unmute is recorded rather than forg
   saveWindowRecord("aa11bb22", { claudeSessionId: "c2" }, dir);
   expect(loadWindowRecord("aa11bb22", dir)?.notificationsMuted).toBe(false);
 });
+
+test("headless round-trips and survives an unrelated patch", () => {
+  saveWindowRecord("cc33dd44", { launchCwd: "/w" }, dir);
+  saveWindowRecord("cc33dd44", { headless: true }, dir);
+  expect(loadWindowRecord("cc33dd44", dir)?.headless).toBe(true);
+  saveWindowRecord("cc33dd44", { claudeSessionId: "c1" }, dir);
+  expect(loadWindowRecord("cc33dd44", dir)?.headless).toBe(true);
+});

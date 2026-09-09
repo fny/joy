@@ -1102,6 +1102,24 @@ export class RelaySession {
    */
   private muted = false;
 
+  /**
+   * Nobody is watching this session (`joy new --headless`).
+   *
+   * Two effects, and the second is the one that keeps it honest: it is kept
+   * out of the app's session list, and it sends no turn-done push — but a
+   * push that needs a HUMAN (an approval, a sign-in) still goes out, and the
+   * app still shows the session while it is blocked. Hiding the one case you
+   * have to act on is how an unattended job wedges for a day unnoticed.
+   */
+  private headless = false;
+
+  setHeadless(headless: boolean): void {
+    this.headless = headless;
+    void this.mergeKey('joy__headless', headless ? true : null, (cur) => (cur === true) === headless).catch(() => {});
+  }
+
+  get isHeadless(): boolean { return this.headless; }
+
   /** Seeded from the window record at attach, and set by joy-set-notifications.
    *  Publishes joy__muted so the app can show the session as silenced without
    *  asking, and so the desktop path (which the app owns) reads the same fact. */
@@ -1116,7 +1134,9 @@ export class RelaySession {
    *  Title falls back to the session's host/folder so a push always identifies
    *  its source; when the agent titles it, the folder rides as a prefix. */
   notifyCustom(headline: string, detail: string | null): void {
-    if (this.muted) return;
+    // An agent's own <joy-notify> on a headless session is a turn-done-shaped
+    // announcement: nobody asked to be told.
+    if (this.muted || this.headless) return;
     // Project-prefixed headline ("joy: Deploy finished") so every push reads
     // as <where>: <what> at a glance; detail (when given) is the body.
     const path = (this.metadata?.path as string | undefined)?.trim();
@@ -1130,6 +1150,9 @@ export class RelaySession {
    *  WHICH session at a glance; body is the reply snippet (or the per-kind reason). */
   notify(kind: 'done' | 'permission' | 'question', snippet?: string): void {
     if (this.muted) return;
+    // Headless suppresses "finished" and nothing else: permission and question
+    // are the session asking for a human, which is exactly when it must speak.
+    if (this.headless && kind === 'done') return;
     // Push title/body travel UNSEALED through the relay and Expo. The reply
     // snippet — and the AI title, which is conversation-derived too — are
     // E2E-sealed content everywhere else; putting them in the body leaked a
@@ -1344,8 +1367,10 @@ export function createRelaySession(
   // A mute outlives the daemon: seed the card so the app shows it silenced
   // from the first publish, not only after the next toggle.
   if (record?.notificationsMuted) metadata.joy__muted = true;
+  if (record?.headless) metadata.joy__headless = true;
   const rs = new RelaySession({ client, relaySessionId: opts.id, metadata });
   if (record?.notificationsMuted) rs.setNotificationsMuted(true);
+  if (record?.headless) rs.setHeadless(true);
   holders.set(opts.id, rs);
   return rs;
 }

@@ -62,6 +62,11 @@ export interface CreateSessionOpts {
   permissionMode?: string;
   /** --fallback-model: model to fall back to when the primary is overloaded. */
   fallbackModel?: string;
+  /** Nobody is watching this one: it stays out of the app's session list and
+   *  sends no turn-done push. A headless session that needs a HUMAN — an
+   *  approval, a sign-in — still surfaces and still pushes, because hiding the
+   *  one case you must act on is how a job wedges unnoticed for a day. */
+  headless?: boolean;
   /** Never revive/adopt a session already in this cwd — ALWAYS a new one.
    *  Fork, handoff and teleport set it: create()'s auto-revive of a detached
    *  session in the folder was restarting an unrelated old conversation and

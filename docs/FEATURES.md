@@ -333,6 +333,13 @@ every relay; machines register per account.
   count and worst state; the foot always says `7 of 18`. Pins and groups
   are synced (they are statements about the work); the axis, filter and
   collapse set are device-local. Pin from a session's long-press menu.
+- **Headless sessions** (`joy new --headless`): for work nobody is watching.
+  Kept out of the app's session list and sends no turn-done push — but a
+  session needing a HUMAN (approval, sign-in) still surfaces AND still
+  pushes (`sessionFacts.hiddenFromList`, `RelaySession.notify`), so an
+  unattended job cannot wedge unseen. Explicit only: nothing becomes
+  headless implicitly, and `joy run` needs none of it (it already kills
+  the session and deletes the transcript on the way out).
 - **Mute a session's notifications** (session info → Actions): silences its
   pushes on every device until unmuted — turn-done, permission, question
   and the agent's own `<joy-notify>` tags. The daemon enforces it

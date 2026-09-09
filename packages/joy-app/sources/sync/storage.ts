@@ -27,7 +27,7 @@ import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
-import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, type SessionFacts } from "./sessionFacts";
+import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, hiddenFromList, type SessionFacts } from "./sessionFacts";
 import { sessionsToRetain } from "./sessionMemory";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
@@ -352,6 +352,10 @@ function buildSessionListViewDataInner(
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
+        // `joy new --headless`: nobody is watching, so it stays out of the
+        // list — until it needs a human, which is the one case hiding it
+        // would cost you (sessionFacts.hiddenFromList).
+        if (hiddenFromList(liveFacts(session))) return;
         if (isSessionInActiveGroup(session)) {
             activeSessions.push(session);
         } else {

@@ -14,6 +14,7 @@ import { storage, sessionRowDataFor, useLocalSetting, useSetting, type SessionLi
 import { useShallow } from 'zustand/react/shallow';
 import { isSessionInActiveGroup } from '@/sync/sessionLiveness';
 import { buildListLayout, type ListSession } from '@/sync/sessionListModel';
+import { hiddenFromList, liveFacts } from '@/sync/sessionFacts';
 import { t } from '@/text';
 
 /** The model's view of a session, straight off the store row. */
@@ -40,7 +41,8 @@ export function useSessionListV2(): SessionListViewItem[] | null {
         // "Hide archived" is a visibility filter, not a grouping question:
         // apply it before the model so an archived session cannot hold a
         // section open or colour its rollup.
-        const visible = hideInactive ? all.filter((s) => isSessionInActiveGroup(s)) : all;
+        const shown = all.filter((s) => !hiddenFromList(liveFacts(s)));
+        const visible = hideInactive ? shown.filter((s) => isSessionInActiveGroup(s)) : shown;
 
         const rows: Row[] = visible.map((s) => ({
             id: s.id,
