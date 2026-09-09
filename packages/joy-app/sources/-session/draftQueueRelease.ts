@@ -1,4 +1,5 @@
-import { storage, isFresh } from '@/sync/storage';
+import { storage } from '@/sync/storage';
+import { isAgentBusy } from '@/sync/sessionLiveness';
 import { isJoyDaemonSource } from '@/sync/storageTypes';
 import { useDraftQueueStore, draftReason, type QueuedDraft } from './draftQueue';
 import type { SendMessageResult } from '@/sync/sync';
@@ -217,12 +218,16 @@ export function initDraftQueueRelease(send: SendFn, cancelTurn?: CancelTurnFn): 
             const head = queue.find((d) => draftReason(d) === 'busy');
             if (!head) continue;
 
-            // Hold while the agent is FRESH-and-provably busy — a stale thinking
-            // flag would hold sends hostage; a wrongly-immediate one is absorbed
-            // by the daemon/TUI queue.
-            const busy = session.thinking === true
-                && session.presence === 'online'
-                && isFresh(session);
+            // Hold while the agent is busy, by the ONE definition (#652) — the
+            // ephemeral flag OR the persisted joy__thinking mirror, both gated
+            // on live-and-fresh presence. This used to require the ephemeral
+            // flag alone, out of a worry that a stale flag would hold sends
+            // hostage; the freshness gate inside isAgentBusy is what answers
+            // that, and MAX_HOLD_MS caps the hold regardless. Requiring it meant
+            // that after a cold start or a reconnect — exactly when only the
+            // mirror is set — a queued message was released straight into a
+            // running turn, which is the bug the send gate already stopped.
+            const busy = isAgentBusy(session);
             if (busy && draftAge(head, now) < MAX_HOLD_MS) {
                 inFlightUntil.delete(sessionId); // turn running — prior release landed
                 lastBusyAt.set(sessionId, now);

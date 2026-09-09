@@ -1,14 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Environment stubs ───────────────────────────────────────────────────────
-const sessions: Record<string, { thinking?: boolean; presence?: string; metadata?: { joy__source?: string } }> = {};
+const sessions: Record<string, {
+    thinking?: boolean;
+    presence?: string;
+    // activeAt matters now that the hold uses the shared isAgentBusy, which gates
+    // BOTH thinking signals on live-and-fresh presence rather than trusting a flag.
+    activeAt?: number;
+    metadata?: { joy__source?: string; joy__thinking?: { since: number } | null };
+}> = {};
 const storageSubscribers: Array<() => void> = [];
 vi.mock('@/sync/storage', () => ({
     storage: {
         getState: () => ({ sessions }),
         subscribe: (fn: () => void) => { storageSubscribers.push(fn); return () => {}; },
     },
-    isFresh: () => true,
+    isFresh: () => true, // only the module's other callers; the hold now goes through isAgentBusy
 }));
 vi.mock('@/sync/storageTypes', () => ({ isJoyDaemonSource: () => true }));
 vi.mock('@/sync/serverConfig', () => {
@@ -50,7 +57,7 @@ beforeEach(() => {
     vi.useFakeTimers();
     clock += 10 * 60_000;
     vi.setSystemTime(clock);
-    sessions[S] = { thinking: false, presence: 'online', metadata: { joy__source: 'joy-daemon' } };
+    sessions[S] = { thinking: false, presence: 'online', activeAt: clock, metadata: { joy__source: 'joy-daemon' } };
     useDraftQueueStore.setState({ bySession: {} });
     sends.length = 0;
     send.mockClear();
@@ -71,6 +78,61 @@ describe('attemptOwnsDraft (#133)', () => {
         expect(attemptOwnsDraft(d, 'L9', 7, 7)).toBe(false); // edited: new release identity
         expect(attemptOwnsDraft({ ...d, state: 'queued' }, 'L1', 7, 7)).toBe(false);
         expect(attemptOwnsDraft(undefined, 'L1', 7, 7)).toBe(false);
+    });
+});
+
+describe('holding a queued message while the agent is busy (#652)', () => {
+    it('holds while the ephemeral thinking flag is set', async () => {
+        sessions[S] = { ...sessions[S], thinking: true };
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        expect(sends).toHaveLength(0);
+        expect(drafts()).toHaveLength(1);
+        expect(head().state).not.toBe('releasing');
+    });
+
+    it('holds on the persisted mirror alone — the cold-start / reconnect case', async () => {
+        // The ephemeral flag only ever reaches connected clients, so after a cold
+        // start or a reconnect joy__thinking is the signal that is true. Requiring
+        // the flag released the message straight into the running turn, where it
+        // rendered as a chat bubble instead of staying in the stack.
+        sessions[S] = {
+            ...sessions[S],
+            thinking: false,
+            metadata: { ...sessions[S].metadata, joy__thinking: { since: clock } },
+        };
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        expect(sends).toHaveLength(0);
+        expect(drafts()).toHaveLength(1);
+        expect(head().state).not.toBe('releasing');
+    });
+
+    it('does NOT hold on a stale session, however loudly it claims to be thinking', async () => {
+        // The objection to trusting the mirror was that a dead daemon would hold
+        // sends hostage. Freshness is what answers it, for both signals.
+        sessions[S] = {
+            ...sessions[S],
+            thinking: true,
+            activeAt: clock - 10 * 60_000,
+            metadata: { ...sessions[S].metadata, joy__thinking: { since: clock } },
+        };
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        expect(sends).toHaveLength(1);
+    });
+
+    it('releases once the turn ends and the settle window passes', async () => {
+        sessions[S] = { ...sessions[S], thinking: true };
+        useDraftQueueStore.getState().add(S, 'A', 'busy');
+        await sweep();
+        expect(sends).toHaveLength(0);
+
+        sessions[S] = { ...sessions[S], thinking: false };
+        await vi.advanceTimersByTimeAsync(5_000); // past the settle window
+        await sweep();
+        expect(sends).toHaveLength(1);
+        expect(sends[0].text).toBe('A');
     });
 });
 
