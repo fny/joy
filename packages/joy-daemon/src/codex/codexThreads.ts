@@ -141,7 +141,7 @@ export function codexRolloutTitle(path: string, maxBytes = ROLLOUT_TITLE_MAX): s
     let offset = 0;
     let carry = "";
     scan: while (offset < size && offset < maxBytes) {
-      const buf = Buffer.alloc(Math.min(ROLLOUT_TITLE_CHUNK, size - offset));
+      const buf = Buffer.alloc(Math.min(ROLLOUT_TITLE_CHUNK, size - offset, maxBytes - offset));
       const n = readSync(fd, buf, 0, buf.length, offset);
       if (n <= 0) break;
       offset += n;

@@ -112,7 +112,7 @@ test("codexRolloutTitle: reads past a large preamble and skips wrapper parts, an
   const preamble = msg(["<recommended_plugins>\n- Airtable\n</recommended_plugins>", "# AGENTS.md instructions\n\n<INSTRUCTIONS>rules</INSTRUCTIONS>", "<environment_context>\n<cwd>/proj</cwd>\n</environment_context>"]);
   const worldState = JSON.stringify({ type: "world_state", payload: { full: true, state: { agents_md: { text: "x".repeat(40 * 1024) } } } });
   writeFileSync(file, [JSON.stringify({ type: "session_meta", payload: { id: "t1", cwd: "/proj" } }), preamble, worldState, msg(["You are picking up work from Claude Code. Its handoff note is below."]), msg(["Show me the image"])].join("\n") + "\n");
-  expect(codexRolloutTitle(file)).toBe("You are picking up work from Claude Code. Its handoff note is…");
+  expect(codexRolloutTitle(file)).toBe("You are picking up work from Claude Code. Its handoff note…");
   // Capped read: the prompt beyond the cap is not found, and nothing is misread.
   clearCodexRolloutTitleCache();
   expect(codexRolloutTitle(file, 8 * 1024)).toBeNull();
