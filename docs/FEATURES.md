@@ -311,6 +311,16 @@ every relay; machines register per account.
   (`onContextMenu` in MarkdownView) — unless text is selected, in which case
   the browser's own menu is left alone.
 - Cmd/Ctrl+F in-session search with match cycling.
+- **Native iOS text selection** (`modules/joy-selectable-text`, Settings →
+  Features → Select Text In Place, default OFF). `isSelectableTextAvailable`
+  PROBES for the native module (`requireOptionalNativeModule`) rather than
+  assuming `Platform.OS === 'ios'`: an OTA reaches whatever binary is
+  installed, runtime version is the only fence, and both the July and
+  September builds carry runtime 21 — so JS needing native code landed on a
+  build without it. Fabric renders an unregistered view as an empty box, so
+  every markdown block became zero-height and messages read blank with no
+  error. Bump `runtimeVersion` in app.config.js whenever the native surface
+  changes; a probe is the belt to that braces.
 - **Session list v2** (Settings → Features → New session list; device-local
   `sessionListV2`). Pins, custom groups, a switchable grouping axis
   (project / machine / date — time becomes the SORT, not the grouping),

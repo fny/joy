@@ -1,3 +1,9 @@
+# Sep 9 (9) — Messages are readable again on iOS
+
+- **Agent messages were rendering blank on iOS.** Since Sep 7, message text has been drawn by a native text view so you can select a phrase out of it — but that view only exists in an app built after Sep 7, and an over-the-air update reaches whatever app you already have. On an older build the view simply is not there, and iOS draws nothing for it: every paragraph and list item collapsed to empty, leaving only the spacing. No error, no clue — just blank messages.
+- **The app now checks whether the view is really there** instead of assuming that being on iOS means it is, and falls back to ordinary text when it is not. Nothing to turn on or off.
+- **Select Text In Place now defaults off.** It is worth having, but it needs a matching app build, and a feature that can leave every message blank should not be on until you ask for it. It is still in Settings → Features.
+
 # Sep 9 (8) — A session list you can organise
 
 - **Settings → Features → New session list** turns on a rebuilt sidebar. It groups by **project** or **machine** instead of only by date — date is still there, but it is now one choice rather than the only one, and time sorts within a group rather than defining it.

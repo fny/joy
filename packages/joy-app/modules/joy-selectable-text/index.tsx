@@ -1,4 +1,4 @@
-import { requireNativeView } from 'expo';
+import { requireNativeView, requireOptionalNativeModule } from 'expo';
 import * as React from 'react';
 import { Platform, StyleProp, ViewStyle } from 'react-native';
 
@@ -35,12 +35,29 @@ type NativeProps = {
     onLinkPress?: (event: { nativeEvent: { url: string } }) => void;
 };
 
-/** Whether the native view exists on this platform. iOS only — see the module. */
-export const isSelectableTextAvailable = Platform.OS === 'ios';
+/**
+ * Whether the native view is in THIS binary — not merely whether the platform
+ * could have it.
+ *
+ * This was `Platform.OS === 'ios'`, which is a capability claim the platform
+ * cannot make. An OTA ships JS to whatever build is installed, and runtime
+ * version is the only fence: both the July build (no module) and the September
+ * build (module) carry runtime 21, so an update needing native code landed on
+ * a binary without it. Fabric does not throw for an unregistered view — it
+ * renders an empty box — so every markdown paragraph on iOS silently became
+ * zero-height, leaving only the wrapper margins. Blank messages, no error.
+ *
+ * The module registers the view, so the module's presence IS the test, and
+ * requireOptionalNativeModule answers it without throwing. A binary that
+ * lacks it now falls back to RN Text automatically instead of rendering
+ * nothing and waiting for someone to find the Features toggle.
+ */
+export const isSelectableTextAvailable =
+    Platform.OS === 'ios' && requireOptionalNativeModule('JoySelectableText') != null;
 
-// Resolved lazily: requireNativeView throws on a platform where the view was
-// never registered, and this module is imported from the shared markdown
-// renderer that also runs on Android and web.
+// Resolved lazily, and only once isSelectableTextAvailable has confirmed the
+// module is actually present: this file is imported by the shared markdown
+// renderer, which also runs on Android and web.
 let NativeView: React.ComponentType<NativeProps> | null = null;
 function getNativeView(): React.ComponentType<NativeProps> | null {
     if (!isSelectableTextAvailable) return null;
