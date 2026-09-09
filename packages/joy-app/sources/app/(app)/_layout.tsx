@@ -132,6 +132,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/models"
+                options={{
+                    headerTitle: t('settings.models'),
+                }}
+            />
+            <Stack.Screen
                 name="settings/palette"
                 options={{
                     headerTitle: 'Color Palette',

@@ -108,6 +108,9 @@ export class CodexSession implements AgentSession {
   // re-seeding from stale local settings would overwrite an authoritative
   // resumed/TUI value).
   #pendingEffort: string | null = null;
+  // Same for a model picked mid-session (joy-set-model): one turn/start
+  // override, which codex then keeps.
+  #pendingModel: string | null = null;
   // The turn codex reports active (turn/started … turn/completed): the
   // synthetic turn-end at teardown and an untargeted interrupt name it. Turn
   // serialization itself is the coordinator's (one op per session).
@@ -232,6 +235,8 @@ export class CodexSession implements AgentSession {
       permissionMode: () => this.#permissionMode,
       pendingEffort: () => this.#pendingEffort ?? undefined,
       effortApplied: () => { this.#pendingEffort = null; },
+      pendingModel: () => this.#pendingModel ?? undefined,
+      modelApplied: () => { this.#pendingModel = null; },
       activeTurnId: () => this.#activeTurnId,
       rejoined: () => this.#rejoined,
       handleCommand: (text, opts) => this.#handleCommand(text, opts),
@@ -1033,6 +1038,28 @@ export class CodexSession implements AgentSession {
     return { ok: true, mode: target };
   }
 
+  /** Reasoning effort for the NEXT turn (codex keeps it for the turns after). */
+  async setEffort(effort: string | null): Promise<{ ok: boolean; effort?: string; error?: string }> {
+    this.#pendingEffort = effort;
+    this.currentEffort = effort ?? undefined;
+    this.#persistWindowRecord();
+    this.#deps.broadcast("session_update", this.toJSON());
+    return { ok: true, effort: this.currentEffort };
+  }
+
+  /** Model for the NEXT turn (codex keeps it for the turns after). The card
+   *  shows it at once; the thread's own report on the next turn confirms. */
+  async setModel(model: string): Promise<{ ok: boolean; model?: string; error?: string }> {
+    this.#pendingModel = model;
+    this.currentModel = model;
+    void this.#relay?.updateModelCode(model);
+    this.#persistWindowRecord();
+    this.#deps.broadcast("session_update", this.toJSON());
+    return { ok: true, model };
+  }
+
+  get permissionMode(): string { return this.#permissionMode; }
+
   transcript(): { lines: unknown[] } { return { lines: [] }; }
 
   // ── claude-hook surface (no-op for codex) ─────────────────────────────────────
@@ -1148,6 +1175,8 @@ export class CodexSession implements AgentSession {
       id: this.id,
       agent: this.agentFlavor,
       current_model: this.currentModel,
+      current_effort: this.currentEffort ?? this.effort,
+      permission_mode: this.#permissionMode,
       pid: this.pid,
       tmux_window: this.tmuxWindow,
       tmux_socket: this.#tmuxSocket,

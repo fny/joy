@@ -287,8 +287,21 @@ export class OpencodeClient {
     await this.request("POST", `/api/session/${sessionID}/interrupt`, {});
   }
 
-  async switchModel(sessionID: string, providerID: string, modelID: string): Promise<void> {
-    await this.request("POST", `/api/session/${sessionID}/model`, { model: { id: modelID, providerID } });
+  async switchModel(sessionID: string, providerID: string, modelID: string, variant?: string): Promise<void> {
+    await this.request("POST", `/api/session/${sessionID}/model`, { model: { id: modelID, providerID, ...(variant ? { variant } : {}) } });
+  }
+
+  /** The primary agent the session prompts with: "build" (default) or "plan"
+   *  (reads and searches only). POST /api/session/:id/agent. */
+  async setAgent(sessionID: string, agent: string): Promise<void> {
+    await this.request("POST", `/api/session/${sessionID}/agent`, { agent });
+  }
+
+  /** A per-SESSION permission ruleset (PATCH /session/:id {permission}):
+   *  `[{permission:"*", pattern:"*", action:"allow"}]` is "allow all"; an
+   *  empty ruleset hands control back to the agent's configured rules. */
+  async setSessionPermission(sessionID: string, ruleset: Array<{ permission: string; pattern: string; action: "ask" | "allow" | "deny" }>): Promise<void> {
+    await this.request("PATCH", `/session/${sessionID}`, { permission: ruleset });
   }
 
   /** Full message history: [{id, type: 'user'|'assistant'|…, content: parts,

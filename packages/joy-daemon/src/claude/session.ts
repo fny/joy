@@ -106,6 +106,12 @@ export interface SessionRecord {
   agent?: string;
   claude_session_id?: string;
   current_model?: string;
+  /** The effort / thinking level the harness is running with (codex: next
+   *  turn's; opencode: the model variant; pi/agy: the launch flag). */
+  current_effort?: string;
+  /** The permission mode the harness is running with, where the daemon owns
+   *  it (codex/opencode/pi/agy; claude's is read off the pane). */
+  permission_mode?: string;
   pid?: number;
   tmux_window: string;
   /** Per-session tmux server socket label (-L), null on the shared server. */
@@ -838,14 +844,14 @@ export class Session {
   // expired before the idle tie-breaker was even allowed to look, so a session
   // that had plainly finished sat blue for minutes (#647).
   #turnProducedOutput = false;
+  /** When output last landed, any turn. Read by the nucleus lane's stall clock. */
+  #lastOutputAt: number | null = null;
   #lastUserText: string | null = null;
   // joy: Claude is compacting its context (the PreCompact hook fired). Surfaced
   // as a "compacting" status; cleared by the compact_boundary transcript record
   // or, as a backstop, by #compactingTimer — a boundary we never see (e.g. the
   // session died mid-compaction) would otherwise leave the banner stuck.
   #compacting: { trigger: string; since: number } | null = null;
-  /** When output last landed, any turn. Read by the nucleus lane's stall clock. */
-  #lastOutputAt: number | null = null;
   #compactingTimer: ReturnType<typeof setTimeout> | null = null;
   // Byte offset the tailer starts at — non-zero only for a capped --resume
   // backfill (snapped to a turn boundary so we don't replay a partial turn).
@@ -2677,18 +2683,18 @@ export class Session {
     return this.#coordinator.abortRunning(this.id);
   }
 
-  /** Escape → Claude Code interactive interprets as "interrupt generation". */
-  async #interruptPane(): Promise<InterruptResult> {
-    // Snapshot the pending submit BEFORE the awaited capture: if a NEW dispatch
-    // starts during that await, this (now possibly stale) abort must not cancel it.
-    const submitBefore = this.#submitTimer;
-    // …and the dispatch it belongs to: a submit that appears during the await
   lastOutputAt(): number | null { return this.#lastOutputAt; }
 
   /** `joy__stalled` on the card — a report the nucleus lane makes when a turn
    *  has been silent for a long time, and withdraws when output resumes. */
   setStalled(info: import("../relay/relay").JoyStalledInfo | null): void { void this.#relay?.updateStalled?.(info); }
 
+  /** Escape → Claude Code interactive interprets as "interrupt generation". */
+  async #interruptPane(): Promise<InterruptResult> {
+    // Snapshot the pending submit BEFORE the awaited capture: if a NEW dispatch
+    // starts during that await, this (now possibly stale) abort must not cancel it.
+    const submitBefore = this.#submitTimer;
+    // …and the dispatch it belongs to: a submit that appears during the await
     // for the SAME in-flight item is that item finishing its typing, not a new
     // send (#35) — see below.
     const inflightBefore = this.#dispatchInFlight;
@@ -3596,17 +3602,17 @@ export class Session {
     // one place it can be reset without hunting every turn-close path (#647).
     if (!thinking) this.#turnProducedOutput = false;
     if (!thinking) this.#thinkingLeaseUntil = 0; // any accepted clear ends the lease
+    // A turn that closes — however it closes — is not stalled. The lane
+    // clears the flag on its own exit too; this covers a close it never saw.
+    // Optional call: the session tests attach relay fakes that predate the
+    // key, and a missing publisher must not break the idle edge itself.
+    if (!thinking) void this.#relay?.updateStalled?.(null);
     this.#thinking = thinking;
     this.#relay?.setThinking(thinking);
   }
 
   /** A task launch/completion or a <joy-bg> tag changes the split, so schedule a
    *  single coalesced re-derive on a short trailing timer — a burst (the recovery
-    // A turn that closes — however it closes — is not stalled. The lane
-    // clears the flag on its own exit too; this covers a close it never saw.
-    // Optional call: the session tests attach relay fakes that predate the
-    // key, and a missing publisher must not break the idle edge itself.
-    if (!thinking) void this.#relay?.updateStalled?.(null);
    *  backfill, or several launches in a turn) collapses to ONE derive+push of the
    *  final state. Derive-based (not incremental) because a task's long-running
    *  classification arrives in a SEPARATE, later entry than its launch, so only a

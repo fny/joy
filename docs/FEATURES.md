@@ -21,6 +21,24 @@ every relay; machines register per account.
   model/effort/permissions (per-agent defaults with user overrides,
   Settings → Agent Defaults). All agents always shown; the daemon rejects
   unknown ones loudly ("run joy update?").
+- **Every row is driven by the harness capability table** the machine's
+  daemon publishes on `GET /v2/harnesses` (`app: sync/harnessCapabilities.ts`,
+  `hooks/useHarnessCapabilities`): model picker (static list for claude,
+  the machine's live catalog otherwise), effort (fixed levels, or the
+  picked model's own — codex `supportedReasoningEfforts`, opencode
+  `variants`), the harness's OWN permission modes, continue / fork / resume
+  by id / past sessions, fallback model, history backfill, extra arguments
+  (verbatim CLI args or codex `key=value` overrides). The spawn spec sends
+  only what the table allows (`joy/new/spawnSpec.ts`). A daemon that
+  publishes no table resolves to a fallback describing what that older
+  daemon accepts, so a stale machine keeps the rows it had rather than
+  gaining controls it would ignore. The session settings sheet gates model /
+  effort / permission switching from the same table (`switchLive`).
+- **Models** (Settings → Models): live catalogs are large (opencode: a few
+  hundred), so the daemon marks a few `recommended` and pickers show that
+  subset until the user trims or extends it per harness (`harnessModels`
+  setting, `sync/modelAllowlist.ts`; the model in use is always listed).
+  Catalogs are read from a chosen machine; the choice applies everywhere.
 - **Resume / fork claude sessions**: new-session page lists past transcripts
   in the chosen directory (radio picker) by TITLE — the user's /title, the
   agent's `<joy-title>`, Claude's last ai-title or the first prompt, with the
@@ -120,6 +138,7 @@ every relay; machines register per account.
   one push ("This session is full"), but the banner never depends on it.
   All name the only recovery: continue in a new session; retrying never
   clears the budget.
+- **Stalled turns are reported, never interrupted.** A running turn that has produced no output for 30 minutes is flagged `joy__stalled` {since, silentForMs} on its card; the app shows *no output for N m* (amber, not pulsing) in place of the vibing message and the sidebar row, and the turn stays open — it still counts as busy for the send gate, eviction and unread. Output resuming or the turn ending clears it. The daemon cannot distinguish a long tool call from a hung one, so the decision is yours; the 30-minute turn cap that used to end such turns `interrupted` and abort the agent is gone.
 - **Agents talk to agents (CLI)**: `joy ls` (agent, state, title), `joy check`
   (exit code = idle / busy / needs input), `joy send` queues behind a running
   turn and returns the turn id, `joy wait --turn` blocks on it, `joy ask`
@@ -138,7 +157,6 @@ every relay; machines register per account.
   `ask`/`run`/`wait --turn` are bound to the durable command the send
   returned (`GET /sessions/:id/queue/:qid`): the command's own terminal state
   is the verdict (`completed` → answered; `failed`/`cancelled`/`interrupted`
-- **Stalled turns are reported, never interrupted.** A running turn that has produced no output for 30 minutes is flagged `joy__stalled` {since, silentForMs} on its card; the app shows *no output for N m* (amber, not pulsing) in place of the vibing message and the sidebar row, and the turn stays open — it still counts as busy for the send gate, eviction and unread. Output resuming or the turn ending clears it. The daemon cannot distinguish a long tool call from a hung one, so the decision is yours; the 30-minute turn cap that used to end such turns `interrupted` and abort the agent is gone.
   → error with the daemon's reason), never a global idle, a failed queue read
   or an id missing from a listing; the reply is the records of the runtime
   turn the daemon attributed to the command (`runtimeTurnId`: codex, opencode
@@ -341,7 +359,9 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 
 ## Agent configuration
 
-- **Agent Defaults**: per-agent model/effort/permission defaults + overrides.
+- **Agent Defaults**: per-agent model/effort/permission defaults + overrides
+  (claude's model list trimmed to Settings → Models).
+- **Models**: per-harness model allowlist for every picker (see Sessions).
 - **Agent Config** (Settings): edit each agent's real config file on a machine
   — schema-walked rows (claude/opencode publish JSON Schemas) or raw mode with
   full-file editing and JSON-path assignment lines

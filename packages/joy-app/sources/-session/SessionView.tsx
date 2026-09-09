@@ -61,7 +61,10 @@ import { useActiveInterval } from '@/hooks/useActiveInterval';
 import { useUnistyles } from 'react-native-unistyles';
 import type { ModelMode, PermissionMode } from '@/components/PermissionModeSelector';
 import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
-import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
+import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
+import { useHarnessCapabilities } from '@/hooks/useHarnessCapabilities';
+import { enabledModels } from '@/sync/modelAllowlist';
+import { modelKeyOf } from '@/sync/machineResources';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { DraftQueueStrip } from './DraftQueueStrip';
@@ -75,7 +78,7 @@ import { EventBudgetBar } from './EventBudgetBar';
 import { CodexApprovalBar } from './CodexApprovalBar';
 import { useDraftQueueStore } from './draftQueue';
 import { isFresh } from '@/sync/storage';
-import { machineSetMode, machineSendKeys, machineSetModel, machineSessionUsage } from '@/sync/v2/machine';
+import { machineSetMode, machineSendKeys, machineSetEffort, machineSetModel, machineSessionUsage } from '@/sync/v2/machine';
 import { useHarnessModels } from '@/hooks/useHarnessModels';
 import { isAgentBusy } from '@/sync/sessionLiveness';
 
@@ -617,13 +620,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     // → claude (legacy joy-tmux sessions and the claude path send no flavor).
     const flavor = isJoyDaemon ? (session.metadata?.flavor ?? 'claude') : session.metadata?.flavor;
     const joySessionId = session.metadata?.joy__sessionId;
-    // Opencode: the daemon's curated allowlist backs the model picker so the
-    // chip can CYCLE (codex stays a 1-entry display: its catalog is per-model
-    // efforts and switching rides the pane, not an RPC). Read through the
-    // shared catalog resource — the same entry the new-session picker holds
-    // for this machine + harness — so a late answer lands in ITS cache only.
-    const ocCatalog = useHarnessModels(flavor === 'opencode' ? machineId : null, 'opencode');
-    const ocModels = ocCatalog.data;
+    // What this session's harness can do on ITS machine — model switching,
+    // effort, permission modes — as the daemon reports it (an older daemon:
+    // the fallback table). The picker lists, the switch paths and the
+    // read-only rows all derive from this one object.
+    const caps = useHarnessCapabilities(isJoyDaemon ? machineId : null, flavor ?? 'claude');
+    const harnessAllowlists = useSetting('harnessModels');
+    // A live catalog backs the model picker (switchLive) and per-model effort
+    // levels. Read through the shared catalog resource — the same entry the
+    // new-session picker holds for this machine + harness — so a late answer
+    // lands in ITS cache only.
+    const wantsCatalog = isJoyDaemon && caps.models.source === 'live' && (caps.models.switchLive || caps.effort?.perModel === true);
+    const liveCatalog = useHarnessModels(wantsCatalog ? machineId : null, flavor);
+    const liveModels = liveCatalog.data;
 
     const availableModels = React.useMemo(() => {
         if (!isJoyDaemon) return getAvailableModels(flavor, session.metadata, t);
@@ -631,33 +640,35 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // catalog — resolving currentModelCode against JOY_CLAUDE_MODELS never
         // matched, so codex sessions showed NO model label (bug 2026-07-31).
         // Synthesize a one-entry catalog from the daemon-published code.
-        if (flavor === 'opencode' && ocModels?.length) {
-            return ocModels
-                .map((m) => ({ key: m.id ?? m.model ?? '', name: m.displayName, description: null }))
+        const code = session.metadata?.currentModelCode;
+        if (caps.models.source === 'live' && caps.models.switchLive && liveModels?.length) {
+            const rows = liveModels
+                .map((m) => ({ key: modelKeyOf(m), name: m.displayName || modelKeyOf(m), description: null, recommended: m.recommended === true, isDefault: m.isDefault === true }))
                 .filter((m) => m.key);
+            // Trimmed to Settings → Models; the model in use is always listed.
+            return enabledModels(rows, harnessAllowlists[flavor ?? ''], code);
         }
-        if (flavor === 'codex' || flavor === 'opencode' || flavor === 'agy' || flavor === 'pi') {
-            // Display-only for these: the daemon switches models server-side
-            // only for opencode, and /model is a claude command — offering the
-            // claude catalog on an agy session sent a command it can't take.
-            const code = session.metadata?.currentModelCode;
+        if (caps.models.source !== 'static') {
+            // Display-only: the harness cannot switch models on a running
+            // session (or its catalog is not ours to list). Offering the claude
+            // catalog on an agy session sent a command it can't take.
             return code ? [{ key: code, name: code, description: null }] : [];
         }
-        return JOY_CLAUDE_MODELS;
-    }, [isJoyDaemon, flavor, session.metadata, ocModels]);
+        return enabledModels(JOY_CLAUDE_MODELS.map((m, i) => ({ ...m, recommended: true, isDefault: i === 0 })), harnessAllowlists.claude, code);
+    }, [isJoyDaemon, flavor, session.metadata, caps.models, liveModels, harnessAllowlists]);
     const availableModes = React.useMemo(() => {
         // joy sessions: only the modes interactive claude can actually reach
         // via Shift+Tab, in the terminal's cycle order (so browser Shift+Tab
         // cycling matches). the stock list has dontAsk (unreachable) and lacks
         // auto. CODEX joy sessions use codex's OWN modes — the claude modes
         // (esp. `auto`) silently escalate to full access on codex (finding #1).
+        // A joy session lists the modes ITS harness can switch to live
+        // (capability table); a harness that cannot switch shows none.
         const modes = isJoyDaemon
-            ? (flavor === 'codex' ? JOY_CODEX_PERMISSION_MODES
-                : flavor === 'opencode' || flavor === 'pi' || flavor === 'agy' ? [] // v1: opencode/pi/agy have no permission surface
-                : JOY_CLAUDE_PERMISSION_MODES)
+            ? (caps.permissions?.switchLive ? caps.permissions.modes.map((m) => ({ key: m.key, name: m.name, description: m.description || null })) : [])
             : getAvailablePermissionModes(flavor, session.metadata, t);
         return modes;
-    }, [isJoyDaemon, flavor, session.metadata]);
+    }, [isJoyDaemon, flavor, session.metadata, caps.permissions]);
     const agentDefaultOverrides = useSetting('agentDefaultOverrides');
     const effectiveAgentDefaults = React.useMemo(() => (
         resolveAgentDefaultConfig(agentDefaultOverrides, flavor)
@@ -691,10 +702,19 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
 
     // Effort level state
     const modelKey = modelMode?.key ?? 'default';
-    const availableEffortLevels = React.useMemo<EffortLevel[]>(
-        () => getEffortLevelsForModel(flavor, modelKey),
-        [flavor, modelKey],
-    );
+    const availableEffortLevels = React.useMemo<EffortLevel[]>(() => {
+        if (!isJoyDaemon) return getEffortLevelsForModel(flavor, modelKey);
+        // The harness's levels, or the running model's own (codex
+        // supportedReasoningEfforts, opencode variants) — from the table.
+        if (!caps.effort) return [];
+        let levels = caps.effort.levels;
+        if (caps.effort.perModel) {
+            const entry = liveModels?.find((m) => modelKeyOf(m) === modelKey);
+            if (entry?.supportedReasoningEfforts?.length) levels = entry.supportedReasoningEfforts;
+            else if (entry?.variants?.length) levels = entry.variants;
+        }
+        return levels.map((key) => ({ key, name: key }));
+    }, [isJoyDaemon, flavor, modelKey, caps.effort, liveModels]);
     // The flavour's effective default is the LAST resort (#638): with neither
     // a session value nor an override, this resolved to null and the sheet
     // rendered an effort column with every radio empty, while the agent was
@@ -705,8 +725,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             session.effortLevel,
             effectiveAgentDefaults.effortLevel,
             getDefaultEffortKeyForModel(flavor, modelKey),
+            caps.effort?.default ?? null,
         ])
-    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel, flavor, modelKey]);
+    ), [availableEffortLevels, session.effortLevel, effectiveAgentDefaults.effortLevel, flavor, modelKey, caps.effort]);
 
     const sessionStatus = useSessionStatus(session);
     // joy message queue: messages sent while Claude is busy line up here and
@@ -871,18 +892,23 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         })();
     }, [sessionId, isJoyDaemon, machineId, joySessionId]);
 
-    // Only claude (via /model in the pane) and opencode (daemon RPC) can switch
-    // models; codex/pi/agy show a single display-only row.
-    const canSwitchModel = !isJoyDaemon || flavor === 'claude' || flavor === 'opencode';
+    // Which harnesses can switch a running session's model is the table's
+    // word (models.switchLive); the rest show a single display-only row.
+    const canSwitchModel = !isJoyDaemon || caps.models.switchLive;
     const updateModelMode = React.useCallback((mode: ModelMode) => {
-        // Display-only catalogs (codex/pi/agy) used to fall into the /model
-        // branch below: on codex that opened its interactive model picker in
-        // the pane (the daemon reported joy__dialog and the queue stalled),
-        // on pi/agy the keys errored silently — and the never-applied model
-        // was persisted as a local override either way (#13).
+        // Display-only catalogs used to fall into the /model branch below: on
+        // codex that opened its interactive model picker in the pane (the
+        // daemon reported joy__dialog and the queue stalled), on pi/agy the
+        // keys errored silently — and the never-applied model was persisted
+        // as a local override either way (#13).
         if (!canSwitchModel) return;
-        if (isJoyDaemon && flavor === 'opencode') {
-            // No pane: the daemon switches the opencode session server-side.
+        if (isJoyDaemon && caps.models.source === 'static') {
+            // Claude: /model <key> switches the interactive session directly;
+            // keys in JOY_CLAUDE_MODELS are valid /model arguments.
+            sendJoyKeys(`/model ${mode.key}<Enter>`);
+        } else if (isJoyDaemon) {
+            // No pane command: the daemon switches the session server-side
+            // (codex: next turn; opencode: the session's model).
             if (machineId && joySessionId) {
                 const octx = sync.machineCtxFor(machineId, joySessionId);
                 if (octx) {
@@ -890,31 +916,35 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                         .catch(() => { /* best-effort; stored state still updates */ });
                 }
             }
-        } else if (isJoyDaemon) {
-            // /model <key> switches the interactive session directly; keys in
-            // JOY_CLAUDE_MODELS are valid /model arguments.
-            sendJoyKeys(`/model ${mode.key}<Enter>`);
         }
         storage.getState().updateSessionModelMode(sessionId, mode.key);
-    }, [sessionId, isJoyDaemon, flavor, machineId, joySessionId, sendJoyKeys, canSwitchModel]);
+    }, [sessionId, isJoyDaemon, caps.models, machineId, joySessionId, sendJoyKeys, canSwitchModel]);
 
     const updateEffortLevel = React.useCallback((level: EffortLevel) => {
-        const flavor = storage.getState().sessions[sessionId]?.metadata?.flavor ?? 'claude';
-        if (isJoyDaemon && flavor !== 'claude') {
+        if (isJoyDaemon && caps.models.source === 'static') {
+            // Claude: /effort <level> sets the interactive session's reasoning
+            // effort, exactly like /model sets the model, and takes effect
+            // immediately.
+            sendJoyKeys(`/effort ${level.key}<Enter>`);
+        } else if (isJoyDaemon) {
             // /effort is a Claude Code command; typed into a codex/pi/agy pane
             // it becomes a prompt, and the recorded level is one the harness
-            // never applied (#90). Codex effort is a per-turn daemon setting.
-            Modal.alert(t('common.error'), t('errors.operationFailed'));
-            return;
-        }
-        if (isJoyDaemon) {
-            // /effort <level> sets the interactive session's reasoning effort,
-            // exactly like /model sets the model. Levels low/medium/high/xhigh/
-            // max are all valid /effort arguments and take effect immediately.
-            sendJoyKeys(`/effort ${level.key}<Enter>`);
+            // never applied (#90). A harness that can switch effort live does
+            // it through the daemon; one that cannot is refused here.
+            if (!caps.effort?.switchLive) {
+                Modal.alert(t('common.error'), t('errors.operationFailed'));
+                return;
+            }
+            if (machineId && joySessionId) {
+                const octx = sync.machineCtxFor(machineId, joySessionId);
+                if (octx) {
+                    void machineSetEffort(octx, level.key)
+                        .catch(() => { /* best-effort; stored state still updates */ });
+                }
+            }
         }
         storage.getState().updateSessionEffortLevel(sessionId, level.key);
-    }, [sessionId, isJoyDaemon, sendJoyKeys]);
+    }, [sessionId, isJoyDaemon, caps.models.source, caps.effort, machineId, joySessionId, sendJoyKeys]);
 
     // Memoize header-dependent styles to prevent re-renders
     const headerDependentStyles = React.useMemo(() => ({

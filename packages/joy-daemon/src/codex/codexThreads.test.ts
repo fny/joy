@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, truncateSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { findLatestCodexThreadForCwd, parseCodexConfigArgs } from "./codexThreads";
+import { findLatestCodexThreadForCwd, listCodexThreadsForCwd, parseCodexConfigArgs } from "./codexThreads";
 
 test("findLatestCodexThreadForCwd: newest rollout for the cwd wins; others ignored", () => {
   const home = mkdtempSync(join(tmpdir(), "cxh-"));
@@ -78,4 +78,24 @@ test("findLatestCodexThreadForCwd: short reads are continued until the newline (
     spy.mockRestore();
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("listCodexThreadsForCwd: every rollout of the cwd, newest first, titled by the first real prompt", () => {
+  const home = mkdtempSync(join(tmpdir(), "cxh-list-"));
+  const day = join(home, "sessions", "2026", "09", "09");
+  mkdirSync(day, { recursive: true });
+  const env = JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>\n<cwd>/proj/a</cwd>\n</environment_context>" }] } });
+  const prompt = (t: string) => JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: t }] } });
+  const meta = (id: string, cwd: string) => JSON.stringify({ type: "session_meta", payload: { id, cwd } });
+  const a = join(day, "rollout-a.jsonl"); writeFileSync(a, [meta("t-old", "/proj/a"), env, prompt("Refactor the pairing flow")].join("\n") + "\n");
+  const b = join(day, "rollout-b.jsonl"); writeFileSync(b, [meta("t-other", "/proj/b"), env].join("\n") + "\n");
+  const c = join(day, "rollout-c.jsonl"); writeFileSync(c, [meta("t-new", "/proj/a"), env, JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Ship it" } })].join("\n") + "\n");
+  const t = Date.now();
+  utimesSync(c, new Date(t), new Date(t));
+  utimesSync(a, new Date(t - 60_000), new Date(t - 60_000));
+  const rows = listCodexThreadsForCwd("/proj/a", home);
+  expect(rows.map((r) => [r.id, r.title])).toEqual([["t-new", "Ship it"], ["t-old", "Refactor the pairing flow"]]);
+  expect(rows[0].sizeBytes).toBeGreaterThan(0);
+  expect(listCodexThreadsForCwd("/proj/none", home)).toEqual([]);
+  rmSync(home, { recursive: true, force: true });
 });

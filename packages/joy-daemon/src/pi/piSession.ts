@@ -14,6 +14,7 @@
 //   restart re-sends what pi never confirmed instead of losing it with pi's
 //   in-process queue.
 import { spawn, type ChildProcess } from "node:child_process";
+import { splitShellWords } from "../domain/shellWords";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { daemonFilePath } from "../claude/hooks";
@@ -46,6 +47,29 @@ export interface PiInit {
   piSessionId?: string;
   /** `pi -c`: continue pi's newest session for this cwd (no id known yet). */
   continueLast?: boolean;
+  /** `--thinking <level>` (off|minimal|low|medium|high|xhigh|max). */
+  effort?: string;
+  /** "plan" → `--tools read,grep,find,ls` (read-only tools); "default" → all tools. */
+  permissionMode?: string;
+  /** Extra CLI arguments, shell-split and appended to argv. */
+  extraArgs?: string;
+}
+
+/** The tools pi is left with in plan mode: nothing that writes or runs. */
+export const PI_READ_ONLY_TOOLS = "read,grep,find,ls";
+
+/** The `pi` argv for a launch. Pure — see the test. Sessions persist in
+ *  ~/.pi/agent/sessions/<cwd>/… so they can be resumed: an explicit id (ours
+ *  or --resume's) via --session-id, or pi's newest for the cwd via -c. */
+export function piLaunchArgs(o: { model?: string; piSessionId?: string; continueLast?: boolean; effort?: string; permissionMode?: string; extraArgs?: string }): string[] {
+  const args = ["--mode", "rpc"];
+  if (o.model) args.push("--model", o.model);
+  if (o.piSessionId) args.push("--session-id", o.piSessionId);
+  else if (o.continueLast) args.push("-c");
+  if (o.effort) args.push("--thinking", o.effort);
+  if (o.permissionMode === "plan") args.push("--tools", PI_READ_ONLY_TOOLS);
+  if (o.extraArgs?.trim()) args.push(...splitShellWords(o.extraArgs));
+  return args;
 }
 
 /** Locate the pi binary: PATH first, then the pnpm-global shim. */
@@ -79,8 +103,10 @@ export class PiSession implements AgentSession {
   readonly cwd: string;
   #piSessionId: string | undefined;
   #continueLast: boolean;
+  readonly permissionMode: string;
+  #extraArgs: string | undefined;
   readonly model?: string;
-  readonly effort?: string = undefined;
+  readonly effort?: string;
   status: SessionStatus;
   endReason?: string;
   claudeSessionId?: string = undefined;
@@ -129,7 +155,14 @@ export class PiSession implements AgentSession {
     this.status = init.status;
     this.#startedAt = init.startedAt;
     this.#deps = deps;
-    this.#titleLocked = loadWindowRecord(init.id)?.titleLockedByUser === true;
+    const rec = loadWindowRecord(init.id);
+    // Launch knobs ride the record so a restart/recover relaunches the same
+    // pi (a thinking level or a read-only tool set is a property of the
+    // conversation, not of one process).
+    this.effort = init.effort ?? rec?.piSettings?.effort;
+    this.permissionMode = init.permissionMode ?? rec?.piSettings?.permissionMode ?? "default";
+    this.#extraArgs = init.extraArgs ?? rec?.piSettings?.extraArgs;
+    this.#titleLocked = rec?.titleLockedByUser === true;
     // A new generation: whatever the previous process had in flight is an
     // explicit unknown, re-sent by #resendPending once pi is up (pi's own
     // queue died with it; the conversation is resumed by --session-id).
@@ -187,13 +220,10 @@ export class PiSession implements AgentSession {
 
   #start(): void {
     try {
-      const args = ["--mode", "rpc"];
-      if (this.model) args.push("--model", this.model);
-      // Sessions persist in ~/.pi/agent/sessions/<cwd>/… so they can be
-      // resumed: an explicit id (ours or --resume's) via --session-id, or
-      // pi's newest for the cwd via -c.
-      if (this.#piSessionId) args.push("--session-id", this.#piSessionId);
-      else if (this.#continueLast) args.push("-c");
+      const args = piLaunchArgs({
+        model: this.model, piSessionId: this.#piSessionId, continueLast: this.#continueLast,
+        effort: this.effort, permissionMode: this.permissionMode, extraArgs: this.#extraArgs,
+      });
       // Provider keys come from the sealed store, applied to process.env by
       // the registry right before this spawn (domain/envStore.ts).
       // JOY_SESSION_ID tells the joy CLI who is talking (a `joy send` from a
@@ -245,7 +275,7 @@ export class PiSession implements AgentSession {
 
   #persistRecord(): void {
     if (this.status === "ended") return; // a retired/killed generation must not recreate a deleted record (#52)
-    saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model, sessionId: this.#piSessionId } });
+    saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "pi", piSettings: { model: this.currentModel ?? this.model, sessionId: this.#piSessionId, effort: this.effort, permissionMode: this.permissionMode, extraArgs: this.#extraArgs } });
   }
 
   /** True when the command was handed to pi's stdin. */
@@ -454,7 +484,7 @@ export class PiSession implements AgentSession {
   async resize(): Promise<{ ok: boolean }> { return { ok: true }; }
   async sendRawKeys(): Promise<{ ok: boolean; segments: number; error?: string }> { return { ok: false, segments: 0, error: "no pane for pi sessions" }; }
   detectPermissionMode(): string | null { return null; }
-  async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "not supported for pi (bare v1)" }; }
+  async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "pi's tool set is fixed at launch (--tools) — restart the session with the other mode" }; }
   transcript(): { lines: unknown[] } { return { lines: [] }; }
   onHookEvent(): { ok: boolean } { return { ok: true }; }
   /** Card snapshot for the nucleus lane's v2 publish (see AgentSession). */
@@ -554,6 +584,8 @@ export class PiSession implements AgentSession {
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
+      current_effort: this.effort,
+      permission_mode: this.permissionMode,
       flags: [],
       status: this.status,
       started_at: this.#startedAt,

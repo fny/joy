@@ -5,7 +5,8 @@
 // thread/resume accepts. Newest-mtime-first, capped so a huge history can't
 // stall session creation.
 
-import { readdirSync, statSync } from "fs";
+import { closeSync, openSync, readSync, readdirSync, statSync } from "fs";
+import { promptTitle } from "../domain/pastSessions";
 import { join } from "path";
 import { codexHome as resolveCodexHome, codexSessionsDir as sessionsDirUnder } from "./codexHome";
 import { withFd } from "../domain/bounded";
@@ -75,6 +76,74 @@ export function findLatestCodexThreadForCwd(cwd: string, codexHome?: string): st
       const p = meta.payload ?? (meta as { cwd?: string; id?: string });
       if (p.cwd === cwd && typeof p.id === "string" && p.id) return p.id;
     } catch { /* unreadable rollout — skip */ }
+  }
+  return null;
+}
+
+/** Every thread whose rollout ran in `cwd`, newest first, with a title from
+ *  the rollout head: the first user text that is not an <environment_context>
+ *  or other "<…" wrapper (the real first prompt), clipped. Bounded head reads
+ *  only — a rollout can be gigabytes (#521). */
+export function listCodexThreadsForCwd(cwd: string, codexHome?: string): Array<{ id: string; title: string | null; updatedAt: number; sizeBytes: number | null }> {
+  const files: { path: string; mtimeMs: number; size: number }[] = [];
+  const walk = (dir: string, depth: number): void => {
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const e of entries) {
+      const p = join(dir, e);
+      try {
+        const st = statSync(p);
+        if (st.isDirectory() && depth < 3) walk(p, depth + 1);
+        else if (st.isFile() && /^rollout-.*\.jsonl$/.test(e)) files.push({ path: p, mtimeMs: st.mtimeMs, size: st.size });
+      } catch { /* skip */ }
+    }
+  };
+  walk(codexSessionsDir(codexHome), 0);
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const out: Array<{ id: string; title: string | null; updatedAt: number; sizeBytes: number | null }> = [];
+  for (const f of files.slice(0, SCAN_CAP)) {
+    try {
+      const firstLine = readFirstLine(f.path);
+      if (firstLine === null) continue;
+      const meta = JSON.parse(firstLine) as { payload?: { cwd?: string; id?: string } };
+      const p = meta.payload ?? (meta as { cwd?: string; id?: string });
+      if (p.cwd !== cwd || typeof p.id !== "string" || !p.id) continue;
+      out.push({ id: p.id, title: codexRolloutTitle(f.path), updatedAt: f.mtimeMs, sizeBytes: f.size });
+    } catch { /* unreadable rollout — skip */ }
+  }
+  return out;
+}
+
+/** First real prompt in a rollout head. Codex writes the prompt both as a
+ *  response_item message (content[].text) and as an event_msg user_message;
+ *  the environment_context message precedes it and starts with "<". */
+export function codexRolloutTitle(path: string, bytes = 16 * 1024): string | null {
+  let fd: number | null = null;
+  let text = "";
+  try {
+    const size = statSync(path).size;
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(Math.min(bytes, size));
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    text = buf.subarray(0, n).toString("utf8");
+    if (n < size) text = text.slice(0, text.lastIndexOf("\n") + 1);
+  } catch { return null; }
+  finally { if (fd !== null) closeSync(fd); }
+  for (const line of text.split("\n")) {
+    if (!line.includes('"user"') && !line.includes("user_message")) continue;
+    let e: { type?: string; payload?: Record<string, unknown> };
+    try { e = JSON.parse(line); } catch { continue; }
+    const pl = e.payload ?? {};
+    let candidate: string | null = null;
+    if (e.type === "response_item" && pl.type === "message" && pl.role === "user" && Array.isArray(pl.content)) {
+      for (const part of pl.content as Array<{ type?: string; text?: string }>) {
+        if (typeof part?.text === "string" && (part.type === "input_text" || part.type === "text")) { candidate = part.text; break; }
+      }
+    } else if (e.type === "event_msg" && pl.type === "user_message" && typeof pl.message === "string") {
+      candidate = pl.message;
+    }
+    const t = candidate ? promptTitle(candidate) : null;
+    if (t) return t;
   }
   return null;
 }

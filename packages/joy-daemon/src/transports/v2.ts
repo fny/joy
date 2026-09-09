@@ -24,8 +24,7 @@ import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/l
 import { readGitStatus } from "../domain/gitStatus";
 import { TextAccumulator } from "../domain/textStream";
 
-const HARNESSES = ["claude", "codex", "opencode", "pi", "agy"] as const;
-type Harness = (typeof HARNESSES)[number];
+import { HARNESSES, HARNESS_CAPABILITIES, type Harness } from "../domain/harnessCapabilities";
 
 const mops = new Map(machineOps.map(o => [o.name, o]));
 const sops = new Map(sessionOps.map(o => [o.name, o]));
@@ -234,7 +233,9 @@ route("GET", "/v2/usage", async (ctx) => {
 
 // ── machine: harnesses ──────────────────────────────────────────────────────
 function harnessDescriptor(h: Harness) {
-  return { id: h, available: onPath(h), config: agentConfigSpec(h) !== null };
+  // `capabilities` is the table the app renders the new-session screen and
+  // the session settings from (domain/harnessCapabilities.ts).
+  return { id: h, available: onPath(h), config: agentConfigSpec(h) !== null, capabilities: HARNESS_CAPABILITIES[h] };
 }
 route("GET", "/v2/harnesses", () => ok({ harnesses: HARNESSES.map(harnessDescriptor) }));
 route("GET", "/v2/harnesses/:harness", (_ctx, p) => {
@@ -246,9 +247,9 @@ route("GET", "/v2/harnesses/:harness/models", async (ctx, p) => {
     case "codex": return ok(await mcall("codexModels", ctx.registry, {}));
     case "opencode": return ok(await mcall("opencodeModels", ctx.registry, {}));
     case "agy": return ok(await mcall("agyModels", ctx.registry, {}));
+    case "pi": return ok(await mcall("piModels", ctx.registry, {}));
     case "claude":
-    case "pi":
-      // No machine-side catalog for these: the CLI owns model choice.
+      // No machine-side catalog: the app's static list is the catalog.
       return ok({ ok: true, models: [] });
     default: return unknownHarness();
   }
@@ -317,9 +318,19 @@ route("GET", "/v2/harnesses/:harness/limits", async (_ctx, p) => {
 });
 
 // ── machine: history (on-disk transcripts) ─────────────────────────────────
-// Past opencode conversations for a directory (the resume picker).
-route("GET", "/v2/harnesses/opencode/sessions", async (ctx) =>
-  ok(await mcall("opencodeSessions", ctx.registry, { cwd: ctx.url.searchParams.get("cwd") ?? "" })));
+// Past conversations of ANY harness in a directory (the resume picker):
+// {ok, harness, directory, sessions:[{id, title, updatedAt, sizeBytes}]}.
+// `directory` is the parameter; `cwd` is accepted for the older opencode
+// caller, which also keeps its original response shape.
+route("GET", "/v2/harnesses/:harness/sessions", async (ctx, p) => {
+  if (!HARNESSES.includes(p.harness as Harness)) return unknownHarness();
+  const directory = ctx.url.searchParams.get("directory");
+  const cwd = ctx.url.searchParams.get("cwd");
+  if (p.harness === "opencode" && !directory && cwd !== null) {
+    return ok(await mcall("opencodeSessions", ctx.registry, { cwd }));
+  }
+  return ok(await mcall("pastSessions", ctx.registry, { harness: p.harness, directory: directory ?? cwd ?? "" }));
+});
 route("GET", "/v2/history", async (ctx) =>
   ok(await mcall("listLogs", ctx.registry, { directory: ctx.url.searchParams.get("directory") ?? "" })));
 route("GET", "/v2/history/:sessionId/messages", async (ctx, p) =>
@@ -354,6 +365,8 @@ route("DELETE", "/v2/sessions/:id", withSession(async (ctx, _s, p, body) => {
 route("POST", "/v2/sessions/:id/restart", async (ctx, p, body) =>
   ok(await mcall("restart", ctx.registry, addressed(body, p))));
 route("POST", "/v2/sessions/:id/fork", async (ctx, p) => ok(await mcall("fork", ctx.registry, { id: p.id })));
+route("POST", "/v2/sessions/:id/model", async (ctx, p, body) => ok(await mcall("setModel", ctx.registry, { id: p.id, model: body.model })));
+route("POST", "/v2/sessions/:id/effort", async (ctx, p, body) => ok(await mcall("setEffort", ctx.registry, { id: p.id, effort: body.effort })));
 route("POST", "/v2/sessions/:id/handoff", (ctx, p, body) => mshaped("handoff", ctx.registry, addressed(body, p)));
 route("POST", "/v2/sessions/:id/handback", (ctx, p) => mshaped("handback", ctx.registry, { id: p.id }));
 route("POST", "/v2/sessions/:id/teleport-export", async (ctx, p) => ok(await mcall("teleportExport", ctx.registry, { id: p.id })));
@@ -365,8 +378,11 @@ route("PATCH", "/v2/sessions/:id", withSession(async (ctx, session, p, body) => 
     applied.permissionMode = await mcall("setMode", ctx.registry, { id: p.id, mode: body.permissionMode });
   }
   if (typeof body.model === "string") {
-    if (session.agentFlavor !== "opencode") return ok({ error: "model_switch_unsupported", harness: session.agentFlavor }, 422);
-    applied.model = await mcall("opencodeSetModel", ctx.registry, { id: p.id, model: body.model });
+    // Every harness answers; the op's own sentence says when it cannot.
+    applied.model = await mcall("setModel", ctx.registry, { id: p.id, model: body.model });
+  }
+  if (typeof body.effort === "string") {
+    applied.effort = await mcall("setEffort", ctx.registry, { id: p.id, effort: body.effort });
   }
   if (Object.keys(applied).length === 0) return ok({ error: "no_supported_fields" }, 400);
   return ok({ ok: true, applied });

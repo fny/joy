@@ -80,7 +80,8 @@ test("#561: a codex restart carries the session's config overrides — live sess
   expect(s2).not.toBe(s1);
   expect(H.spawns).toHaveLength(2);
   expect(H.spawns[1].config).toEqual(overrides);
-  expect(loadWindowRecord(s1.id)?.codexSettings).toMatchObject({ config: overrides, permissionMode: "bypassPermissions" });
+  // `bypassPermissions` is claude's word for it; the record keeps codex's own key (harnessCapabilities.normalizePermissionMode).
+  expect(loadWindowRecord(s1.id)?.codexSettings).toMatchObject({ config: overrides, permissionMode: "yolo" });
 
   // The daemon forgot the session (a new registry, the record survives):
   // restart from the record carries them too.

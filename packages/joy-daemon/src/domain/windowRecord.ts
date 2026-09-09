@@ -98,10 +98,10 @@ export interface WindowRecord {
    *  recovery verifies BOTH before it signals anything. */
   opencodeServerStart?: string;
   opencodeServerMarker?: string;
-  opencodeSettings?: { model?: string; providerID?: string };
-  piSettings?: { model?: string; sessionId?: string };
+  opencodeSettings?: { model?: string; providerID?: string; permissionMode?: string; effort?: string };
+  piSettings?: { model?: string; sessionId?: string; effort?: string; permissionMode?: string; extraArgs?: string };
   /** Antigravity (agy): model display name + the conversation id to --conversation on the next turn. */
-  agySettings?: { model?: string; conversationId?: string };
+  agySettings?: { model?: string; conversationId?: string; effort?: string; permissionMode?: string; extraArgs?: string };
   /** The settled handoff link (peer, state) — the card is rebuilt from a
    *  blank holder on every restart, so "Hand back" needs it from here. */
   handoff?: JoyHandoffInfo | null;
@@ -263,7 +263,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  when the state dir refused the write. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string }; piSettings?: { model?: string; sessionId?: string }; agySettings?: { model?: string; conversationId?: string }; handoff?: JoyHandoffInfo | null; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string; permissionMode?: string; effort?: string }; piSettings?: { model?: string; sessionId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; agySettings?: { model?: string; conversationId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; handoff?: JoyHandoffInfo | null; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
   baseDir = defaultStateDir(),
 ): boolean {
   try {

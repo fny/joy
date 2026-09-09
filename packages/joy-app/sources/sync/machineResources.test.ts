@@ -23,10 +23,12 @@ vi.mock('@/sync/sync', () => ({ sync: { machineOnlyCtx: (machineId: string) => (
 vi.mock('@/sync/v2/machine', () => ({
     machineStatusOnly: op('status'), machineListSessions: op('sessions'), machineEnvList: op('env'),
     machineHarnessModels: op('models'), machineHistoryLogs: op('history'), machineOpencodeSessions: op('opencode'),
+    machineHarnesses: op('harnesses'), machineHarnessSessions: op('harnessSessions'),
 }));
 
 import { resources } from '@/sync/resource';
-import { harnessModelsSpec, joyMachinesSpec, joySessionsSpec, joyStatusSpec, machineEnvSpec, pastSessionsSpec } from '@/sync/machineResources';
+import { harnessCapabilitiesSpec, harnessModelsSpec, joyMachinesSpec, joySessionsSpec, joyStatusSpec, machineEnvSpec, pastSessionsSpec } from '@/sync/machineResources';
+import { FALLBACK_HARNESS_CAPABILITIES } from '@/sync/harnessCapabilities';
 
 let n = 0;
 const machine = () => `m${++n}`;
@@ -174,6 +176,31 @@ describe('sealed environment names (machineEnvSpec)', () => {
 });
 
 describe('past sessions (pastSessionsSpec)', () => {
+    // The per-harness route answers 404 on an older daemon: the legacy routes take over.
+    beforeEach(() => { answers.harnessSessions = { status: 404, data: null }; });
+
+    it('the per-harness route lists any harness, title and all, newest first', async () => {
+        const m = machine();
+        answers.harnessSessions = { status: 200, data: { ok: true, sessions: [
+            { id: 'p1', title: 'Fix the latch', updatedAt: 5, sizeBytes: 10 },
+            { id: 'p2', title: null, updatedAt: 9, sizeBytes: null },
+        ] } };
+        const e = await resources.refresh(pastSessionsSpec(m, '/p', 'pi'));
+        expect(e.data).toEqual([
+            { id: 'p2', title: null, updatedAt: 9, sizeBytes: null },
+            { id: 'p1', title: 'Fix the latch', updatedAt: 5, sizeBytes: 10 },
+        ]);
+        expect(requests).not.toContain('history');
+        answers.harnessSessions = { status: 200, data: { ok: false, error: 'no such harness' } };
+        expect(await resources.refresh(pastSessionsSpec(m, '/p', 'pi'))).toMatchObject({ error: 'pi sessions failed: no such harness' });
+        expect(resources.peek(pastSessionsSpec(m, '/p', 'pi').key).data).toEqual(e.data);
+    });
+
+    it('an older daemon (404) lists nothing for a harness it never listed', async () => {
+        const m = machine();
+        expect(await resources.refresh(pastSessionsSpec(m, '/p', 'agy'))).toMatchObject({ data: [], error: null });
+    });
+
     it('history: a non-200 or missing logs array is an error; a valid answer is the sorted rows', async () => {
         const m = machine();
         answers.history = { status: 200, data: { ok: true, logs: [{ sessionId: 'a', sizeBytes: 1, mtimeMs: 1 }, { sessionId: 'b', sizeBytes: 2, mtimeMs: 5 }] } };
@@ -188,5 +215,39 @@ describe('past sessions (pastSessionsSpec)', () => {
         const m = machine();
         answers.opencode = { status: 200, data: { ok: true } };
         expect(await resources.refresh(pastSessionsSpec(m, '/p', 'opencode'))).toMatchObject({ hasData: false, error: 'opencode sessions failed: HTTP 200' });
+    });
+});
+
+describe('harness capabilities (harnessCapabilitiesSpec)', () => {
+    it('a daemon without the route, or descriptors without a table, resolve to the fallback', async () => {
+        const m = machine();
+        answers.harnesses = { status: 404, data: null };
+        let e = await resources.refresh(harnessCapabilitiesSpec(m));
+        expect(e.data).toEqual(FALLBACK_HARNESS_CAPABILITIES);
+        answers.harnesses = { status: 200, data: { harnesses: [{ id: 'pi', available: true, config: false }] } };
+        e = await resources.refresh(harnessCapabilitiesSpec(m));
+        expect(e.data?.pi).toEqual(FALLBACK_HARNESS_CAPABILITIES.pi);
+    });
+
+    it("a published table is the daemon's word; a refusal keeps the last good one", async () => {
+        const m = machine();
+        answers.harnesses = { status: 200, data: { harnesses: [{ id: 'pi', capabilities: {
+            models: { pick: true, source: 'live', switchLive: false },
+            effort: { levels: ['off', 'low', 'max'], default: null, perModel: false, switchLive: false },
+            permissions: { modes: [{ key: 'default', name: 'default' }, { key: 'plan', name: 'plan', description: 'read-only tools' }], default: 'plan', switchLive: false },
+            resume: { continueLast: true, byId: true, pastList: true, fork: true },
+            extraArgs: 'cli',
+        } }] } };
+        const e = await resources.refresh(harnessCapabilitiesSpec(m));
+        expect(e.data?.pi.models.pick).toBe(true);
+        expect(e.data?.pi.effort?.levels).toEqual(['off', 'low', 'max']);
+        expect(e.data?.pi.permissions).toEqual({ modes: [{ key: 'default', name: 'default', description: '' }, { key: 'plan', name: 'plan', description: 'read-only tools' }], default: 'plan', switchLive: false });
+        expect(e.data?.pi.resume.pastList).toBe(true);
+        expect(e.data?.pi.extraArgs).toBe('cli');
+        expect(e.data?.pi.fallbackModel).toBe(false);
+        expect(e.data?.claude).toEqual(FALLBACK_HARNESS_CAPABILITIES.claude); // not listed → fallback
+        answers.harnesses = { status: 500, data: { error: 'boom' } };
+        expect(await resources.refresh(harnessCapabilitiesSpec(m))).toMatchObject({ error: 'harnesses failed: boom' });
+        expect(resources.peek(harnessCapabilitiesSpec(m).key).data).toEqual(e.data);
     });
 });

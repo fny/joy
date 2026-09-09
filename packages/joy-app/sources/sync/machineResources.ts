@@ -30,9 +30,10 @@
  */
 import { sync } from './sync';
 import {
-    machineEnvList, machineHarnessModels, machineHistoryLogs, machineListSessions,
+    machineEnvList, machineHarnesses, machineHarnessModels, machineHarnessSessions, machineHistoryLogs, machineListSessions,
     machineOpencodeSessions, machineStatusOnly,
 } from './v2/machine';
+import { resolveHarnessTable, type HarnessCapabilities, type HarnessId } from './harnessCapabilities';
 import { resources, withTimeout, type ResourceOutcome, type ResourceSpec } from './resource';
 import { pastSessionsContextKey } from '@/utils/pastSessionsContext';
 import type { JoySession } from '@/joy/types';
@@ -207,14 +208,53 @@ export function machineEnvSpec(machineId: string): ResourceSpec<string[]> {
 // ── harness model catalogs ──────────────────────────────────────────────────
 
 export interface HarnessModel {
-    /** What the harness takes on its command line (codex: `model`; opencode / agy: `id`). */
+    /** What the harness takes on its command line (codex: `model`; opencode / pi / agy: `id`). */
     model?: string;
     id?: string;
     providerID?: string;
+    /** opencode: the provider-native id (`id` is `providerID/modelID`). */
+    modelID?: string;
     displayName: string;
     supportedReasoningEfforts?: string[];
     defaultReasoningEffort?: string | null;
+    /** opencode: reasoning variants the model offers (effort choices). */
+    variants?: string[];
+    /** pi: the model can think. */
+    thinking?: boolean;
     isDefault?: boolean;
+    /** The daemon's short list for this harness; the picker's default subset (Settings → Models). */
+    recommended?: boolean;
+}
+
+/** The key a picker stores and the daemon's create takes for a catalog entry. */
+export function modelKeyOf(m: HarnessModel): string {
+    return m.id ?? m.model ?? '';
+}
+
+/**
+ * The capability table of every harness on one machine (GET /v2/harnesses).
+ * An older daemon's descriptors carry no table and resolve to the fallback
+ * (harnessCapabilities.ts); a daemon without the route at all (404) is the
+ * same. A refusal keeps the last good table.
+ */
+export function harnessCapabilitiesSpec(machineId: string): ResourceSpec<Record<HarnessId, HarnessCapabilities>> {
+    return {
+        key: `harness-caps:${machineId}`,
+        family: MACHINE_FAMILY,
+        staleTime: 10 * 60_000,
+        // The table changes when the daemon is updated — a reconnect follows.
+        refetchOnReconnect: true,
+        refetchOnFocus: false,
+        fetch: async () => {
+            const ctx = sync.machineOnlyCtx(machineId);
+            if (!ctx) return { kind: 'unavailable', reason: NO_CTX };
+            const r = await machineHarnesses(ctx);
+            if (r.status === 404) return { kind: 'ok', data: resolveHarnessTable([]) };
+            const list = r.data?.harnesses;
+            if (r.status !== 200 || !Array.isArray(list)) return { kind: 'error', reason: daemonError('harnesses', r) };
+            return { kind: 'ok', data: resolveHarnessTable(list) };
+        },
+    };
 }
 
 /**
@@ -263,7 +303,7 @@ export interface PastSessionRow {
  * or submitted as a resume id — under project B, and A's slow answer lands
  * in A's cache only.
  */
-export function pastSessionsSpec(machineId: string, cwd: string, agent: 'claude' | 'opencode'): ResourceSpec<PastSessionRow[]> {
+export function pastSessionsSpec(machineId: string, cwd: string, agent: HarnessId): ResourceSpec<PastSessionRow[]> {
     return {
         key: `past-sessions:${pastSessionsContextKey({ machineId, cwd, agent })}`,
         family: PICKER_FAMILY,
@@ -275,6 +315,24 @@ export function pastSessionsSpec(machineId: string, cwd: string, agent: 'claude'
         fetch: async (): Promise<ResourceOutcome<PastSessionRow[]>> => {
             const ctx = sync.machineOnlyCtx(machineId);
             if (!ctx) return { kind: 'unavailable', reason: NO_CTX };
+            // Every harness lists through one route now; a daemon without it
+            // (404) falls back to the two routes it always had (claude's
+            // transcript listing, opencode's server sessions) and lists
+            // nothing for the rest — the capability fallback hides the row.
+            const hs = await machineHarnessSessions(ctx, agent, cwd);
+            if (hs.status !== 404) {
+                const rows = hs.data?.sessions;
+                if (!isDaemonSuccess(hs) || !Array.isArray(rows)) return { kind: 'error', reason: daemonError(`${agent} sessions`, hs) };
+                const list = rows as unknown as { id: string; title?: string | null; updatedAt: number; sizeBytes?: number | null }[];
+                return {
+                    kind: 'ok',
+                    data: list
+                        .filter((s) => typeof s.id === 'string' && s.id)
+                        .map((s) => ({ id: s.id, title: s.title ?? null, updatedAt: Number(s.updatedAt) || 0, sizeBytes: typeof s.sizeBytes === 'number' ? s.sizeBytes : null }))
+                        .sort((a, b) => b.updatedAt - a.updatedAt),
+                };
+            }
+            if (agent !== 'claude' && agent !== 'opencode') return { kind: 'ok', data: [] };
             if (agent === 'opencode') {
                 const r = await machineOpencodeSessions(ctx, cwd);
                 const rows = r.data?.sessions;

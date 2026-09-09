@@ -1575,11 +1575,13 @@ export async function cmdNew(rest: string[]): Promise<number> {
 }
 
 /** --read-only per agent: claude's plan mode; codex's read-only sandbox
- *  (approvals on request); opencode and pi have no such switch — refuse
- *  loudly rather than pretend. */
+ *  (approvals on request); opencode's plan agent; pi's read-only tool set
+ *  (--tools read,grep,find,ls); agy's --mode plan (approvals still skipped —
+ *  print mode cannot answer one). The same keys the app sends
+ *  (domain/harnessCapabilities.ts). */
 function permissionModeFor(agent: string, readOnly: boolean): { ok: true; mode: string } | { ok: false; error: string } {
-  if (!readOnly) return { ok: true, mode: "bypassPermissions" };
-  if (agent === "claude") return { ok: true, mode: "plan" };
+  if (!readOnly) return { ok: true, mode: "bypassPermissions" }; // each harness's own "no prompts" key (harnessCapabilities.normalizePermissionMode)
+  if (agent === "claude" || agent === "opencode" || agent === "pi" || agent === "agy") return { ok: true, mode: "plan" };
   if (agent === "codex") return { ok: true, mode: "read-only" };
   return { ok: false, error: `--read-only is not available for ${agent} (no read-only mode in that harness)` };
 }

@@ -37,6 +37,10 @@ export interface CodexRuntimePort {
    *  yet visible in thread/read may still be in flight (hold it, at most
    *  once) rather than dead with the old server (resend, at least once). */
   rejoined(): boolean;
+  /** A model picked mid-session (joy-set-model): sent as the next turn's
+   *  override, which codex keeps for the turns after it. */
+  pendingModel?(): string | undefined;
+  modelApplied?(): void;
   /** Joy-owned slash commands the session executes itself. */
   handleCommand(text: string, opts: { source: string; mirrorToRelay: boolean; seq?: number | null }): HandledCommand | null;
   /** Mirror a freshly accepted command's user row to the relay. */
@@ -44,7 +48,7 @@ export interface CodexRuntimePort {
   log(line: string): void;
 }
 export interface CodexTurnClient {
-  turnStart(threadId: string, text: string, opts: { clientUserMessageId?: string; permissionMode?: string; effort?: string }): Promise<{ turnId: string }>;
+  turnStart(threadId: string, text: string, opts: { clientUserMessageId?: string; permissionMode?: string; effort?: string; model?: string }): Promise<{ turnId: string }>;
   turnInterrupt(threadId: string, turnId: string): Promise<unknown>;
   threadRead(threadId: string): Promise<Record<string, unknown>>;
 }
@@ -87,8 +91,10 @@ export class CodexDriver implements RuntimeDriver {
         clientUserMessageId: attempt.runtimeRef,
         permissionMode: this.#port.permissionMode(),
         effort: this.#port.pendingEffort(),
+        model: this.#port.pendingModel?.(),
       });
       this.#port.effortApplied();
+      this.#port.modelApplied?.();
       return { kind: "accepted", runtimeTurnId: turnId };
     } catch (e) {
       if (e instanceof JsonRpcResponseError) {

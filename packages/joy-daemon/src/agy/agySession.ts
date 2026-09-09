@@ -33,6 +33,7 @@ import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand, type AttemptRef } from "../domain/coordinator";
 import { AgyDriver, type AgyRuntimePort } from "./agyDriver";
 import type { SessionStatus, SessionRecord, SessionDeps } from "../claude/session";
+import { splitShellWords } from "../domain/shellWords";
 import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
 import { titleFromPrompt } from "../opencode/opencodeSession";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
@@ -48,13 +49,43 @@ export interface AgyInit {
   conversationId?: string;
   /** `agy --continue`: resume the CLI's most recent conversation (id unknown yet). */
   continueLast?: boolean;
+  /** `--effort low|medium|high`. */
+  effort?: string;
+  /** "bypassPermissions" (default): every approval skipped. "acceptEdits" /
+   *  "plan": `--mode accept-edits|plan` — approvals are STILL skipped, since
+   *  print mode has no one to answer a prompt; the mode limits what the
+   *  agent does, not what it asks. */
+  permissionMode?: string;
+  /** Extra CLI arguments, shell-split and appended to argv. */
+  extraArgs?: string;
+}
+
+/** The fixed part of every `agy` turn's argv plus the launch knobs. Pure —
+ *  see the test. The prompt itself goes over stdin (#56). */
+export function agyLaunchArgs(o: { cwd: string; printTimeout: string; conversationId?: string; continueLast?: boolean; model?: string; effort?: string; permissionMode?: string; extraArgs?: string }): string[] {
+  const args = [
+    "--print", "",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--dangerously-skip-permissions",
+    "--add-dir", o.cwd,
+    "--print-timeout", o.printTimeout,
+  ];
+  if (o.conversationId) args.push("--conversation", o.conversationId);
+  else if (o.continueLast) args.push("--continue");
+  if (o.model) args.push("--model", o.model);
+  if (o.effort) args.push("--effort", o.effort);
+  if (o.permissionMode === "plan") args.push("--mode", "plan");
+  else if (o.permissionMode === "acceptEdits") args.push("--mode", "accept-edits");
+  if (o.extraArgs?.trim()) args.push(...splitShellWords(o.extraArgs));
+  return args;
 }
 
 /** The `agySettings` blob as THIS adapter writes it. `continueLast` (#468)
  *  and `title` (#469) ride beside the fields windowRecord.ts declares: its
  *  type has neither yet (out of this fix's scope), and saveWindowRecord
  *  stores the object as given, so both survive a daemon/session restart. */
-interface AgySettingsRecord { model?: string; conversationId?: string; continueLast?: boolean; title?: string }
+interface AgySettingsRecord { model?: string; conversationId?: string; continueLast?: boolean; title?: string; effort?: string; permissionMode?: string; extraArgs?: string }
 
 /** One wire event from `--output-format stream-json`. */
 interface AgyEvent {
@@ -104,7 +135,7 @@ export class AgySession implements AgentSession {
   readonly id: string;
   readonly cwd: string;
   readonly model?: string;
-  readonly effort?: string = undefined;
+  readonly effort?: string;
   status: SessionStatus;
   endReason?: string;
   claudeSessionId?: string = undefined;
@@ -117,6 +148,8 @@ export class AgySession implements AgentSession {
 
   #conversationId: string | undefined;
   #continueLast: boolean;
+  readonly permissionMode: string;
+  #extraArgs: string | undefined;
   #startedAt: number;
   #deps: SessionDeps;
   #relay: RelaySession | null = null;
@@ -162,6 +195,11 @@ export class AgySession implements AgentSession {
     // a FRESH conversation instead of the CLI's most recent one. The pending
     // flag is restored until a concrete conversation id has been learned.
     this.#continueLast = init.continueLast === true || (!init.conversationId && saved?.continueLast === true);
+    // Launch knobs ride the record: every turn is a fresh process, and a
+    // restart/recover must run the conversation the way it was started.
+    this.effort = init.effort ?? saved?.effort;
+    this.permissionMode = init.permissionMode ?? saved?.permissionMode ?? "bypassPermissions";
+    this.#extraArgs = init.extraArgs ?? saved?.extraArgs;
     this.status = init.status;
     this.#startedAt = init.startedAt;
     this.#deps = deps;
@@ -246,6 +284,9 @@ export class AgySession implements AgentSession {
       // Only the user's explicit title is worth keeping; a prompt-derived one
       // is recomputed on the next prompt anyway (#469).
       title: this.#titleLocked && this.summary ? this.summary : undefined,
+      effort: this.effort,
+      permissionMode: this.permissionMode,
+      extraArgs: this.#extraArgs,
     };
     saveWindowRecord(this.id, { launchCwd: this.cwd, agent: "agy", agySettings });
   }
@@ -270,18 +311,12 @@ export class AgySession implements AgentSession {
     // {"role":"user","content":…}}` per stdin line runs one turn, and stdin
     // EOF ends the process after it (probed live 2026-09-06). `--print` is a
     // string flag, so it is passed empty. No temp file: nothing hits disk.
-    const args = [
-      "--print", "",
-      "--input-format", "stream-json",
-      "--output-format", "stream-json",
-      "--dangerously-skip-permissions",
-      "--add-dir", this.cwd,
-      "--print-timeout", PRINT_TIMEOUT,
-    ];
-    if (this.#conversationId) args.push("--conversation", this.#conversationId);
-    else if (this.#continueLast) args.push("--continue");
-    const model = this.currentModel ?? this.model;
-    if (model) args.push("--model", model);
+    const args = agyLaunchArgs({
+      cwd: this.cwd, printTimeout: PRINT_TIMEOUT,
+      conversationId: this.#conversationId, continueLast: this.#continueLast,
+      model: this.currentModel ?? this.model,
+      effort: this.effort, permissionMode: this.permissionMode, extraArgs: this.#extraArgs,
+    });
 
     const run: AgyRun = { turn, proc: null, sawResult: false, turnEnded: false, exit: null, stdoutDone: false, finalized: false, textByStep: new Map(), commandId: attempt.commandId, attemptId: attempt.attemptId, cancelled: false };
     this.#run = run;
@@ -528,7 +563,7 @@ export class AgySession implements AgentSession {
   async resize(): Promise<{ ok: boolean }> { return { ok: true }; }
   async sendRawKeys(): Promise<{ ok: boolean; segments: number; error?: string }> { return { ok: false, segments: 0, error: "no pane for antigravity sessions" }; }
   detectPermissionMode(): string | null { return "bypassPermissions"; }
-  async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "antigravity runs headless with permissions skipped" }; }
+  async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "antigravity's mode is fixed at launch (--mode) — restart the session with the other mode" }; }
   transcript(): { lines: unknown[] } { return { lines: [] }; }
   onHookEvent(): { ok: boolean } { return { ok: true }; }
   cardMetadata(): Record<string, unknown> | null { return this.#relay?.metadataSnapshot ?? null; }
@@ -620,6 +655,8 @@ export class AgySession implements AgentSession {
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
+      current_effort: this.effort,
+      permission_mode: this.permissionMode,
       flags: [],
       status: this.status,
       started_at: this.#startedAt,

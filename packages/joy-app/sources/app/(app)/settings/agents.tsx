@@ -10,7 +10,8 @@ import {
     getHardcodedPermissionModes,
     type ModeOption,
 } from '@/components/modelModeOptions';
-import { useSettingMutable } from '@/sync/storage';
+import { useSetting, useSettingMutable } from '@/sync/storage';
+import { enabledModels } from '@/sync/modelAllowlist';
 import {
     agentKeys,
     getCodeAgentDefaults,
@@ -55,6 +56,7 @@ function optionName(options: ModeOption[], key: string | null | undefined): stri
 export default function AgentDefaultsSettingsScreen() {
     const { theme } = useUnistyles();
     const [agentDefaultOverrides, setAgentDefaultOverrides] = useSettingMutable('agentDefaultOverrides');
+    const harnessAllowlists = useSetting('harnessModels');
     const [expanded, setExpanded] = React.useState<ExpandedField>(null);
 
     const updateOverride = React.useCallback((
@@ -150,7 +152,13 @@ export default function AgentDefaultsSettingsScreen() {
                 // Claude's lists for OpenCode/Pi/Antigravity, which cannot honour
                 // them (#171). A field with no options for this agent is hidden.
                 const permissionOptions = permissionOptionsFor(agent, (a) => getHardcodedPermissionModes(a, t));
-                const modelOptions = modelOptionsFor(agent, (a) => getHardcodedModelModes(a, t));
+                // Claude's static catalog is trimmed to Settings → Models; the
+                // override in force stays listed so it can be seen and changed.
+                const modelOptions = enabledModels(
+                    modelOptionsFor(agent, (a) => getHardcodedModelModes(a, t)).map((o) => ({ ...o, recommended: true })),
+                    harnessAllowlists[agent],
+                    getAgentDefaultOverrideValue(agentDefaultOverrides, agent, 'modelMode'),
+                );
                 const effortOptions = getEffortLevelsForModel(agent, effectiveDefaults.modelMode);
                 const fields: FieldConfig[] = [
                     ...(permissionOptions.length > 0 ? [{

@@ -19,7 +19,7 @@ describe("buildOpenApiSpec", () => {
     expect(spec.paths["/sessions"].post["x-rpc-name"]).toBe("joy-create-session");
     const methodCount = Object.values(spec.paths).reduce((n: number, p: any) => n + Object.keys(p).length, 0);
     expect(spec.paths["/sessions/{id}/queue/{qid}"].get["x-rpc-name"]).toBe("joy-queue-get"); // #498
-    expect(methodCount).toBe(60); // 61 ops - killSession (RPC-only)
+    expect(methodCount).toBe(65); // 66 ops - killSession (RPC-only)
   });
 
   it("annotated ops carry real schemas; path params never leak into bodies", () => {

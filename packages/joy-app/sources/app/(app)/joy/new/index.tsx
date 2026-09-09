@@ -1,11 +1,12 @@
-// New joy-tmux session screen — sister of /new but stripped to Claude only,
-// no worktrees, yolo by default.
+// New joy session screen: machine, folder, harness, and every option the
+// harness's daemon reports it can take (sync/harnessCapabilities) — model,
+// effort, permission mode, continue / fork / resume by id / past sessions,
+// fallback model, history backfill, extra arguments. No worktrees.
 //
-// Differences from /new:
-//   - No agent picker (Claude only)
-//   - No worktree picker
-//   - Full claude CLI surface: permission mode, fallback model, continue,
-//     fork, plus a free-form extra-arguments string
+// Every row is keyed off the capability table for the SELECTED machine and
+// harness, never off `selectedAgent === 'codex'` chains: a harness that
+// gains an option on the daemon gains its row here without an app change,
+// and an older daemon (no table) keeps exactly the rows it honours.
 //   - Spawn is v2-only: v2.createSession() puts a durable spawn command on the
 //     relay queue and the daemon's nucleus lane launches the agent. There is no
 //     v1 RPC fallback — a broken spawn must surface, not silently reroute.
@@ -42,7 +43,11 @@ import { machineTeleportExport, machineTeleportImport } from '@/sync/v2/machine'
 import { isMachineOnline } from '@/utils/machineUtils';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { pastSessionsContextKey } from '@/utils/pastSessionsContext';
-import { harnessModelsSpec, joyMachinesSpec, pastSessionsSpec, type HarnessModel, type PastSessionRow } from '@/sync/machineResources';
+import { harnessModelsSpec, joyMachinesSpec, modelKeyOf, pastSessionsSpec, type HarnessModel, type PastSessionRow } from '@/sync/machineResources';
+import { useHarnessCapabilities } from '@/hooks/useHarnessCapabilities';
+import { enabledModels } from '@/sync/modelAllowlist';
+import { buildSpawnSpec } from './spawnSpec';
+import type { HarnessId } from '@/sync/harnessCapabilities';
 import { useResource } from '@/hooks/useResource';
 import { onlineMachineIds, planMachineAutoSelect } from './machineAutoSelect';
 import { formatPathRelativeToHome, formatLastSeen } from '@/utils/sessionUtils';
@@ -50,13 +55,8 @@ import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
 import { v2SpawnInteractive, waitForLocalSession, type V2SpawnSpec } from '@/sync/v2/spawn';
 import type { Machine, Session } from '@/sync/storageTypes';
-import {
-    getEffortLevelsForModel,
-    getDefaultEffortKeyForModel,
-    type ModelMode,
-    type EffortLevel,
-} from '@/components/modelModeOptions';
-import { JOY_CLAUDE_MODELS, JOY_CLAUDE_PERMISSION_MODES, JOY_CODEX_PERMISSION_MODES } from '@/sync/joyModels';
+import { getDefaultEffortKeyForModel } from '@/components/modelModeOptions';
+import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
 
 const COMPOSER_INPUT_VERTICAL_PADDING = Platform.OS === 'web' ? 10 : 8;
 const COMPOSER_INPUT_MAX_HEIGHT = Platform.OS === 'web' ? 480 : 240;
@@ -85,6 +85,11 @@ function scaledComposerMetrics(scale: number) {
 
 const NO_MODELS: HarnessModel[] = [];
 const NO_PAST: PastSessionRow[] = [];
+const NO_MODES: { key: string; name: string; description: string }[] = [];
+/** One entry of the model picker: a key the daemon's create takes, its label, and the catalog entry behind it (live catalogs). */
+type PickerModel = { key: string; name: string; entry?: HarnessModel; isDefault?: boolean; recommended?: boolean };
+const HARNESS_LABELS: Record<HarnessId, string> = { claude: 'claude code', codex: 'codex', opencode: 'opencode', pi: 'pi', agy: 'antigravity' };
+const HARNESS_ORDER: HarnessId[] = ['claude', 'codex', 'opencode', 'pi', 'agy'];
 
 function getMachineName(machine: Machine): string {
     return machine.metadata?.displayName || machine.metadata?.host || 'unknown';
@@ -137,22 +142,26 @@ function NewJoyTmuxSessionScreen() {
     // session so an untouched form carries the source's settings over.
     const isTeleport = !!teleportFrom;
     const [selectedMachineId, setSelectedMachineId] = React.useState<string | null>(params.machineId ?? null);
-    const [selectedAgent, setSelectedAgent] = React.useState<'claude' | 'codex' | 'opencode' | 'pi' | 'agy'>('claude');
+    const [selectedAgent, setSelectedAgent] = React.useState<HarnessId>('claude');
     const [pathInput, setPathInput] = React.useState<string>(params.path || '~/');
-    const [modelIndex, setModelIndex] = React.useState(() => {
-        const src = teleportSource?.modelMode ?? teleportSource?.metadata?.currentModelCode;
-        const i = src ? JOY_CLAUDE_MODELS.findIndex(m => m.key === src) : -1;
-        return i >= 0 ? i : 0;
-    });
-    const [effortIndex, setEffortIndex] = React.useState(0);
-    // Permission mode, cycled by tapping the row. Index 0 = yolo
-    // (bypassPermissions) — the joy-tmux default, since the app drives the
-    // session and answering permission prompts through tmux is fragile.
-    const [modeIndex, setModeIndex] = React.useState(() => {
-        const src = teleportSource?.permissionMode ?? teleportSource?.metadata?.currentOperatingModeCode;
-        const i = src ? JOY_CLAUDE_PERMISSION_MODES.findIndex(m => m.key === src) : -1;
-        return i >= 0 ? i : 0;
-    });
+    // The picks are KEYS, not indexes into a list: the lists come from the
+    // machine's catalog and the Models allowlist and change under the page
+    // (a catalog answering, a machine switch), and an index into the old list
+    // pointed at a different model in the new one. An unknown key resolves to
+    // the harness default. A teleport pre-sets both from the source session.
+    const teleportModelKey = teleportSource?.modelMode ?? teleportSource?.metadata?.currentModelCode ?? null;
+    const teleportModeKey = teleportSource?.permissionMode ?? teleportSource?.metadata?.currentOperatingModeCode ?? null;
+    const [modelKey, setModelKey] = React.useState<string | null>(teleportModelKey);
+    const [effortKey, setEffortKey] = React.useState<string | null>(null);
+    const [modeKey, setModeKey] = React.useState<string | null>(teleportModeKey);
+    // Switching harness forgets the picks: a claude model key means nothing
+    // to codex, and a stale key would silently resolve to the default anyway.
+    const prevAgentRef = React.useRef(selectedAgent);
+    React.useEffect(() => {
+        if (prevAgentRef.current === selectedAgent) return;
+        prevAgentRef.current = selectedAgent;
+        setModelKey(null); setEffortKey(null); setModeKey(null);
+    }, [selectedAgent]);
     // Fallback model (--fallback-model) — index 0 = none.
     const [fallbackIndex, setFallbackIndex] = React.useState(0);
     // When true, joy-tmux launches `claude --continue …`, resuming the most
@@ -251,42 +260,86 @@ function NewJoyTmuxSessionScreen() {
         return Array.from(paths).sort();
     }, [selectedMachineId, sessions]);
 
-    // Claude models / effort levels
-    const modelModes = React.useMemo<ModelMode[]>(() => JOY_CLAUDE_MODELS, []);
-    const currentModel = modelModes[modelIndex] ?? modelModes[0];
-    const currentModelKey = currentModel?.key ?? 'default';
-    const effortLevels = React.useMemo<EffortLevel[]>(
-        () => getEffortLevelsForModel('claude', currentModelKey),
-        [currentModelKey],
-    );
-    const currentEffort = effortLevels[effortIndex] ?? effortLevels[0];
+    // ── Options, from the harness's capability table ──────────────────────
+    // What this machine's daemon says the harness takes (an older daemon:
+    // the fallback table). Rows below render from `caps`; nothing else.
+    const caps = useHarnessCapabilities(selectedMachineId, selectedAgent);
+    const harnessAllowlists = useSetting('harnessModels');
 
-    // Harness model catalogs (codex: model/list; opencode: the daemon's
-    // curated allowlist; agy: `agy models` display names — what `agy --model`
-    // takes) are a RESOURCE per MACHINE and harness (sync/machineResources).
-    // The picker always reads the entry for the machine + harness on screen,
-    // so machine A's list can never be selected — or its model id sent — for
-    // machine B; Create waits until this machine's catalog answered. No
-    // machine context yet is `unavailable`, which does not leave Create
-    // disabled (#86).
-    const catalogAgent = selectedAgent === 'codex' || selectedAgent === 'opencode' || selectedAgent === 'agy';
-    const catalog = useResource(catalogAgent && selectedMachineId ? harnessModelsSpec(selectedMachineId, selectedAgent) : null);
-    const catalogReady = !catalogAgent || catalog.hasData || !!catalog.error || !!catalog.unavailable;
-    const catalogModels: HarnessModel[] = catalog.data ?? NO_MODELS;
-    // Index into the catalog on screen; re-seeded to the harness's default
-    // whenever the catalog (machine or harness) changes.
-    const [catalogModelIndex, setCatalogModelIndex] = React.useState(0);
-    React.useEffect(() => {
-        const def = catalogModels.findIndex((m) => m.isDefault);
-        setCatalogModelIndex(def >= 0 ? def : 0);
-    }, [catalogModels]);
-    const cycleCatalogModel = React.useCallback(() => { setCatalogModelIndex(i => catalogModels.length ? (i + 1) % catalogModels.length : 0); }, [catalogModels.length]);
-    const catalogModel: HarnessModel | undefined = catalogModels[catalogModelIndex];
-    const codexModel = selectedAgent === 'codex' ? catalogModel : undefined;
-    const ocModel = selectedAgent === 'opencode' ? catalogModel : undefined;
-    const agyModel = selectedAgent === 'agy' ? catalogModel : undefined;
-    const [codexEffortIndex, setCodexEffortIndex] = React.useState(0);
-    // Past-sessions picker (opencode / claude): a RESOURCE of ONE machine +
+    // Model catalog: the app's own list for claude, the machine's live
+    // catalog otherwise — a RESOURCE per MACHINE and harness
+    // (sync/machineResources), so machine A's list can never be selected —
+    // or its model id sent — for machine B. Create waits until this
+    // machine's catalog answered; no machine context yet is `unavailable`,
+    // which does not leave Create disabled (#86). Then trimmed to what
+    // Settings → Models enables (modelAllowlist.ts), the default always kept.
+    const liveCatalog = useResource(caps.models.pick && caps.models.source === 'live' && selectedMachineId ? harnessModelsSpec(selectedMachineId, selectedAgent) : null);
+    const catalogReady = caps.models.source !== 'live' || liveCatalog.hasData || !!liveCatalog.error || !!liveCatalog.unavailable;
+    const catalogModels: HarnessModel[] = liveCatalog.data ?? NO_MODELS;
+    const modelOptions = React.useMemo<PickerModel[]>(() => {
+        if (!caps.models.pick) return [];
+        const allow = harnessAllowlists[selectedAgent];
+        if (caps.models.source === 'static') {
+            const rows = JOY_CLAUDE_MODELS.map((m, i) => ({ key: m.key, name: m.name, recommended: true, isDefault: i === 0 }));
+            return enabledModels(rows, allow, teleportModelKey);
+        }
+        const rows = catalogModels
+            .map((e) => ({ key: modelKeyOf(e), name: e.displayName || modelKeyOf(e), entry: e, isDefault: e.isDefault === true, recommended: e.recommended === true }))
+            .filter((r) => r.key);
+        return enabledModels(rows, allow);
+    }, [caps.models.pick, caps.models.source, harnessAllowlists, selectedAgent, catalogModels, teleportModelKey]);
+    const currentModel = modelOptions.find((m) => m.key === modelKey) ?? modelOptions.find((m) => m.isDefault) ?? modelOptions[0];
+    const cycleModel = React.useCallback(() => {
+        if (modelOptions.length === 0) return;
+        const i = modelOptions.findIndex((m) => m.key === (currentModel?.key ?? ''));
+        setModelKey(modelOptions[(Math.max(i, 0) + 1) % modelOptions.length].key);
+    }, [modelOptions, currentModel?.key]);
+
+    // Effort: the harness's fixed levels, or the picked model's own
+    // (codex `supportedReasoningEfforts`, opencode `variants`). A harness
+    // with no fixed default leaves it to the model — 'default' sends nothing.
+    const effortOptions = React.useMemo<string[]>(() => {
+        if (!caps.effort) return [];
+        const e = currentModel?.entry;
+        const levels = caps.effort.perModel
+            ? (e?.supportedReasoningEfforts?.length ? e.supportedReasoningEfforts : e?.variants?.length ? e.variants : caps.effort.levels)
+            : caps.effort.levels;
+        if (levels.length === 0) return [];
+        return caps.effort.default === null && selectedAgent !== 'claude' ? ['default', ...levels] : levels;
+    }, [caps.effort, currentModel?.entry, selectedAgent]);
+    const effortDefault = React.useMemo<string | null>(() => {
+        if (!caps.effort || effortOptions.length === 0) return null;
+        const e = currentModel?.entry;
+        // The model's OWN default (codex finding #8): an untouched pick must
+        // not override defaultReasoningEffort on every turn.
+        if (e?.defaultReasoningEffort && effortOptions.includes(e.defaultReasoningEffort)) return e.defaultReasoningEffort;
+        if (selectedAgent === 'claude') {
+            const d = getDefaultEffortKeyForModel('claude', currentModel?.key ?? 'default');
+            return d && effortOptions.includes(d) ? d : effortOptions[effortOptions.length - 1];
+        }
+        return caps.effort.default && effortOptions.includes(caps.effort.default) ? caps.effort.default : effortOptions[0];
+    }, [caps.effort, effortOptions, currentModel?.entry, currentModel?.key, selectedAgent]);
+    const currentEffort = effortKey && effortOptions.includes(effortKey) ? effortKey : effortDefault;
+    const cycleEffort = React.useCallback(() => {
+        if (effortOptions.length === 0) return;
+        const i = effortOptions.indexOf(currentEffort ?? '');
+        setEffortKey(effortOptions[(Math.max(i, 0) + 1) % effortOptions.length]);
+    }, [effortOptions, currentEffort]);
+
+    // Permission mode — the harness's OWN modes (claude's on codex silently
+    // escalate, finding #1), in the daemon's cycle order; the daemon's
+    // default is the seed.
+    const permissionModes = caps.permissions?.modes ?? NO_MODES;
+    const currentMode = permissionModes.find((m) => m.key === modeKey)
+        ?? permissionModes.find((m) => m.key === caps.permissions?.default)
+        ?? permissionModes[0];
+    const isYolo = currentMode?.key === 'bypassPermissions' || currentMode?.key === 'yolo';
+    const cycleMode = React.useCallback(() => {
+        if (permissionModes.length === 0) return;
+        const i = permissionModes.findIndex((m) => m.key === (currentMode?.key ?? ''));
+        setModeKey(permissionModes[(Math.max(i, 0) + 1) % permissionModes.length].key);
+    }, [permissionModes, currentMode?.key]);
+    // Past-sessions picker (any harness the daemon lists): a RESOURCE of ONE machine +
     // directory + harness (#153). A change of any of them is another key, so
     // a row fetched for project A can never be listed — or submitted as a
     // resume id — under project B, and A's slow response lands in A's cache
@@ -298,7 +351,7 @@ function NewJoyTmuxSessionScreen() {
     const [pastOpen, setPastOpen] = React.useState(false);
     React.useEffect(() => { setPastOpen(false); }, [pastContextKey]);
     const past = useResource(
-        selectedMachineId && (selectedAgent === 'claude' || selectedAgent === 'opencode') ? pastSessionsSpec(selectedMachineId, pastCwd, selectedAgent) : null,
+        selectedMachineId && caps.resume.pastList ? pastSessionsSpec(selectedMachineId, pastCwd, selectedAgent) : null,
         { enabled: pastOpen },
     );
     const pastRows = pastOpen ? (past.data ?? NO_PAST) : NO_PAST;
@@ -318,50 +371,6 @@ function NewJoyTmuxSessionScreen() {
         return `${Math.round(h / 24)}d ago`;
     };
 
-    // Switching agents swaps the permission-mode list (claude vs codex) — reset
-    // the index so a stale claude index can't select the wrong codex mode.
-    React.useEffect(() => { setModeIndex(0); }, [selectedAgent]);
-    const codexEfforts = codexModel?.supportedReasoningEfforts ?? [];
-    const codexEffort = codexEfforts[codexEffortIndex];
-    const cycleCodexEffort = React.useCallback(() => { setCodexEffortIndex(i => codexEfforts.length ? (i + 1) % codexEfforts.length : 0); }, [codexEfforts.length]);
-    // Seed the effort picker to the model's OWN default (finding #8): an
-    // untouched index-0 pick would otherwise override codex's defaultReasoning-
-    // Effort on every new turn. Re-runs whenever the selected model changes.
-    React.useEffect(() => {
-        if (!codexModel) return;
-        const def = codexModel.defaultReasoningEffort;
-        const idx = def ? (codexModel.supportedReasoningEfforts ?? []).indexOf(def) : -1;
-        setCodexEffortIndex(idx >= 0 ? idx : 0);
-    }, [codexModel]);
-
-    // Reset effort to a sensible default when model changes
-    React.useEffect(() => {
-        const defaultEffort = getDefaultEffortKeyForModel('claude', currentModelKey);
-        if (defaultEffort && effortLevels.length > 0) {
-            const idx = effortLevels.findIndex(e => e.key === defaultEffort);
-            setEffortIndex(idx >= 0 ? idx : effortLevels.length - 1);
-        } else {
-            setEffortIndex(0);
-        }
-    }, [currentModelKey, effortLevels]);
-
-    const cycleModel = React.useCallback(() => {
-        setModelIndex(i => (i + 1) % modelModes.length);
-    }, [modelModes.length]);
-
-    const cycleEffort = React.useCallback(() => {
-        if (effortLevels.length === 0) return;
-        setEffortIndex(i => (i + 1) % effortLevels.length);
-    }, [effortLevels.length]);
-
-    // Codex uses its OWN permission modes — the claude modes silently escalate
-    // when mapped onto codex (finding #1). Pick the list by selected agent.
-    const permissionModes = selectedAgent === 'codex' ? JOY_CODEX_PERMISSION_MODES : JOY_CLAUDE_PERMISSION_MODES;
-    const currentMode = permissionModes[modeIndex] ?? permissionModes[0];
-    const isYolo = currentMode.key === 'bypassPermissions' || currentMode.key === 'yolo';
-    const cycleMode = React.useCallback(() => {
-        setModeIndex(i => (i + 1) % permissionModes.length);
-    }, [permissionModes.length]);
 
     // 'none' plus the model catalog — claude falls back when the primary
     // model is overloaded.
@@ -410,7 +419,7 @@ function NewJoyTmuxSessionScreen() {
                 // bypassPermissions applied).
                 const imp = await machineTeleportImport(dctx, {
                     cwd, claudeSessionId: exp.data.claudeSessionId, transcriptBase64: exp.data.transcriptBase64,
-                    model: currentModel?.key ?? exp.data.model, permissionMode: currentMode.key, createDir: true,
+                    model: currentModel?.key ?? exp.data.model, permissionMode: currentMode?.key ?? 'bypassPermissions', createDir: true,
                 });
                 if (!imp.data?.ok || !imp.data.localSessionId) throw new Error(imp.data?.error || 'Import failed');
                 const landed = await waitForLocalSession(imp.data.localSessionId);
@@ -428,26 +437,22 @@ function NewJoyTmuxSessionScreen() {
             }
             // Git-URL spawn: the daemon clones (or reuses) the URL into cwd
             // BEFORE launching, and the spawn fails — instead of starting an
-            // agent in an empty folder — if the clone does (#151). `gitUrl` is
-            // the daemon create op's own parameter name; the v2 spawn spec
-            // type does not list it yet, hence the widened literal.
-            const spawnSpec: V2SpawnSpec & { gitUrl?: string } = {
+            // agent in an empty folder — if the clone does (#151). Only what
+            // the capability table allows is sent (spawnSpec.ts).
+            const spawnSpec = buildSpawnSpec(caps, {
                 cwd,
                 gitUrl: gitClone?.url,
                 agent: selectedAgent,
-                // Codex/opencode carry their own model ids from their catalogs;
-                // claude sends its key. Effort is claude/codex only.
-                model: selectedAgent === 'codex' ? codexModel?.model : selectedAgent === 'opencode' ? ocModel?.id : selectedAgent === 'agy' ? agyModel?.id : selectedAgent === 'pi' ? undefined : currentModel?.key,
-                effort: selectedAgent === 'codex' ? codexEffort : selectedAgent === 'claude' && currentEffort && currentEffort.key !== 'default' ? currentEffort.key : undefined,
-                // resume by id wins over --continue (most recent); never both.
-                resume_id: resumeId.trim() || undefined,
-                continue: (continueLast && !resumeId.trim()) || undefined,
-                resumeLimitMb: selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (Number(resumeMb) >= 0 ? Number(resumeMb) : 1) : undefined,
-                permissionMode: selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' ? currentMode.key : undefined,
-                fallbackModel: selectedAgent === 'claude' ? (currentFallback.key ?? undefined) : undefined,
-                forkSession: (selectedAgent === 'claude' && (continueLast || resumeId.trim()) && forkSession) || undefined,
-                extraArgs: selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' ? (extraArgs.trim() || undefined) : undefined,
-            };
+                model: currentModel?.key,
+                effort: currentEffort ?? undefined,
+                permissionMode: currentMode?.key,
+                resumeId,
+                continueLast,
+                fork: forkSession,
+                resumeMb,
+                fallbackModel: currentFallback.key,
+                extraArgs,
+            });
             // Interactive (#417): an unanswered creation offers a Retry that
             // re-drives THIS action under the same creation intent, so the
             // relay replays the session it may already hold instead of
@@ -478,9 +483,9 @@ function NewJoyTmuxSessionScreen() {
         } finally {
             setIsSpawning(false);
         }
-    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, selectedAgent, codexModel, codexEffort, ocModel, agyModel, teleportFrom, teleportSource, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
+    }, [selectedMachineId, selectedMachine, selectedHomeDir, pathInput, selectedAgent, caps, teleportFrom, teleportSource, currentModel, currentEffort, currentMode, currentFallback, continueLast, forkSession, resumeId, resumeMb, extraArgs, prompt, router, navigateToSession, recentMachinePaths, setRecentMachinePaths]);
 
-    const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning && (!catalogAgent || catalogReady);
+    const canSend = !!selectedMachineId && !!selectedMachine && isMachineOnline(selectedMachine) && !isSpawning && catalogReady;
 
     const handleKeyPress = React.useCallback((event: KeyPressEvent): boolean => {
         if (Platform.OS === 'web' && event.key === 'Enter' && !event.shiftKey && agentInputEnterToSend) {
@@ -548,75 +553,41 @@ function NewJoyTmuxSessionScreen() {
                                 <Text style={styles.configLabel} numberOfLines={1}>{displayPath}</Text>
                             </Pressable>
 
-                            {/* Agent badge (tap to toggle claude ↔ codex) + model + effort */}
+                            {/* Agent badge (tap cycles the harnesses) + model + effort —
+                                the model and effort segments appear for any harness whose
+                                table offers them. */}
                             <View style={styles.configRow}>
                                 <Ionicons name="terminal-outline" size={15} color={theme.colors.textSecondary} />
-                                <Pressable disabled={isTeleport} onPress={() => setSelectedAgent(a => a === 'claude' ? 'codex' : a === 'codex' ? 'opencode' : a === 'opencode' ? 'pi' : a === 'pi' ? 'agy' : 'claude')} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                    <Text style={styles.configLabel} numberOfLines={1}>{selectedAgent === 'codex' ? 'codex' : selectedAgent === 'opencode' ? 'opencode' : selectedAgent === 'pi' ? 'pi' : selectedAgent === 'agy' ? 'antigravity' : 'claude code'}</Text>
+                                <Pressable disabled={isTeleport} onPress={() => setSelectedAgent(a => HARNESS_ORDER[(HARNESS_ORDER.indexOf(a) + 1) % HARNESS_ORDER.length])} style={(p) => [p.pressed && styles.configRowPressed]}>
+                                    <Text style={styles.configLabel} numberOfLines={1}>{HARNESS_LABELS[selectedAgent]}</Text>
                                 </Pressable>
-                                {selectedAgent === 'codex' && codexModel && (
+                                {currentModel && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleCatalogModel} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{codexModel.displayName}</Text>
-                                        </Pressable>
-                                        {codexEfforts.length > 0 && (
-                                            <>
-                                                <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                                <Pressable onPress={cycleCodexEffort} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                                    <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{codexEffort}</Text>
-                                                </Pressable>
-                                            </>
-                                        )}
-                                    </>
-                                )}
-                                {selectedAgent === 'opencode' && ocModel && (
-                                    <>
-                                        <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleCatalogModel} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{ocModel.displayName}</Text>
+                                        <Pressable onPress={cycleModel} style={(p) => [p.pressed && styles.configRowPressed]} testID="joy-new-model-picker">
+                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{currentModel.name}</Text>
                                         </Pressable>
                                     </>
                                 )}
-                                {selectedAgent === 'agy' && agyModel && (
+                                {!isTeleport && currentEffort && (
                                     <>
                                         <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleCatalogModel} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{agyModel.displayName}</Text>
-                                        </Pressable>
-                                    </>
-                                )}
-                                {selectedAgent === 'claude' && modelModes.length > 1 && (
-                                    <>
-                                        <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleModel} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                                                {currentModel?.name ?? 'default'}
-                                            </Text>
-                                        </Pressable>
-                                    </>
-                                )}
-                                {/* Claude effort — codex has its own effort item above. */}
-                                {selectedAgent === 'claude' && !isTeleport && effortLevels.length > 0 && currentEffort && (
-                                    <>
-                                        <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]}>·</Text>
-                                        <Pressable onPress={cycleEffort} style={(p) => [p.pressed && styles.configRowPressed]}>
-                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                                                {currentEffort.name}
-                                            </Text>
+                                        <Pressable onPress={cycleEffort} style={(p) => [p.pressed && styles.configRowPressed]} testID="joy-new-effort-picker">
+                                            <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>{currentEffort}</Text>
                                         </Pressable>
                                     </>
                                 )}
                             </View>
 
-                            {/* Permission mode — tap to cycle through the same order as
-                                claude's Shift+Tab. yolo (bypassPermissions) is the default.
-                                Hidden for opencode: v1 has no permission surface (approvals
-                                land as chat prompts). */}
-                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' && (
+                            {/* Permission mode — tap to cycle the harness's own modes in
+                                the daemon's order (claude: the same as Shift+Tab). Absent
+                                for a harness that reports none (agy runs with permissions
+                                skipped; an older daemon offers none for opencode / pi). */}
+                            {currentMode && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={cycleMode}
+                                testID="joy-new-permission-picker"
                             >
                                 <Ionicons
                                     name={isYolo ? 'play-forward' : 'shield-outline'}
@@ -627,7 +598,7 @@ function NewJoyTmuxSessionScreen() {
                                     {currentMode.name}
                                 </Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
-                                    {isYolo ? 'permission prompts are skipped' : 'permission mode'}
+                                    {currentMode.description || 'permission mode'}
                                 </Text>
                             </Pressable>
                             )}
@@ -646,9 +617,8 @@ function NewJoyTmuxSessionScreen() {
                             )}
 
                             {!isTeleport && (<>
-                            {/* Claude-only: fallback model (--fallback-model). */}
-                            {selectedAgent === 'claude' && (<>
-                            {/* Fallback model — tap to cycle. */}
+                            {/* Fallback model (claude's --fallback-model) — tap to cycle. */}
+                            {caps.fallbackModel && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={cycleFallback}
@@ -664,13 +634,13 @@ function NewJoyTmuxSessionScreen() {
                                     </Text>
                                 )}
                             </Pressable>
-
-                            </>)}
+                            )}
 
                             {/* Continue — resume the most recent conversation in this
                                 cwd (claude: --continue; codex: newest thread whose
                                 rollout ran here; opencode: newest session in this
-                                directory). */}
+                                directory; pi: -c; agy: --continue). */}
+                            {caps.resume.continueLast && (
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={() => setContinueLast(v => !v)}
@@ -685,32 +655,35 @@ function NewJoyTmuxSessionScreen() {
                                 />
                                 <Text style={styles.configLabel} numberOfLines={1}>continue</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
-                                    {continueLast ? (selectedAgent === 'claude' ? 'resume last claude conversation' : `resume last ${selectedAgent} conversation`) : 'start fresh'}
+                                    {continueLast ? `resume last ${HARNESS_LABELS[selectedAgent]} conversation` : 'start fresh'}
                                 </Text>
                             </Pressable>
+                            )}
 
-                            {/* Fork — claude-only; only meaningful with continue (claude
-                                rejects --fork-session on a fresh session). */}
-                            {selectedAgent === 'claude' && (<>
+                            {/* Fork — continue under a NEW conversation id (claude:
+                                --fork-session; codex / pi / agy: the daemon copies the
+                                history file). Only meaningful with continue or a resume id. */}
+                            {caps.resume.fork && (
                             <Pressable
-                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !continueLast && { opacity: 0.4 }]}
+                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed, !(continueLast || resumeId.trim()) && { opacity: 0.4 }]}
                                 onPress={() => setForkSession(v => !v)}
-                                disabled={!continueLast}
+                                disabled={!(continueLast || resumeId.trim())}
+                                testID="joy-new-fork-toggle"
                             >
                                 <Ionicons
-                                    name={continueLast && forkSession ? 'checkbox' : 'square-outline'}
+                                    name={(continueLast || resumeId.trim()) && forkSession ? 'checkbox' : 'square-outline'}
                                     size={15}
-                                    color={continueLast && forkSession ? theme.colors.textLink : theme.colors.textSecondary}
+                                    color={(continueLast || resumeId.trim()) && forkSession ? theme.colors.textLink : theme.colors.textSecondary}
                                 />
                                 <Text style={styles.configLabel} numberOfLines={1}>fork</Text>
                                 <Text style={styles.configHint} numberOfLines={1}>
-                                    {continueLast ? 'continue under a new session id' : 'requires continue'}
+                                    {(continueLast || resumeId.trim()) ? 'continue under a new session id' : 'requires continue or a resume id'}
                                 </Text>
                             </Pressable>
-                            </>)}
+                            )}
 
-                            {/* Resume a specific conversation by id (claude session id,
-                                or codex thread id). Overrides continue when set. */}
+                            {/* Resume a specific conversation by id. Overrides continue when set. */}
+                            {caps.resume.byId && (
                             <View style={styles.configRow}>
                                 <Ionicons name="refresh-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput
@@ -725,13 +698,15 @@ function NewJoyTmuxSessionScreen() {
                                     autoComplete="off"
                                 />
                             </View>
+                            )}
 
-                            {/* Claude: past conversations in this directory — tap one to
-                                fill the resume field. */}
-                            {selectedAgent === 'claude' && (<>
+                            {/* Past conversations in this directory, by title — tap one
+                                to fill the resume field. */}
+                            {caps.resume.pastList && (<>
                             <Pressable
                                 style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
                                 onPress={togglePast}
+                                testID="joy-new-past-toggle"
                             >
                                 <Ionicons name={pastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
                                 <Text style={styles.configLabel} numberOfLines={1}>past sessions</Text>
@@ -751,45 +726,15 @@ function NewJoyTmuxSessionScreen() {
                                     <Text style={[styles.configLabel, { color: ps.title ? theme.colors.text : theme.colors.textSecondary }]} numberOfLines={1}>
                                         {ps.title || `${ps.id.slice(0, 18)}…`}
                                     </Text>
-                                    <Text style={styles.configHint} numberOfLines={1}>{ps.title ? `${ps.id.slice(0, 8)} · ` : ''}{ocAge(ps.updatedAt)} · {Math.max(1, Math.round((ps.sizeBytes ?? 0) / 1024))}KB</Text>
-                                </Pressable>
-                            ))}
-                            </>)}
-
-                            {/* Opencode: past sessions in this directory — tap one to
-                                fill the resume field. */}
-                            {selectedAgent === 'opencode' && (<>
-                            <Pressable
-                                style={(p) => [styles.configRow, p.pressed && styles.configRowPressed]}
-                                onPress={togglePast}
-                            >
-                                <Ionicons name={pastOpen ? 'chevron-down' : 'chevron-forward'} size={15} color={theme.colors.textSecondary} />
-                                <Text style={styles.configLabel} numberOfLines={1}>past sessions</Text>
-                                <Text style={styles.configHint} numberOfLines={1}>{pastHint}</Text>
-                            </Pressable>
-                            {pastOpen && !pastLoading && pastRows.slice(0, 8).map((ps) => (
-                                <Pressable
-                                    key={ps.id}
-                                    style={(p) => [styles.configRow, { paddingLeft: 34 }, p.pressed && styles.configRowPressed]}
-                                    onPress={() => { setResumeId(ps.id); setContinueLast(true); setPastOpen(false); }}
-                                >
-                                    <Ionicons
-                                        name={resumeId === ps.id ? 'radio-button-on' : 'radio-button-off'}
-                                        size={13}
-                                        color={resumeId === ps.id ? theme.colors.button.primary.background : theme.colors.textSecondary}
-                                    />
-                                    <Text style={[styles.configLabel, { color: theme.colors.textSecondary }]} numberOfLines={1}>
-                                        {ps.title?.startsWith('New session') ? ps.id.slice(0, 16) + '…' : (ps.title || ps.id)}
+                                    <Text style={styles.configHint} numberOfLines={1}>
+                                        {ps.title ? `${ps.id.slice(0, 8)} · ` : ''}{ocAge(ps.updatedAt)}{ps.sizeBytes != null ? ` · ${Math.max(1, Math.round(ps.sizeBytes / 1024))}KB` : ''}
                                     </Text>
-                                    <Text style={styles.configHint} numberOfLines={1}>{ocAge(ps.updatedAt)}</Text>
                                 </Pressable>
                             ))}
                             </>)}
 
-                            {/* History to backfill (MB). Relevant when resuming by
-                                id OR continuing the last conversation. 0 = full.
-                                Claude-only: codex resume replays via thread/read. */}
-                            {selectedAgent === 'claude' && (resumeId.trim() || continueLast) ? (
+                            {/* History to backfill (MB) on resume / continue. 0 = full. */}
+                            {caps.resumeLimitMb && (resumeId.trim() || continueLast) ? (
                                 <View style={styles.configRow}>
                                     <Ionicons name="time-outline" size={15} color={theme.colors.textSecondary} />
                                     <TextInput
@@ -806,21 +751,20 @@ function NewJoyTmuxSessionScreen() {
                                 </View>
                             ) : null}
 
-
-                            {/* Extra arguments — claude: CLI args appended verbatim;
-                                codex: -c config overrides (key=value …). opencode has
-                                no extra-args surface. */}
-                            {selectedAgent !== 'opencode' && selectedAgent !== 'pi' && selectedAgent !== 'agy' && (
+                            {/* Extra arguments — verbatim command-line args (claude, pi,
+                                agy) or key=value config overrides (codex). */}
+                            {caps.extraArgs && (
                             <View style={styles.configRow}>
                                 <Ionicons name="options-outline" size={15} color={theme.colors.textSecondary} />
                                 <TextInput
                                     value={extraArgs}
                                     onChangeText={setExtraArgs}
-                                    placeholder={selectedAgent === 'codex' ? 'config overrides (key=value …)' : 'extra arguments'}
+                                    placeholder={caps.extraArgs === 'config' ? 'config overrides (key=value …)' : 'extra command-line args'}
                                     placeholderTextColor={theme.colors.textSecondary}
                                     style={styles.argsInput}
                                     autoCapitalize="none"
                                     autoCorrect={false}
+                                    testID="joy-new-extra-args-input"
                                 />
                             </View>
                             )}

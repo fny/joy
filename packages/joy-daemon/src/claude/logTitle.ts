@@ -18,6 +18,7 @@
 // once. Results are cached by size+mtime, so a re-list is free.
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { joyTitleValue } from "./session";
+import type { WindowRecord } from "../domain/windowRecord";
 
 export type LogTitleSource = "agent" | "ai" | "prompt";
 export interface LogTitle { title: string; source: LogTitleSource }
@@ -146,3 +147,18 @@ export function readLogTitle(
   } catch { value = null; }
   return remember(file, key, value);
 }
+
+/** Title for a listed transcript: the user's own /title (window record) is
+ *  the one thing the transcript cannot tell us; after that the transcript
+ *  itself, then whatever the record remembered when the file has nothing
+ *  readable (e.g. an agent title set in a session whose transcript was
+ *  truncated). */
+export function logTitleFor(file: string, record: WindowRecord | undefined): { title: string | null; titleSource: LogTitleSource | "user" | null } {
+  if (record?.userTitle?.trim()) return { title: record.userTitle.trim(), titleSource: "user" };
+  const fromFile = readLogTitle(file);
+  if (fromFile) return { title: fromFile.title, titleSource: fromFile.source };
+  if (record?.agentTitle?.trim()) return { title: record.agentTitle.trim(), titleSource: "agent" };
+  if (record?.lastAiTitle?.trim()) return { title: record.lastAiTitle.trim(), titleSource: "ai" };
+  return { title: null, titleSource: null };
+}
+

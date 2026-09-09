@@ -24,13 +24,15 @@ import { claimTranscript, transcriptClaims, type TranscriptClaim } from "./trans
 import { processTreeStats } from "./procStats";
 import { listWindowRecords, loadWindowRecord, type WindowRecord } from "./windowRecord";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
+import { HARNESSES, HARNESS_CAPABILITIES, isHarness } from "./harnessCapabilities";
+import { listPastSessions } from "./pastSessions";
 import { notePath, noteRequestPrompt, sessionLabel, runHandoffJob, runHandbackJob, loadHandoffJob, type HandoffTarget } from "./handoff";
 import { handleBash, handleReadFile, handleWriteFile, handleDeleteFile, handleListDirectory, handleGetDirectoryTree, handleRipgrep, handleDifftastic, readRoots, withPathLock } from "./fileOps";
 import { computeUsage, periodToRange } from "../claude/usage";
 import { fetchClaudeLimits, readCodexLimits } from "./limits";
 import { readAgentConfig, applyAgentConfigAssignments, writeAgentConfigRaw, fetchAgentSchema } from "./agentConfig";
 import { cwdToTranscriptDir, teleportTailOffset } from "../claude/transcript";
-import { readLogTitle, type LogTitleSource } from "../claude/logTitle";
+import { logTitleFor, type LogTitleSource } from "../claude/logTitle";
 import { joySessionDir, canonicalCwd } from "../paths";
 import { ReverseUtf8Assembler } from "./textStream";
 import { shellJoin } from "./quote";
@@ -322,20 +324,6 @@ export function readLastLogMessages(file: string, limit: number, chunkBytes = 25
   } catch { return []; }
 }
 
-/** Title for a listed transcript: the user's own /title (window record) is
- *  the one thing the transcript cannot tell us; after that the transcript
- *  itself, then whatever the record remembered when the file has nothing
- *  readable (e.g. an agent title set in a session whose transcript was
- *  truncated). Exported for its test. */
-export function logTitleFor(file: string, record: WindowRecord | undefined): { title: string | null; titleSource: LogTitleSource | "user" | null } {
-  if (record?.userTitle?.trim()) return { title: record.userTitle.trim(), titleSource: "user" };
-  const fromFile = readLogTitle(file);
-  if (fromFile) return { title: fromFile.title, titleSource: fromFile.source };
-  if (record?.agentTitle?.trim()) return { title: record.agentTitle.trim(), titleSource: "agent" };
-  if (record?.lastAiTitle?.trim()) return { title: record.lastAiTitle.trim(), titleSource: "ai" };
-  return { title: null, titleSource: null };
-}
-
 /** JSON-Schema fragment used for OpenAPI emission (transports/openapi.ts).
  *  Plain objects rather than zod: handlers don't validate through zod today,
  *  so a literal schema keeps the table dependency-free and directly dumpable.
@@ -470,12 +458,66 @@ export const machineOps: MachineOp[] = [
     name: "opencodeModels",
     scope: "machine",
     rpcName: "joy-opencode-models",
-    summary: "Curated opencode model list",
+    summary: "opencode model catalog — what the server itself reports (GET /provider), the curated pair marked recommended",
     http: { method: "GET", path: "/opencode/models" },
-    // Static curated allowlist (v1) — no server spawn, instant.
+    // Live: one short-lived server boot, memoised ten minutes; the curated
+    // pair when the server cannot be asked. Rows: {id: "<providerID>/<modelID>",
+    // providerID, modelID, displayName, isDefault, recommended, variants[]}.
+    // The app keeps its own allowlist over this — the picker never has to
+    // show 241 models.
     handler: async () => {
-      const { OPENCODE_MODELS } = await import("../opencode/models");
-      return { ok: true, models: OPENCODE_MODELS };
+      const { listOpencodeModels } = await import("../opencode/models");
+      return { ok: true, models: await listOpencodeModels() };
+    },
+  },
+  {
+    name: "piModels",
+    scope: "machine",
+    rpcName: "joy-pi-models",
+    summary: "pi model catalog — `pi --list-models`, the curated pair marked recommended",
+    http: { method: "GET", path: "/pi/models" },
+    // Rows: {id: "<provider>/<model id>" (what `pi --model` takes), providerID,
+    // modelID, displayName, isDefault, recommended, thinking}. Memoised ten
+    // minutes; the curated pair when pi cannot be asked.
+    handler: async () => {
+      const { listPiModels } = await import("../pi/models");
+      return { ok: true, models: await listPiModels() };
+    },
+  },
+  {
+    name: "harnessCapabilities",
+    scope: "machine",
+    rpcName: "joy-harness-capabilities",
+    summary: "What each harness can be asked for on create and live (models, effort, permissions, resume, extra args)",
+    http: { method: "GET", path: "/harnesses/capabilities" },
+    // The ONE table the app renders the new-session screen and the session
+    // settings from, and the daemon validates create against
+    // (domain/harnessCapabilities.ts). GET /v2/harnesses carries the same
+    // object per harness.
+    handler: () => ({ ok: true, harnesses: HARNESSES.map((h) => HARNESS_CAPABILITIES[h]) }),
+  },
+  {
+    name: "pastSessions",
+    scope: "machine",
+    rpcName: "joy-past-sessions",
+    summary: "Resumable past conversations of one harness in one directory (the new-session picker)",
+    http: { method: "GET", path: "/past-sessions" },
+    params: { type: "object", required: ["harness", "directory"], properties: { harness: { type: "string", enum: [...HARNESSES] }, directory: { type: "string" } } },
+    // {id, title, updatedAt, sizeBytes} newest first, for ANY harness —
+    // claude transcripts, codex rollouts, opencode server sessions, pi
+    // session files, agy conversation summaries (domain/pastSessions.ts).
+    // `id` is what `resume_id` takes on create for that harness.
+    handler: async (_registry, params) => {
+      const harness = params.harness;
+      const directory = typeof params.directory === "string" ? params.directory.trim() : "";
+      if (!isHarness(harness)) return { ok: false, error: `unknown harness "${String(harness)}"`, harness, directory, sessions: [] };
+      if (!directory) return { ok: false, error: "directory required", harness, directory, sessions: [] };
+      const cwd = canonicalCwd(directory);
+      try {
+        return { ok: true, harness, directory: cwd, sessions: await listPastSessions(harness, cwd) };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e), harness, directory: cwd, sessions: [] };
+      }
     },
   },
   {
@@ -508,12 +550,12 @@ export const machineOps: MachineOp[] = [
     handler: async (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
       if (!session) return { ok: false, error: "session_not_found" };
-      const { OPENCODE_MODELS } = await import("../opencode/models");
+      const { resolveOpencodeModel } = await import("../opencode/models");
       const { OpencodeSession } = await import("../opencode/opencodeSession");
       if (!(session instanceof OpencodeSession)) return { ok: false, error: "not an opencode session" };
-      const m = OPENCODE_MODELS.find((x) => x.id === params.model);
+      const m = typeof params.model === "string" ? resolveOpencodeModel(params.model) : null;
       if (!m) return { ok: false, error: "unknown model" };
-      return await session.setModel(m.id, m.providerID);
+      return await session.setModel(m.modelID, m.providerID);
     },
   },
   {
@@ -550,7 +592,7 @@ export const machineOps: MachineOp[] = [
     name: "create",
     scope: "machine",
     rpcName: "joy-create-session",
-    summary: "Spawn an agent session (claude|codex|opencode|pi) in a directory",
+    summary: "Spawn an agent session (claude|codex|opencode|pi|agy) in a directory — what each harness accepts is GET /v2/harnesses (joy-harness-capabilities)",
     http: { method: "POST", path: "/sessions" },
     params: {
       type: "object",
@@ -561,16 +603,16 @@ export const machineOps: MachineOp[] = [
         agent: { type: "string", enum: ["claude", "codex", "opencode", "pi", "agy"], default: "claude" },
         createDir: { type: "boolean" },
         gitUrl: { type: "string", description: "Clone (or reuse) into cwd before launching" },
-        model: { type: "string" },
-        fallbackModel: { type: "string" },
-        effort: { type: "string" },
-        permissionMode: { type: "string" },
+        model: { type: "string", description: "claude: a model name; codex: a catalog `model`; opencode/pi: a catalog id (`<providerID>/<modelID>`, GET /v2/harnesses/:h/models); agy: a display name from `agy models`" },
+        fallbackModel: { type: "string", description: "claude only: --fallback-model" },
+        effort: { type: "string", description: "claude: CLAUDE_EFFORT (low|medium|high|xhigh|max); codex: turn effort (low|medium|high|xhigh); opencode: the model's reasoning variant; pi: --thinking (off|minimal|low|medium|high|xhigh|max); agy: --effort (low|medium|high)" },
+        permissionMode: { type: "string", description: "claude: bypassPermissions|auto|default|acceptEdits|plan; codex: default|read-only|safe-yolo|yolo; opencode: default|plan|yolo (plan agent / allow-all ruleset); pi: default|plan (--tools read,grep,find,ls); agy: bypassPermissions|acceptEdits|plan (--mode)" },
         yolo: { type: "boolean", default: true },
-        continue: { type: "boolean" },
-        resume_id: { type: "string", description: "Claude session id to --resume" },
-        resume_limit_mb: { type: "number" },
-        forkSession: { type: "boolean", description: "With resume_id: --fork-session (new id, shared history)" },
-        extraArgs: { type: "string" },
+        continue: { type: "boolean", description: "Resume the newest conversation the harness has in cwd" },
+        resume_id: { type: "string", description: "A past conversation id from GET /v2/harnesses/:h/sessions (claude transcript, codex thread, opencode session, pi session, agy conversation)" },
+        resume_limit_mb: { type: "number", description: "claude only" },
+        forkSession: { type: "boolean", description: "With resume_id: continue under a NEW id (claude: --fork-session; codex/pi/agy: the history is copied first; opencode: refused)" },
+        extraArgs: { type: "string", description: "claude/pi/agy: raw CLI arguments appended to the launch (pi/agy shell-split); codex: `key=value` config overrides; opencode: refused" },
       },
     },
     result: { type: "object", properties: { session: { type: "object", description: "SessionRecord" }, error: { type: "string" } } },
@@ -1300,10 +1342,76 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "setModel",
+    scope: "machine",
+    rpcName: "joy-set-model",
+    summary: "Switch a live session's model (opencode: server-side now; codex: the next turn; others: refused)",
+    http: { method: "POST", path: "/sessions/:id/model" },
+    params: { type: "object", required: ["model"], properties: { model: { type: "string", description: "A catalog id from GET /v2/harnesses/:harness/models" } } },
+    // ONE contract for every harness: {ok, model} or {ok:false, error} with
+    // a sentence the app shows as-is. Claude's model is switched in its pane
+    // (/model); pi and agy fix the model at launch.
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { ok: false, error: "session_not_found" };
+      const model = typeof params.model === "string" ? params.model.trim() : "";
+      if (!model) return { ok: false, error: "model required" };
+      switch (session.agentFlavor) {
+        case "opencode": {
+          const { resolveOpencodeModel } = await import("../opencode/models");
+          const { OpencodeSession } = await import("../opencode/opencodeSession");
+          const m = resolveOpencodeModel(model);
+          if (!m || !(session instanceof OpencodeSession)) return { ok: false, error: `unknown opencode model "${model}"` };
+          return await session.setModel(m.modelID, m.providerID);
+        }
+        case "codex": {
+          if (!/^[\w.:/-]{1,128}$/.test(model)) return { ok: false, error: "invalid model" };
+          const { CodexSession } = await import("../codex/codexSession");
+          if (!(session instanceof CodexSession)) return { ok: false, error: "not a codex session" };
+          return await session.setModel(model);
+        }
+        case "claude": return { ok: false, error: "Claude switches models in its own pane: send /model <name>." };
+        default: return { ok: false, error: `${session.agentFlavor} fixes the model at launch — restart the session with the other model.` };
+      }
+    },
+  },
+  {
+    name: "setEffort",
+    scope: "machine",
+    rpcName: "joy-set-effort",
+    summary: "Switch a live session's effort (codex: next turn; opencode: the model's reasoning variant; others: refused)",
+    http: { method: "POST", path: "/sessions/:id/effort" },
+    params: { type: "object", required: ["effort"], properties: { effort: { type: "string", description: "A level from the harness's capabilities (codex) or a variant of the session's model (opencode); \"default\" clears" } } },
+    handler: async (registry, params) => {
+      const session = registry.get(String(params.id ?? ""));
+      if (!session) return { ok: false, error: "session_not_found" };
+      const raw = typeof params.effort === "string" ? params.effort.trim() : "";
+      if (!raw) return { ok: false, error: "effort required" };
+      const effort = raw === "default" ? null : raw;
+      if (effort && !/^[\w.-]{1,32}$/.test(effort)) return { ok: false, error: "invalid effort" };
+      switch (session.agentFlavor) {
+        case "codex": {
+          const levels = HARNESS_CAPABILITIES.codex.effort!.levels;
+          if (effort && !levels.includes(effort)) return { ok: false, error: `invalid effort "${effort}" for codex (${levels.join(" | ")})` };
+          const { CodexSession } = await import("../codex/codexSession");
+          if (!(session instanceof CodexSession)) return { ok: false, error: "not a codex session" };
+          return await session.setEffort(effort);
+        }
+        case "opencode": {
+          const { OpencodeSession } = await import("../opencode/opencodeSession");
+          if (!(session instanceof OpencodeSession)) return { ok: false, error: "not an opencode session" };
+          return await session.setEffort(effort);
+        }
+        case "claude": return { ok: false, error: "Claude switches effort in its own pane: send /effort <level>." };
+        default: return { ok: false, error: `${session.agentFlavor} fixes the thinking level at launch — restart the session with the other level.` };
+      }
+    },
+  },
+  {
     name: "setMode",
     scope: "machine",
     rpcName: "joy-set-mode",
-    summary: "Switch permission mode / model / effort",
+    summary: "Switch permission mode (claude: pane; codex: next turn; opencode: live; pi/agy: refused)",
     http: { method: "POST", path: "/sessions/:id/mode" },
     // Absolute permission-mode set: detects the current mode from the pane
     // footer, walks Shift+Tab to the target, verifies the footer afterwards.

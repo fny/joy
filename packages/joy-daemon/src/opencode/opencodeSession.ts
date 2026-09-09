@@ -51,7 +51,15 @@ export interface OpencodeInit {
    *  (ignored when opencodeSessionId is set). Falls back to a fresh session
    *  when the cwd has none. */
   continueLast?: boolean;
+  /** "default": the agent's configured rules; "plan": the plan agent (read
+   *  only); "yolo": every permission allowed on this session. */
+  permissionMode?: string;
+  /** The model's reasoning variant (its effort level), sent with the model. */
+  effort?: string;
 }
+
+export const OPENCODE_PERMISSION_MODES = new Set(["default", "plan", "yolo"]);
+export const OPENCODE_ALLOW_ALL: Array<{ permission: string; pattern: string; action: "allow" }> = [{ permission: "*", pattern: "*", action: "allow" }];
 
 /** Newest session for a cwd from GET /api/session. The directory filter is
  *  load-bearing: non-git dirs all share opencode's "global" project, so the
@@ -280,6 +288,8 @@ export class OpencodeSession implements AgentSession {
   readonly tmuxWindow = "";           // no tmux window — capability absent
 
   #providerID?: string;
+  #permissionMode = "default";
+  currentEffort?: string;
   #startedAt: number;
   #deps: SessionDeps;
   #client: OpencodeClient | null = null;
@@ -344,6 +354,11 @@ export class OpencodeSession implements AgentSession {
     this.#continueLast = init.continueLast === true;
     this.#titled = init.opencodeSessionId != null;
     const rec = loadWindowRecord(init.id);
+    // Both knobs ride the record so a restart/recover reopens the session
+    // the way it was running (they are per opencode session server-side too,
+    // but the server is respawned fresh every time).
+    this.#permissionMode = init.permissionMode ?? rec?.opencodeSettings?.permissionMode ?? "default";
+    this.currentEffort = init.effort ?? rec?.opencodeSettings?.effort;
     this.#titleLocked = rec?.titleLockedByUser === true;
     // The persisted identity belongs to the persisted pid — pair them, or the
     // reap would verify one server's pid against another's start time (#628).
@@ -481,10 +496,16 @@ export class OpencodeSession implements AgentSession {
 
       if (this.model && this.#providerID) {
         try {
-          await client.switchModel(this.#ocSessionId, this.#providerID, this.model);
+          await client.switchModel(this.#ocSessionId, this.#providerID, this.model, this.currentEffort);
           this.currentModel = this.model;
           void this.#relay?.updateModelCode(this.model);
         } catch (e) { process.stderr.write(`[opencode ${this.id}] model switch failed: ${e}\n`); }
+      }
+      // The permission mode is a property of the server-side session, and
+      // this is a fresh server: re-apply it on every start.
+      if (this.#permissionMode !== "default") {
+        try { await this.#applyPermissionMode(client, this.#ocSessionId, this.#permissionMode); }
+        catch (e) { process.stderr.write(`[opencode ${this.id}] permission mode ${this.#permissionMode} not applied: ${e}\n`); }
       }
 
       // Backfill for every non-fresh session: explicit resume AND continue.
@@ -543,8 +564,40 @@ export class OpencodeSession implements AgentSession {
       // our server from whatever inherited its number (#628).
       opencodeServerStart: this.#proc?.pid ? this.#procStart : undefined,
       opencodeServerMarker: this.#proc?.pid ? this.#procMarker : undefined,
-      opencodeSettings: { model: this.currentModel ?? this.model, providerID: this.#providerID },
+      opencodeSettings: { model: this.currentModel ?? this.model, providerID: this.#providerID, permissionMode: this.#permissionMode, effort: this.currentEffort },
     });
+  }
+
+  /** plan ⇄ default switch the session's primary agent; yolo ⇄ default set or
+   *  clear a session-level allow-all ruleset. Leaving yolo also puts the
+   *  build agent back, so the two axes cannot be left crossed. */
+  async #applyPermissionMode(client: OpencodeClient, sid: string, mode: string): Promise<void> {
+    if (mode === "plan") {
+      await client.setSessionPermission(sid, []);
+      await client.setAgent(sid, "plan");
+    } else if (mode === "yolo") {
+      await client.setAgent(sid, "build");
+      await client.setSessionPermission(sid, OPENCODE_ALLOW_ALL);
+    } else {
+      await client.setAgent(sid, "build");
+      await client.setSessionPermission(sid, []);
+    }
+  }
+
+  /** The model's reasoning variant for this session (its effort level). Sent
+   *  with the model, so a live switch is one /model call. */
+  async setEffort(variant: string | null): Promise<{ ok: boolean; effort?: string; error?: string }> {
+    const sid = this.#ocSessionId;
+    const client = this.#client;
+    const model = this.currentModel ?? this.model;
+    if (sid && client && model && this.#providerID) {
+      try { await client.switchModel(sid, this.#providerID, model, variant ?? undefined); }
+      catch (e) { return { ok: false, error: `opencode refused the variant: ${e instanceof Error ? e.message : e}` }; }
+    }
+    this.currentEffort = variant ?? undefined;
+    this.#persistRecord();
+    this.#deps.broadcast("session_update", this.toJSON());
+    return { ok: true, effort: this.currentEffort };
   }
 
   // ── inbound ────────────────────────────────────────────────────────────────
@@ -762,7 +815,7 @@ export class OpencodeSession implements AgentSession {
     const sid = this.#ocSessionId;
     if (!client || !sid) return { ok: false, error: "session not started" };
     try {
-      await client.switchModel(sid, providerID, modelId);
+      await client.switchModel(sid, providerID, modelId, this.currentEffort);
       this.currentModel = modelId;
       this.#providerID = providerID;
       void this.#relay?.updateModelCode(modelId);
@@ -792,7 +845,21 @@ export class OpencodeSession implements AgentSession {
   async resize(): Promise<{ ok: boolean }> { return { ok: true }; }
   async sendRawKeys(): Promise<{ ok: boolean; segments: number; error?: string }> { return { ok: false, segments: 0, error: "no pane for opencode sessions" }; }
   detectPermissionMode(): string | null { return null; }
-  async setPermissionMode(): Promise<{ ok: boolean; mode?: string; error?: string }> { return { ok: false, error: "not supported for opencode (v1)" }; }
+  async setPermissionMode(target: string): Promise<{ ok: boolean; mode?: string; error?: string }> {
+    if (!OPENCODE_PERMISSION_MODES.has(target)) return { ok: false, error: `unknown opencode permission mode "${target}" (default | plan | yolo)` };
+    const sid = this.#ocSessionId;
+    const client = this.#client;
+    if (sid && client) {
+      try { await this.#applyPermissionMode(client, sid, target); }
+      catch (e) { return { ok: false, error: `opencode refused the mode: ${e instanceof Error ? e.message : e}` }; }
+    }
+    this.#permissionMode = target;
+    this.#persistRecord();
+    this.#deps.broadcast("session_update", this.toJSON());
+    return { ok: true, mode: target };
+  }
+
+  get permissionMode(): string { return this.#permissionMode; }
   // Chat-log mirror (once per part id — reconcile re-walks in-flight
   // assistant messages until they complete, and the relay-side localId dedupe
   // does not cover the daemon chat log).
@@ -884,6 +951,8 @@ export class OpencodeSession implements AgentSession {
       cwd: this.cwd,
       model: this.model,
       effort: this.effort,
+      current_effort: this.currentEffort,
+      permission_mode: this.#permissionMode,
       flags: [],
       status: this.status,
       started_at: this.#startedAt,

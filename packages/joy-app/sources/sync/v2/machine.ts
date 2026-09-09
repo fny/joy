@@ -254,8 +254,17 @@ export const machineKillSession = (ctx: MachineCtx, opts?: { ifStatus?: 'ended' 
 export const machineRestartSession = (ctx: MachineCtx) =>
     j<{ ok: boolean; relaySessionId?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/restart`);
 
-export const machineSetModel = (ctx: MachineCtx, model: string) =>
-    j<{ ok?: boolean; error?: string }>(ctx, 'PATCH', `/v2/sessions/${ctx.localSessionId}`, { model });
+/** Switch a running session's model. POST …/model is the per-harness op
+ *  (codex + opencode); a daemon without it answers 404, and the older
+ *  PATCH form (opencode only) is tried then. */
+export const machineSetModel = async (ctx: MachineCtx, model: string) => {
+    const r = await j<{ ok?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/model`, { model });
+    if (r.status !== 404) return r;
+    return j<{ ok?: boolean; error?: string }>(ctx, 'PATCH', `/v2/sessions/${ctx.localSessionId}`, { model });
+};
+/** Switch a running session's reasoning effort (codex + opencode). */
+export const machineSetEffort = (ctx: MachineCtx, effort: string) =>
+    j<{ ok?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/effort`, { effort });
 
 export const machineSetMode = (ctx: MachineCtx, permissionMode: string) =>
     j<{ ok?: boolean; error?: string }>(ctx, 'PATCH', `/v2/sessions/${ctx.localSessionId}`, { permissionMode });
@@ -284,6 +293,12 @@ const jm = <T>(ctx: MachineOnlyCtx, method: string, path: string, body?: unknown
         machineId: ctx.machineId, method, path, json: body,
     }));
 
+/** Every harness the daemon knows, with its capability table (older daemons: without). */
+export const machineHarnesses = (ctx: MachineOnlyCtx) =>
+    jm<{ harnesses?: Array<Record<string, unknown>> }>(ctx, 'GET', '/v2/harnesses');
+/** Resumable past conversations of one harness in a directory (title + id). */
+export const machineHarnessSessions = (ctx: MachineOnlyCtx, harness: string, directory: string) =>
+    jm<{ ok?: boolean; sessions?: Array<Record<string, unknown>>; error?: string }>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/sessions?directory=${encodeURIComponent(directory)}`);
 export const machineHarnessModels = (ctx: MachineOnlyCtx, harness: string) =>
     jm<{ ok?: boolean; models?: Array<Record<string, unknown>>; error?: string }>(ctx, 'GET', `/v2/harnesses/${encodeURIComponent(harness)}/models`);
 export const machineHistoryLogs = (ctx: MachineOnlyCtx, directory: string) =>

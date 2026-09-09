@@ -22,7 +22,7 @@ import { PiSession } from "../pi/piSession";
 import { AgySession } from "../agy/agySession";
 import { resumeHandoffJobs } from "./handoff";
 import { PI_MODELS, defaultPiModel } from "../pi/models";
-import { OPENCODE_MODELS, defaultOpencodeModel } from "../opencode/models";
+import { defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript } from "./windowRecord";
@@ -30,6 +30,11 @@ import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
 import { claimTranscript, claimProject, claimedTranscriptPaths, transcriptClaims, type TranscriptClaim } from "./transcriptClaims";
+import { effortLevelsFor, normalizePermissionMode, permissionModesFor, type Harness } from "./harnessCapabilities";
+import { splitShellWords } from "./shellWords";
+import { forkAgyConversation, forkCodexThread, forkPiSession } from "./forkHarness";
+import { resolveOpencodeModel } from "../opencode/models";
+import { knownPiModels } from "../pi/models";
 
 export interface CreateSessionOpts {
   cwd: string;
@@ -86,6 +91,30 @@ export interface CreateSessionOpts {
 const PERMISSION_MODES = new Set([
   "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan",
 ]);
+
+/** What every harness but claude accepts on create — the same table the
+ *  app renders its options from (harnessCapabilities.ts). Claude keeps its
+ *  own checks below (its modes include the pane-only `dontAsk`). Throws
+ *  the sentence the app shows. */
+export function validateHarnessLaunchOptions(harness: Harness, opts: Pick<CreateSessionOpts, "permissionMode" | "effort" | "extraArgs">): void {
+  const modes = permissionModesFor(harness);
+  if (opts.permissionMode) {
+    if (!modes) throw new Error(`${harness} has no permission modes`);
+    if (!modes.has(opts.permissionMode)) throw new Error(`invalid permissionMode "${opts.permissionMode}" for ${harness} (${[...modes].join(" | ")})`);
+  }
+  const levels = effortLevelsFor(harness);
+  if (opts.effort && opts.effort !== "default") {
+    if (!levels) throw new Error(`${harness} has no effort setting`);
+    // Per-model levels (opencode variants) are checked against the catalog
+    // by the adapter; here only the shape.
+    if (levels.size > 0 && !levels.has(opts.effort)) throw new Error(`invalid effort "${opts.effort}" for ${harness} (${[...levels].join(" | ")})`);
+    if (levels.size === 0 && !/^[\w.-]{1,32}$/.test(opts.effort)) throw new Error("invalid effort");
+  }
+  if (opts.extraArgs?.trim()) {
+    if (harness === "opencode") throw new Error("opencode takes no extra arguments (it runs as a server)");
+    if (harness === "pi" || harness === "agy") splitShellWords(opts.extraArgs); // throws with the reason
+  }
+}
 
 /**
  * Thrown by create() when opts.cwd doesn't exist and createDir isn't set.
@@ -523,6 +552,23 @@ export class SessionRegistry {
     // ── Codex path: a separate, minimal flow (app-server drive + attached TUI)
     // that shares the window bootstrap above but NONE of claude's flag/transcript
     // machinery. Kept isolated so the claude create path is untouched.
+    const harness: Harness = opts.agent ?? "claude";
+    if (harness !== "claude") {
+      // `yolo: false` is claude's opt-out; for the others the table's default
+      // stands when no mode is named. Aliases (a CLI's bypassPermissions)
+      // become the harness's own key first.
+      opts = { ...opts, permissionMode: normalizePermissionMode(harness, opts.permissionMode) };
+      validateHarnessLaunchOptions(harness, opts);
+      // forkSession + resume_id for a harness with no native fork: copy the
+      // history under a fresh id first (what the fork op does for a live
+      // session), then resume the copy. opencode has no fork surface.
+      if (opts.forkSession && opts.resume_id) {
+        if (opts.agent === "codex") opts = { ...opts, resume_id: forkCodexThread(opts.resume_id) };
+        else if (opts.agent === "pi") opts = { ...opts, resume_id: forkPiSession(opts.resume_id) };
+        else if (opts.agent === "agy") opts = { ...opts, resume_id: forkAgyConversation(opts.resume_id) };
+        else throw new Error("opencode sessions live inside the opencode server, which offers no way to fork one");
+      }
+    }
     if (opts.agent === "codex") {
       return await this.#createCodexSession(opts, id, sockLabel, windowName, cwd);
     }
@@ -872,18 +918,26 @@ export class SessionRegistry {
       if (opts.createDir) mkdirSync(cwd, { recursive: true });
       else throw new DirectoryCreationApprovalRequired(cwd);
     }
-    // Model must be on the curated allowlist; an unknown request falls back to
-    // the default rather than sending an arbitrary id to the provider.
-    const requested = OPENCODE_MODELS.find((m) => m.id === opts.model) ?? defaultOpencodeModel();
+    // The curated pair by bare id, a catalog id ("<providerID>/<modelID>")
+    // when the live catalog is loaded, else provider/model split — and a
+    // model the loaded catalog does not know is refused, not silently
+    // swapped for the default (the picker offered it, so it must be run).
+    const requested = resolveOpencodeModel(opts.model);
+    if (!requested) throw new Error(`unknown opencode model "${opts.model}" — pick one from the catalog (GET /v2/harnesses/opencode/models)`);
+    if (opts.effort && opts.effort !== "default" && requested.variants.length > 0 && !requested.variants.includes(opts.effort)) {
+      throw new Error(`"${opts.effort}" is not a variant of ${requested.modelID} (${requested.variants.join(" | ")})`);
+    }
     const session = new OpencodeSession({
       id, cwd,
-      model: requested.id,
+      model: requested.modelID,
       providerID: requested.providerID,
       status: "starting",
       startedAt: Date.now(),
       // Resume an existing server-side opencode session (restart path).
       opencodeSessionId: opts.resume_id,
       continueLast: opts.continue === true,
+      permissionMode: opts.permissionMode,
+      effort: opts.effort && opts.effort !== "default" ? opts.effort : undefined,
     }, this.#sessionDeps());
     this.#sessions.set(id, session);
     saveWindowRecord(id, { launchCwd: cwd, agent: "opencode" });
@@ -908,14 +962,28 @@ export class SessionRegistry {
       if (opts.createDir) mkdirSync(cwd, { recursive: true });
       else throw new DirectoryCreationApprovalRequired(cwd);
     }
-    const requested = PI_MODELS.find((m) => m.spec === opts.model) ?? defaultPiModel();
+    // A model spec is anything `pi --model` takes ("provider/id" or a
+    // pattern). The curated pair passes as before; a spec the loaded catalog
+    // does not list is refused rather than fuzzy-matched to something else.
+    let modelSpec = opts.model || defaultPiModel().spec;
+    if (opts.model && !PI_MODELS.some((m) => m.spec === opts.model)) {
+      if (!/^[\w./:@-]{1,160}$/.test(opts.model)) throw new Error("invalid model");
+      const catalog = knownPiModels();
+      if (catalog && !catalog.some((m) => m.id === opts.model || m.modelID === opts.model)) {
+        throw new Error(`unknown pi model "${opts.model}" — pick one from the catalog (GET /v2/harnesses/pi/models)`);
+      }
+      modelSpec = opts.model;
+    }
     // pi persists sessions itself (~/.pi/agent/sessions/<cwd>/…): a fresh
     // session gets an id we choose (--session-id), so the record can resume
     // it; --resume <id> reuses one; --continue takes pi's newest for the cwd.
     const piSessionId = opts.resume_id ?? (opts.continue ? undefined : crypto.randomUUID());
     const session = new PiSession({
-      id, cwd, model: requested.spec, status: "starting", startedAt: Date.now(),
+      id, cwd, model: modelSpec, status: "starting", startedAt: Date.now(),
       piSessionId, continueLast: opts.continue === true && !opts.resume_id,
+      effort: opts.effort && opts.effort !== "default" ? opts.effort : undefined,
+      permissionMode: opts.permissionMode,
+      extraArgs: opts.extraArgs?.trim() || undefined,
     }, this.#sessionDeps());
     this.#sessions.set(id, session);
     saveWindowRecord(id, { launchCwd: cwd, agent: "pi" });
@@ -943,6 +1011,9 @@ export class SessionRegistry {
     const session = new AgySession({
       id, cwd, model: opts.model, status: "starting", startedAt: Date.now(),
       conversationId: opts.resume_id, continueLast: opts.continue === true && !opts.resume_id,
+      effort: opts.effort && opts.effort !== "default" ? opts.effort : undefined,
+      permissionMode: opts.permissionMode,
+      extraArgs: opts.extraArgs?.trim() || undefined,
     }, this.#sessionDeps());
     this.#sessions.set(id, session);
     saveWindowRecord(id, { launchCwd: cwd, agent: "agy" });
@@ -1078,13 +1149,19 @@ export class SessionRegistry {
     if (isOpencode) {
       const ocSessionId = (existing instanceof OpencodeSession ? existing.opencodeSessionId : undefined) ?? rec?.opencodeSessionId;
       const model = (existing instanceof OpencodeSession ? existing.model : undefined) ?? rec?.opencodeSettings?.model;
+      const providerID = rec?.opencodeSettings?.providerID;
+      const permissionMode = (existing instanceof OpencodeSession ? existing.permissionMode : undefined) ?? rec?.opencodeSettings?.permissionMode;
+      const effort = (existing instanceof OpencodeSession ? existing.currentEffort : undefined) ?? rec?.opencodeSettings?.effort;
       await this.#retire(existing, opts.id);
       return this.#replace(opts.id, cwd, () => this.create({
         agent: "opencode",
         id: opts.id,
         cwd,
         resume_id: ocSessionId,
-        model,
+        // The record holds the bare model id; qualify it so the catalog
+        // resolver does not split a model path at its first slash.
+        model: model && providerID && !model.includes(providerID + "/") ? `${providerID}/${model}` : model,
+        permissionMode, effort,
       }));
     }
 
@@ -1095,15 +1172,21 @@ export class SessionRegistry {
     if (isAgy) {
       const conversationId = (existing instanceof AgySession ? existing.conversationId : undefined) ?? rec?.agySettings?.conversationId;
       const model = existing?.model ?? rec?.agySettings?.model;
+      const agyRec = rec?.agySettings;
+      const effort = existing?.effort ?? agyRec?.effort;
+      const permissionMode = (existing instanceof AgySession ? existing.permissionMode : undefined) ?? agyRec?.permissionMode;
       await this.#retire(existing, opts.id);
-      return this.#replace(opts.id, cwd, () => this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, forceNew: true }));
+      return this.#replace(opts.id, cwd, () => this.create({ agent: "agy", id: opts.id, cwd, resume_id: conversationId, model, effort, permissionMode, extraArgs: agyRec?.extraArgs, forceNew: true }));
     }
     const isPi = (existing instanceof PiSession) || rec?.agent === "pi";
     if (isPi) {
       const piSessionId = (existing instanceof PiSession ? existing.piSessionId : undefined) ?? rec?.piSettings?.sessionId;
       const model = existing?.model ?? rec?.piSettings?.model;
+      const piRec = rec?.piSettings;
+      const effort = existing?.effort ?? piRec?.effort;
+      const permissionMode = (existing instanceof PiSession ? existing.permissionMode : undefined) ?? piRec?.permissionMode;
       await this.#retire(existing, opts.id);
-      return this.#replace(opts.id, cwd, () => this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, forceNew: true }));
+      return this.#replace(opts.id, cwd, () => this.create({ agent: "pi", id: opts.id, cwd, resume_id: piSessionId, model, effort, permissionMode, extraArgs: piRec?.extraArgs, forceNew: true }));
     }
     const isCodex = (existing instanceof CodexSession) || rec?.agent === "codex";
     if (isCodex) {
@@ -1127,7 +1210,10 @@ export class SessionRegistry {
         resume_id: codexThreadId,
         model: existing?.currentModel ?? existing?.model ?? codexRec?.codexSettings?.model,
         effort: currentEffort ?? codexRec?.codexSettings?.effort,
-        permissionMode: codexMode && PERMISSION_MODES.has(codexMode) ? codexMode : undefined,
+        // The record holds codex's own key (yolo|safe-yolo|read-only|default)
+        // since normalizePermissionMode; a legacy claude key still passes and
+        // is normalised again on create.
+        permissionMode: codexMode && (permissionModesFor("codex")!.has(codexMode) || PERMISSION_MODES.has(codexMode)) ? codexMode : undefined,
         codexConfig,
       }));
     }

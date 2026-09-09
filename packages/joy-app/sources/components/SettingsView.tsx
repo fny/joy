@@ -271,6 +271,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     onPress={() => router.push('/settings/agents' as any)}
                 />
                 <Item
+                    title={t('settings.models')}
+                    subtitle={t('settings.modelsSubtitle')}
+                    icon={<Ionicons name="list-outline" size={29} color={theme.colors.accents.indigo} />}
+                    onPress={() => router.push('/settings/models' as any)}
+                />
+                <Item
                     title="Agent Config"
                     subtitle="Edit each agent's own config file on a machine"
                     icon={<Ionicons name="build-outline" size={29} color={theme.colors.accents.orange} />}

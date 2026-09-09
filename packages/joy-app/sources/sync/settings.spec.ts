@@ -253,6 +253,7 @@ describe('settings', () => {
                 voiceWakeOnEvents: true,
                 voiceWakeOnSound: true,
                 voiceIdleTimeoutSec: 45,
+                harnessModels: {},
                 voiceMode: 'classic',
                 joy__tmuxServerUrl: null,
                 reviewPromptAnswered: false,
