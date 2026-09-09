@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 9 (6) — Finished sessions go green again",
+      "summary": "",
+      "markdown": "- **A session that has finished no longer sits blue in the sidebar.** The app worked out \"a turn is running\" partly from turn-start and turn-end events in the message stream — and if it never saw the end, because you left the session while it was working, nothing ever reset it. The daemon's own signal said idle the whole time. The daemon now decides: its word outranks the app's guess once that guess is more than a few seconds old, which is long enough to cover the moment at the start of a turn before the daemon's signal arrives.\n- **And that signal can no longer be lost.** If the message saying a turn ended failed to reach the server — a brief connection drop — it was never sent again, and the session stayed blue for good. It is now retried on the next turn."
+    },
+    {
       "title": "Sep 9 (5) — See the whole file behind a change",
       "summary": "",
       "markdown": "- **Changes now has a \"Whole file\" view, next to Unified and Split.** Opening a changed file showed only the edited hunks with a few lines around them; there was no way to see the change in the context of the rest of the file without leaving for the file viewer. The new mode shows the complete file with the change marked in place. If the file has been edited since the diff was taken, it keeps showing the hunks rather than a reconstruction that might be wrong.\n- **The diff toggle now appears on phones too.** It was web-only because the split view is; unified and whole-file work everywhere, so the control does now, minus the Split button."
@@ -391,5 +396,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 9 (5) — See the whole file behind a change"
+  "latestTitle": "Sep 9 (6) — Finished sessions go green again"
 }

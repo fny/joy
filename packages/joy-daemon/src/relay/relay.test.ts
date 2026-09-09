@@ -503,3 +503,65 @@ test("a machine key arriving after the first publish republishes the record exac
     expect(relay.writes).toHaveLength(2);
   } finally { vi.unstubAllGlobals(); }
 });
+
+// The thinking mirror IS the app's "a turn is open" signal, so a lost write
+// shows as a session stuck blue. setThinking used to gate on a `lastThinking`
+// field OUTSIDE the serialized chain — the shape #587 removed everywhere else
+// — which suppressed the write whether or not the previous one reached the
+// relay, so a clear lost to a lane blip was never retried.
+test("a thinking clear lost to a failed publish is retried by the next transition", async () => {
+  let fail = false;
+  const published: Array<Record<string, unknown>> = [];
+  registerV2CardPublisher(ID, async (m) => {
+    if (fail) throw new Error("lane down");
+    published.push({ ...m });
+  });
+  const s = newSession();
+  s.setThinking(true);
+  await vi.waitFor(() => expect(published.length).toBe(1));
+  expect(published[0].joy__thinking).not.toBeNull();
+
+  fail = true;
+  s.setThinking(false);                       // the clear never reaches the relay
+  await vi.waitFor(() => expect(s.lastPublishOk).toBe(false));
+  expect(published.length).toBe(1);
+
+  // The next turn's start finds the card dirty and republishes; the one after
+  // it carries the clear the relay never got.
+  fail = false;
+  s.setThinking(true);
+  await vi.waitFor(() => expect(published.length).toBe(2));
+  s.setThinking(false);
+  await vi.waitFor(() => expect(published.length).toBe(3));
+  expect(published[2].joy__thinking).toBeNull();
+});
+
+test("re-asserting thinking does not republish the card on every poll", async () => {
+  const published: Array<Record<string, unknown>> = [];
+  registerV2CardPublisher(ID, async (m) => { published.push({ ...m }); });
+  const s = newSession();
+  s.setThinking(true);
+  await vi.waitFor(() => expect(published.length).toBe(1));
+  // Same fact, fresh `since` each time: redundant by PRESENCE, so no churn.
+  s.setThinking(true);
+  s.setThinking(true);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(published.length).toBe(1);
+  s.setThinking(false);
+  await vi.waitFor(() => expect(published.length).toBe(2));
+  expect(published[1].joy__thinking).toBeNull();
+});
+
+test("clearThinkingMeta clears a card the daemon did not set itself (restart reconcile)", async () => {
+  // The old guard read the LOCAL snapshot, which a restart rebuilds without
+  // joy__thinking — so it returned early and never cleared the relay's copy.
+  const published: Array<Record<string, unknown>> = [];
+  registerV2CardPublisher(ID, async (m) => { published.push({ ...m }); });
+  const s = new RelaySession({ client: {} as any, relaySessionId: ID, metadata: { path: "/x", joy__thinking: { since: 1 } } });
+  await s.clearThinkingMeta();
+  expect(published.length).toBe(1);
+  expect(published[0].joy__thinking).toBeNull();
+  // Idempotent once the card is clean.
+  await s.clearThinkingMeta();
+  expect(published.length).toBe(1);
+});

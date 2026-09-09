@@ -1050,27 +1050,34 @@ export class RelaySession {
    *  crash instead of being skipped. */
   get outboundPersistDegraded(): boolean { return outboundDegraded; }
 
-  /** Last thinking value we recorded. */
-  private lastThinking = false;
-
+  /**
+   * Publish (or clear) the thinking mirror. The app reads joy__thinking +
+   * live machine presence as "a turn is open", so this is the authoritative
+   * statement and a lost write shows as a session stuck blue.
+   *
+   * Through mergeKey, not a `lastThinking` gate outside the chain: that gate
+   * is the exact shape #587 removed everywhere else. It suppressed the write
+   * whether or not the previous one REACHED the relay, so a clear lost to a
+   * lane blip was never retried and the card kept a turn open for good.
+   * mergeKey judges redundancy inside the serialized chain and always writes
+   * while the snapshot is dirty, so the next transition repairs it.
+   *
+   * Redundancy is by presence, not value: re-asserting `true` with a fresh
+   * `since` is the same fact, and must not republish the card on every poll.
+   */
   setThinking(thinking: boolean): void {
-    const changed = this.lastThinking !== thinking;
-    this.lastThinking = thinking;
-    // Persisted on change: the app treats joy__thinking + live machine
-    // presence as thinking, so a cold app start shows the real state and a
-    // daemon death can't freeze a stale blue.
-    if (changed) {
-      void this.mergeMetadata({ joy__thinking: thinking ? { since: Date.now() } : null }).catch(() => {});
-    }
+    void this.mergeKey(
+      'joy__thinking',
+      thinking ? { since: Date.now() } : null,
+      (cur) => (cur != null) === thinking,
+    ).catch(() => {});
   }
 
   /** Clear a stale persisted joy__thinking (daemon restarted while the flag
-   *  was set; the fresh Session starts not-thinking so the change-gate in
-   *  setThinking would never write the false). Attach-time reconcile, same
-   *  pattern as the retry/compacting banners. */
+   *  was set). Attach-time reconcile, same pattern as the retry/compacting
+   *  banners — idempotent, and a no-op when the card is already clear. */
   async clearThinkingMeta(): Promise<void> {
-    if (this.metadata?.joy__thinking == null) return;
-    await this.mergeMetadata({ joy__thinking: null });
+    await this.mergeKey('joy__thinking', null, (cur) => cur == null);
   }
 
   /** Agent-authored notification (<joy-notify/> tag): free-form title + body.

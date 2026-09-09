@@ -7,6 +7,7 @@ const sessions: Record<string, {
     // activeAt matters now that the hold uses the shared isAgentBusy, which gates
     // BOTH thinking signals on live-and-fresh presence rather than trusting a flag.
     activeAt?: number;
+    thinkingAt?: number;
     metadata?: { joy__source?: string; joy__thinking?: { since: number } | null };
 }> = {};
 const storageSubscribers: Array<() => void> = [];
@@ -83,7 +84,7 @@ describe('attemptOwnsDraft (#133)', () => {
 
 describe('holding a queued message while the agent is busy (#652)', () => {
     it('holds while the ephemeral thinking flag is set', async () => {
-        sessions[S] = { ...sessions[S], thinking: true };
+        sessions[S] = { ...sessions[S], thinking: true, thinkingAt: clock };
         useDraftQueueStore.getState().add(S, 'A', 'busy');
         await sweep();
         expect(sends).toHaveLength(0);
@@ -123,7 +124,7 @@ describe('holding a queued message while the agent is busy (#652)', () => {
     });
 
     it('releases once the turn ends and the settle window passes', async () => {
-        sessions[S] = { ...sessions[S], thinking: true };
+        sessions[S] = { ...sessions[S], thinking: true, thinkingAt: clock };
         useDraftQueueStore.getState().add(S, 'A', 'busy');
         await sweep();
         expect(sends).toHaveLength(0);

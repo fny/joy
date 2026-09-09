@@ -95,6 +95,9 @@ export interface SessionFacts {
  *  neither the store nor react-native and can be tested directly. */
 export interface SessionFactsInput {
     thinking?: boolean;
+    /** When this client derived `thinking` — how long it outranks a daemon
+     *  card carrying no mirror (see isAgentBusy). */
+    thinkingAt?: number;
     presence?: 'online' | number;
     activeAt: number;
     agentState?: { requests?: Record<string, unknown> | null } | null;

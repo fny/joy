@@ -1,5 +1,6 @@
-// Session liveness predicates — dependency-free so the list logic that
-// depends on them can be unit-tested without loading the whole store.
+// Session liveness predicates — no store, so the list logic that depends on
+// them can be unit-tested directly.
+import { isJoyDaemonSource } from './storageTypes';
 
 // Client-side liveness window. The server keeps a session active:true until its
 // own ~10-min reaper runs, so when a daemon dies the app would show "online" for
@@ -7,6 +8,14 @@
 // last activity is older than this as offline — far above the cadence to avoid
 // flapping an idle-but-alive session.
 export const SESSION_STALE_AFTER_MS = 90_000;
+
+/**
+ * How long a client-derived `thinking` outranks a daemon card that does not
+ * carry the mirror. Covers the card's lag behind the message stream (a poke
+ * plus a refetch, seconds) with room to spare; anything older is a turn-end
+ * this client missed, not a turn still running.
+ */
+export const EPHEMERAL_THINKING_TRUST_MS = 45_000;
 
 export function isFresh(session: { activeAt: number }): boolean {
     return Date.now() - session.activeAt < SESSION_STALE_AFTER_MS;
@@ -51,16 +60,41 @@ export function isSessionInActiveGroup(session: { active: boolean; activeAt: num
  * of them. That was the original objection to the mirror, and it is answered
  * by the liveness check rather than by ignoring the mirror.
  *
+ * The two are NOT symmetric, though, and ORing them outright left finished
+ * sessions blue in the sidebar. `thinking` is derived by this client from
+ * turn-start / turn-end events in the message stream, and it has no reset
+ * path: relay session rows preserve it (`thinking: existing?.thinking ??
+ * false`), so a turn-end this client never saw — the session was open when
+ * the turn began and closed before it ended — pinned the flag true for the
+ * life of the app. (Until 164fc749 a wedged turn was force-closed after 30
+ * minutes, which emitted the turn-end that unstuck it; that backstop is gone
+ * on purpose, so the asymmetry had to be faced here.)
+ *
+ * The daemon's mirror has no such gap — it is written on every transition —
+ * but it LAGS: the turn-start event reaches this client through the message
+ * stream before the card carrying joy__thinking does. Deferring to the mirror
+ * outright would therefore reopen #652 in that window, releasing a queued
+ * message into a turn that has just begun.
+ *
+ * So for a session the daemon publishes, the derived flag is believed only
+ * while it is fresh — long enough to cover the card's lag, far short of
+ * forever — and after that the mirror's silence is taken at face value.
+ *
  * Anything deciding "is it busy" must call this, so the two can never drift
  * apart again.
  */
 export function isAgentBusy(session: {
     thinking?: boolean;
+    /** When this client derived `thinking`; 0 when it never did. */
+    thinkingAt?: number;
     presence?: 'online' | number;
     activeAt: number;
-    metadata?: { joy__thinking?: { since: number } | null } | null;
+    metadata?: { joy__thinking?: { since: number } | null; joy__source?: string | null } | null;
 }): boolean {
     const live = session.presence === 'online' && isFresh(session);
     if (!live) return false;
-    return session.thinking === true || session.metadata?.joy__thinking != null;
+    if (session.metadata?.joy__thinking != null) return true;
+    if (session.thinking !== true) return false;
+    if (!isJoyDaemonSource(session.metadata?.joy__source)) return true;
+    return Date.now() - (session.thinkingAt ?? 0) < EPHEMERAL_THINKING_TRUST_MS;
 }
