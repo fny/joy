@@ -19,6 +19,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { resolveRevealScroll, rowContainsMessage, RevealLayout, RevealTarget } from './searchReveal';
 import { useSessionSearch } from '@/hooks/useSessionSearch';
+import { shouldFollowBottom } from './chatFollow';
 
 const SCROLL_THRESHOLD = 300;
 // "Live" (pinned to the newest message) is a SEPARATE, much tighter band than
@@ -495,9 +496,13 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
 
     // Non-inverted list: the newest messages sit at the visual bottom. Show the
     // scroll-to-bottom button once the user has scrolled UP far enough from the
-    // bottom. Auto-stick-to-bottom on new messages is handled natively by
-    // FlashList's maintainVisibleContentPosition.autoscrollToBottomThreshold —
-    // no JS-side scroll is needed (running both fights the viewport mid-stream).
+    // bottom. Following new content to the bottom is decided HERE (see
+    // followBottom below), not by FlashList's autoscrollToBottomThreshold:
+    // that ran on every streamed data change with no idea whether a finger
+    // was down or a fling still moving, inside a band of 20% of the viewport,
+    // so scrolling up from the bottom mid-stream was answered by an animated
+    // scroll straight back down (chatFollow.ts). Only one of the two may run —
+    // both together fight the viewport mid-stream.
     const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
         const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
         const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
@@ -667,6 +672,40 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         void restoreViewport({ retained: false });
     }, [restoreViewport]);
 
+    // ── Follow new content ───────────────────────────────────────────────
+    // With maintainVisibleContentPosition the viewport stays anchored to the
+    // row it was on, so new content at the bottom simply extends below it;
+    // someone pinned to the newest message has to be moved down explicitly.
+    // Done only while they are within the same 48px band that makes a saved
+    // viewport 'live', and never while a finger is down or a fling is still
+    // running — releasing near the bottom re-arms it, scrolling away disarms
+    // it, and the down button is the way back (chatFollow.ts).
+    const interactingRef = React.useRef(false);
+    const handleScrollBeginDrag = useCallback(() => { interactingRef.current = true; }, []);
+    const handleScrollEndDrag = useCallback(() => { interactingRef.current = false; }, []);
+    const handleMomentumBegin = useCallback(() => { interactingRef.current = true; }, []);
+    const handleMomentumEnd = useCallback(() => { interactingRef.current = false; }, []);
+    const followBottom = useCallback(() => {
+        const ok = shouldFollowBottom({
+            loaded: restoredRef.current,
+            restoring: restoreInFlightRef.current,
+            nearBottom: nearBottomRef.current,
+            interacting: interactingRef.current,
+        });
+        if (!ok) return;
+        // Not animated: a stream updates several times a second, and an
+        // animation still in flight when the next one starts is the jitter.
+        flatListRef.current?.scrollToEnd({ animated: false });
+    }, []);
+    // New rows and streamed growth: after the list has committed them (next
+    // frame), then again when the real measured content size lands — the
+    // first follow ran against estimated heights and can fall short.
+    React.useEffect(() => {
+        const id = requestAnimationFrame(followBottom);
+        return () => cancelAnimationFrame(id);
+    }, [orderedItems, followBottom]);
+    const handleContentSizeChange = useCallback(() => { followBottom(); }, [followBottom]);
+
     // Retained-screen path: capture on blur, restore on refocus. The first
     // focus of a mount is skipped — onLoad owns that one (the list may not
     // even have laid out yet). Restore waits for the navigation transition so
@@ -806,10 +845,9 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                     // (newest) — the fast path; FlashList only mounts the visible
                     // window instead of every message.
                     startRenderingFromBottom: true,
-                    // Stick to the bottom on new messages when the user is near it
-                    // (streaming tokens / new turns), but don't yank them up when
-                    // they're reading older history.
-                    autoscrollToBottomThreshold: 0.2,
+                    // No autoscrollToBottomThreshold: following the newest
+                    // message is this component's job (followBottom), gated on
+                    // the live band and on the user's hands being off.
                     // Anchor the viewport when older pages prepend at the top.
                     autoscrollToTopThreshold: 100,
                 }}
@@ -818,6 +856,11 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 renderItem={renderItem}
                 extraData={listExtraData}
                 onScroll={handleScroll}
+                onScrollBeginDrag={handleScrollBeginDrag}
+                onScrollEndDrag={handleScrollEndDrag}
+                onMomentumScrollBegin={handleMomentumBegin}
+                onMomentumScrollEnd={handleMomentumEnd}
+                onContentSizeChange={handleContentSizeChange}
                 onLoad={handleLoad}
                 scrollEventThrottle={16}
                 onViewableItemsChanged={handleViewableItemsChanged}

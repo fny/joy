@@ -1,3 +1,7 @@
+# Sep 9 — Reading stays put
+
+- **Scrolling up no longer snaps you back to the bottom.** While the agent was streaming, the list followed new content whenever you were within a fifth of the screen of the bottom, and it did so on every update with no idea whether your finger was still on the screen or a fling was still moving. So scrolling up from the newest message during a reply was answered, several times a second, by an animated scroll straight back down. Following now happens only inside the same narrow band the app already treats as "at the bottom", and never mid-gesture. Scroll away and it stops; scroll back or tap the down arrow and it resumes.
+
 # Sep 8 (6) — Voice works again
 
 - **Voice connects and stays connected.** Every call was being refused by ElevenLabs the moment it came up: the app overrode the agent's system prompt and first message on each connect, and an agent that does not allow those overrides closes the call on the spot. On the phone that looked like "Voice live" for a second, then quiet standby, then a wake on the next sound into the same wall. The default mode is now **Stays on**, the way voice originally worked: one conversation from the mic tap until you end it, no idle hang-up, no wake-ups, and nothing sent that the agent has to permit — a stock agent works as is. The briefing arrives as context right after connect instead.
