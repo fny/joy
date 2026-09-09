@@ -3,6 +3,7 @@
 // /proc snapshots — no live processes involved.
 import { describe, it, expect } from "vitest";
 import { treeCpuTicks, type TreeSnapshot } from "./procStats";
+import { treeOrder, perProcessCpu, parseEtime } from "./procStats";
 
 const proc = (ppid: number, ticks: number, startTicks: number, childTicks = 0) =>
   ({ ppid, ticks, childTicks, rssBytes: 0, startTicks });
@@ -92,5 +93,34 @@ describe("treeCpuTicks — departed subtree accounting (#554 residual)", () => {
     const a: TreeSnapshot = { uptimeTicks: 100, procs: new Map([[1, proc(0, 0, 1, 0)], [2, proc(1, 200, 50)]]) };
     const b: TreeSnapshot = { uptimeTicks: 140, procs: new Map([[1, proc(0, 0, 1, 200)], [2, proc(1, 7, 120)]]) };
     expect(treeCpuTicks(a, b)).toBe(7);
+  });
+});
+
+describe("per-process listing", () => {
+  it("orders the tree depth-first from the root, children by pid", () => {
+    const ppid = new Map<number, number>([[100, 1], [101, 100], [105, 100], [102, 101], [999, 5]]);
+    expect(treeOrder(ppid, 100)).toEqual([{ pid: 100, depth: 0 }, { pid: 101, depth: 1 }, { pid: 102, depth: 2 }, { pid: 105, depth: 1 }]);
+    expect(treeOrder(ppid, 42)).toEqual([]);
+  });
+
+  it("gives each survivor its own delta, a newborn everything, and a mid-window joiner nothing", () => {
+    const snap = (procs: Array<[number, number, number, number]>, uptime: number) => ({
+      procs: new Map(procs.map(([pid, ppid, ticks, start]) => [pid, { ppid, ticks, childTicks: 0, rssBytes: 0, startTicks: start }])),
+      uptimeTicks: uptime,
+    });
+    const a = snap([[1, 0, 100, 10], [2, 1, 50, 20]], 1000);
+    const b = snap([[1, 0, 150, 10], [2, 1, 50, 20], [3, 1, 40, 1005], [4, 1, 70, 500]], 1100);
+    const cpu = perProcessCpu(a, b, 1, 100);
+    expect(cpu.get(1)).toBe(50);   // 50 ticks over 1 s at 100 Hz
+    expect(cpu.get(2)).toBe(0);
+    expect(cpu.get(3)).toBe(40);   // born inside the window: all of it
+    expect(cpu.get(4)).toBe(0);    // existed before, joined the tree later: unknown
+  });
+
+  it("parses ps etime", () => {
+    expect(parseEtime("05:07")).toBe(307);
+    expect(parseEtime("01:02:03")).toBe(3723);
+    expect(parseEtime("2-01:00:00")).toBe(2 * 86_400 + 3600);
+    expect(parseEtime("garbage")).toBeNull();
   });
 });

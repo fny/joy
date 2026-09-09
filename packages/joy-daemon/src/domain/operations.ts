@@ -43,7 +43,8 @@ import { hostname, platform, release, arch } from "os";
 import { spawn, execFile, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
 
-import { scanStorage, nukeSessionStorage, killTmuxServer, type NukeResult } from "./footprint";
+import { scanStorage, nukeSessionStorage, killTmuxServer, tmuxLabelsFor, realTmux, type NukeResult } from "./footprint";
+import { processTreeList } from "./procStats";
 import { ledgerFor } from "./ledger";
 /** Accepted git URL shapes for a git-URL session spawn. */
 export const GIT_URL_RE = /^(https?:\/\/|git@|ssh:\/\/)\S+$/;
@@ -1468,6 +1469,37 @@ export const machineOps: MachineOp[] = [
       if (r.error === "session_not_found") return { status: 404, body: result };
       return { status: 200, body: result };
     },
+  },
+  {
+    name: "sessionProcesses",
+    scope: "machine",
+    rpcName: "joy-session-processes",
+    summary: "Every process under the session's agent — pid, parent, depth, name, command line, CPU right now, resident memory, age — in tree order, with totals (domain/procStats.ts processTreeList). Rooted at the agent pid; a session without one (detached, record-only) is rooted at its tmux pane shells instead",
+    http: { method: "GET", path: "/sessions/:id/processes" },
+    result: { type: "object", properties: { ok: { type: "boolean" }, roots: { type: "array", items: { type: "number" } }, sampledAt: { type: "number" }, totals: { type: "object" }, processes: { type: "array", items: { type: "object" } }, error: { type: "string" } } },
+    handler: async (registry, params) => {
+      const id = String(params.id ?? "");
+      const session = registry.get(id);
+      // Roots: the agent pid; failing that, whatever shells the session's
+      // tmux server still holds (a detached session's tool children can
+      // outlive the agent under the pane shell).
+      let roots: number[] = session?.pid ? [session.pid] : [];
+      if (roots.length === 0) {
+        for (const label of tmuxLabelsFor(id)) {
+          const r = realTmux(["-L", label, "list-panes", "-a", "-F", "#{pane_pid}"]);
+          if (r.ok) roots.push(...r.out.split("\n").map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0));
+        }
+      }
+      if (!session && roots.length === 0) return { ok: false, error: "session_not_found" };
+      const lists = (await Promise.all(roots.map((r) => processTreeList(r)))).filter((l): l is NonNullable<typeof l> => !!l);
+      const processes = lists.flatMap((l) => l.processes);
+      return {
+        ok: true, roots, sampledAt: Date.now(),
+        totals: { cpuPercent: Math.round(lists.reduce((n, l) => n + l.totals.cpuPercent, 0) * 10) / 10, rssBytes: lists.reduce((n, l) => n + l.totals.rssBytes, 0), processCount: processes.length },
+        processes,
+      };
+    },
+    httpShape: (result) => ({ status: (result as { ok?: boolean }).ok ? 200 : 404, body: result }),
   },
   {
     name: "pane",

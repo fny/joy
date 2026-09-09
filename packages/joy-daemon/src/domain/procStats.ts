@@ -211,3 +211,150 @@ export async function processTreeStats(root: number | undefined): Promise<Proces
     return null;
   }
 }
+
+
+// ── Per-process listing (the session's Processes page) ─────────────────────
+//
+// The aggregate above answers "how much is this session burning". The list
+// answers "which of its processes" — every descendant of the agent with its
+// own CPU right now, resident memory, age and command line, in tree order so
+// a subagent's tool shell sits under the subagent.
+
+export interface ProcessRow {
+  pid: number;
+  ppid: number;
+  /** Distance from the root: 0 for the agent, 1 for its direct children… */
+  depth: number;
+  /** Executable name (comm). */
+  name: string;
+  /** Full command line where readable; else the name. */
+  args: string;
+  /** Percent of one core, this process alone, over the sample window. */
+  cpuPercent: number;
+  rssBytes: number;
+  /** Seconds since the process started. */
+  elapsedSeconds: number | null;
+}
+
+export interface ProcessTreeList {
+  root: number;
+  sampledAt: number;
+  totals: { cpuPercent: number; rssBytes: number; processCount: number };
+  processes: ProcessRow[];
+}
+
+/** DFS from `root` over a parent map: pids in tree order with their depth. */
+export function treeOrder(ppidOf: Map<number, number>, root: number): Array<{ pid: number; depth: number }> {
+  const children = new Map<number, number[]>();
+  for (const [pid, ppid] of ppidOf) {
+    if (pid === root) continue;
+    const list = children.get(ppid) ?? [];
+    list.push(pid); children.set(ppid, list);
+  }
+  const out: Array<{ pid: number; depth: number }> = [];
+  const seen = new Set<number>();
+  const walk = (pid: number, depth: number) => {
+    if (seen.has(pid)) return;
+    seen.add(pid);
+    out.push({ pid, depth });
+    for (const c of (children.get(pid) ?? []).sort((x, y) => x - y)) walk(c, depth + 1);
+  };
+  if (ppidOf.has(root)) walk(root, 0);
+  return out;
+}
+
+/** Each surviving pid's own CPU over the window, percent of one core. A pid
+ *  born inside the window gets everything it has; a reused pid (same number,
+ *  different start) is the new process. */
+export function perProcessCpu(a: TreeSnapshot, b: TreeSnapshot, seconds: number, ticksPerSecond: number): Map<number, number> {
+  const out = new Map<number, number>();
+  const denom = Math.max(0.001, seconds) * ticksPerSecond;
+  for (const [pid, pb] of b.procs) {
+    const pa = a.procs.get(pid);
+    let d: number;
+    if (pa && pa.startTicks === pb.startTicks) d = Math.max(0, pb.ticks - pa.ticks);
+    else if (pb.startTicks >= a.uptimeTicks) d = pb.ticks;
+    else d = 0; // joined the tree mid-window: its split is unknown
+    out.set(pid, Math.round((d / denom) * 1000) / 10);
+  }
+  return out;
+}
+
+/** `[[dd-]hh:]mm:ss` from ps etime → seconds. */
+export function parseEtime(s: string): number | null {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s.trim());
+  if (!m) return null;
+  const [, d, h, mi, se] = m;
+  return (Number(d ?? 0) * 86_400) + (Number(h ?? 0) * 3600) + Number(mi) * 60 + Number(se);
+}
+
+function readProcName(pid: number): { name: string; args: string } {
+  let name = "";
+  try { name = readFileSync(`/proc/${pid}/comm`, "utf8").trim(); } catch { /* gone */ }
+  let args = "";
+  try { args = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" "); } catch { /* gone or kernel thread */ }
+  return { name: name || args.split(" ")[0] || String(pid), args: args || name };
+}
+
+async function linuxList(root: number): Promise<ProcessTreeList | null> {
+  const a = linuxTree(root);
+  if (a.procs.size === 0) return null;
+  const t0 = Date.now();
+  await new Promise((r) => setTimeout(r, SAMPLE_MS));
+  const b = linuxTree(root);
+  const t1 = Date.now();
+  if (b.procs.size === 0) return null;
+  const cpu = perProcessCpu(a, b, (t1 - t0) / 1000, clockTicksPerSecond());
+  const ppidOf = new Map<number, number>();
+  for (const [pid, p] of b.procs) ppidOf.set(pid, p.ppid);
+  const processes: ProcessRow[] = treeOrder(ppidOf, root).map(({ pid, depth }) => {
+    const p = b.procs.get(pid)!;
+    const { name, args } = readProcName(pid);
+    return {
+      pid, ppid: p.ppid, depth, name, args,
+      cpuPercent: cpu.get(pid) ?? 0, rssBytes: p.rssBytes,
+      elapsedSeconds: Math.max(0, Math.round((b.uptimeTicks - p.startTicks) / clockTicksPerSecond())),
+    };
+  });
+  return {
+    root, sampledAt: t1,
+    totals: { cpuPercent: Math.round(processes.reduce((n, r) => n + r.cpuPercent, 0) * 10) / 10, rssBytes: processes.reduce((n, r) => n + r.rssBytes, 0), processCount: processes.length },
+    processes,
+  };
+}
+
+function psList(root: number): Promise<ProcessTreeList | null> {
+  return new Promise((resolve) => {
+    // args last: it is the one column with spaces in it.
+    execFile("ps", ["-Ao", "pid=,ppid=,%cpu=,rss=,etime=,comm=,args="], { timeout: 4000, maxBuffer: 8 << 20 }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const rows = new Map<number, { ppid: number; cpu: number; rssKb: number; etime: string; comm: string; args: string }>();
+      for (const line of stdout.split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$/.exec(line);
+        if (!m) continue;
+        rows.set(Number(m[1]), { ppid: Number(m[2]), cpu: Number(m[3]), rssKb: Number(m[4]), etime: m[5], comm: m[6].split("/").pop() ?? m[6], args: m[7] || m[6] });
+      }
+      if (!rows.has(root)) { resolve(null); return; }
+      const keep = new Set<number>([root]);
+      let grew = true;
+      while (grew) { grew = false; for (const [pid, p] of rows) if (!keep.has(pid) && keep.has(p.ppid)) { keep.add(pid); grew = true; } }
+      const ppidOf = new Map<number, number>();
+      for (const pid of keep) ppidOf.set(pid, rows.get(pid)!.ppid);
+      const processes: ProcessRow[] = treeOrder(ppidOf, root).map(({ pid, depth }) => {
+        const p = rows.get(pid)!;
+        return { pid, ppid: p.ppid, depth, name: p.comm, args: p.args, cpuPercent: Math.round(p.cpu * 10) / 10, rssBytes: p.rssKb * 1024, elapsedSeconds: parseEtime(p.etime) };
+      });
+      resolve({
+        root, sampledAt: Date.now(),
+        totals: { cpuPercent: Math.round(processes.reduce((n, r) => n + r.cpuPercent, 0) * 10) / 10, rssBytes: processes.reduce((n, r) => n + r.rssBytes, 0), processCount: processes.length },
+        processes,
+      });
+    });
+  });
+}
+
+/** Every process under `root`, in tree order, or null when the pid is gone. */
+export async function processTreeList(root: number | undefined): Promise<ProcessTreeList | null> {
+  if (!root || !Number.isFinite(root)) return null;
+  try { return platform() === "linux" ? await linuxList(root) : await psList(root); } catch { return null; }
+}
