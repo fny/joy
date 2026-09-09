@@ -511,6 +511,10 @@ export const ja: TranslationStructure = {
     },
 
     sessionInfo: {
+        muteNotifications: '通知をミュート',
+        muteNotificationsSubtitle: 'このセッションの通知をすべてのデバイスで消音します。状態はここに表示されたままです。',
+        unmuteNotifications: 'ミュートを解除',
+        unmuteNotificationsSubtitle: 'このセッションはすべてのデバイスで消音されています。',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: 'セッションを終了',
         killSessionConfirm: 'このセッションを終了してもよろしいですか？',

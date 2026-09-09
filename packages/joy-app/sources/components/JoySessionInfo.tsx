@@ -13,6 +13,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { copyToClipboard } from '@/utils/clipboard';
 import { guarded } from '@/utils/guardAsync';
 import { Typography } from '@/constants/Typography';
+import { t } from '@/text';
 import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
@@ -24,7 +25,7 @@ import { useJoyAction } from '@/hooks/useJoyAction';
 import { sessionDelete, sessionKill } from '@/sync/ops';
 import { sync } from '@/sync/sync';
 import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
-import { machineSessionInfoFor, machineSessionLog, machineHandoff } from '@/sync/v2/machine';
+import { machineSessionInfoFor, machineSessionLog, machineHandoff, machineSetNotificationsMuted } from '@/sync/v2/machine';
 import { loadHarnessModels } from '@/hooks/useHarnessModels';
 import { Modal } from '@/modal';
 import { Session, isJoyDaemonSource } from '@/sync/storageTypes';
@@ -182,6 +183,19 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
     // the relay; nothing server-side is touched, so the worst case is a reload.
     // Until now the only way out was restarting the whole app.
     // Hand off: choose a harness, then a model from that harness's catalog
+    // Notifications for THIS session, silenced on every device. Enforced by
+    // the daemon (a phone draws a remote notification before the app is
+    // consulted, so nothing the app does on receipt could suppress one), so
+    // this is a round-trip and the card's joy__muted is the answer.
+    const muted = session.metadata?.joy__muted === true;
+    const [togglingMute, toggleMute] = useJoyAction(async () => {
+        if (!machineId || !joySessionId) throw new JoyError('No machine context for this session', false);
+        const ctx = sync.machineCtxFor(machineId, joySessionId);
+        if (!ctx) throw new JoyError('Machine is offline', false);
+        const r = await machineSetNotificationsMuted(ctx, !muted);
+        if (r.data?.ok !== true) throw new JoyError(r.data?.error || 'Could not change notifications for this session', false);
+    });
+
     // (or its default), then ask the daemon. Progress shows in the chat's
     // HandoffBar; this page just kicks it off.
     const canHandoff = Boolean(joySessionId && machineId && sessionStatus.isConnected);
@@ -352,6 +366,16 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                         subtitle="Continue this conversation on another machine (files assumed synced)"
                         icon={<Ionicons name="planet-outline" size={29} color="#007AFF" />}
                         onPress={teleportSession}
+                    />
+                )}
+                {!!joySessionId && !!machineId && (
+                    <Item
+                        title={muted ? t('sessionInfo.unmuteNotifications') : t('sessionInfo.muteNotifications')}
+                        subtitle={muted ? t('sessionInfo.unmuteNotificationsSubtitle') : t('sessionInfo.muteNotificationsSubtitle')}
+                        subtitleLines={0}
+                        icon={<Ionicons name={muted ? 'notifications-off-outline' : 'notifications-outline'} size={29} color={muted ? '#FF9500' : '#007AFF'} />}
+                        onPress={toggleMute}
+                        loading={togglingMute}
                     />
                 )}
                 <Item

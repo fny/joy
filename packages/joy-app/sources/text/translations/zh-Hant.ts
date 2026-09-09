@@ -510,6 +510,10 @@ export const zhHant: TranslationStructure = {
     },
 
     sessionInfo: {
+        muteNotifications: '靜音通知',
+        muteNotificationsSubtitle: '在所有裝置上靜音此工作階段的通知。狀態仍會顯示在這裡。',
+        unmuteNotifications: '取消靜音',
+        unmuteNotificationsSubtitle: '此工作階段已在所有裝置上靜音。',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: '終止工作階段',
         killSessionConfirm: '您確定要終止此工作階段嗎？',

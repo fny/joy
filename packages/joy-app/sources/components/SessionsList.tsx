@@ -144,6 +144,10 @@ const stylesheet = StyleSheet.create((theme) => ({
         gap: 4,
         marginBottom: 2,
     },
+    mutedIcon: {
+        marginLeft: 6,
+        color: theme.colors.textSecondary,
+    },
     sessionSubtitle: {
         fontSize: 13,
         color: theme.colors.textSecondary,
@@ -448,6 +452,11 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
                     ]} numberOfLines={1}>
                         {session.name}
                     </Text>
+                    {/* Silenced sessions say so: a mute you cannot see is a
+                        session you think has gone quiet on its own. */}
+                    {session.facts.muted && (
+                        <Ionicons name="notifications-off" size={12} style={styles.mutedIcon} />
+                    )}
                 </View>
 
                 {session.path ? (

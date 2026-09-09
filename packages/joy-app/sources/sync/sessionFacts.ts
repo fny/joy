@@ -88,6 +88,11 @@ export interface SessionFacts {
     longRunning: number;
     /** Terminal: the relay refused this session's output for good. Only a new session recovers. */
     budgetExhausted: boolean;
+    /** Notifications for this session are silenced on every device. A fact
+     *  about the session, not a state: it is orthogonal to everything in the
+     *  ladder and never becomes the badge — a muted session still shows
+     *  whatever it is doing. */
+    muted: boolean;
     queue: QueueFacts | null;
 }
 
@@ -110,6 +115,7 @@ export interface SessionFactsInput {
         joy__agents?: { done: number; total: number } | null;
         joy__tasks?: { done: number; total: number } | null;
         joy__longRunning?: number | null;
+        joy__muted?: boolean | null;
         joy__eventBudget?: { since: number; dropped: number } | null;
         joy__login?: { url?: string; code?: string; error?: string } | null;
         joy__dialog?: { title?: string | null; options: string[] } | null;
@@ -191,6 +197,7 @@ export function sessionFacts(session: SessionFactsInput, online: boolean): Sessi
         tasks: counter(m?.joy__tasks),
         longRunning: m?.joy__longRunning ?? 0,
         budgetExhausted: (m?.joy__eventBudget?.dropped ?? 0) > 0,
+        muted: m?.joy__muted === true,
         queue: q
             ? { depth: q.queue.length, inFlight: q.inFlight != null, paused: q.paused, pauseReason: q.pauseReason }
             : null,

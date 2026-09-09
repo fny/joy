@@ -22,7 +22,8 @@ import { queueFor } from "./queueFacade";
 import type { SessionRegistry } from "./registry";
 import { claimTranscript, transcriptClaims, type TranscriptClaim } from "./transcriptClaims";
 import { processTreeStats } from "./procStats";
-import { listWindowRecords, loadWindowRecord, type WindowRecord } from "./windowRecord";
+import { listWindowRecords, loadWindowRecord, saveWindowRecord, type WindowRecord } from "./windowRecord";
+import { relaySessionFor } from "../relay/relay";
 import { forkAgyConversation, forkPiSession, forkCodexThread } from "./forkHarness";
 import { HARNESSES, HARNESS_CAPABILITIES, isHarness } from "./harnessCapabilities";
 import { listPastSessions } from "./pastSessions";
@@ -1463,6 +1464,37 @@ export const machineOps: MachineOp[] = [
       const mode = typeof params.mode === "string" ? params.mode : "";
       if (!mode) return { error: "mode required" };
       return session.setPermissionMode(mode);
+    },
+    httpShape: (result) => {
+      const r = result as { error?: string };
+      if (r.error === "session_not_found") return { status: 404, body: result };
+      return { status: 200, body: result };
+    },
+  },
+  {
+    name: "setNotifications",
+    scope: "machine",
+    rpcName: "joy-set-notifications",
+    summary: "Silence (or restore) this session's push notifications on every device",
+    http: { method: "POST", path: "/sessions/:id/notifications" },
+    params: { type: "object", required: ["muted"], properties: { muted: { type: "boolean", description: "true silences turn-done, permission, question and agent <joy-notify> pushes" } } },
+    // Enforced daemon-side because that is the last point before the relay
+    // fans a push out to the account's devices: a phone draws a remote
+    // notification before the app is consulted, so a mute the app applied on
+    // receipt would arrive too late. Persisted on the window record, so it
+    // survives a restart, and mirrored onto the card as joy__muted so the app
+    // can show the session silenced.
+    handler: (registry, params) => {
+      const id = String(params.id ?? "");
+      const session = registry.get(id);
+      if (!session) return { ok: false, error: "session_not_found" };
+      if (typeof params.muted !== "boolean") return { ok: false, error: "muted (boolean) required" };
+      const muted = params.muted;
+      relaySessionFor(id)?.setNotificationsMuted(muted);
+      // Written even with no relay attached (a detached session, a lane that
+      // is down): the record is what the next attach reads.
+      saveWindowRecord(id, { notificationsMuted: muted });
+      return { ok: true, muted };
     },
     httpShape: (result) => {
       const r = result as { error?: string };

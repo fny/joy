@@ -1086,10 +1086,37 @@ export class RelaySession {
     await this.mergeKey('joy__thinking', null, (cur) => cur == null);
   }
 
+  /**
+   * Push notifications for this session are silenced.
+   *
+   * Enforced HERE, at the one junction every notification passes through,
+   * because it is the last point before the relay fans a push out to the
+   * account's devices — and a remote notification is drawn by the phone's OS
+   * before the app is consulted, so a device-side filter could not suppress
+   * one. Muting therefore applies to every device at once, which is also what
+   * "mute this session" means to a reader.
+   *
+   * The session's STATE is untouched: it still goes green in the list when it
+   * finishes, still shows an approval waiting. Mute removes the interruption,
+   * not the fact.
+   */
+  private muted = false;
+
+  /** Seeded from the window record at attach, and set by joy-set-notifications.
+   *  Publishes joy__muted so the app can show the session as silenced without
+   *  asking, and so the desktop path (which the app owns) reads the same fact. */
+  setNotificationsMuted(muted: boolean): void {
+    this.muted = muted;
+    void this.mergeKey('joy__muted', muted ? true : null, (cur) => (cur === true) === muted).catch(() => {});
+  }
+
+  get notificationsMuted(): boolean { return this.muted; }
+
   /** Agent-authored notification (<joy-notify/> tag): free-form title + body.
    *  Title falls back to the session's host/folder so a push always identifies
    *  its source; when the agent titles it, the folder rides as a prefix. */
   notifyCustom(headline: string, detail: string | null): void {
+    if (this.muted) return;
     // Project-prefixed headline ("joy: Deploy finished") so every push reads
     // as <where>: <what> at a glance; detail (when given) is the body.
     const path = (this.metadata?.path as string | undefined)?.trim();
@@ -1102,6 +1129,7 @@ export class RelaySession {
    *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
    *  WHICH session at a glance; body is the reply snippet (or the per-kind reason). */
   notify(kind: 'done' | 'permission' | 'question', snippet?: string): void {
+    if (this.muted) return;
     // Push title/body travel UNSEALED through the relay and Expo. The reply
     // snippet — and the AI title, which is conversation-derived too — are
     // E2E-sealed content everywhere else; putting them in the body leaked a
@@ -1310,9 +1338,14 @@ export function createRelaySession(
   // rebuilt blank on every restart (session or daemon), and the card was the
   // only place the link existed — "Hand back" then refused a valid handback
   // as "not picked up" (codex review, 2026-09-04).
-  const handoff = loadWindowRecord(opts.id)?.handoff;
+  const record = loadWindowRecord(opts.id);
+  const handoff = record?.handoff;
   if (handoff) metadata.joy__handoff = handoff;
+  // A mute outlives the daemon: seed the card so the app shows it silenced
+  // from the first publish, not only after the next toggle.
+  if (record?.notificationsMuted) metadata.joy__muted = true;
   const rs = new RelaySession({ client, relaySessionId: opts.id, metadata });
+  if (record?.notificationsMuted) rs.setNotificationsMuted(true);
   holders.set(opts.id, rs);
   return rs;
 }

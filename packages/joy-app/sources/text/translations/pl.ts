@@ -527,6 +527,10 @@ export const pl: TranslationStructure = {
     },
 
     sessionInfo: {
+        muteNotifications: 'Wycisz powiadomienia',
+        muteNotificationsSubtitle: 'Wycisza powiadomienia tej sesji na wszystkich urządzeniach. Status nadal widać tutaj.',
+        unmuteNotifications: 'Włącz powiadomienia',
+        unmuteNotificationsSubtitle: 'Ta sesja jest wyciszona na wszystkich urządzeniach.',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: 'Zakończ sesję',
         killSessionConfirm: 'Czy na pewno chcesz zakończyć tę sesję?',

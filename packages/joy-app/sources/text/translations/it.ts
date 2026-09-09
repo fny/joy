@@ -508,6 +508,10 @@ export const it: TranslationStructure = {
     },
 
     sessionInfo: {
+        muteNotifications: 'Silenzia le notifiche',
+        muteNotificationsSubtitle: 'Silenzia le notifiche di questa sessione su tutti i dispositivi. Lo stato resta visibile qui.',
+        unmuteNotifications: 'Riattiva le notifiche',
+        unmuteNotificationsSubtitle: 'Questa sessione è silenziata su tutti i dispositivi.',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: 'Termina sessione',
         killSessionConfirm: 'Sei sicuro di voler terminare questa sessione?',

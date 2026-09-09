@@ -559,6 +559,10 @@ export const en = {
     },
 
     sessionInfo: {
+        muteNotifications: 'Mute notifications',
+        muteNotificationsSubtitle: 'Silence this session\'s notifications on every device. It still shows its status here.',
+        unmuteNotifications: 'Unmute notifications',
+        unmuteNotificationsSubtitle: 'This session is silenced on every device.',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: 'Kill Session',
         killSessionConfirm: 'Are you sure you want to terminate this session?',

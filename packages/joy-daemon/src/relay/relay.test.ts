@@ -565,3 +565,50 @@ test("clearThinkingMeta clears a card the daemon did not set itself (restart rec
   await s.clearThinkingMeta();
   expect(published.length).toBe(1);
 });
+
+// Muting is enforced HERE because it is the last point before the relay fans
+// a push out to the account's devices: a phone draws a remote notification
+// before the app is consulted, so a device-side filter would arrive too late.
+test("a muted session sends no push, on any of its notification paths", async () => {
+  const pushes: Array<{ title: string; body: string }> = [];
+  registerV2CardPublisher(ID, async () => {});
+  const s = new RelaySession({
+    client: { sendSessionPushEvent: async (_id: string, _k: string, title: string, body: string) => { pushes.push({ title, body }); } } as any,
+    relaySessionId: ID,
+    metadata: { path: "/x", host: "box" },
+  });
+
+  s.notify("done");
+  s.notifyCustom("Deploy finished", "staging green");
+  expect(pushes).toHaveLength(2);
+
+  s.setNotificationsMuted(true);
+  expect(s.notificationsMuted).toBe(true);
+  s.notify("done");
+  s.notify("permission");           // silenced too: "mute" means quiet
+  s.notifyCustom("Deploy finished", null);
+  expect(pushes).toHaveLength(2);   // nothing new reached the relay
+
+  s.setNotificationsMuted(false);
+  s.notify("done");
+  expect(pushes).toHaveLength(3);
+});
+
+test("mute is published as joy__muted so the app can show it, and cleared on unmute", async () => {
+  const published: Array<Record<string, unknown>> = [];
+  registerV2CardPublisher(ID, async (m) => { published.push({ ...m }); });
+  const s = newSession();
+
+  s.setNotificationsMuted(true);
+  await vi.waitFor(() => expect(published.length).toBe(1));
+  expect(published[0].joy__muted).toBe(true);
+
+  // Re-asserting the same state is not a card publish.
+  s.setNotificationsMuted(true);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(published.length).toBe(1);
+
+  s.setNotificationsMuted(false);
+  await vi.waitFor(() => expect(published.length).toBe(2));
+  expect(published[1].joy__muted).toBeNull();
+});

@@ -38,6 +38,7 @@ const HTTP_SHAPED: Record<string, (op: MachineOp) => HttpResponses> = {
   queueAdd: (op) => ({ "200": success(op), "400": err("empty"), "404": err("session_not_found"), "503": err("not_durable") }),
   sendKeys: (op) => ({ "200": success(op), "400": err("empty"), "404": err("session_not_found") }),
   setMode: (op) => ({ "200": success(op), "404": err("session_not_found") }),
+  setNotifications: (op) => ({ "200": success(op), "404": err("session_not_found") }),
   pane: (op) => ({ "200": success(op), "404": err("session_not_found") }),
   resize: (op) => ({ "200": success(op), "400": err("bad dimensions"), "404": err("session_not_found") }),
   transcript: (op) => ({ "200": success(op), "404": err("session_not_found") }),

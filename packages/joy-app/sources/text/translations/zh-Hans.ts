@@ -511,6 +511,10 @@ export const zhHans: TranslationStructure = {
     },
 
     sessionInfo: {
+        muteNotifications: '静音通知',
+        muteNotificationsSubtitle: '在所有设备上静音此会话的通知。状态仍会显示在这里。',
+        unmuteNotifications: '取消静音',
+        unmuteNotificationsSubtitle: '此会话已在所有设备上静音。',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: '终止会话',
         killSessionConfirm: '您确定要终止此会话吗？',

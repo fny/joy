@@ -367,6 +367,7 @@ route("POST", "/v2/sessions/:id/restart", async (ctx, p, body) =>
 route("POST", "/v2/sessions/:id/fork", async (ctx, p) => ok(await mcall("fork", ctx.registry, { id: p.id })));
 route("POST", "/v2/sessions/:id/model", async (ctx, p, body) => ok(await mcall("setModel", ctx.registry, { id: p.id, model: body.model })));
 route("POST", "/v2/sessions/:id/effort", async (ctx, p, body) => ok(await mcall("setEffort", ctx.registry, { id: p.id, effort: body.effort })));
+route("POST", "/v2/sessions/:id/notifications", (ctx, p, body) => mshaped("setNotifications", ctx.registry, { id: p.id, muted: body.muted }));
 route("POST", "/v2/sessions/:id/handoff", (ctx, p, body) => mshaped("handoff", ctx.registry, addressed(body, p)));
 route("POST", "/v2/sessions/:id/handback", (ctx, p) => mshaped("handback", ctx.registry, { id: p.id }));
 route("POST", "/v2/sessions/:id/teleport-export", async (ctx, p) => ok(await mcall("teleportExport", ctx.registry, { id: p.id })));

@@ -272,6 +272,12 @@ export const machineSetModel = async (ctx: MachineCtx, model: string) => {
 export const machineSetEffort = (ctx: MachineCtx, effort: string) =>
     j<{ ok?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/effort`, { effort });
 
+/** Silence (or restore) a session's push notifications on every device.
+ *  Daemon-side because a phone draws a remote notification before the app is
+ *  consulted — a mute applied on receipt would arrive too late. */
+export const machineSetNotificationsMuted = (ctx: MachineCtx, muted: boolean) =>
+    j<{ ok?: boolean; muted?: boolean; error?: string }>(ctx, 'POST', `/v2/sessions/${ctx.localSessionId}/notifications`, { muted });
+
 export const machineSetMode = (ctx: MachineCtx, permissionMode: string) =>
     j<{ ok?: boolean; error?: string }>(ctx, 'PATCH', `/v2/sessions/${ctx.localSessionId}`, { permissionMode });
 

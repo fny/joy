@@ -356,6 +356,10 @@ export const ru: TranslationStructure = {
     },
 
     sessionInfo: {
+        muteNotifications: 'Отключить уведомления',
+        muteNotificationsSubtitle: 'Отключает уведомления этой сессии на всех устройствах. Её статус здесь по-прежнему виден.',
+        unmuteNotifications: 'Включить уведомления',
+        unmuteNotificationsSubtitle: 'Эта сессия отключена на всех устройствах.',
         // Used by Session Info screen (app/(app)/session/[id]/info.tsx)
         killSession: 'Завершить сессию',
         killSessionConfirm: 'Вы уверены, что хотите завершить эту сессию?',

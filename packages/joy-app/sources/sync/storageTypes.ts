@@ -149,6 +149,10 @@ export const MetadataSchema = z.object({
     // tagged <joy-bg long-running>). These never "complete", so they're kept OUT
     // of joy__tasks (the N/M) and shown as plain text next to the status.
     joy__longRunning: z.number().nullable().optional(),
+    // This session's push notifications are silenced (joy-set-notifications).
+    // Published by the daemon, which is where the mute is enforced, so the
+    // list and header can show a session as quiet without asking for it.
+    joy__muted: z.boolean().nullable().optional(),
     // WHAT is running behind the session, alongside the counts above (#646).
     // The counts alone say a number is stuck but never which thing — and an
     // outstanding count also suppresses the turn-done push, so this is what

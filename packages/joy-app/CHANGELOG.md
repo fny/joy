@@ -1,3 +1,8 @@
+# Sep 9 (7) — Mute a session
+
+- **A single session can be silenced.** Session info → Mute notifications stops that session's pushes — finished, permission needed, question asked, and anything the agent announces itself — on every device you own, until you unmute it. The session is not otherwise changed: it still shows what it is doing, and still turns green in the list when it finishes. Muted sessions carry a small bell-slash in the sidebar so a quiet session is never mistaken for a stalled one.
+- Muting is applied on the machine rather than on your phone, because a phone shows a notification before the app can have an opinion about it. That means the machine's daemon needs to be up to date for a mute to take hold there.
+
 # Sep 9 (6) — Finished sessions go green again
 
 - **A session that has finished no longer sits blue in the sidebar.** The app worked out "a turn is running" partly from turn-start and turn-end events in the message stream — and if it never saw the end, because you left the session while it was working, nothing ever reset it. The daemon's own signal said idle the whole time. The daemon now decides: its word outranks the app's guess once that guess is more than a few seconds old, which is long enough to cover the moment at the start of a turn before the daemon's signal arrives.

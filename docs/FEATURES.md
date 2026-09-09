@@ -311,6 +311,13 @@ every relay; machines register per account.
   (`onContextMenu` in MarkdownView) — unless text is selected, in which case
   the browser's own menu is left alone.
 - Cmd/Ctrl+F in-session search with match cycling.
+- **Mute a session's notifications** (session info → Actions): silences its
+  pushes on every device until unmuted — turn-done, permission, question
+  and the agent's own `<joy-notify>` tags. The daemon enforces it
+  (`joy-set-notifications` → the window record), because a phone draws a
+  remote notification before the app is consulted; the card carries
+  `joy__muted`, so the sidebar row shows a bell-slash and the session's
+  status is otherwise unchanged — it still goes green when it finishes.
 - Composer info line: agent · model · reasoning · permissions. Tapping it
   opens the settings panel (`SessionSettingsPanel`), a two-level picker:
   a root of current values, one list per setting on drill-in, back to the
