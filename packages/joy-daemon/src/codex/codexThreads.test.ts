@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, truncateSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { findLatestCodexThreadForCwd, listCodexThreadsForCwd, parseCodexConfigArgs } from "./codexThreads";
+import { clearCodexRolloutTitleCache, codexRolloutTitle, findLatestCodexThreadForCwd, listCodexThreadsForCwd, parseCodexConfigArgs } from "./codexThreads";
 
 test("findLatestCodexThreadForCwd: newest rollout for the cwd wins; others ignored", () => {
   const home = mkdtempSync(join(tmpdir(), "cxh-"));
@@ -97,5 +97,30 @@ test("listCodexThreadsForCwd: every rollout of the cwd, newest first, titled by 
   expect(rows.map((r) => [r.id, r.title])).toEqual([["t-new", "Ship it"], ["t-old", "Refactor the pairing flow"]]);
   expect(rows[0].sizeBytes).toBeGreaterThan(0);
   expect(listCodexThreadsForCwd("/proj/none", home)).toEqual([]);
+  rmSync(home, { recursive: true, force: true });
+});
+
+// A joy-driven thread's first user message is three preamble parts
+// (recommended plugins, AGENTS.md, environment_context), and the next line
+// is a `world_state` record carrying the whole AGENTS.md — tens of KB before
+// the real prompt. A single 16KB head read titled none of them.
+test("codexRolloutTitle: reads past a large preamble and skips wrapper parts, and caches by size+mtime", () => {
+  clearCodexRolloutTitleCache();
+  const home = mkdtempSync(join(tmpdir(), "cxh-title-"));
+  const file = join(home, "rollout-big.jsonl");
+  const msg = (parts: string[]) => JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: parts.map((text) => ({ type: "input_text", text })) } });
+  const preamble = msg(["<recommended_plugins>\n- Airtable\n</recommended_plugins>", "# AGENTS.md instructions\n\n<INSTRUCTIONS>rules</INSTRUCTIONS>", "<environment_context>\n<cwd>/proj</cwd>\n</environment_context>"]);
+  const worldState = JSON.stringify({ type: "world_state", payload: { full: true, state: { agents_md: { text: "x".repeat(40 * 1024) } } } });
+  writeFileSync(file, [JSON.stringify({ type: "session_meta", payload: { id: "t1", cwd: "/proj" } }), preamble, worldState, msg(["You are picking up work from Claude Code. Its handoff note is below."]), msg(["Show me the image"])].join("\n") + "\n");
+  expect(codexRolloutTitle(file)).toBe("You are picking up work from Claude Code. Its handoff note is…");
+  // Capped read: the prompt beyond the cap is not found, and nothing is misread.
+  clearCodexRolloutTitleCache();
+  expect(codexRolloutTitle(file, 8 * 1024)).toBeNull();
+  // Cached: a rewrite with the same size+mtime is not re-read; a newer file is.
+  clearCodexRolloutTitleCache();
+  expect(codexRolloutTitle(file)).toContain("picking up work");
+  writeFileSync(file, [JSON.stringify({ type: "session_meta", payload: { id: "t1", cwd: "/proj" } }), msg(["Different prompt"])].join("\n") + "\n");
+  utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+  expect(codexRolloutTitle(file)).toBe("Different prompt");
   rmSync(home, { recursive: true, force: true });
 });

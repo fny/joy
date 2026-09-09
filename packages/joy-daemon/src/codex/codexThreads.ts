@@ -114,37 +114,80 @@ export function listCodexThreadsForCwd(cwd: string, codexHome?: string): Array<{
   return out;
 }
 
-/** First real prompt in a rollout head. Codex writes the prompt both as a
- *  response_item message (content[].text) and as an event_msg user_message;
- *  the environment_context message precedes it and starts with "<". */
-export function codexRolloutTitle(path: string, bytes = 16 * 1024): string | null {
+/** First real prompt in a rollout, or null. Codex writes the prompt both as
+ *  a response_item message (content[].text) and as an event_msg
+ *  user_message. The first user message is the harness's own preamble —
+ *  recommended plugins, AGENTS.md, environment_context, each a part that
+ *  starts with "<" or "#" — and a `world_state` line carrying the whole
+ *  AGENTS.md can push the real prompt past 16KB, which a single head read
+ *  missed: every joy-driven thread listed untitled. The file is read in
+ *  chunks up to `maxBytes`, line by line, and the scan stops at the first
+ *  part that reads as a prompt; results are cached by size+mtime. */
+const ROLLOUT_TITLE_CHUNK = 64 * 1024;
+const ROLLOUT_TITLE_MAX = 1024 * 1024;
+const rolloutTitleCache = new Map<string, { key: string; title: string | null }>();
+const ROLLOUT_TITLE_CACHE_MAX = 1000;
+
+export function codexRolloutTitle(path: string, maxBytes = ROLLOUT_TITLE_MAX): string | null {
+  let size: number;
+  let key: string;
+  try { const st = statSync(path); size = st.size; key = `${st.size}:${st.mtimeMs}`; } catch { return null; }
+  const hit = rolloutTitleCache.get(path);
+  if (hit && hit.key === key) return hit.title;
+  let title: string | null = null;
   let fd: number | null = null;
-  let text = "";
   try {
-    const size = statSync(path).size;
     fd = openSync(path, "r");
-    const buf = Buffer.alloc(Math.min(bytes, size));
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    text = buf.subarray(0, n).toString("utf8");
-    if (n < size) text = text.slice(0, text.lastIndexOf("\n") + 1);
-  } catch { return null; }
-  finally { if (fd !== null) closeSync(fd); }
-  for (const line of text.split("\n")) {
-    if (!line.includes('"user"') && !line.includes("user_message")) continue;
-    let e: { type?: string; payload?: Record<string, unknown> };
-    try { e = JSON.parse(line); } catch { continue; }
-    const pl = e.payload ?? {};
-    let candidate: string | null = null;
-    if (e.type === "response_item" && pl.type === "message" && pl.role === "user" && Array.isArray(pl.content)) {
-      for (const part of pl.content as Array<{ type?: string; text?: string }>) {
-        if (typeof part?.text === "string" && (part.type === "input_text" || part.type === "text")) { candidate = part.text; break; }
+    let offset = 0;
+    let carry = "";
+    scan: while (offset < size && offset < maxBytes) {
+      const buf = Buffer.alloc(Math.min(ROLLOUT_TITLE_CHUNK, size - offset));
+      const n = readSync(fd, buf, 0, buf.length, offset);
+      if (n <= 0) break;
+      offset += n;
+      const text = carry + buf.subarray(0, n).toString("utf8");
+      const lines = text.split("\n");
+      // The last piece is complete only at EOF.
+      carry = offset < size ? (lines.pop() ?? "") : "";
+      for (const line of lines) {
+        const t = rolloutLineTitle(line);
+        if (t) { title = t; break scan; }
       }
-    } else if (e.type === "event_msg" && pl.type === "user_message" && typeof pl.message === "string") {
-      candidate = pl.message;
     }
-    const t = candidate ? promptTitle(candidate) : null;
-    if (t) return t;
+    if (title === null && carry) title = rolloutLineTitle(carry);
+  } catch { title = null; }
+  finally { if (fd !== null) closeSync(fd); }
+  if (!rolloutTitleCache.has(path) && rolloutTitleCache.size >= ROLLOUT_TITLE_CACHE_MAX) {
+    const oldest = rolloutTitleCache.keys().next().value;
+    if (oldest !== undefined) rolloutTitleCache.delete(oldest);
   }
+  rolloutTitleCache.set(path, { key, title });
+  return title;
+}
+
+/** Test seam. */
+export function clearCodexRolloutTitleCache(): void { rolloutTitleCache.clear(); }
+
+function rolloutLineTitle(line: string): string | null {
+  if (!line.includes('"user"') && !line.includes("user_message")) return null;
+  let e: { type?: string; payload?: Record<string, unknown> };
+  try { e = JSON.parse(line); } catch { return null; }
+  const pl = e.payload ?? {};
+  if (e.type === "response_item" && pl.type === "message" && pl.role === "user" && Array.isArray(pl.content)) {
+    // Every part: the preamble parts (plugins, AGENTS.md, environment) sit
+    // in the SAME message as nothing else, but a later message may carry a
+    // wrapper part before the prompt.
+    for (const part of pl.content as Array<{ type?: string; text?: string }>) {
+      if (typeof part?.text !== "string" || (part.type !== "input_text" && part.type !== "text")) continue;
+      // The AGENTS.md part of the preamble is the one that does not start
+      // with "<"; it is never the prompt.
+      if (/^\s*#\s*AGENTS\.md/i.test(part.text)) continue;
+      const t = promptTitle(part.text);
+      if (t) return t;
+    }
+    return null;
+  }
+  if (e.type === "event_msg" && pl.type === "user_message" && typeof pl.message === "string") return promptTitle(pl.message);
   return null;
 }
 
