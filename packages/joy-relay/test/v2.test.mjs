@@ -257,6 +257,26 @@ describe('v2 send idempotency', () => {
     expect(anon.status).toBe(401);
   });
 
+  it('relay/status reports the box, the database and the live counts, to an account only', async () => {
+    const r = await call('GET', '/joy/v2/relay/status');
+    expect(r.status).toBe(200);
+    const j = r.json;
+    expect(j.relay).toBe('joy-relay');
+    expect(typeof j.uptimeSeconds).toBe('number');
+    expect(j.host.cpuCount).toBeGreaterThan(0);
+    expect(j.host.cpuPercent).toBeGreaterThanOrEqual(0);
+    expect(j.host.memTotalBytes).toBeGreaterThan(j.host.memAvailableBytes);
+    expect(j.host.memUsedPercent).toBeGreaterThanOrEqual(0);
+    expect(j.disk.root.totalBytes).toBeGreaterThan(0);
+    expect(j.disk.data).toBeNull();                       // :memory: in tests
+    expect(j.db.accounts).toBeGreaterThanOrEqual(0);
+    expect(j.db.sessions).toBeGreaterThanOrEqual(1);      // earlier tests made some
+    expect(typeof j.db.events).toBe('number');
+    expect(typeof j.live.daemonLeases).toBe('number');
+    const anon = await fetch(`${base}/joy/v2/relay/status`);
+    expect(anon.status).toBe(401);
+  });
+
   it('capabilities probe answers without auth', async () => {
     const r = await fetch(`${base}/joy/v2/capabilities`);
     expect(r.status).toBe(200);

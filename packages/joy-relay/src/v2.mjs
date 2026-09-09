@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto';
 import { ApiError, hashToken, nextSeq, appendEvent, messageStatusOf } from './core.mjs';
 
+import { relayStatus } from './status.mjs';
 const CLAIM_WAIT_MS = 25_000;
 const TUNNEL_REQUEST_MAX = 32 * 1024 * 1024;
 const ATTACH_REQUEST_MAX = 32 * 1024 * 1024;
@@ -84,7 +85,8 @@ const MSG_SELECT = `
   FROM commands c JOIN turns tu ON tu.id = c.turn_id
   WHERE c.session_id = $1 AND c.kind = 'prompt'`;
 
-export function createV2Router({ core, auth, notify, db, tunnel, attachments, accounts }) {
+export function createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, dataDir = null, version = null }) {
+  const startedAt = Date.now();
   const routes = [];
   const route = (method, pattern, opts, handler) =>
     routes.push({ method, pattern, regex: new RegExp(`^${pattern}$`), opts, handler });
@@ -106,6 +108,11 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     if (!r) throw new ApiError(404, 'message_not_found');
     return r;
   }
+
+  // The relay about itself — host, disk, database, live connections — for the
+  // app's Settings → Relay page. Account-authenticated like everything else.
+  route('GET', '/relay/status', { summary: 'The relay box: cpu/ram/disk, database size and counts, leases and SSE clients, uptime, version (Settings → Relay)' }, async () =>
+    relayStatus({ db, notify, dataDir, version, startedAt }));
 
   // ── client: sessions ──────────────────────────────────────────────────────
   route('GET', '/sessions', {}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));

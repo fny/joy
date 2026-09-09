@@ -359,6 +359,10 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 
 ## Agent configuration
 
+- **Relay** (Settings): the relay box as it reports itself over
+  `GET /relay/status` — CPU, memory, disk under / and the data dir, database
+  size and row counts, daemon leases and SSE clients, uptime, version; the
+  machine page's system rows, pointed at the relay. Read every 15 s while open.
 - **Agent Defaults**: per-agent model/effort/permission defaults + overrides
   (claude's model list trimmed to Settings → Models).
 - **Models**: per-harness model allowlist for every picker (see Sessions).

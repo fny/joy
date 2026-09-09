@@ -204,6 +204,12 @@ export default function RootLayout() {
                 }}
             />
             <Stack.Screen
+                name="settings/relay"
+                options={{
+                    headerTitle: 'Relay',
+                }}
+            />
+            <Stack.Screen
                 name="settings/joy-http"
                 options={{
                     headerTitle: t('settings.joyHttp'),

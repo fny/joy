@@ -306,6 +306,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     icon={<Ionicons name="hourglass-outline" size={29} color={theme.colors.accents.orange} />}
                     onPress={() => router.push('/settings/limits' as any)}
                 />
+                <Item
+                    title="Relay"
+                    subtitle="The relay box: CPU, memory, disk, database size, connections"
+                    icon={<Ionicons name="cloud-outline" size={29} color={theme.colors.accents.blue} />}
+                    onPress={() => router.push('/settings/relay' as any)}
+                />
                 {Platform.OS !== 'web' && (
                     <Item
                         title={t('settings.appLock')}

@@ -37,7 +37,8 @@ const accounts = createAccounts(db, tokens);
 const auth = createAuth({ tokens, accounts });
 const tunnel = createTunnel({ notify });
 const attachments = createAttachments(db);
-const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
+const VERSION = '0.2.0';
+const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, dataDir: DATA_DIR, version: VERSION });
 
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();
@@ -58,7 +59,7 @@ const server = http.createServer(async (req, res) => {
       if (await v2.handle(req, res)) return;
     }
     if (!gate.allows(req)) return gate.rejectHttp(res, req); // req: CORS on the 401 (#85)
-    if (handleDocs(req, res, { version: '0.2.0', routeTable: { routes: v2.routeTable(), served: true } })) return;
+    if (handleDocs(req, res, { version: VERSION, routeTable: { routes: v2.routeTable(), served: true } })) return;
     if (await v2.handle(req, res)) return;
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not_found', relay: 'joy-relay' }));

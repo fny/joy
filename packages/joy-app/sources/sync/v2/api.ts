@@ -122,8 +122,19 @@ export interface V2SessionState {
     };
 }
 
+export interface RelayDisk { path: string; totalBytes: number | null; freeBytes: number | null; usedPercent: number | null }
+export interface RelayStatus {
+    relay: string; version: string | null; node: string; uptimeSeconds: number; startedAt: number | null; now: number;
+    host: { hostname: string; platform: string; cpuCount: number; cpuModel: string | null; cpuPercent: number; load1: number; memTotalBytes: number; memAvailableBytes: number; memUsedPercent: number; processRssBytes: number };
+    disk: { root: RelayDisk; data: RelayDisk | null };
+    db: { dataDir: string | null; dataDirBytes: number | null; sizeBytes: number | null; accounts: number | null; machines: number | null; sessions: number | null; sessionsLive: number | null; events: number | null };
+    live: { daemonLeases: number | null; sseClients: number | null; sseAccounts: number | null };
+}
+
 export const v2 = {
     listSessions: (): Promise<{ sessions: V2SessionRow[] }> => v2fetch('GET', '/sessions'),
+    /** The relay about itself — host, disk, database, live counts (Settings → Relay). */
+    relayStatus: (): Promise<RelayStatus> => v2fetch('GET', '/relay/status'),
     /** Per-session event rows and ciphertext bytes on the relay (Settings → Storage). */
     sessionsStorage: (): Promise<{ sessions: Array<{ sessionId: string; state: string; events: number; bytes: number; oldest: number | null; newest: number | null }> }> => v2fetch('GET', '/sessions/storage'),
     listMachines: (): Promise<{ machines: V2Machine[] }> => v2fetch('GET', '/machines'),

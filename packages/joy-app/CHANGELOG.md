@@ -26,6 +26,8 @@
 
 - **Settings → Machines → Storage shows what every session leaves behind, and deletes it.** Each machine's daemon now reports every session's footprint under `~/.joy` — media, record, queue, receipts, ledger rows — with size and age, and the relay reports each session's event rows and bytes. The page lists them biggest first across all your machines; pick any number and delete them in one press. A running session is killed first, and the relay row goes with its events. Shared files (the ledger, the usage cache) and orphaned files nobody names any more are reported but never touched. Needs an updated daemon on the machine.
 
+- **Settings → Relay shows the relay box.** CPU, memory, disk, the database's size and row counts, how many daemons hold a lease and how many apps are streaming, uptime and version — the same rows every machine page has, for the relay itself. Needs the updated relay.
+
 
 # Sep 9 — Reading stays put
 
