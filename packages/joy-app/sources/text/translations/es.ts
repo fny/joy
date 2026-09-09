@@ -425,6 +425,13 @@ export const es: TranslationStructure = {
         codePlaceholder: 'Pega el código aquí…',
         submitCode: 'Enviar código de inicio de sesión',
         sendFailed: 'No se pudo enviar el código. Comprueba la conexión e inténtalo de nuevo.',
+        codexLabel: 'INICIA SESIÓN EN CODEX',
+        codeLabel: 'Código de un solo uso',
+        codeCopied: 'Código copiado al portapapeles',
+        copyCode: 'Copiar el código de un solo uso',
+        deviceHint: 'Abre el enlace, inicia sesión allí y luego introduce este código.',
+        expires: ({ minutes }: { minutes: number }) => `Caduca en ${minutes} min.`,
+        terminalHint: 'Abre la terminal y vuelve a iniciar sesión (/login).',
     },
 
     joyLogs: {

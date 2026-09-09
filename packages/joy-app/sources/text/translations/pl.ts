@@ -442,6 +442,13 @@ export const pl: TranslationStructure = {
         codePlaceholder: 'Wklej kod tutaj…',
         submitCode: 'Wyślij kod logowania',
         sendFailed: 'Nie udało się wysłać kodu. Sprawdź połączenie i spróbuj ponownie.',
+        codexLabel: 'ZALOGUJ SIĘ DO CODEX',
+        codeLabel: 'Kod jednorazowy',
+        codeCopied: 'Kod skopiowany do schowka',
+        copyCode: 'Skopiuj kod jednorazowy',
+        deviceHint: 'Otwórz link, zaloguj się tam, a następnie wpisz ten kod.',
+        expires: ({ minutes }: { minutes: number }) => `Wygasa za ${minutes} min.`,
+        terminalHint: 'Otwórz terminal i zaloguj się ponownie (/login).',
     },
 
     joyLogs: {

@@ -184,9 +184,15 @@ export const MetadataSchema = z.object({
     // bar; the app submits the pasted code via `/login-code <code>`. Present
     // while the prompt is up, cleared when it's gone.
     joy__login: z.object({
-        url: z.string(),
+        // Absent for a dead-token notice that has no link to offer (codex).
+        url: z.string().optional(),
         since: z.number().optional(),
-        error: z.string().optional(), // rejection message (e.g. bad/expired code)
+        error: z.string().optional(), // rejection message (e.g. bad/expired code), or the dead-token message
+        // Which harness: claude's OAuth box takes a pasted code back; codex's
+        // device flow shows a one-time code to enter in the BROWSER.
+        kind: z.enum(['claude', 'codex']).optional(),
+        code: z.string().optional(),
+        expiresAt: z.number().optional(),
     }).nullable().optional(),
     // Interactive CLI dialog occupying the pane (model picker, "Switch model?"
     // confirm, /effort slider…) — the harness is waiting on a human in the

@@ -44,6 +44,8 @@
 
 - **A session's processes, listed.** The session info screen's CPU · Memory row is now a button: it opens every process under the agent — tool shells, dev servers, test runners, subagents — in tree order, each with its own CPU right now, memory and age, re-read every five seconds while you look. Needs the updated daemon on the machine.
 
+- **A Codex session that needs a sign-in now says so.** Codex runs behind its app-server, so the daemon never looked at its screen — a session whose ChatGPT token had lapsed sat on "Sign in with ChatGPT … Press enter to continue" for twenty minutes with its first message held behind it and nothing in the app to explain. The daemon now watches the Codex screen: the sign-in chooser shows as a dialog bar, the device-code screen as a sign-in bar with the link and the one-time code to enter in the browser, the "Press enter to continue" screens are pressed through for you, and a token that dies mid-conversation shows as a sign-in notice. The status reads *sign-in required* the whole time. Needs the updated daemon.
+
 
 # Sep 9 — Reading stays put
 

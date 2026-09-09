@@ -426,6 +426,13 @@ export const zhHans: TranslationStructure = {
         codePlaceholder: '在此粘贴授权码…',
         submitCode: '提交授权码',
         sendFailed: '无法发送验证码。请检查连接后重试。',
+        codexLabel: '登录 CODEX',
+        codeLabel: '一次性验证码',
+        codeCopied: '验证码已复制到剪贴板',
+        copyCode: '复制一次性验证码',
+        deviceHint: '打开链接并登录，然后在那里输入此验证码。',
+        expires: ({ minutes }: { minutes: number }) => `${minutes} 分钟后过期。`,
+        terminalHint: '打开终端并重新登录 (/login)。',
     },
 
     joyLogs: {

@@ -426,6 +426,13 @@ export const ja: TranslationStructure = {
         codePlaceholder: 'ここにコードを貼り付け…',
         submitCode: 'ログインコードを送信',
         sendFailed: 'コードを送信できませんでした。接続を確認してもう一度お試しください。',
+        codexLabel: 'CODEX にサインイン',
+        codeLabel: 'ワンタイムコード',
+        codeCopied: 'コードをコピーしました',
+        copyCode: 'ワンタイムコードをコピー',
+        deviceHint: 'リンクを開いてサインインし、このコードを入力してください。',
+        expires: ({ minutes }: { minutes: number }) => `有効期限: ${minutes} 分`,
+        terminalHint: 'ターミナルを開いて再度サインインしてください (/login)。',
     },
 
     joyLogs: {

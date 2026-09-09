@@ -425,6 +425,13 @@ export const ca: TranslationStructure = {
         codePlaceholder: 'Enganxa el codi aquí…',
         submitCode: 'Envia el codi d\'inici de sessió',
         sendFailed: "No s'ha pogut enviar el codi. Comprova la connexió i torna-ho a provar.",
+        codexLabel: 'INICIA SESSIÓ A CODEX',
+        codeLabel: 'Codi d’un sol ús',
+        codeCopied: 'Codi copiat al porta-retalls',
+        copyCode: 'Copia el codi d’un sol ús',
+        deviceHint: 'Obre l’enllaç, inicia sessió allà i després introdueix aquest codi.',
+        expires: ({ minutes }: { minutes: number }) => `Caduca en ${minutes} min.`,
+        terminalHint: 'Obre el terminal i torna a iniciar sessió (/login).',
     },
 
     joyLogs: {

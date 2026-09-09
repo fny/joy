@@ -443,6 +443,13 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- Codex sign-in is surfaced like Claude's: the daemon watches the Codex TUI
+  pane (`codex/codexPane.ts`, quick while starting or while a sign-in screen
+  is up) — the sign-in chooser becomes a dialog bar, the device-code screen a
+  login bar with the link and the one-time code to enter in the browser, the
+  "Press enter to continue" screens are pressed through, and a dead token
+  mid-conversation ("Your access token could not be refreshed") shows as a
+  sign-in notice; the status reads *sign-in required* throughout.
 - Processes (session info → CPU · Memory row, or Actions → Processes): every
   process under the session's agent — tool shells, dev servers, test runners,
   subagents — in tree order with CPU right now, resident memory and age

@@ -425,6 +425,13 @@ export const zhHant: TranslationStructure = {
         codePlaceholder: '在此貼上授權碼…',
         submitCode: '提交授權碼',
         sendFailed: '無法傳送驗證碼。請檢查連線後重試。',
+        codexLabel: '登入 CODEX',
+        codeLabel: '一次性驗證碼',
+        codeCopied: '驗證碼已複製到剪貼簿',
+        copyCode: '複製一次性驗證碼',
+        deviceHint: '開啟連結並登入，然後在那裡輸入此驗證碼。',
+        expires: ({ minutes }: { minutes: number }) => `${minutes} 分鐘後到期。`,
+        terminalHint: '開啟終端機並重新登入 (/login)。',
     },
 
     joyLogs: {

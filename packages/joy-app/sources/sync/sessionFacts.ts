@@ -111,7 +111,7 @@ export interface SessionFactsInput {
         joy__tasks?: { done: number; total: number } | null;
         joy__longRunning?: number | null;
         joy__eventBudget?: { since: number; dropped: number } | null;
-        joy__login?: { url: string } | null;
+        joy__login?: { url?: string; code?: string; error?: string } | null;
         joy__dialog?: { title?: string | null; options: string[] } | null;
         joy__codexApproval?: { title: string; kind: string } | null;
         joy__queue?: {

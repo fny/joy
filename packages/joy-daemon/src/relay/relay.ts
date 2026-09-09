@@ -669,9 +669,15 @@ export interface JoyGoalInfo {
  * app shows a login bar with the URL + a field to submit the pasted code.
  */
 export interface JoyLoginInfo {
-  url: string;     // the reassembled auth URL
+  /** The auth URL. Absent for a dead-token notice with no link to offer. */
+  url?: string;
   since: number;   // epoch ms when it was first detected
-  error?: string;  // a rejection/error message shown in the box (e.g. bad code)
+  error?: string;  // a rejection/error message shown in the box (e.g. bad code), or the dead-token message
+  /** Which harness's sign-in this is; the app words the bar accordingly. */
+  kind?: "claude" | "codex";
+  /** A one-time code the user enters in the BROWSER (codex device flow) — shown, not typed back. */
+  code?: string;
+  expiresAt?: number;
 }
 
 /**

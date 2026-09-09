@@ -473,6 +473,13 @@ export const en = {
         codePlaceholder: 'Paste code here…',
         submitCode: 'Submit login code',
         sendFailed: 'Could not send the code. Check the connection and try again.',
+        codexLabel: 'SIGN IN TO CODEX',
+        codeLabel: 'One-time code',
+        codeCopied: 'Code copied to clipboard',
+        copyCode: 'Copy the one-time code',
+        deviceHint: 'Open the link, sign in there, then enter this code.',
+        expires: ({ minutes }: { minutes: number }) => `Expires in ${minutes} min.`,
+        terminalHint: 'Open the terminal and sign in again (/login).',
     },
 
     joyLogs: {

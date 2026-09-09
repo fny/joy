@@ -21,6 +21,9 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
     const login = session?.metadata?.joy__login;
     const url = login?.url;
     const error = login?.error;
+    // Codex's device flow: the code goes into the BROWSER, not back to the CLI.
+    const deviceCode = login?.kind === 'codex' ? login?.code : undefined;
+    const expiresAt = login?.expiresAt;
     const [code, setCode] = React.useState('');
     const [sending, setSending] = React.useState(false);
     const [sendError, setSendError] = React.useState<string | null>(null);
@@ -60,7 +63,55 @@ export const LoginBar = React.memo(function LoginBar({ sessionId }: { sessionId:
         }
     }, [sessionId, code, sending]);
 
-    if (!url) return null;
+    const onCopyCode = React.useCallback(async () => {
+        if (!deviceCode) return;
+        if (!(await copyToClipboard(deviceCode, { silent: true }))) return;
+        Modal.alert(t('common.copied'), t('joyLogin.codeCopied'));
+    }, [deviceCode]);
+
+    if (!login) return null;
+
+    // A dead token with nothing to click: say so, and where to fix it.
+    if (!url) {
+        return (
+            <View style={[styles.bar, { backgroundColor: theme.colors.surface, borderBottomColor: theme.colors.divider }]}>
+                <View style={styles.row}>
+                    <Ionicons name="key" size={16} color={theme.colors.textDestructive ?? '#FF453A'} style={{ marginRight: 8 }} />
+                    <Text style={[styles.label, { color: theme.colors.textSecondary }]}>{login.kind === 'codex' ? t('joyLogin.codexLabel') : t('joyLogin.label')}</Text>
+                    <Text style={[styles.error, { flex: 1, color: theme.colors.textDestructive ?? '#FF453A' }]} numberOfLines={3}>{error ?? t('joyLogin.terminalHint')}</Text>
+                </View>
+                {!!error && <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>{t('joyLogin.terminalHint')}</Text>}
+            </View>
+        );
+    }
+
+    // Codex device flow: open the link, sign in there, enter this code there.
+    if (deviceCode) {
+        const minutes = expiresAt ? Math.max(0, Math.round((expiresAt - Date.now()) / 60_000)) : null;
+        return (
+            <View style={[styles.bar, { backgroundColor: theme.colors.surface, borderBottomColor: theme.colors.divider }]}>
+                <View style={styles.row}>
+                    <Ionicons name="key" size={16} color={theme.colors.textLink} style={{ marginRight: 8 }} />
+                    <Text style={[styles.label, { color: theme.colors.textSecondary }]}>{t('joyLogin.codexLabel')}</Text>
+                    <Pressable style={{ flex: 1, minWidth: 0 }} onPress={onOpen} hitSlop={6} accessibilityRole="link" accessibilityLabel={t('joyLogin.openUrl')}>
+                        <Text style={[styles.url, { color: theme.colors.textLink }]} numberOfLines={1}>{url}</Text>
+                    </Pressable>
+                    <Pressable onPress={onOpen} hitSlop={8} accessibilityRole="button" accessibilityLabel={t('joyLogin.openUrl')} style={(p) => [styles.iconBtn, { opacity: p.pressed ? 0.6 : 1 }]}>
+                        <Ionicons name="open-outline" size={18} color={theme.colors.textSecondary} />
+                    </Pressable>
+                </View>
+                <Pressable onPress={onCopyCode} style={styles.row} accessibilityRole="button" accessibilityLabel={t('joyLogin.copyCode')}>
+                    <Text style={[styles.label, { color: theme.colors.textSecondary }]}>{t('joyLogin.codeLabel')}</Text>
+                    <Text style={[styles.code, { color: theme.colors.text }]} selectable>{deviceCode}</Text>
+                    <Ionicons name="copy-outline" size={18} color={theme.colors.textSecondary} style={{ marginLeft: 8 }} />
+                    <Text style={[styles.hint, { flex: 1, color: theme.colors.textSecondary }]} numberOfLines={2}>
+                        {t('joyLogin.deviceHint')}{minutes != null ? ` ${t('joyLogin.expires', { minutes })}` : ''}
+                    </Text>
+                </Pressable>
+                {!!error && <Text style={[styles.error, { color: theme.colors.textDestructive ?? '#FF453A' }]} numberOfLines={2}>{error}</Text>}
+            </View>
+        );
+    }
 
     return (
         <View style={[styles.bar, { backgroundColor: theme.colors.surface, borderBottomColor: theme.colors.divider }]}>
@@ -129,6 +180,17 @@ const styles = StyleSheet.create((theme) => ({
         fontSize: 10,
         marginRight: 8,
         ...Typography.default('semiBold'),
+    },
+    code: {
+        fontSize: 18,
+        letterSpacing: 1,
+        marginLeft: 8,
+        ...Typography.mono(),
+    },
+    hint: {
+        fontSize: 12,
+        marginLeft: 8,
+        ...Typography.default(),
     },
     url: {
         fontSize: 13,

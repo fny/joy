@@ -423,6 +423,13 @@ export const it: TranslationStructure = {
         codePlaceholder: 'Incolla qui il codice…',
         submitCode: 'Invia codice di accesso',
         sendFailed: 'Impossibile inviare il codice. Controlla la connessione e riprova.',
+        codexLabel: 'ACCEDI A CODEX',
+        codeLabel: 'Codice monouso',
+        codeCopied: 'Codice copiato negli appunti',
+        copyCode: 'Copia il codice monouso',
+        deviceHint: 'Apri il link, accedi e poi inserisci questo codice.',
+        expires: ({ minutes }: { minutes: number }) => `Scade tra ${minutes} min.`,
+        terminalHint: 'Apri il terminale e accedi di nuovo (/login).',
     },
 
     joyLogs: {

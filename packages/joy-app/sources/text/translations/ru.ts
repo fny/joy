@@ -553,6 +553,13 @@ export const ru: TranslationStructure = {
         codePlaceholder: 'Вставьте код сюда…',
         submitCode: 'Отправить код входа',
         sendFailed: 'Не удалось отправить код. Проверьте соединение и попробуйте ещё раз.',
+        codexLabel: 'ВОЙТИ В CODEX',
+        codeLabel: 'Одноразовый код',
+        codeCopied: 'Код скопирован в буфер обмена',
+        copyCode: 'Скопировать одноразовый код',
+        deviceHint: 'Откройте ссылку, войдите там и введите этот код.',
+        expires: ({ minutes }: { minutes: number }) => `Истекает через ${minutes} мин.`,
+        terminalHint: 'Откройте терминал и войдите снова (/login).',
     },
 
     joyLogs: {

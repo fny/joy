@@ -41,6 +41,8 @@ import { CodexDriver, codexTurnStatus, type CodexRuntimePort } from "./codexDriv
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
 import { isTurnDelivered, advanceTurnHighWater } from "./codexTurnCheckpoint";
 
+import { codexPaneAuth } from "./codexPane";
+import type { JoyLoginInfo, JoyDialogInfo } from "../relay/relay";
 export interface CodexInit {
   id: string;
   tmuxWindow: string;
@@ -95,6 +97,19 @@ export class CodexSession implements AgentSession {
   #client: CodexAppServerClient | null = null;
   #proc: ChildProcess | null = null;
   #relay: RelaySession | null = null;
+  // The TUI pane's sign-in state (codexPane.ts). Codex is driven over the
+  // app-server, so nothing here read the pane — and a lapsed ChatGPT token
+  // left a session on "Sign in with ChatGPT … Press enter to continue" for
+  // 21 minutes with its first prompt held and the app saying nothing
+  // (fny c80b0698). The watcher polls the pane, quickly while starting or
+  // while a sign-in screen is up, slowly otherwise, and surfaces the state:
+  // the chooser as a dialog, the device-code screen as a login (link + code),
+  // the "Press enter to continue" screens by pressing Enter, a dead token as
+  // a login notice with the message.
+  #authTimer: ReturnType<typeof setTimeout> | null = null;
+  #authShown: { login: string | null; dialog: string | null } = { login: null, dialog: null };
+  #authContinuePressed = false;
+  #authRefreshRequestedAt = 0;
   #norm: CodexNormalizer;
   #threadId: string | null = null;
   #resumeThreadId?: string;
@@ -184,6 +199,7 @@ export class CodexSession implements AgentSession {
     this.status = init.status;
     this.tmuxWindow = init.tmuxWindow;
     this.#tmux = init.tmux ?? defaultTmux;
+    this.#scheduleAuthWatch(1_500);
     this.#tmuxSocket = init.tmuxSocket ?? null;
     // Fail closed: an absent mode becomes the collaborative default, NOT yolo
     // (finding #1 — resolveCodexExecutionPolicy also fails closed).
@@ -550,6 +566,11 @@ export class CodexSession implements AgentSession {
       case "item/permissions/requestApproval":
         throw new JsonRpcError(-32601, `joy cannot answer ${req.method}`);
       case "account/chatgptAuthTokens/refresh":
+        // The server wants a token joy cannot mint: the sign-in is about to
+        // fail. Remember when, and look at the pane sooner.
+        this.#authRefreshRequestedAt = Date.now();
+        process.stderr.write(`[codex ${this.id}] app-server asked to refresh ChatGPT auth tokens — a sign-in is needed\n`);
+        this.#scheduleAuthWatch(500);
         throw new JsonRpcError(-32601, "joy does not manage codex auth tokens");
       default:
         throw new JsonRpcError(-32601, `unhandled server request: ${req.method}`);
@@ -993,6 +1014,40 @@ export class CodexSession implements AgentSession {
 
   // ── pane / control (the tmux window hosts the attached TUI) ───────────────────
 
+  #scheduleAuthWatch(ms: number): void {
+    if (this.#authTimer) clearTimeout(this.#authTimer);
+    this.#authTimer = setTimeout(() => { this.#authTimer = null; void this.#authWatchTick(); }, ms);
+  }
+
+  async #authWatchTick(): Promise<void> {
+    if (this.status === "ended") return;
+    let text = "";
+    try { const r = await this.#tmux.captureFresh(this.tmuxWindow, { color: false }); text = r.ok ? r.out : ""; } catch { /* pane gone or not yet up */ }
+    const auth = text ? codexPaneAuth(text) : null;
+    const now = Date.now();
+    // Auto-continue a bare keypress screen, once per appearance.
+    if (auth?.kind === "continue") {
+      if (!this.#authContinuePressed) { this.#authContinuePressed = true; void this.#tmux.key(this.tmuxWindow, "Enter").catch(() => {}); }
+    } else this.#authContinuePressed = false;
+    // What the card should say. Each is published only on change, and only
+    // once a relay is attached — the state is kept so attach catches up.
+    let login: JoyLoginInfo | null = null;
+    let dialog: JoyDialogInfo | null = null;
+    if (auth?.kind === "device") login = { kind: "codex", url: auth.url, code: auth.code, since: now, ...(auth.expiresMinutes ? { expiresAt: now + auth.expiresMinutes * 60_000 } : {}) };
+    else if (auth?.kind === "chooser") dialog = { title: "Codex needs a sign-in", options: auth.options, since: now };
+    else if (auth?.kind === "broken") login = { kind: "codex", error: auth.message, since: now };
+    if (this.#relay) {
+      const loginKey = login ? `${login.url ?? ""}|${login.code ?? ""}|${login.error ?? ""}` : null;
+      if (loginKey !== this.#authShown.login) { this.#authShown.login = loginKey; void this.#relay.updateLogin(login); }
+      const dialogKey = dialog ? dialog.options.join("|") : null;
+      if (dialogKey !== this.#authShown.dialog) { this.#authShown.dialog = dialogKey; this.#relay.updateDialog(dialog); }
+    }
+    // Quick while something needs a human or the runtime is still coming up
+    // (or the server just asked for a token), slow in a healthy conversation.
+    const attentive = auth !== null || this.status === "starting" || now - this.#authRefreshRequestedAt < 60_000;
+    this.#scheduleAuthWatch(attentive ? 2_000 : 15_000);
+  }
+
   async pane(color = false): Promise<{ ok: true; text: string }> {
     const r = await this.#tmux.captureFresh(this.tmuxWindow, { color });
     return { ok: true, text: r.ok ? r.out : "" };
@@ -1110,6 +1165,7 @@ export class CodexSession implements AgentSession {
     // busy forever through busy() and toJSON() (#515).
     this.#thinking = false;
     if (this.#relay) this.#relay.setThinking(false);
+    if (this.#authTimer) { clearTimeout(this.#authTimer); this.#authTimer = null; }
     this.#tmux.untrack(this.tmuxWindow);
     if (reason === "process_exited") {
       void this.#relay?.updateJoyState("detached");
