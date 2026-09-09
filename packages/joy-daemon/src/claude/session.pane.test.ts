@@ -115,6 +115,30 @@ test("#479 the live footer and the spinner line still read as generating", () =>
   expect(paneShowsGenerating(narrow)).toBe(true);
 });
 
+// ── fny 4477e540 (2026-09-09): a 58-col pane, spinner without a timer ────────
+
+test("a spinner whose status is words, not a timer, still reads as generating — and the box may hold typed text", () => {
+  const RULE58 = "─".repeat(58);
+  const frame = (spinner: string) => [
+    "     '.head_sha[0:8]') vs branch $(git rev-par…", "",
+    spinner,
+    "                  ✔ Update installed · Restart to update",
+    RULE58,
+    "❯ go back to the original solution, dismiss and ping",
+    "  preston on slack about this",
+    "  (~/.fny/secrets/slack.json)",
+    RULE58,
+    "  ⏵⏵ bypass permissions on · PR #5298 · 1 shell",
+  ].join("\n");
+  expect(paneShowsGenerating(frame("· Calculating… (still thinking with high effort)"))).toBe(true);
+  expect(paneShowsGenerating(frame("✻ Calculating… (26m 34s · ↓ 70.4k tokens)"))).toBe(true);
+  // A reply quoting a spinner is a reply.
+  expect(paneShowsGenerating(["● I saw \"· Calculating… (still thinking)\" earlier.", RULE58, `❯${NBSP}`, RULE58, FOOTER_IDLE].join("\n"))).toBe(false);
+  // The spinner sits above a tall box: still inside the live window.
+  const tall = ["✽ Zesting… (4m 17s · ↓ 13.9k tokens)", RULE58, "❯ line one", ...Array.from({ length: 12 }, (_, i) => `  line ${i + 2}`), RULE58, "  ⏵⏵ bypass permissions on · PR #5298"].join("\n");
+  expect(paneShowsGenerating(tall)).toBe(true);
+});
+
 // ── #480: permission mode from the live footer, not from reply text ──────────
 
 test("#480 mode words in conversation text never override the live footer", () => {

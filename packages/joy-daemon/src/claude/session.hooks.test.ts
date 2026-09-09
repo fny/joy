@@ -859,6 +859,39 @@ test("hook authority owns readiness: after Stop a queued prompt dispatches again
 
 // ── edd69fd1 review residual: the lagging transcript terminal vs the next hook-owned run ──
 
+test("the tie-breaker clears only on an EMPTY idle box, and output inside the open turn undoes a wrong clear (fny 4477e540)", async () => {
+  vi.useFakeTimers();
+  const NBSP = "\u00a0";
+  const RULE58 = "─".repeat(58);
+  const WORDS = ["· Calculating… (still thinking with high effort)", RULE58, `❯${NBSP}`, RULE58, "  ⏵⏵ bypass permissions on · PR #5298 · 1 shell"].join("\n");
+  const TYPED = ["", RULE58, "❯ go back to the original solution", RULE58, "  ⏵⏵ bypass permissions on · PR #5298"].join("\n");
+  const EMPTY = ["", RULE58, `❯${NBSP}`, RULE58, "  ⏵⏵ bypass permissions on · PR #5298"].join("\n");
+  const { st, driver } = fakeTmux({ pane: WORDS });
+  const s = mkSession(uid("tiebreak-idlebox"), driver, { claudeSessionId: "sid" });
+  const { rs, thinking } = relayStub("rs-tiebreak");
+  s.attachRelay(rs, true);
+  s.beginWatching(); // the 3 s thinking reconcile poll
+  s.onHookEvent({ event: "UserPromptSubmit", session_id: "sid", prompt: "do the thing" });
+  // A block of output opens the turn and lifts the pre-output lease.
+  s.onTranscriptEntry({ type: "assistant", uuid: "a1", timestamp: new Date().toISOString(), message: { role: "assistant", model: "m", content: [{ type: "text", text: "working on it" }] } } as any);
+  expect(s.busy()).toBe(true);
+  // Word-form spinner for a long time: generating, never an idle read.
+  await vi.advanceTimersByTimeAsync(3_000 * 8);
+  expect(thinking.at(-1)).not.toBe(false);
+  // Typed-ahead text in the box, no spinner: ambiguous, still never clears.
+  st.pane = TYPED;
+  await vi.advanceTimersByTimeAsync(3_000 * 8);
+  expect(thinking.at(-1)).not.toBe(false);
+  // An empty idle box, six polls running: the one shape that clears.
+  st.pane = EMPTY;
+  await vi.advanceTimersByTimeAsync(3_000 * 8);
+  expect(thinking.at(-1)).toBe(false);
+  // Output lands in the turn that is still open: the clear was wrong.
+  s.onTranscriptEntry({ type: "assistant", uuid: "a2", timestamp: new Date().toISOString(), message: { role: "assistant", model: "m", content: [{ type: "text", text: "still here" }] } } as any);
+  expect(thinking.at(-1)).toBe(true);
+  s.end("killed");
+});
+
 test("late transcript terminal (edd69fd1): Stop A → dispatch + UserPromptSubmit B → A's lagging turn_duration arrives → B stays running with its thinking and confirmation ref; B's own Stop ends it", async () => {
   vi.useFakeTimers();
   const { st, driver } = fakeTmux({ pane: READY });

@@ -67,6 +67,8 @@
 
 - **Long messages no longer arrive truncated — or twice.** A message of several thousand characters was typed into the terminal in one go, which can overflow the terminal's input buffer while the agent is busy drawing; the rest was silently dropped. Claude then worked on a shortened prompt, and because what it received no longer matched what was sent, the daemon took it for something typed at the terminal and showed it in the chat a second time, then timed the send out and paused the queue. Text is now typed in small pieces with a pause between them, and if a message still comes back short the chat says exactly how much reached the agent. Needs the updated daemon.
 
+- **A working session no longer turns gray mid-turn.** On a narrow terminal (a phone-sized pane) Claude's spinner alternates between a timer — `Calculating… (26m 34s · ↓ 70.4k tokens)` — and words — `Calculating… (still thinking with high effort)` — and the footer loses its *esc to interrupt* hint to the width. The daemon only recognised the timer form, so a long think read as idle six polls running and it cleared the working state nine minutes into a 26-minute tool call; nothing put it back. It now recognises the spinner by its shape whatever the status says, looks further up the screen for it (a few lines of typed-ahead text in the box used to push it out of view), clears only on a genuinely empty idle prompt — never on a box holding text — and, if it still clears wrongly, the next line of output inside the same turn puts it back. Needs the updated daemon.
+
 
 # Sep 9 — Reading stays put
 

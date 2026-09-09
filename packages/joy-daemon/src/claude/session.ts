@@ -3609,7 +3609,12 @@ export class Session {
    *  accepted clear voids the lease. Sized just under the app's 3-min TTL. */
   #thinkingLeaseUntil = 0;
 
+  /** The last clear came from the pane tie-breaker (not a hook, not the
+   *  transcript). Output arriving in the still-open turn undoes it. */
+  #clearedByTieBreaker = false;
+
   #setThinking(thinking: boolean): void {
+    if (thinking) this.#clearedByTieBreaker = false;
     // The flag only means anything while thinking is true, so clearing is the
     // one place it can be reset without hunting every turn-close path (#647).
     if (!thinking) this.#turnProducedOutput = false;
@@ -4223,9 +4228,14 @@ export class Session {
         // fire on a terminal Esc; the transcript's interrupt marker normally
         // closes that one first).
         if (this.#hooksLive) {
+          // An idle read is an EMPTY ready box with nothing generating — not
+          // merely "no spinner seen". A box holding typed-ahead text, a
+          // dialog, or a frame the parser cannot place is ambiguous and
+          // counts for nothing either way (fny 4477e540, 2026-09-09).
+          const idleBox = !generating && paneShowsReadyPrompt(pane.out) && (paneInputText(pane.out) ?? "").trim() === "";
           if (generating || !this.#thinking) {
             this.#idlePolls = 0;
-          } else {
+          } else if (idleBox) {
             this.#idlePolls += 1;
             if (this.#idlePolls >= HOOK_TIEBREAK_IDLE_POLLS) {
               this.#idlePolls = 0;
@@ -4233,6 +4243,7 @@ export class Session {
               // lease guards the pre-output window and nothing else (#647).
               if (Date.now() >= this.#thinkingLeaseUntil || this.#turnProducedOutput) {
                 process.stderr.write(`[hook] ${this.id} pane idle for ${HOOK_TIEBREAK_IDLE_POLLS} polls with no Stop — tie-breaker clears thinking\n`);
+                this.#clearedByTieBreaker = true;
                 this.#setThinking(false);
               }
             }
@@ -4947,6 +4958,13 @@ export class Session {
       // below would reset it — the first output entry is what OPENS the turn,
       // so setting it earlier means opening the turn wipes it (#647).
       if (this.#relay && blocks.length > 0) { this.#turnProducedOutput = true; this.#lastOutputAt = Date.now(); }
+      // Output landing inside a turn the tie-breaker declared idle proves that
+      // read wrong: the pane looked idle to the parser, not to Claude. Only a
+      // tie-breaker clear is undone here — a Stop-driven clear is authoritative.
+      if (this.#relay && blocks.length > 0 && this.#turn && this.#hooksLive && !this.#thinking && this.#clearedByTieBreaker) {
+        process.stderr.write(`[hook] ${this.id} output inside the open turn after a tie-breaker clear — thinking re-asserted\n`);
+        this.#setThinking(true);
+      }
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
@@ -5578,18 +5596,31 @@ export function paneShowsGenerating(text: string): boolean {
   // Live footer: below the box (or the tail when no box), footer-shaped, with
   // the hint as a `·`-separated segment.
   if (liveStatusLines(lines, 6).some((l) => FOOTER_LINE_RE.test(l) && /(?:·|^)\s*esc to interrupt/i.test(l))) return true;
-  // Spinner line: glyph-led, in the live bottom region (scrollback can echo old
-  // spinner text far above). The hint is parenthesised there.
-  const tail = lines.slice(-12);
+  // Spinner line: glyph-led, and LIVE. Claude paints the spinner directly
+  // above the input box — at most a status line ("✔ Update installed …") and a
+  // blank between them — so with a box on screen the live spinner is within a
+  // few rows above its top rule, and a spinner echoed in scrollback is not
+  // (it sits above the previous turn's output). Anchoring on the box rather
+  // than on a fixed tail window matters both ways: a box holding a few lines
+  // of typed-ahead text pushed the live spinner out of a 12-row tail (fny
+  // 4477e540, 2026-09-09: spinner 8 rows up, box 3 lines), while widening the
+  // tail let a scrollback echo count. No box (a dialog, a boot) → the last 12.
+  const box = locateLiveBox(lines);
+  const tail = box ? lines.slice(Math.max(0, box.prompt - 5), Math.max(0, box.prompt - 1)) : lines.slice(-12);
   if (tail.some((l) => /^\s*[✽✻✶✳✢·∗⠂⠐⠈]\s.*\(\s*esc to interrupt\b/i.test(l))) return true;
   // Narrow-pane fallback: on a small attached client (e.g. 58 cols) claude
   // truncates the status line before "esc to interrupt" ("… · esc to…"), which
   // made the daemon read a generating pane as idle (and, with the box parser
   // also blind, kept dispatch gated forever — 2026-07-04). The spinner line
-  // itself survives truncation: `✽ Zesting… (4m 17s · ↓ 13.9k tokens …`. Match
-  // its shape — spinner glyph, word, ellipsis, then an elapsed-time paren —
-  // only in the live bottom region (scrollback can echo old spinner text).
-  return tail.some(l => /^\s*[✽✻✶✳✢·∗]\s+\w[\w '’-]*…\s*\(\d+[ms]?\s?\d*s?\b/u.test(l));
+  // itself survives truncation. Its shape — spinner glyph, word, ellipsis,
+  // then a parenthesised status — is the signal; the status alternates
+  // between an elapsed time (`✽ Zesting… (4m 17s · ↓ 13.9k tokens …`) and
+  // words (`· Calculating… (still thinking with high effort)`), and matching
+  // only the timer form read the word frames as idle for six polls running,
+  // so the tie-breaker cleared thinking nine minutes into a 26-minute tool
+  // call (fny 4477e540, 2026-09-09). A reply quoting a spinner starts with
+  // `●`, not a spinner glyph, so it does not match.
+  return tail.some(l => /^\s*[✽✻✶✳✢·∗]\s+\w[\w '’-]*…\s*\(\S[^)]*\)?\s*$/u.test(l));
 }
 
 /** Human-readable backoff delay for retry notes: "15s", "2m". Exported for tests. */
