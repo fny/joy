@@ -5,9 +5,12 @@ import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 import { formatPathRelativeToHome } from './pathUtils';
 import { stabilizeOnline, sameOnlineState, OFFLINE_GRACE_MS, type OnlineHysteresisState } from './onlineHysteresis';
-import { isAgentBusy } from '@/sync/sessionLiveness';
+import { sessionFacts, statusState, type SessionFacts } from '@/sync/sessionFacts';
 
-export type SessionState = 'disconnected' | 'detached' | 'retrying' | 'compacting' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
+// SessionState moved next to the facts it projects (sessionFacts.ts); re-exported
+// here so the components that render a badge keep importing it from one place.
+export type { SessionState } from '@/sync/sessionFacts';
+import type { SessionState } from '@/sync/sessionFacts';
 
 export interface SessionStatus {
     state: SessionState;
@@ -94,49 +97,34 @@ export function useSessionStatus(session: Session): SessionStatus {
     // clock and the hysteresis (#649).
     const rawOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
     const isOnline = useStableOnline(rawOnline);
-    const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
+
+    // Every fact about the session, derived once. The nine-branch ladder that
+    // used to be written out here — and again, separately, in storage.ts's
+    // buildSessionRowData — is now `statusState`, so the header and the sidebar
+    // row cannot disagree about which state wins. What stays here is the part
+    // that is genuinely presentational: the wording, and the background suffix.
+    const facts = sessionFacts(session, isOnline);
+    const state = statusState(facts);
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
-    }, [isOnline, hasPermissions, session.thinking]);
-
-    // Detached: Claude died but the daemon still serves the window. Shown red.
-    // Only honored while the session's OWN presence is live — joy-tmux keeps
-    // heartbeating a detached session, so when the daemon dies presence lapses
-    // and it falls back to plain offline (we no longer know it's detached).
-    if (isOnline && session.metadata?.joy__state === 'detached') {
-        return {
-            ...paletteBase('detached'),
-            statusText: t('status.detached'),
-            shouldShowStatus: true,
-        };
-    }
-
-    if (!isOnline) {
-        return {
-            ...paletteBase('disconnected'),
-            statusText: t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }),
-            shouldShowStatus: true,
-        };
-    }
+    }, [isOnline, facts.permission, session.thinking]);
 
     // Long-running processes (servers/daemons the agent tagged <joy-bg
     // long-running>) never complete, so they're NOT in the N/M — they're appended
     // to whatever the real status is, in its normal color, e.g.
     // "ready, 3 background processes". withBg is the single exit point that
     // appends the suffix to every online status below.
-    const longRunning = session.metadata?.joy__longRunning ?? 0;
-    const agents = session.metadata?.joy__agents;
-    const tasks = session.metadata?.joy__tasks;
-    // Background-work suffix appended to every online status EXCEPT the one
-    // already headlining that count: "permission needed, 1/3 agents". Blocking
-    // states and thinking outrank the counts — the primary state answers "can a
-    // reply happen right now?", the suffix says what's still running behind it.
+    //
+    // This suffix is the badge's lossiness showing through: agents, tasks and
+    // long-running processes run CONCURRENTLY with whatever won the ladder, so
+    // the one-state answer has to hand them back as text. They are on `facts`
+    // as structured values for anything that wants to render them properly.
     const withBg = (status: SessionStatus): SessionStatus => {
         const parts: string[] = [];
-        if (agents && agents.total > 0 && status.state !== 'agents') parts.push(t('status.agentsRunning', { done: agents.done, total: agents.total }));
-        if (tasks && tasks.total > 0 && status.state !== 'tasks') parts.push(t('status.tasksCompleted', { done: tasks.done, total: tasks.total }));
-        if (longRunning > 0) parts.push(t('status.backgroundProcesses', { count: longRunning }));
+        if (facts.agents && status.state !== 'agents') parts.push(t('status.agentsRunning', facts.agents));
+        if (facts.tasks && status.state !== 'tasks') parts.push(t('status.tasksCompleted', facts.tasks));
+        if (facts.longRunning > 0) parts.push(t('status.backgroundProcesses', { count: facts.longRunning }));
         if (parts.length === 0) return status;
         // After a trailing ellipsis ("brewing…") a comma reads badly — join
         // the suffix with a plain space there; comma elsewhere ("ready, …").
@@ -144,80 +132,61 @@ export function useSessionStatus(session: Session): SessionStatus {
         return { ...status, statusText: status.statusText + sep + parts.join(', ') };
     };
 
-    // 500-error auto-retry in progress: the daemon is re-sending a failed turn
-    // on a backoff schedule. Shown amber + pulsing, with the attempt count.
-    const retry = session.metadata?.joy__retry;
-    if (retry) {
-        return withBg({
-            ...paletteBase('retrying'),
-            statusText: t('status.retrying', { attempt: retry.attempt, total: retry.total }),
-            shouldShowStatus: true,
-        });
-    }
+    const show = (text: string, shouldShowStatus = true): SessionStatus =>
+        ({ ...paletteBase(state), statusText: text, shouldShowStatus });
 
-    // Compacting: Claude is summarizing its context to free up tokens. Can run
-    // for minutes, so it's worth surfacing. Shown purple + pulsing. Ranks above
-    // thinking (the turn is effectively paused while this happens).
-    if (session.metadata?.joy__compacting) {
-        return withBg({
-            ...paletteBase('compacting'),
-            statusText: t('status.compacting'),
-            shouldShowStatus: true,
-        });
-    }
+    switch (state) {
+        // Claude died but the daemon still serves the window. Shown red. Only
+        // honored while the session's OWN presence is live — joy-tmux keeps
+        // heartbeating a detached session, so when the daemon dies presence
+        // lapses and it falls back to plain offline (we no longer know it's
+        // detached). Offline states skip the background suffix: whatever was
+        // running behind them is no longer observable.
+        case 'detached':
+            return show(t('status.detached'));
+        case 'disconnected':
+            return show(t('status.lastSeen', { time: formatLastSeen(session.activeAt, false) }));
 
-    // Check if permission is required (yellow)
-    if (hasPermissions) {
-        return withBg({
-            ...paletteBase('permission_required'),
-            statusText: t('status.permissionRequired'),
-            shouldShowStatus: true,
-        });
-    }
+        // 500-error auto-retry in progress: the daemon is re-sending a failed
+        // turn on a backoff schedule. Shown amber + pulsing, with the attempt
+        // count. `facts.retry` is non-null exactly when this state is reached.
+        case 'retrying':
+            return withBg(show(t('status.retrying', facts.retry ?? { attempt: 0, total: 0 })));
 
-    // Thinking ranks ABOVE the background counts: a streaming reply is the
-    // strongest "you can converse right now" signal, and the counts stay
-    // visible as the withBg suffix. (They used to mask thinking entirely.)
-    // Ephemeral flag (live socket) OR the persisted mirror — the mirror is what
-    // survives an app cold start; it's only trusted while presence is live
-    // (isOnline gates this whole branch), so a dead daemon can't freeze it.
-    // Same predicate the send gate uses (#652) — they must never disagree
-    // about whether the agent is working. isOnline is already true here, which
-    // is the liveness half of it.
-    if (isAgentBusy(session)) {
-        return withBg({
-            ...paletteBase('thinking'),
-            statusText: vibingMessage,
-            shouldShowStatus: true,
-        });
-    }
+        // Claude is summarizing its context to free up tokens. Can run for
+        // minutes, so it's worth surfacing. Purple + pulsing.
+        case 'compacting':
+            return withBg(show(t('status.compacting')));
 
-    // Foreground idle with background work in flight: the counts ARE the
-    // headline (magenta agents above teal shell tasks). Long-running processes
-    // are excluded from the N/M (they're the withBg suffix).
-    if (agents && agents.total > 0) {
-        return withBg({
-            ...paletteBase('agents'),
-            statusText: t('status.agentsRunning', { done: agents.done, total: agents.total }),
-            shouldShowStatus: true,
-        });
-    }
+        case 'permission_required':
+            return withBg(show(t('status.permissionRequired')));
 
-    if (tasks && tasks.total > 0) {
-        return withBg({
-            ...paletteBase('tasks'),
-            statusText: t('status.tasksCompleted', { done: tasks.done, total: tasks.total }),
-            shouldShowStatus: true,
-        });
-    }
+        // A reply is streaming — the strongest "you can converse right now"
+        // signal, which is why it outranks the background counts (they used to
+        // mask it entirely) and they become the withBg suffix instead.
+        case 'thinking':
+            return withBg(show(vibingMessage));
 
-    // Idle. If background processes are running, surface them next to "ready" in
-    // the normal (green) color, e.g. "ready, 3 background processes".
-    return withBg({
-        ...paletteBase('waiting'),
-        statusText: t('status.online'),
-        shouldShowStatus: longRunning > 0,
-    });
+        // Foreground idle with background work in flight: the counts ARE the
+        // headline (magenta agents above teal shell tasks). Long-running
+        // processes are excluded from the N/M — they're the withBg suffix.
+        case 'agents':
+            return withBg(show(t('status.agentsRunning', facts.agents ?? { done: 0, total: 0 })));
+        case 'tasks':
+            return withBg(show(t('status.tasksCompleted', facts.tasks ?? { done: 0, total: 0 })));
+
+        // Idle. If background processes are running, surface them next to
+        // "ready" in the normal (green) color, e.g. "ready, 3 processes".
+        case 'waiting':
+            return withBg(show(t('status.online'), facts.longRunning > 0));
+    }
+}
+
+/** The derived facts behind a session's status, for anything that needs more
+ *  than the single badge `useSessionStatus` collapses them to. */
+export function useSessionFacts(session: Session): SessionFacts {
+    const rawOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
+    return sessionFacts(session, useStableOnline(rawOnline));
 }
 
 /**

@@ -27,6 +27,7 @@ import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
+import { sessionFacts, statusState } from "./sessionFacts";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
 
@@ -107,39 +108,13 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
     // for a session the in-session view already calls disconnected.
     const isOnline = session.presence === "online" && isFresh(session);
     const inActiveGroup = isSessionInActiveGroup(session);
-    const hasPermissions = !!(session.agentState?.requests && Object.keys(session.agentState.requests).length > 0);
-
-    let state: SessionState;
-    // 'detached' = Claude died but the daemon still serves the window. Only honor
-    // it while the session's OWN presence is live: joy-tmux keeps heartbeating a
-    // detached session (session-alive) while the daemon's up, so when the daemon
-    // dies the heartbeat lapses, presence drops, and we fall back to plain offline.
-    // (Per-session presence is joy-tmux-specific — unlike machine.active, which a
-    // co-located daemon keeps true.)
-    if (isOnline && session.metadata?.joy__state === 'detached') {
-        state = 'detached'; // Claude died — red status, takes priority over plain online
-    } else if (!isOnline) {
-        state = 'disconnected';
-    } else if (session.metadata?.joy__retry) {
-        state = 'retrying'; // daemon re-sending a 500-failed turn on a backoff schedule
-    } else if (session.metadata?.joy__compacting) {
-        state = 'compacting'; // Claude summarizing context — purple, ranks above a paused turn
-    } else if (hasPermissions) {
-        state = 'permission_required';
-    } else if (session.thinking || (isOnline && session.metadata?.joy__thinking != null)) {
-        // Persisted mirror (joy__thinking) restores the state on cold start —
-        // the ephemeral only reaches connected clients. Presence-gated.
-        // Ranks ABOVE the background counts (mirrors useSessionStatus): a
-        // streaming reply is the "you can converse" signal; the counts show as
-        // a text suffix in the row instead.
-        state = 'thinking';
-    } else if (session.metadata?.joy__agents && session.metadata.joy__agents.total > 0) {
-        state = 'agents'; // idle + background AGENTS — magenta N/M, ranks above shell tasks
-    } else if (session.metadata?.joy__tasks && session.metadata.joy__tasks.total > 0) {
-        state = 'tasks'; // idle + background shell work — teal N/M, outlives the turn
-    } else {
-        state = 'waiting';
-    }
+    // The ladder itself lives in sessionFacts.ts. This function and
+    // useSessionStatus used to spell it out separately — nine branches written
+    // twice, kept in step by a comment — and had already drifted apart over the
+    // thinking predicate. Both now project the same derived facts; the online
+    // reading stays each caller's own (the header debounces it, this does not).
+    const facts = sessionFacts(session, isOnline);
+    const state = statusState(facts);
 
     return {
         id: session.id,
@@ -158,13 +133,13 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
         homeDir: session.metadata?.homeDir ?? null,
         completedTodosCount: session.todos?.filter(todo => todo.status === 'completed').length ?? 0,
         totalTodosCount: session.todos?.length ?? 0,
-        tasksDone: session.metadata?.joy__tasks?.done ?? null,
-        tasksTotal: session.metadata?.joy__tasks?.total ?? null,
-        agentsDone: session.metadata?.joy__agents?.done ?? null,
-        agentsTotal: session.metadata?.joy__agents?.total ?? null,
-        retryAttempt: session.metadata?.joy__retry?.attempt ?? null,
-        retryTotal: session.metadata?.joy__retry?.total ?? null,
-        outputDropped: (session.metadata?.joy__eventBudget?.dropped ?? 0) > 0,
+        tasksDone: facts.tasks?.done ?? null,
+        tasksTotal: facts.tasks?.total ?? null,
+        agentsDone: facts.agents?.done ?? null,
+        agentsTotal: facts.agents?.total ?? null,
+        retryAttempt: facts.retry?.attempt ?? null,
+        retryTotal: facts.retry?.total ?? null,
+        outputDropped: facts.budgetExhausted,
         hasUnread: unreadSessionIds?.has(session.id) ?? false,
         isJoyDaemon: isJoyDaemonSource(session.metadata?.joy__source),
         joySessionId: session.metadata?.joy__sessionId ?? null,
