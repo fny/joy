@@ -43,6 +43,7 @@ import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import type { Message } from './typesMessage';
 
 import { liveFacts, isTurnActive } from './sessionFacts';
+import { CardMemo } from './v2/cardMemo';
 // Sentinel used as `before_seq` for the very first backward fetch of a
 // session. It must exceed any real `seq` value the server can produce; the
 // relay stores `seq` as BIGINT, but a session would need two billion events
@@ -440,6 +441,8 @@ class Sync {
         }, POLL_INTERVAL_MS);
     }
 
+    /** What each relay row last decrypted to — see v2/cardMemo.ts. */
+    private cardMemo = new CardMemo<Session['metadata'] | null>();
     private v2LiveStopped = false;
     /** Last time anything was successfully read from the relay — the honest
      *  input to the connection indicator (see startV2Live). */
@@ -819,14 +822,24 @@ class Sync {
         await this.encryption.initializeSessions(sessionKeys);
 
         const decryptedSessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[] = [];
+        const memo = this.cardMemo;
+        memo.hits = 0; memo.misses = 0;
         for (const row of rows) {
+            // Same ciphertext under the same envelope is the same card: reuse
+            // last tick's result and do no crypto for it. At idle that is
+            // every row — this poll used to re-open every key and every card
+            // on the account every 2.5 s whether anything had changed or not.
+            const remembered = memo.lookup(row);
             // Session content key: envelope sealed to the account content key.
-            const key = row.sessionKeyEnvelope ? this.encryption.openV2SessionKey(row.sessionKeyEnvelope) : null;
+            const key = remembered.hit || !row.sessionKeyEnvelope ? null : this.encryption.openV2SessionKey(row.sessionKeyEnvelope);
 
             // The card IS the metadata. A session with no card yet (spawn still
             // provisioning, or a pre-card daemon) gets a minimal one carrying
             // the v2 link — enough for the spawn poller and the reads engine.
-            let metadata = openCard(row.encryptedMetadata, key) as Session['metadata'] | null;
+            let metadata: Session['metadata'] | null = remembered.hit
+                ? remembered.value
+                : (openCard(row.encryptedMetadata, key) as Session['metadata'] | null);
+            if (!remembered.hit) memo.remember(row, metadata);
             if (!metadata) {
                 metadata = {
                     path: '',
@@ -873,8 +886,10 @@ class Sync {
         const stale = staleSessionIds(storage.getState().sessions, rows.map(r => r.sessionId), isDemoSession);
         this.applySessions(decryptedSessions);
         for (const sid of stale) this.forgetSession(sid);
+        memo.prune(rows.map(r => r.sessionId));
         if (stale.length > 0) log.log(`📥 fetchSessions: removed ${stale.length} session(s) no longer listed by the relay (#406)`);
-        log.log(`📥 fetchSessions completed - processed ${decryptedSessions.length} v2 sessions`);
+        // An idle tick is all hits; the line only earns a read when it did work.
+        if (memo.misses > 0) log.log(`📥 fetchSessions completed - ${decryptedSessions.length} v2 sessions, decrypted ${memo.misses}, reused ${memo.hits}`);
     }
 
     public refreshMachines = async () => {

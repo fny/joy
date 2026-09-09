@@ -22,6 +22,8 @@
 
 - **A long turn is no longer killed at 30 minutes.** The daemon had a hard cap on how long a turn could run: past it, the turn was marked interrupted and — since three days ago — the agent was aborted. That timer measured age, not activity, so a turn doing real work for 31 minutes died exactly like one that had hung at minute two, while the actual hangs (a dead process, a lost completion signal, a turn that never started) had nothing an interrupt could reach. The cap is gone. A turn that has produced nothing for 30 minutes now shows **no output for N m** in the status, in amber, and keeps running; the moment output lands the status goes back to normal. Whether a quiet turn is a long test suite or a hung tool is a call the daemon cannot make, so it no longer makes it.
 
+- **The app no longer burns CPU at idle.** The session list is re-read every 2.5 seconds as the baseline live channel, and every read decrypted every session on the account — an asymmetric key open plus a card open per row — whether anything had changed or not. On the web that was a steady 20% of a core doing nothing. A row whose bytes match the last read is now reused without any crypto, and a session's key is opened once and kept; an idle read does no decryption at all.
+
 
 # Sep 9 — Reading stays put
 

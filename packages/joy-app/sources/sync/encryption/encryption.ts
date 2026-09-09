@@ -62,7 +62,24 @@ export class Encryption {
      * the 32-byte symmetric content key, or null for plaintext/legacy
      * envelopes and anything malformed.
      */
+    /** Opened session keys by envelope string. The envelope for a session
+     *  only ever changes on an account content-key rotation, and opening it is
+     *  an asymmetric box open — the session-list poll was doing one per row
+     *  every 2.5 s for keys that never change. */
+    private v2SessionKeys = new Map<string, Uint8Array | null>();
+
     openV2SessionKey(envelope: string): Uint8Array | null {
+        const hit = this.v2SessionKeys.get(envelope);
+        if (hit !== undefined) return hit;
+        const key = this.openV2SessionKeyUncached(envelope);
+        // A failure is cached too: the same envelope fails the same way, and
+        // retrying it every tick is the cost this exists to remove. A key
+        // rotation produces a NEW envelope string, which misses and re-opens.
+        this.v2SessionKeys.set(envelope, key);
+        return key;
+    }
+
+    private openV2SessionKeyUncached(envelope: string): Uint8Array | null {
         if (!envelope.startsWith('v2sk1:')) return null;
         try {
             const raw = sodium.from_base64(envelope.slice(6), sodium.base64_variants.ORIGINAL);
