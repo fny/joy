@@ -84,6 +84,7 @@ export const zhHant: TranslationStructure = {
         signInRequired: '需要登入',
         waitingInTerminal: '等待終端機操作',
         approvalRequired: '需要核准',
+        stalled: ({ minutes }: { minutes: number }) => `${minutes} 分鐘無輸出`,
         detached: '已分離',
         compacting: '壓縮中',
         outputDropped: '輸出已遺失 — 工作階段已滿',

@@ -85,6 +85,7 @@ export const zhHans: TranslationStructure = {
         signInRequired: '需要登录',
         waitingInTerminal: '等待终端操作',
         approvalRequired: '需要批准',
+        stalled: ({ minutes }: { minutes: number }) => `${minutes} 分钟无输出`,
         detached: '已分离',
         compacting: '压缩中',
         outputDropped: '输出已丢失 — 会话已满',

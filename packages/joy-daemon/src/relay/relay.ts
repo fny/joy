@@ -608,6 +608,13 @@ export interface JoyCompactingInfo {
   since: number;              // epoch ms when compaction started
 }
 
+/** A running turn with no output for a long time (nucleusLane's stall clock).
+ *  Reported on the card, never acted on. */
+export interface JoyStalledInfo {
+  since: number;        // epoch ms when the stall was declared
+  silentForMs: number;  // how long the turn had been quiet at that moment
+}
+
 /**
  * Background-task progress ("N/M completed") the app shows while
  * run_in_background bash / background agents are in flight. Tracked from the
@@ -878,6 +885,10 @@ export class RelaySession {
 
   async updateCompacting(info: JoyCompactingInfo | null): Promise<void> {
     await this.mergeKey('joy__compacting', info);
+  }
+
+  async updateStalled(info: JoyStalledInfo | null): Promise<void> {
+    await this.mergeKey('joy__stalled', info);
   }
 
   /** The relay refused this session's events for good (#130): show the gap

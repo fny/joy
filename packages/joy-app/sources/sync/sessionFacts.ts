@@ -73,6 +73,10 @@ export interface SessionFacts {
     turn: TurnPhase;
     /** Attempt counts, present exactly when `turn === 'retrying'`. */
     retry: { attempt: number; total: number } | null;
+    /** The open turn has produced no output for a long time. A qualifier on
+     *  `turn`, not a phase of it: the turn is still open (so this still counts
+     *  as busy everywhere), the daemon just cannot vouch for it. */
+    stalled: { since: number } | null;
     blocked: Blocked | null;
     /** A tool permission request is outstanding. Orthogonal to `blocked`: it
      *  arrives on its own channel and can be up at the same time as a dialog. */
@@ -98,6 +102,7 @@ export interface SessionFactsInput {
         joy__state?: string;
         joy__retry?: { attempt: number; total: number } | null;
         joy__compacting?: { trigger: string; since: number } | null;
+        joy__stalled?: { since: number; silentForMs: number } | null;
         joy__thinking?: { since: number } | null;
         joy__agents?: { done: number; total: number } | null;
         joy__tasks?: { done: number; total: number } | null;
@@ -174,6 +179,9 @@ export function sessionFacts(session: SessionFactsInput, online: boolean): Sessi
         lifecycle: lifecycleOf(m?.joy__state),
         turn: turnOf(session),
         retry: retry ? { attempt: retry.attempt, total: retry.total } : null,
+        // Only meaningful over a turn we can see is open; a stale flag on an
+        // idle or unreachable session is not a stall.
+        stalled: m?.joy__stalled && online && turnOf(session) !== 'idle' ? { since: m.joy__stalled.since } : null,
         blocked: blockedOf(session),
         permission: hasPermissionRequest(session),
         agents: counter(m?.joy__agents),
@@ -211,7 +219,7 @@ export function liveFacts(session: SessionFactsInput): SessionFacts {
  */
 export type SessionState =
     | 'disconnected' | 'detached' | 'blocked' | 'retrying' | 'compacting'
-    | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
+    | 'stalled' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
 
 /**
  * The ladder — ONE implementation, where there were two.
@@ -229,6 +237,10 @@ export type SessionState =
  *   retrying      the daemon is re-sending a failed turn on a backoff.
  *   compacting    the turn is effectively paused while Claude summarises.
  *   permission    a human answer is needed before anything continues.
+ *   stalled       the turn is open but has been silent for a long time: shown
+ *                 instead of "thinking" because a vibing message over a hung
+ *                 turn is the lie; ranked below the blocking states because
+ *                 those are the thing to act on.
  *   thinking      a reply is streaming — the strongest "you can converse" signal.
  *   agents/tasks  idle, but background work is still in flight.
  *   waiting       ready.
@@ -240,6 +252,7 @@ export function statusState(facts: SessionFacts): SessionState {
     if (facts.turn === 'retrying') return 'retrying';
     if (facts.turn === 'compacting') return 'compacting';
     if (facts.permission) return 'permission_required';
+    if (facts.stalled) return 'stalled';
     if (facts.turn === 'thinking') return 'thinking';
     if (facts.agents) return 'agents';
     if (facts.tasks) return 'tasks';

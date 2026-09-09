@@ -94,6 +94,7 @@ export const pl: TranslationStructure = {
         signInRequired: 'wymagane logowanie',
         waitingInTerminal: 'oczekiwanie w terminalu',
         approvalRequired: 'wymagane zatwierdzenie',
+        stalled: ({ minutes }: { minutes: number }) => `brak wyjścia od ${minutes} min`,
         detached: 'odłączony',
         compacting: 'kompaktowanie',
         outputDropped: 'utracono wyjście — sesja pełna',

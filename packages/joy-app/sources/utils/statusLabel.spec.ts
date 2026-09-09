@@ -9,7 +9,7 @@ import { sessionFacts, type SessionState, type SessionFacts } from '@/sync/sessi
 
 const ALL_STATES: SessionState[] = [
     'disconnected', 'detached', 'blocked', 'retrying', 'compacting',
-    'thinking', 'tasks', 'agents', 'waiting', 'permission_required',
+    'stalled', 'thinking', 'tasks', 'agents', 'waiting', 'permission_required',
 ];
 
 const words = { vibing: 'brewing…', lastSeen: 'last seen 5m ago' };
@@ -36,6 +36,14 @@ describe('statusHeadline', () => {
         expect(statusHeadline('blocked', facts({ blocked: { kind: 'login' } }), words)).toBe('status.signInRequired');
         expect(statusHeadline('blocked', facts({ blocked: { kind: 'approval' } }), words)).toBe('status.approvalRequired');
         expect(statusHeadline('blocked', facts({ blocked: { kind: 'dialog' } }), words)).toBe('status.waitingInTerminal');
+    });
+
+    it('says how long a stalled turn has been quiet, rounded to whole minutes', () => {
+        const now = 100 * 60_000;
+        const f = facts({ stalled: { since: now - 42 * 60_000 } });
+        expect(statusHeadline('stalled', f, { ...words, now })).toBe('status.stalled({"minutes":42})');
+        // Never "0m": a stall that has only just been declared still reads as one.
+        expect(statusHeadline('stalled', facts({ stalled: { since: now } }), { ...words, now })).toBe('status.stalled({"minutes":1})');
     });
 
     it('uses the caller-supplied words where the clock or randomness is involved', () => {

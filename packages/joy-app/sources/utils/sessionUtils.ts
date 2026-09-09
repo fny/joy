@@ -41,6 +41,9 @@ export const STATUS_PALETTE: Record<SessionState, { color: string; dotColor: str
     // Same "waiting on you" family as permission_required, but not pulsing:
     // nothing is in progress behind it, which is the point.
     blocked:             { color: '#FFCC00', dotColor: '#FFCC00', isPulsing: false, isConnected: true },
+    // Amber like retrying — something is off — but not pulsing: pulsing says
+    // "in progress", and the whole point is that nothing observable is.
+    stalled:             { color: '#FF9500', dotColor: '#FF9500', isPulsing: false, isConnected: true },
     tasks:               { color: '#30B0C7', dotColor: '#30B0C7', isPulsing: true,  isConnected: true },
     agents:              { color: '#FF2D95', dotColor: '#FF2D95', isPulsing: true,  isConnected: true },
     thinking:            { color: '#007AFF', dotColor: '#007AFF', isPulsing: true,  isConnected: true },

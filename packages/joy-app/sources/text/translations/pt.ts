@@ -83,6 +83,7 @@ export const pt: TranslationStructure = {
         signInRequired: 'início de sessão necessário',
         waitingInTerminal: 'aguardando no terminal',
         approvalRequired: 'aprovação necessária',
+        stalled: ({ minutes }: { minutes: number }) => `sem saída há ${minutes} min`,
         detached: 'desacoplado',
         compacting: 'compactando',
         outputDropped: 'saída perdida — sessão cheia',

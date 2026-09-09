@@ -20,6 +20,8 @@ export interface StatusWords {
     vibing: string;
     /** Preformatted "last seen …", which needs the caller's clock and locale. */
     lastSeen: string;
+    /** The clock, for durations; defaults to Date.now(). Injectable for tests. */
+    now?: number;
 }
 
 /** Names the prompt holding the pane, so a blocked row never falls through to "online". */
@@ -39,6 +41,10 @@ export function statusHeadline(state: SessionState, facts: SessionFacts, words: 
         case 'blocked': return blockedLabel(facts.blocked?.kind);
         case 'retrying': return t('status.retrying', facts.retry ?? { attempt: 0, total: 0 });
         case 'compacting': return t('status.compacting');
+        case 'stalled': {
+            const since = facts.stalled?.since ?? (words.now ?? Date.now());
+            return t('status.stalled', { minutes: Math.max(1, Math.round(((words.now ?? Date.now()) - since) / 60_000)) });
+        }
         case 'permission_required': return t('status.permissionRequired');
         case 'thinking': return words.vibing;
         case 'agents': return t('status.agentsRunning', facts.agents ?? { done: 0, total: 0 });

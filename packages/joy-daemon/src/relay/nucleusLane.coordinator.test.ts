@@ -284,6 +284,63 @@ describe("nucleusLane on the coordinator", () => {
   // idle establishes only that execution STOPPED. Pinned here for the whole
   // outcome vocabulary, and against a session that reports itself idle
   // BEFORE the runtime's verdict arrives (the shape that used to lie).
+  it("a long-silent turn is surfaced as stalled and never interrupted; output clears it; its own end closes it", async () => {
+    const relay = makeFakeRelay();
+    const url = await relay.listen(); srv = relay.server;
+    const id = "csstall1";
+    const { s, driver, ledger } = coordinatedSession(id);
+    // What the lane observes, and what it may do about it.
+    let lastOutputAt: number | null = null;
+    const stalls: Array<{ since: number; silentForMs: number } | null> = [];
+    let aborts = 0;
+    s.lastOutputAt = () => lastOutputAt;
+    s.setStalled = (info: { since: number; silentForMs: number } | null) => { stalls.push(info); };
+    const realAbort = s.abort; s.abort = async () => { aborts++; return realAbort(); };
+    const registry: any = { get: (i: string) => (i === id ? s : undefined), list: () => [s], create: async () => s, chatHistory: () => [], listRecords: () => [], saveRecord: () => {} };
+    // The lane's own log rides along in any failure: a stall that never
+    // surfaced is invisible otherwise (the test sees only the stub's calls).
+    const logs: string[] = [];
+    const expectSoon = async (what: string, pred: () => boolean, ms = 5_000) => {
+      try { await until(pred, ms); }
+      catch { throw new Error(`timed out waiting for: ${what}\nstalls=${JSON.stringify(stalls)} aborts=${aborts}\nlane log:\n  ${logs.join("\n  ")}`); }
+    };
+    handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "mstall", log: (l) => logs.push(l), turnStallMs: 300 });
+    relay.pushWork({ deliveryId: "dst0", commandId: "spst", sessionId: "v2stall", kind: "spawn_session", ciphertext: spawnSpec("/tmp/x") });
+    await until(() => relay.count("/bind") === 1);
+    relay.pushWork({ deliveryId: "dst1", commandId: "cst1", sessionId: "v2stall", kind: "prompt", turnId: "tst1", ciphertext: enc("long job") });
+    await until(() => driver.submits.length === 1);
+    const row = ledger.commandForRelayTurn("tst1")!;
+    driver.lastSubmit.settle.resolve({ kind: "accepted", runtimeTurnId: "Tst1" });
+    await settle();
+    driver.emit({ kind: "echo", runtimeRef: row.id, runtimeTurnId: "Tst1" });
+    await until(() => relay.count("/turns/tst1/start") === 1);
+
+    // Silent past the threshold: reported on the card, nothing else.
+    await expectSoon("first stall report", () => stalls.length === 1);
+    expect(stalls[0]).toMatchObject({ silentForMs: expect.any(Number) });
+    expect(stalls[0]!.silentForMs).toBeGreaterThanOrEqual(300);
+    expect(aborts).toBe(0);
+    expect(relay.terminal("tst1")).toBeUndefined();
+    expect(ledger.getCommand(row.id)?.state).toBe("running");
+
+    // Output lands: the stall clears on the next recheck — the turn was alive.
+    lastOutputAt = Date.now();
+    await expectSoon("stall cleared after output", () => stalls.length === 2 && stalls[1] === null);
+    expect(aborts).toBe(0);
+    expect(relay.terminal("tst1")).toBeUndefined();
+
+    // Quiet again, long enough to be reported a second time — still no action.
+    await expectSoon("second stall report", () => stalls.length === 3 && stalls[2] !== null);
+    expect(aborts).toBe(0);
+
+    // The runtime's OWN end is the terminal fact, and it takes the flag with it.
+    driver.emit({ kind: "turn_ended", runtimeTurnId: "Tst1", status: "completed" });
+    await expectSoon("terminal from the runtime's own end", () => !!relay.terminal("tst1"), 10_000);
+    expect(relay.terminal("tst1")!.terminalState).toBe("completed");
+    expect(stalls[stalls.length - 1]).toBeNull();
+    expect(aborts).toBe(0);
+  }, 30_000);
+
   it("the terminal fact is the command's state, never an idle guess (#584)", async () => {
     for (const [n, status, terminalState, reason] of [
       [0, "failed", "failed", "agent_reported_failed"],

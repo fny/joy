@@ -454,6 +454,7 @@ export const ru: TranslationStructure = {
         approvalRequired: 'требуется подтверждение',
         detached: 'отключён',
         compacting: 'сжатие',
+        stalled: ({ minutes }: { minutes: number }) => `нет вывода ${minutes} мин`,
         outputDropped: 'вывод потерян — сессия заполнена',
         tasksCompleted: ({ done, total }: { done: number; total: number }) => `${done}/${total} задач`,
         agentsRunning: ({ done, total }: { done: number; total: number }) => `агентов: ${done}/${total}`,

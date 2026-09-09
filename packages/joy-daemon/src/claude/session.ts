@@ -844,6 +844,8 @@ export class Session {
   // or, as a backstop, by #compactingTimer — a boundary we never see (e.g. the
   // session died mid-compaction) would otherwise leave the banner stuck.
   #compacting: { trigger: string; since: number } | null = null;
+  /** When output last landed, any turn. Read by the nucleus lane's stall clock. */
+  #lastOutputAt: number | null = null;
   #compactingTimer: ReturnType<typeof setTimeout> | null = null;
   // Byte offset the tailer starts at — non-zero only for a capped --resume
   // backfill (snapped to a turn boundary so we don't replay a partial turn).
@@ -2681,6 +2683,12 @@ export class Session {
     // starts during that await, this (now possibly stale) abort must not cancel it.
     const submitBefore = this.#submitTimer;
     // …and the dispatch it belongs to: a submit that appears during the await
+  lastOutputAt(): number | null { return this.#lastOutputAt; }
+
+  /** `joy__stalled` on the card — a report the nucleus lane makes when a turn
+   *  has been silent for a long time, and withdraws when output resumes. */
+  setStalled(info: import("../relay/relay").JoyStalledInfo | null): void { void this.#relay?.updateStalled?.(info); }
+
     // for the SAME in-flight item is that item finishing its typing, not a new
     // send (#35) — see below.
     const inflightBefore = this.#dispatchInFlight;
@@ -3594,6 +3602,11 @@ export class Session {
 
   /** A task launch/completion or a <joy-bg> tag changes the split, so schedule a
    *  single coalesced re-derive on a short trailing timer — a burst (the recovery
+    // A turn that closes — however it closes — is not stalled. The lane
+    // clears the flag on its own exit too; this covers a close it never saw.
+    // Optional call: the session tests attach relay fakes that predate the
+    // key, and a missing publisher must not break the idle edge itself.
+    if (!thinking) void this.#relay?.updateStalled?.(null);
    *  backfill, or several launches in a turn) collapses to ONE derive+push of the
    *  final state. Derive-based (not incremental) because a task's long-running
    *  classification arrives in a SEPARATE, later entry than its launch, so only a
@@ -4894,7 +4907,7 @@ export class Session {
       // Output has appeared for this turn. Recorded AFTER the turn-open block
       // below would reset it — the first output entry is what OPENS the turn,
       // so setting it earlier means opening the turn wipes it (#647).
-      if (this.#relay && blocks.length > 0) this.#turnProducedOutput = true;
+      if (this.#relay && blocks.length > 0) { this.#turnProducedOutput = true; this.#lastOutputAt = Date.now(); }
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {

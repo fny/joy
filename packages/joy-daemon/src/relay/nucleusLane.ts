@@ -41,7 +41,26 @@ import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
 
 const RENEW_MS = 8_000;           // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
-const TURN_CAP_MS = 30 * 60_000;  // hard stop: a turn stuck past this is interrupted
+/** How long a running turn may go with NO output before it is surfaced as
+ *  stalled. It was a hard 30-minute cap on the turn's total age that ended it
+ *  `interrupted` and, from a0ceefef, aborted the agent — which is exactly
+ *  inverted: every real wedge (process gone, completion lost, never started,
+ *  no local worker) has nothing an Escape can reach, so the only turn the
+ *  abort ever touched was a live one doing long work. A wedge is a STATE and
+ *  each one is observed and closed by the fact that is already true (the
+ *  pane-idle tie-breaker, the detached edge, the no_local_worker reconciler);
+ *  a turn that is merely quiet is reported as such and left alone — the one
+ *  thing the daemon cannot tell apart is a long tool call from a hung one,
+ *  so it does not try. No timer writes a terminal state. */
+const TURN_STALL_MS = 30 * 60_000;
+/** How long a submitted prompt may wait to be confirmed RUNNING before the
+ *  row is given up as undeliverable. A different question from the stall
+ *  clock — nothing is executing yet — so it keeps its own constant rather
+ *  than riding the (test-injectable) stall threshold. */
+const DELIVERY_WAIT_MS = 30 * 60_000;
+/** Once stalled, how often the turn is re-checked for output so a recovery
+ *  clears the flag promptly. */
+const STALL_RECHECK_MS = 60_000;
 const ACQUIRE_RETRY_MS = 60_000;
 
 export interface NucleusLaneOpts {
@@ -75,6 +94,10 @@ export interface NucleusLaneOpts {
   /** Cadence (ms) of the slow adoption retry once a turn is parked
    *  `adoption_pending`: 30s by default. A test seam, like `adoptionRetryMs`. */
   adoptionPendingRetryMs?: number;
+  /** Silence (ms, no output) after which a running turn is surfaced as
+   *  stalled on its card: 30 min by default. Surfaced only — never
+   *  interrupted. A test seam, like `adoptionRetryMs`. */
+  turnStallMs?: number;
 }
 
 /** One relay turn this lane is driving, as the handle reports it. `state`
@@ -277,6 +300,7 @@ export function sealSessionKey(sessionKey: Uint8Array, accountPub: Uint8Array): 
 
 export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const { registry, relayUrl, token, machineId } = opts;
+  const turnStallMs = opts.turnStallMs ?? TURN_STALL_MS;
   const log = (line: string) => opts.log?.(`[v2-lane] ${line}`);
   // Derived once: the leaf the app seals spawn specs under (#107). Never
   // sent anywhere — both ends compute it from the machine key they share.
@@ -1933,7 +1957,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // The command is the coordinator's whatever object (or none) is under
     // the id right now — a restart replaces it.
     const q = () => queueFor({ id: localId });
+    // A stall that was surfaced on the card must come off it with the turn,
+    // whichever path closes the turn — finish is the one exit they all share.
+    let stalled = false;
+    const clearStalled = () => { if (stalled) { stalled = false; sessionNow()?.setStalled?.(null); } };
     const finish = async (state: CommandState, reason?: string | null) => {
+      clearStalled();
       if (state !== "completed") opts.dropFiles?.();
       await postTerminal(turnId, localId, terminalBody(state, reason), leaseRef);
       log(`${tag} ${state}${state !== "completed" && reason ? ` (${reason})` : ""}`);
@@ -2053,13 +2082,14 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // waits here even with its /start acknowledged: adopting it on the
       // relay (below) is right only once the new driver generation has
       // confirmed the runtime is executing it.
-      const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: TURN_CAP_MS });
+      const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: DELIVERY_WAIT_MS });
       if (r.state === null) return finish("failed", "command_lost");
       if (isTerminal(r.state)) return finish(r.state, r.reason);
       if (r.state !== "running") {
-        // Still not delivered at the cap: nothing will run it now.
+        // Still not delivered: nothing will run it now. The row is cancelled
+        // so the queue moves on; there is no agent turn to interrupt — the
+        // abort that used to sit here could only ever reach unrelated work.
         q().cancel(commandId);
-        try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
         return finish("failed", "dispatch_timeout");
       }
       if (!startPosted) log(`${tag}: started (delivery confirmed)`);
@@ -2147,9 +2177,27 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // on the relay; the durable ack lands) and the loop returns to one fresh
     // bounded wait for the command's own terminal. No answer is acted on
     // twice: a resolved turn is never re-adopted (Astra, F21).
-    const capAt = Date.now() + TURN_CAP_MS;
-    let done = await waitForTerminal(adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, TURN_CAP_MS) : TURN_CAP_MS);
-    while (done.state !== null && !isTerminal(done.state) && Date.now() < capAt) {
+    // The stall clock runs from the last OUTPUT, not from the turn's start:
+    // a turn producing anything is alive, however long it has run.
+    const openedAt = Date.now();
+    const quietSince = () => Math.max(openedAt, sessionNow()?.lastOutputAt?.() ?? 0);
+    /** The next wait: up to the stall boundary while the turn is healthy; a
+     *  short recheck once stalled, so output resuming is noticed. Never 0. */
+    const nextWait = () => stalled ? Math.min(STALL_RECHECK_MS, turnStallMs) : Math.max(1, quietSince() + turnStallMs - Date.now());
+    const observeStall = () => {
+      const quietFor = Date.now() - quietSince();
+      if (quietFor < turnStallMs) {
+        if (stalled) { clearStalled(); log(`${tag}: output resumed — no longer stalled`); }
+        return;
+      }
+      if (stalled) return;
+      stalled = true;
+      sessionNow()?.setStalled?.({ since: Date.now(), silentForMs: quietFor });
+      log(`${tag}: no output for ${Math.round(quietFor / 60_000)}m → stalled (surfaced on the card; NOT interrupted)`);
+    };
+    let done = await waitForTerminal(adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, nextWait()) : nextWait());
+    while (done.state !== null && !isTerminal(done.state)) {
+      observeStall();
       const entry = activeTurns.get(turnId);
       // The SWEEP may have answered this turn's adoption while the loop was
       // waiting, and that answer is a VERDICT — not just the end of the wait.
@@ -2193,7 +2241,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             startPosted = true;
           }
         }
-        done = await waitForTerminal(Math.max(0, capAt - Date.now()));
+        done = await waitForTerminal(nextWait());
         continue;
       }
       // Everything this pass needs off the entry is read BEFORE the await:
@@ -2230,18 +2278,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         startPosted = true;
         continue;
       }
-      done = await waitForTerminal(Math.min(ADOPTION_PENDING_RETRY_MS, Math.max(0, capAt - Date.now())));
+      done = await waitForTerminal(Math.min(ADOPTION_PENDING_RETRY_MS, nextWait()));
     }
+    // The loop leaves only on a terminal state or a lost row: there is no
+    // deadline exit any more. What used to be here ended a still-running turn
+    // `interrupted` and aborted the agent at 30 minutes of AGE.
     if (done.state === null) return finish("failed", "command_lost");
-    if (!isTerminal(done.state)) {
-      // Stop the REAL agent too — reporting interrupted while the agent
-      // keeps burning would be a lie with a bill attached.
-      q().cancel(commandId);
-      try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
-      await finish("interrupted", "turn_cap");
-      log(`${tag}: 30min cap → interrupted (agent aborted)`);
-      return;
-    }
     await finish(done.state, done.reason);
   }
 

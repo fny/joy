@@ -82,6 +82,7 @@ export const en = {
         signInRequired: 'sign-in required',
         waitingInTerminal: 'waiting in terminal',
         approvalRequired: 'approval required',
+        stalled: ({ minutes }: { minutes: number }) => `no output for ${minutes}m`,
         detached: 'detached',
         compacting: 'compacting',
         outputDropped: 'output dropped — session full',

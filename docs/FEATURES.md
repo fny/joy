@@ -138,6 +138,7 @@ every relay; machines register per account.
   `ask`/`run`/`wait --turn` are bound to the durable command the send
   returned (`GET /sessions/:id/queue/:qid`): the command's own terminal state
   is the verdict (`completed` → answered; `failed`/`cancelled`/`interrupted`
+- **Stalled turns are reported, never interrupted.** A running turn that has produced no output for 30 minutes is flagged `joy__stalled` {since, silentForMs} on its card; the app shows *no output for N m* (amber, not pulsing) in place of the vibing message and the sidebar row, and the turn stays open — it still counts as busy for the send gate, eviction and unread. Output resuming or the turn ending clears it. The daemon cannot distinguish a long tool call from a hung one, so the decision is yours; the 30-minute turn cap that used to end such turns `interrupted` and abort the agent is gone.
   → error with the daemon's reason), never a global idle, a failed queue read
   or an id missing from a listing; the reply is the records of the runtime
   turn the daemon attributed to the command (`runtimeTurnId`: codex, opencode

@@ -283,3 +283,35 @@ describe('finishedWork — the falling edge behind the unread marker', () => {
         expect(finishedWork(live({ thinking: true }), gone)).toBe(false);
     });
 });
+
+describe('stalled — a long-silent turn is reported, never acted on', () => {
+    const quiet = { joy__stalled: { since: 1_000, silentForMs: 30 * 60_000 } };
+
+    it('replaces the vibing message over an open turn', () => {
+        const f = sessionFacts(base({ thinking: true, metadata: quiet }), true);
+        expect(f.stalled).toEqual({ since: 1_000 });
+        expect(f.turn).toBe('thinking');
+        expect(statusState(f)).toBe('stalled');
+    });
+
+    it('is still a live turn for everything that asks — eviction, the send gate, unread', () => {
+        expect(isTurnActive(sessionFacts(base({ thinking: true, metadata: quiet }), true))).toBe(true);
+    });
+
+    it('is ignored when there is no open turn to be stalled', () => {
+        // The daemon clears the flag on turn end; if a stale one survives, an
+        // idle session must not read as stuck.
+        const f = sessionFacts(base({ thinking: false, metadata: quiet }), true);
+        expect(f.stalled).toBeNull();
+        expect(statusState(f)).toBe('waiting');
+    });
+
+    it('yields to the states you can act on, and to being unreachable', () => {
+        const withPermission = base({ thinking: true, agentState: { requests: { r1: {} } }, metadata: quiet });
+        expect(statusState(sessionFacts(withPermission, true))).toBe('permission_required');
+        const withDialog = base({ thinking: true, metadata: { ...quiet, joy__dialog: { title: null, options: [] } } });
+        expect(statusState(sessionFacts(withDialog, true))).toBe('blocked');
+        const gone = { thinking: true, presence: 600_000, activeAt: 0, metadata: quiet };
+        expect(statusState(sessionFacts(gone, false))).toBe('disconnected');
+    });
+});

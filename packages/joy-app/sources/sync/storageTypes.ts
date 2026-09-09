@@ -109,6 +109,15 @@ export const MetadataSchema = z.object({
         trigger: z.enum(['auto', 'manual']),
         since: z.number(),
     }).nullable().optional(),
+    // joy: a running turn has produced no output for a long time (30 min by
+    // default). The daemon REPORTS this and never acts on it — it cannot tell
+    // a long tool call from a hung one, so the badge says how long it has
+    // been quiet and leaves the decision to you. Cleared when output resumes
+    // or the turn ends. null/absent = none.
+    joy__stalled: z.object({
+        since: z.number(),
+        silentForMs: z.number(),
+    }).nullable().optional(),
     // joy: the relay refused this session's further output for good (429
     // session_event_budget_exhausted — 50,000 events per session, never
     // refilled; #130). The daemon drops that output and counts it here:

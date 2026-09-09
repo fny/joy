@@ -83,6 +83,7 @@ export const ca: TranslationStructure = {
         signInRequired: 'inici de sessió requerit',
         waitingInTerminal: 'esperant al terminal',
         approvalRequired: 'aprovació requerida',
+        stalled: ({ minutes }: { minutes: number }) => `sense sortida des de fa ${minutes} min`,
         detached: 'separat',
         compacting: 'compactant',
         outputDropped: 'sortida perduda — sessió plena',

@@ -85,6 +85,7 @@ export const ja: TranslationStructure = {
         signInRequired: 'サインインが必要です',
         waitingInTerminal: 'ターミナルで待機中',
         approvalRequired: '承認が必要です',
+        stalled: ({ minutes }: { minutes: number }) => `${minutes}分間出力なし`,
         detached: 'デタッチ',
         compacting: '圧縮中',
         outputDropped: '出力が失われました — セッション上限',

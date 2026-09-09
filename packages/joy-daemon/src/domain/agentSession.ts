@@ -93,4 +93,14 @@ export interface AgentSession {
    *  Notification hooks) without a first-class approval object to answer. */
   needsInput?(): { kind: string; tool?: string; since: number } | null;
   answerApproval?(params: Record<string, unknown> | undefined): { ok: boolean };
+
+  /** Epoch ms of the most recent output this session produced (any turn),
+   *  null if none yet. The nucleus lane's stall clock runs from this — a turn
+   *  producing anything is alive, whatever its age. Optional: an adapter
+   *  that cannot say is treated as silent since the turn opened. */
+  lastOutputAt?(): number | null;
+  /** Surface (or clear, with null) a running turn that has produced no
+   *  output for a long time — `joy__stalled` on the card. A report, never an
+   *  action: the daemon cannot tell a long tool call from a hung one. */
+  setStalled?(info: import("../relay/relay").JoyStalledInfo | null): void;
 }

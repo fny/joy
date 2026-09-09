@@ -82,6 +82,7 @@ export const it: TranslationStructure = {
         signInRequired: 'accesso richiesto',
         waitingInTerminal: 'in attesa nel terminale',
         approvalRequired: 'approvazione richiesta',
+        stalled: ({ minutes }: { minutes: number }) => `nessun output da ${minutes} min`,
         detached: 'scollegato',
         compacting: 'compattazione',
         outputDropped: 'output perso — sessione piena',
