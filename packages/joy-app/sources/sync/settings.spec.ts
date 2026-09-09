@@ -248,6 +248,8 @@ describe('settings', () => {
                 joy__chatHistoryLimit: null,
                 joy__doubleTapEnabled: false,
                 joy__newSessionDefault: false,
+                pinnedSessions: [],
+                sessionViews: [],
                 voiceAgents: [],
                 voiceActiveAgentId: null,
                 voiceWakeOnEvents: true,

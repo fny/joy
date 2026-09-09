@@ -16,6 +16,7 @@ export default function FeaturesSettingsScreen() {
     const [commandPaletteEnabled, setCommandPaletteEnabled] = useLocalSettingMutable('commandPaletteEnabled');
     const [markdownCopyV2, setMarkdownCopyV2] = useLocalSettingMutable('markdownCopyV2');
     const [nativeTextSelection, setNativeTextSelection] = useLocalSettingMutable('nativeTextSelection');
+    const [sessionListV2, setSessionListV2] = useLocalSettingMutable('sessionListV2');
     const [limitSessionMemory, setLimitSessionMemory] = useLocalSettingMutable('limitSessionMemory');
     const [hideInactiveSessions, setHideInactiveSessions] = useSettingMutable('hideInactiveSessions');
     const [fileDiffsSidebar, setFileDiffsSidebar] = useSettingMutable('fileDiffsSidebar');
@@ -149,6 +150,19 @@ export default function FeaturesSettingsScreen() {
                         showChevron={false}
                     />
                 )}
+                <Item
+                    title={t('settingsFeatures.sessionListV2')}
+                    subtitle={t('settingsFeatures.sessionListV2Subtitle')}
+                    subtitleLines={0}
+                    icon={<Ionicons name="list-outline" size={29} color="#FF9500" />}
+                    rightElement={
+                        <Switch
+                            value={sessionListV2}
+                            onValueChange={setSessionListV2}
+                        />
+                    }
+                    showChevron={false}
+                />
                 <Item
                     title={t('settingsFeatures.markdownCopyV2')}
                     subtitle={t('settingsFeatures.markdownCopyV2Subtitle')}

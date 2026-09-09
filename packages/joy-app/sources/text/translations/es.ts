@@ -228,6 +228,8 @@ export const es: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: 'Nueva lista de sesiones',
+        sessionListV2Subtitle: 'Fija sesiones, agrúpalas por proyecto o máquina en vez de por fecha, colapsa grupos y filtra por lo que te necesita. Mantén pulsada una sesión para fijarla.',
         // Features settings screen
         experiments: 'Experimentos',
         experimentsDescription: 'Habilitar características experimentales que aún están en desarrollo. Estas características pueden ser inestables o cambiar sin aviso.',
@@ -685,6 +687,24 @@ export const es: TranslationStructure = {
     },
 
     sidebar: {
+        pin: 'Fijar',
+        unpin: 'No fijar',
+        pinned: 'Fijadas',
+        filterAll: 'Todas',
+        filterNeeds: 'Me necesitan',
+        filterWorking: 'Trabajando',
+        filterUnread: 'Sin leer',
+        axisProject: 'Proyecto',
+        axisMachine: 'Máquina',
+        axisDate: 'Fecha',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} ocultas por el filtro`,
+        saveAsGroup: 'Guardar como grupo…',
+        newGroup: 'Nuevo grupo',
+        nameGroup: 'Nombra este grupo',
+        removeGroup: 'Eliminar grupo',
+        removeGroupConfirm: '¿Eliminar este grupo? Las sesiones se quedan donde estaban.',
+        noMatches: 'Nada coincide con este filtro.',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'Mostrar archivadas',
         hideArchived: 'Ocultar archivadas',

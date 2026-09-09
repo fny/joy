@@ -7,6 +7,8 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { STATUS_PALETTE, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
+import { SessionListControls } from './SessionListControls';
+import { SessionGroupHeader } from './SessionGroupHeader';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { Typography } from '@/constants/Typography';
@@ -205,6 +207,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.groupped.sectionTitle,
         opacity: 0.3,
     },
+    tally: {
+        paddingHorizontal: 16,
+        paddingTop: 10,
+        paddingBottom: 20,
+    },
+    tallyText: {
+        fontSize: 11,
+        color: theme.colors.textSecondary,
+        ...Typography.default(),
+    },
     archiveToggleText: {
         fontSize: 12,
         color: theme.colors.textSecondary,
@@ -247,6 +259,9 @@ export function SessionsList() {
             case 'archive-toggle': return 'archive-toggle';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
+            case 'list-controls': return 'list-controls';
+            case 'group-header': return `group-${item.sectionKey}`;
+            case 'list-tally': return 'list-tally';
         }
     }, []);
 
@@ -278,6 +293,23 @@ export function SessionsList() {
                         sessions={item.sessions}
                         selectedSessionId={selectedSessionId}
                     />
+                );
+
+            case 'list-controls':
+                return <SessionListControls />;
+
+            case 'group-header':
+                return <SessionGroupHeader item={item} />;
+
+            case 'list-tally':
+                return (
+                    <View style={styles.tally}>
+                        <Text style={styles.tallyText}>
+                            {item.shown === item.total
+                                ? null
+                                : t('sidebar.filtered', { shown: item.shown, total: item.total })}
+                        </Text>
+                    </View>
                 );
 
             case 'project-group':

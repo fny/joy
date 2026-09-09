@@ -229,6 +229,8 @@ export const zhHans: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: '新的会话列表',
+        sessionListV2Subtitle: '置顶会话，按项目或机器分组而不是按日期，折叠分组，并筛选出需要你处理的。长按会话即可置顶。',
         // Features settings screen
         experiments: '实验功能',
         experimentsDescription: '启用仍在开发中的实验功能。这些功能可能不稳定或会在没有通知的情况下改变。',
@@ -686,6 +688,24 @@ export const zhHans: TranslationStructure = {
     },
 
     sidebar: {
+        pin: '置顶',
+        unpin: '取消置顶',
+        pinned: '已置顶',
+        filterAll: '全部',
+        filterNeeds: '需要我',
+        filterWorking: '进行中',
+        filterUnread: '未读',
+        axisProject: '项目',
+        axisMachine: '机器',
+        axisDate: '日期',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} 被筛选隐藏`,
+        saveAsGroup: '保存为分组…',
+        newGroup: '新建分组',
+        nameGroup: '为该分组命名',
+        removeGroup: '删除分组',
+        removeGroupConfirm: '删除这个分组？会话会留在原处。',
+        noMatches: '没有符合此筛选的会话。',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: '显示已归档',
         hideArchived: '隐藏已归档',

@@ -228,6 +228,8 @@ export const zhHant: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: '新的工作階段清單',
+        sessionListV2Subtitle: '置頂工作階段，依專案或機器分組而非依日期，摺疊群組，並篩選出需要你處理的。長按工作階段即可置頂。',
         // Features settings screen
         experiments: '實驗功能',
         experimentsDescription: '啟用仍在開發中的實驗功能。這些功能可能不穩定或會在沒有通知的情況下改變。',
@@ -685,6 +687,24 @@ export const zhHant: TranslationStructure = {
     },
 
     sidebar: {
+        pin: '置頂',
+        unpin: '取消置頂',
+        pinned: '已置頂',
+        filterAll: '全部',
+        filterNeeds: '需要我',
+        filterWorking: '進行中',
+        filterUnread: '未讀',
+        axisProject: '專案',
+        axisMachine: '機器',
+        axisDate: '日期',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} 被篩選隱藏`,
+        saveAsGroup: '儲存為群組…',
+        newGroup: '新增群組',
+        nameGroup: '為此群組命名',
+        removeGroup: '刪除群組',
+        removeGroupConfirm: '刪除這個群組？工作階段會留在原處。',
+        noMatches: '沒有符合此篩選的工作階段。',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: '顯示已封存',
         hideArchived: '隱藏已封存',

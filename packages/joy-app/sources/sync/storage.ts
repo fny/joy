@@ -159,6 +159,23 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
 // Unified list item type for SessionsList component
 export type SessionListViewItem =
     | { type: 'header'; title: string }
+    // ── session list v2 (localSettings.sessionListV2) ──────────────────────
+    /** The axis switcher and filter chips, once, at the top. */
+    | { type: 'list-controls' }
+    /** A collapsible section head. Carries its own count and worst state so a
+     *  collapsed group compresses without concealing (sessionListModel.ts). */
+    | {
+        type: 'group-header';
+        sectionKey: string;
+        title: string;
+        kind: 'pinned' | 'view' | 'group';
+        count: number;
+        hiddenByFilter: number;
+        collapsed: boolean;
+        worstState: string | null;
+    }
+    /** "7 of 18" — a filter must always say what it is hiding. */
+    | { type: 'list-tally'; shown: number; total: number }
     | { type: 'active-sessions'; sessions: SessionRowData[] }
     | { type: 'archive-toggle'; hidden: boolean }
     | { type: 'project-group'; displayPath: string; machine: Machine }
@@ -275,6 +292,14 @@ interface StorageState {
 // element was reused) makes both checks reference-equal short-circuits.
 const sessionRowCache = new Map<string, SessionRowData>();
 let prevSessionListViewData: SessionListViewItem[] | null = null;
+
+/** One row's view data, memoised by session identity. Exported for the v2
+ *  list, which builds its sections in the component layer (the axis, filter
+ *  and collapse state are device-local prefs, so a store-side rebuild would
+ *  have to be re-triggered by every preference change). */
+export function sessionRowDataFor(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
+    return buildSessionRowDataCached(session, unreadSessionIds);
+}
 
 function buildSessionRowDataCached(session: Session, unreadSessionIds?: Set<string>): SessionRowData {
     const next = buildSessionRowData(session, unreadSessionIds);

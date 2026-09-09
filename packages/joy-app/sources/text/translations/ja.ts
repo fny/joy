@@ -229,6 +229,8 @@ export const ja: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: '新しいセッション一覧',
+        sessionListV2Subtitle: 'セッションをピン留めし、日付ではなくプロジェクトやマシンでグループ化し、グループを折りたたみ、対応が必要なものだけに絞り込めます。長押しでピン留めできます。',
         // Features settings screen
         experiments: '実験的機能',
         experimentsDescription: '開発中の実験的機能を有効にします。これらの機能は不安定であったり、予告なく変更される場合があります。',
@@ -686,6 +688,24 @@ export const ja: TranslationStructure = {
     },
 
     sidebar: {
+        pin: 'ピン留め',
+        unpin: 'ピン留めを解除',
+        pinned: 'ピン留め',
+        filterAll: 'すべて',
+        filterNeeds: '対応が必要',
+        filterWorking: '実行中',
+        filterUnread: '未読',
+        axisProject: 'プロジェクト',
+        axisMachine: 'マシン',
+        axisDate: '日付',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} フィルターで非表示`,
+        saveAsGroup: 'グループとして保存…',
+        newGroup: '新しいグループ',
+        nameGroup: 'このグループに名前を付ける',
+        removeGroup: 'グループを削除',
+        removeGroupConfirm: 'このグループを削除しますか？セッションは元の場所に残ります。',
+        noMatches: 'このフィルターに一致するものはありません。',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'アーカイブを表示',
         hideArchived: 'アーカイブを非表示',

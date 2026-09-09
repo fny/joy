@@ -228,6 +228,8 @@ export const ca: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: 'Nova llista de sessions',
+        sessionListV2Subtitle: 'Fixa sessions, agrupa-les per projecte o màquina en lloc de per data, plega grups i filtra pel que et necessita. Mantén premuda una sessió per fixar-la.',
         // Features settings screen
         experiments: 'Experiments',
         experimentsDescription: 'Activa funcions experimentals que encara estan en desenvolupament. Aquestes funcions poden ser inestables o canviar sense avís.',
@@ -685,6 +687,24 @@ export const ca: TranslationStructure = {
     },
 
     sidebar: {
+        pin: 'Fixa',
+        unpin: 'No fixis',
+        pinned: 'Fixades',
+        filterAll: 'Totes',
+        filterNeeds: 'Em necessiten',
+        filterWorking: 'Treballant',
+        filterUnread: 'No llegides',
+        axisProject: 'Projecte',
+        axisMachine: 'Màquina',
+        axisDate: 'Data',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} amagades pel filtre`,
+        saveAsGroup: 'Desa com a grup…',
+        newGroup: 'Grup nou',
+        nameGroup: 'Posa nom a aquest grup',
+        removeGroup: 'Elimina el grup',
+        removeGroupConfirm: 'Vols eliminar aquest grup? Les sessions es queden on eren.',
+        noMatches: 'No hi ha res que coincideixi amb aquest filtre.',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'Mostra arxivades',
         hideArchived: 'Amaga arxivades',

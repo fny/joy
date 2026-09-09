@@ -311,6 +311,18 @@ every relay; machines register per account.
   (`onContextMenu` in MarkdownView) — unless text is selected, in which case
   the browser's own menu is left alone.
 - Cmd/Ctrl+F in-session search with match cycling.
+- **Session list v2** (Settings → Features → New session list; device-local
+  `sessionListV2`). Pins, custom groups, a switchable grouping axis
+  (project / machine / date — time becomes the SORT, not the grouping),
+  collapsible sections and preset filters (all / needs me / working /
+  unread). A filter and a custom group are ONE object (`sessionViews`: a
+  rule, hand-picked members, or both), and Pinned is the built-in view.
+  Rules live in `sync/sessionListModel.ts`: a session appears once (first
+  view to claim it wins, and it leaves the derived grouping); a filtered
+  section reports what it lost; a collapsed section still carries its
+  count and worst state; the foot always says `7 of 18`. Pins and groups
+  are synced (they are statements about the work); the axis, filter and
+  collapse set are device-local. Pin from a session's long-press menu.
 - **Mute a session's notifications** (session info → Actions): silences its
   pushes on every device until unmuted — turn-done, permission, question
   and the agent's own `<joy-notify>` tags. The daemon enforces it

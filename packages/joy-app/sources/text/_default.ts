@@ -254,6 +254,8 @@ export const en = {
     },
 
     settingsFeatures: {
+        sessionListV2: 'New session list',
+        sessionListV2Subtitle: 'Pin sessions, group them by project or machine instead of by date, collapse groups, and filter to what needs you. Long-press a session to pin it.',
         // Features settings screen
         experiments: 'Experiments',
         experimentsDescription: 'Enable experimental features that are still in development. These features may be unstable or change without notice.',
@@ -734,6 +736,24 @@ export const en = {
     },
 
     sidebar: {
+        pin: 'Pin',
+        unpin: 'Unpin',
+        pinned: 'Pinned',
+        filterAll: 'All',
+        filterNeeds: 'Needs me',
+        filterWorking: 'Working',
+        filterUnread: 'Unread',
+        axisProject: 'Project',
+        axisMachine: 'Machine',
+        axisDate: 'Date',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} hidden by filter`,
+        saveAsGroup: 'Save as group…',
+        newGroup: 'New group',
+        nameGroup: 'Name this group',
+        removeGroup: 'Remove group',
+        removeGroupConfirm: 'Remove this group? The sessions stay where they were.',
+        noMatches: 'Nothing matches this filter.',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'Show archived',
         hideArchived: 'Hide archived',

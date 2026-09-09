@@ -227,6 +227,8 @@ export const pt: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: 'Nova lista de sessões',
+        sessionListV2Subtitle: 'Fixe sessões, agrupe por projeto ou máquina em vez de por data, recolha grupos e filtre pelo que precisa de você. Mantenha pressionada uma sessão para fixá-la.',
         // Features settings screen
         experiments: 'Experimentos',
         experimentsDescription: 'Ative recursos experimentais que ainda estão em desenvolvimento. Estes recursos podem ser instáveis ou mudar sem aviso.',
@@ -684,6 +686,24 @@ export const pt: TranslationStructure = {
     },
 
     sidebar: {
+        pin: 'Fixar',
+        unpin: 'Desafixar',
+        pinned: 'Fixadas',
+        filterAll: 'Todas',
+        filterNeeds: 'Precisam de mim',
+        filterWorking: 'Trabalhando',
+        filterUnread: 'Não lidas',
+        axisProject: 'Projeto',
+        axisMachine: 'Máquina',
+        axisDate: 'Data',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} ocultas pelo filtro`,
+        saveAsGroup: 'Salvar como grupo…',
+        newGroup: 'Novo grupo',
+        nameGroup: 'Dê um nome a este grupo',
+        removeGroup: 'Remover grupo',
+        removeGroupConfirm: 'Remover este grupo? As sessões ficam onde estavam.',
+        noMatches: 'Nada corresponde a este filtro.',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'Mostrar arquivadas',
         hideArchived: 'Ocultar arquivadas',

@@ -25,6 +25,11 @@ export const LocalSettingsSchema = z.object({
     limitSessionMemory: z.number().nullable().describe('Max sessions to keep in memory (most-recently-viewed; unload the rest, reloaded on revisit). null/empty = keep all'),
     fileViewerFontSize: z.number().describe('Code/file viewer font size in px'),
     fileViewerWrap: z.boolean().describe('Code/file viewer word wrap (off = horizontal scroll)'),
+    // Session list v2 — the flag this whole thing sits behind.
+    sessionListV2: z.boolean().describe('Session list: pinning, a switchable grouping axis, collapsible groups and filters'),
+    sessionGroupBy: z.enum(['project', 'machine', 'date']).describe('Which axis the session list groups on'),
+    sessionFilter: z.enum(['all', 'needs', 'working', 'unread']).describe('Active session-list filter'),
+    collapsedSessionGroups: z.array(z.string()).describe('Collapsed section keys. Device-local: a phone wants far more collapsed than a wide desktop'),
     diffWholeFile: z.boolean().describe('Changes view: show each change against the complete file instead of the patch hunks. Device-local — diffStyle (unified/split) stays the synced preference this returns to.'),
     chatFontScale: z.number().describe('Chat message text scale multiplier (1 = 100%), clamped to [0.8, 1.4]'),
     // CLI version acknowledgments - keyed by machineId
@@ -60,6 +65,10 @@ export const localSettingsDefaults: LocalSettings = {
     limitSessionMemory: 5,
     fileViewerFontSize: 14,
     fileViewerWrap: true,
+    sessionListV2: false,
+    sessionGroupBy: 'project',
+    sessionFilter: 'all',
+    collapsedSessionGroups: [],
     diffWholeFile: false,
     chatFontScale: 1,
     terminalTheme: 'default',

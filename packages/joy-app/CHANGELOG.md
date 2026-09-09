@@ -1,3 +1,11 @@
+# Sep 9 (8) — A session list you can organise
+
+- **Settings → Features → New session list** turns on a rebuilt sidebar. It groups by **project** or **machine** instead of only by date — date is still there, but it is now one choice rather than the only one, and time sorts within a group rather than defining it.
+- **Pin a session** from its long-press menu and it sits at the top, in its own section, on every device.
+- **Collapse any group.** A collapsed group still shows how many sessions are in it and a dot for whatever most wants your attention, so folding the list away never hides something waiting on you.
+- **Filter to All, Needs me, Working or Unread**, and the list always says what it is holding back — `7 of 18` at the bottom, and a section that lost rows to the filter says so rather than quietly shrinking.
+- **Save a filter as a group.** Narrow the list, tap the bookmark, name it, and it becomes a section of its own. A group can also just be sessions you picked by hand, or a rule plus a few stragglers. Long-press a group's header to remove it; the sessions stay where they were.
+
 # Sep 9 (7) — Mute a session
 
 - **A single session can be silenced.** Session info → Mute notifications stops that session's pushes — finished, permission needed, question asked, and anything the agent announces itself — on every device you own, until you unmute it. The session is not otherwise changed: it still shows what it is doing, and still turns green in the list when it finishes. Muted sessions carry a small bell-slash in the sidebar so a quiet session is never mistaken for a stalled one.

@@ -245,6 +245,8 @@ export const pl: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: 'Nowa lista sesji',
+        sessionListV2Subtitle: 'Przypinaj sesje, grupuj je według projektu lub maszyny zamiast daty, zwijaj grupy i filtruj to, co czeka na Ciebie. Przytrzymaj sesję, aby ją przypiąć.',
         // Features settings screen
         experiments: 'Eksperymenty',
         experimentsDescription: 'Włącz eksperymentalne funkcje, które są nadal w rozwoju. Te funkcje mogą być niestabilne lub zmienić się bez ostrzeżenia.',
@@ -701,6 +703,24 @@ export const pl: TranslationStructure = {
     },
 
     sidebar: {
+        pin: 'Przypnij',
+        unpin: 'Odepnij',
+        pinned: 'Przypięte',
+        filterAll: 'Wszystkie',
+        filterNeeds: 'Czekają na mnie',
+        filterWorking: 'Pracują',
+        filterUnread: 'Nieprzeczytane',
+        axisProject: 'Projekt',
+        axisMachine: 'Maszyna',
+        axisDate: 'Data',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} ukryte przez filtr`,
+        saveAsGroup: 'Zapisz jako grupę…',
+        newGroup: 'Nowa grupa',
+        nameGroup: 'Nazwij tę grupę',
+        removeGroup: 'Usuń grupę',
+        removeGroupConfirm: 'Usunąć tę grupę? Sesje zostaną tam, gdzie były.',
+        noMatches: 'Nic nie pasuje do tego filtra.',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'Pokaż zarchiwizowane',
         hideArchived: 'Ukryj zarchiwizowane',

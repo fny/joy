@@ -3,7 +3,7 @@ import { useJoyAction } from '@/hooks/useJoyAction';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { Modal } from '@/modal';
 import { sessionDelete, sessionKill } from '@/sync/ops';
-import { useLocalSetting, useMachine } from '@/sync/storage';
+import { useLocalSetting, useMachine, useSetting, useSettingMutable } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
 import { waitForLocalSession } from '@/sync/v2/spawn';
@@ -180,10 +180,31 @@ export function useSessionQuickActions(
 
     const canCopySessionMetadata = __DEV__ || devModeEnabled;
 
+    const sessionListV2 = useLocalSetting('sessionListV2');
+    const pinnedSessions = useSetting('pinnedSessions');
+    const [, setPinnedSessions] = useSettingMutable('pinnedSessions');
+    const isPinned = pinnedSessions.indexOf(session.id) !== -1;
+    const togglePin = React.useCallback(() => {
+        const next = isPinned
+            ? pinnedSessions.filter((id) => id !== session.id)
+            : [...pinnedSessions, session.id];
+        setPinnedSessions(next);
+    }, [isPinned, pinnedSessions, session.id, setPinnedSessions]);
+
+    // Pinning lives in the action sheet rather than as a row control: it is
+    // reachable the same way on a phone (long-press) and on desktop
+    // (right-click), and it costs the row no layout. Only offered while the
+    // new session list is on — nothing renders a pinned section otherwise.
     const actionItems = React.useMemo<SessionActionItem[]>(() => {
         const items: SessionActionItem[] = [
             { id: 'details', icon: 'information-circle-outline', label: t('profile.details'), onPress: openDetails },
         ];
+
+        if (sessionListV2) {
+            items.push(isPinned
+                ? { id: 'unpin', icon: 'star', label: t('sidebar.unpin'), onPress: togglePin }
+                : { id: 'pin', icon: 'star-outline', label: t('sidebar.pin'), onPress: togglePin });
+        }
 
         if (canResume) {
             items.push({ id: 'resume', icon: 'play-circle-outline', label: t('sessionInfo.resumeSession'), onPress: restartSession });
@@ -208,6 +229,7 @@ export function useSessionQuickActions(
 
         return items;
     }, [
+        sessionListV2, isPinned, togglePin,
         archiveSession,
         deleteSession,
         canCopySessionMetadata,

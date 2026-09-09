@@ -202,6 +202,8 @@ export const ru: TranslationStructure = {
     },
 
     settingsFeatures: {
+        sessionListV2: 'Новый список сессий',
+        sessionListV2Subtitle: 'Закрепляйте сессии, группируйте их по проекту или машине вместо даты, сворачивайте группы и фильтруйте то, что ждёт вас. Удерживайте сессию, чтобы закрепить.',
         // Features settings screen
         experiments: 'Эксперименты',
         experimentsDescription: 'Включить экспериментальные функции, которые всё ещё разрабатываются. Эти функции могут быть нестабильными или изменяться без предупреждения.',
@@ -701,6 +703,24 @@ export const ru: TranslationStructure = {
     },
 
     sidebar: {
+        pin: 'Закрепить',
+        unpin: 'Открепить',
+        pinned: 'Закреплённые',
+        filterAll: 'Все',
+        filterNeeds: 'Ждут меня',
+        filterWorking: 'В работе',
+        filterUnread: 'Непрочитанные',
+        axisProject: 'Проект',
+        axisMachine: 'Машина',
+        axisDate: 'Дата',
+        hiddenByFilter: ({ count }: { count: number }) => `${count} скрыто фильтром`,
+        saveAsGroup: 'Сохранить как группу…',
+        newGroup: 'Новая группа',
+        nameGroup: 'Назовите эту группу',
+        removeGroup: 'Удалить группу',
+        removeGroupConfirm: 'Удалить эту группу? Сессии останутся на своих местах.',
+        noMatches: 'Ничего не подходит под этот фильтр.',
+        filtered: ({ shown, total }: { shown: number; total: number }) => `${shown} of ${total}`,
         sessionsTitle: 'Joy',
         showArchived: 'Показать архив',
         hideArchived: 'Скрыть архив',
