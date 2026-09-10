@@ -29,7 +29,7 @@ export const LocalSettingsSchema = z.object({
     // Session list v2 — the flag this whole thing sits behind.
     sessionListV2: z.boolean().describe('Session list: pinning, a switchable grouping axis, collapsible groups and filters'),
     collapsedSessionGroups: z.array(z.string()).describe('Collapsed section keys. Device-local: a phone wants far more collapsed than a wide desktop'),
-    pinnedSort: z.enum(['project', 'state']).describe('Pinned order: by project name (stable), or by what needs you first'),
+    pinnedSort: z.enum(['project', 'state']).describe('Pinned order: by what needs you first (default), or by project name'),
     diffWholeFile: z.boolean().describe('Changes view: show each change against the complete file instead of the patch hunks. Device-local — diffStyle (unified/split) stays the synced preference this returns to.'),
     chatFontScale: z.number().describe('Chat message text scale multiplier (1 = 100%), clamped to [0.8, 1.4]'),
     // CLI version acknowledgments - keyed by machineId
@@ -71,7 +71,7 @@ export const localSettingsDefaults: LocalSettings = {
     fileViewerWrap: true,
     sessionListV2: false,
     collapsedSessionGroups: [],
-    pinnedSort: 'project' as const,
+    pinnedSort: 'state' as const,
     diffWholeFile: false,
     chatFontScale: 1,
     terminalTheme: 'default',

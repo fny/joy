@@ -164,22 +164,26 @@ export interface ListLayoutInput<T extends ListSession = ListSession> {
     collapsed: string[];
     /** Machine ids in the order the caller wants their sections to appear. */
     machineOrder?: string[];
-    /** Pinned order. Default 'project'. */
+    /** Pinned order. Default 'state'. */
     pinnedSort?: PinnedSort;
 }
 
 /**
- * Pins are ordered by PROJECT, not by recency.
+ * Pins are ordered by STATE by default — what needs you, first.
  *
- * Every other section is newest-first, because you are scanning for what just
- * happened. A pinned list is the opposite: you put things in it so you could
- * find them again, and a list that reorders itself whenever an agent speaks is
- * one you have to re-read every time. Project name is stable and it is what
- * you remember the session by.
+ * Neither option is recency, which is what every other section uses. You put
+ * things in this list so you could find them again, and a list that reorders
+ * itself whenever an agent speaks is one you have to re-read every time.
  *
- * Sorting by state gives that up on purpose — it answers "what needs me" — so
- * it still falls back to project name inside a bucket, which keeps the order
- * stable for everything that is in the same condition.
+ * State wins the default because a pinned session is one you are actually
+ * waiting on: the top of the list should be the one that stopped for you. It
+ * falls back to project name inside a bucket, so everything in the same
+ * condition holds a stable order and the list only moves when a session's
+ * colour actually changes.
+ *
+ * 'project' orders the whole list that way instead — nothing moves unless you
+ * pin or unpin something, which is the right choice if you use the pinned
+ * section as a fixed set of bookmarks rather than as a queue.
  */
 function pinnedComparator<T extends ListSession>(sort: PinnedSort) {
     const byProject = (a: T, b: T) =>
@@ -221,7 +225,7 @@ export function buildListLayout<T extends ListSession>(input: ListLayoutInput<T>
             key: 'pinned',
             kind: 'pinned',
             machineId: null,
-            sessions: [...pins].sort(pinnedComparator(input.pinnedSort ?? 'project')),
+        sessions: [...pins].sort(pinnedComparator(input.pinnedSort ?? 'state')),
             collapsed: false,
             worstState: worstOf(pins),
         });

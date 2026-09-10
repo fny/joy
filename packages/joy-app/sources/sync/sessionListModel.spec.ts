@@ -183,7 +183,19 @@ describe('the pinned order', () => {
         buildListLayout({ sessions: [], pinned: [], collapsed: [], ...over })
             .find((x) => x.key === 'pinned')?.sessions.map((x) => x.id) ?? [];
 
-    it('is by project name by default, not by recency', () => {
+    it('defaults to STATE — what needs you is at the top without asking', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'idle', state: 'disconnected', project: '~/aaa' }),
+                s({ id: 'needs-me', state: 'permission_required', project: '~/zzz' }),
+            ],
+            pinned: ['idle', 'needs-me'],
+            // no pinnedSort — project name would put ~/aaa first
+        });
+        expect(ids).toEqual(['needs-me', 'idle']);
+    });
+
+    it('inside one bucket it is project name, not recency', () => {
         const ids = pinnedIds({
             sessions: [
                 s({ id: 'c', project: '~/work/zebra', activeAt: NOW }),
@@ -193,6 +205,18 @@ describe('the pinned order', () => {
             pinned: ['a', 'b', 'c'],
         });
         expect(ids).toEqual(['a', 'b', 'c']);
+    });
+
+    it('orders by project name throughout when asked', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'idle', state: 'disconnected', project: '~/aaa' }),
+                s({ id: 'needs-me', state: 'permission_required', project: '~/zzz' }),
+            ],
+            pinned: ['idle', 'needs-me'],
+            pinnedSort: 'project',
+        });
+        expect(ids).toEqual(['idle', 'needs-me']);
     });
 
     it('does not reorder itself when a pinned agent speaks', () => {
