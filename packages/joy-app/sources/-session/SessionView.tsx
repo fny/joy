@@ -83,6 +83,8 @@ import { useHarnessModels } from '@/hooks/useHarnessModels';
 import { isAgentBusy } from '@/sync/sessionLiveness';
 
 import { liveFacts, isTurnActive } from '@/sync/sessionFacts';
+import { steerRoute } from './steerRoute';
+import { machineSend } from '@/sync/v2/machine';
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
 // "switch immediately" mid-turn (model-config.md) and /btw runs while Claude
@@ -999,6 +1001,30 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         // plus joy's daemon-intercepted commands, which exist for mid-turn use.
         const cmdMatch = /^\/([a-z-]+)/i.exec(liveMessage.trim());
         const isImmediateCommand = cmdMatch != null && IMMEDIATE_COMMANDS.has(cmdMatch[1].toLowerCase());
+        // A daemon-intercepted mid-turn command (/steer above all) goes over the
+        // MACHINE TUNNEL while the agent is busy: as a relay turn it would queue
+        // behind the running one and the daemon would not see it until that
+        // turn ended — a steer that arrives after the thing it was steering
+        // (fny 4477e540, 2026-09-10). The daemon mirrors the bubble on
+        // dispatch; a tunnel failure falls back to the relay path below.
+        const machineIdNow = latest?.metadata?.machineId;
+        const joySessionIdNow = latest?.metadata?.joy__sessionId;
+        const tunnelCtx = isJoyDaemon && machineIdNow ? sync.machineOnlyCtx(machineIdNow) : null;
+        if (!hasImages && steerRoute({ text: liveMessage, busy, tunnelAvailable: !!tunnelCtx && !!joySessionIdNow }) === 'tunnel' && tunnelCtx && joySessionIdNow) {
+            composerHandleRef.current?.clearMessage();
+            void machineSend(tunnelCtx, joySessionIdNow, liveMessage).then((r) => {
+                if (r.data?.ok) return;
+                // The daemon refused or the tunnel dropped: the relay still delivers it, just later.
+                void sync.sendMessage(sessionId, liveMessage, { source: 'chat' }).then((res) => {
+                    if (!res.ok && composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
+                });
+            }).catch(() => {
+                void sync.sendMessage(sessionId, liveMessage, { source: 'chat' }).then((res) => {
+                    if (!res.ok && composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
+                });
+            });
+            return;
+        }
         if (isJoyDaemon && busy && !isImmediateCommand && !hasImages) {
             composerHandleRef.current?.clearMessage();
             // A message held because a turn is processing ahead is a QUEUE ITEM

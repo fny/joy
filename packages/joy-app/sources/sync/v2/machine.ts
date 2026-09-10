@@ -393,6 +393,13 @@ export const machineStorage = (ctx: MachineOnlyCtx) => jm<StorageReport>(ctx, 'G
 export const machineStorageNuke = (ctx: MachineOnlyCtx, body: { ids: string[]; tmux?: string[]; killLive: boolean }) =>
     jm<{ ok?: boolean; bytesFreed?: number; results?: Array<{ id: string; ok: boolean; bytesFreed: number; removed: string[]; error?: string }>; tmux?: Array<{ label: string; killed: boolean; unlinked: boolean; error?: string }>; error?: string }>(ctx, 'POST', '/v2/storage/nuke', body);
 
+/** The daemon's own send (`joy-send`): accepted at once, `/steer` and friends
+ *  intercepted at accept and applied mid-turn, the bubble mirrored to the chat
+ *  on dispatch. Used for mid-turn commands while the agent is busy — a relay
+ *  turn would queue behind the running one (see -session/steerRoute.ts). */
+export const machineSend = (ctx: MachineOnlyCtx, sessionId: string, text: string) =>
+    jm<{ ok?: boolean; queued_id?: string; chat_id?: string; error?: string }>(ctx, 'POST', '/v2/send', { session_id: sessionId, text });
+
 export const machineEnvList = (ctx: MachineOnlyCtx) =>
     jm<{ ok?: boolean; names?: string[]; error?: string }>(ctx, 'GET', '/v2/env');
 export const machineEnvSet = (ctx: MachineOnlyCtx, name: string, value: string) =>

@@ -479,6 +479,12 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- `/steer` (and `/btw`, `/title`, `/login-code`, `/joy-prompt`) sent while
+  the agent is busy go over the MACHINE TUNNEL (`joy-send`), not as a relay
+  turn: the relay serialises turns per session, so a relay-queued steer was
+  not even offered to the daemon until the running turn ended (`-session/
+  steerRoute.ts`). The daemon intercepts them at accept, types them into the
+  live pane and mirrors the bubble; a tunnel failure falls back to the relay.
 - Long messages reach Claude whole: a line is typed in pieces of at most
   1,024 characters with a short gap between them (`claude/typing.ts`), because
   one oversized `send-keys` overflows the pty's 4 KB input queue while the TUI
