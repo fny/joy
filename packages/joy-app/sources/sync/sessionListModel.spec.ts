@@ -161,6 +161,13 @@ describe('partitionForList — the two ways pinning silently did nothing', () =>
         expect(new Set(seen).size).toBe(seen.length);
     });
 
+    it('counts what "hide archived" is hiding, so the toggle can be offered', () => {
+        const sessions = [s({ id: 'a', active: true }), s({ id: 'b' }), s({ id: 'c' })];
+        expect(part({ sessions, hideInactive: true }).archived).toBe(2);
+        expect(part({ sessions, hideInactive: false }).archived).toBe(2);
+        expect(part({ sessions: [s({ id: 'a', active: true })] }).archived).toBe(0);
+    });
+
     it('changes nothing when nothing is pinned', () => {
         const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'b' })] });
         expect(ids(p.pins)).toEqual([]);

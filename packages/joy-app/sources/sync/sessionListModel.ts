@@ -49,17 +49,21 @@ export function partitionForList<T extends ListSession>(input: {
     pinned: string[];
     /** "Hide archived": drop everything that is not in the active block. */
     hideInactive: boolean;
-}): { pins: T[]; active: T[]; rest: T[] } {
+}): { pins: T[]; active: T[]; rest: T[]; archived: number } {
     const isPinned = new Set(input.pinned);
     const pins: T[] = [];
     const active: T[] = [];
     const rest: T[] = [];
+    let archived = 0;
     for (const s of input.sessions) {
         if (isPinned.has(s.id)) { pins.push(s); continue; }
         if (s.active) { active.push(s); continue; }
+        archived++;
         if (!input.hideInactive) rest.push(s);
     }
-    return { pins, active, rest };
+    // Counted whether or not they were kept: the caller needs to know they
+    // exist in order to offer the toggle that brings them back.
+    return { pins, active, rest, archived };
 }
 
 export interface ListSection<T extends ListSession = ListSession> {

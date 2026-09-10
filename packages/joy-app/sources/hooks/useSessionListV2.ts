@@ -52,7 +52,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             active: isSessionInActiveGroup(s),
             session: s,
         }));
-        const { pins, active, rest } = partitionForList({ sessions: rows, pinned, hideInactive });
+        const { pins, active, rest, archived } = partitionForList({ sessions: rows, pinned, hideInactive });
 
         const machineName = (id: string | null): string => {
             if (!id) return t('sidebar.noMachine');
@@ -95,6 +95,11 @@ export function useSessionListV2(): SessionListViewItem[] | null {
                     .map((r) => sessionRowDataFor(r.session, unread)),
             });
         }
+
+        // The archive toggle, exactly where the old list puts it. Without it
+        // "hide archived" is a one-way door: it empties every machine section,
+        // and nothing in the list can bring them back.
+        if (archived > 0) items.push({ type: 'archive-toggle', hidden: hideInactive });
 
         for (const section of sections) {
             if (section.kind !== 'pinned') emit(section);
