@@ -795,6 +795,8 @@ export class Session {
   // currently on the pane and when it was FIRST sighted — drives the causal
   // guard for dispatch confirmation, which must not wait for the debounce.
   #dialogObservedKey: string | null = null;
+  /** The current dialog sighting has had its auto-answer keys sent (once). */
+  #dialogAnswered = false;
   #dialogFirstSeenAt = 0;
   // Consecutive #pollEnd passes where ONLY a pane dialog vouched for liveness
   // (no live pid, no running markers) — bounded grace, see #pollEnd.
@@ -4360,8 +4362,22 @@ export class Session {
     if (this.#dialogObservedKey !== key) {
       this.#dialogObservedKey = key;
       this.#dialogFirstSeenAt = Date.now();
+      this.#dialogAnswered = false;
     }
     this.#confirmDispatchOnDialog(this.#dialogFirstSeenAt);
+    // Auto-answer (see dialogAutoAnswerKeys): once per sighting of a given
+    // dialog. The keys are fire-and-forget; if the dialog is still painted on
+    // the next poll it simply publishes as before, so a lost keystroke
+    // degrades to the old "answer this in the terminal" banner, never a loop.
+    if (!this.#dialogAnswered) {
+      const keys = dialogAutoAnswerKeys(dialog);
+      if (keys) {
+        this.#dialogAnswered = true;
+        this.#dlog(`dialog "${dialog.title ?? ""}" auto-answered with ${keys.join("+")}`);
+        void this.#tmux.key(this.tmuxWindow, ...keys);
+        return;
+      }
+    }
     if (!this.#dialog && this.#dialogPendingKey !== key) {
       this.#dialogPendingKey = key; // first sighting — publish on next poll
       return;
@@ -5255,7 +5271,7 @@ export function paneShowsLoginForm(text: string): boolean {
 const DIALOG_RULE_RE = /^\s*▔{8,}\s*$/;
 const DIALOG_OPTION_RE = /^\s*(?:❯\s*)?\d+\.\s+\S/;
 const DIALOG_FOOTER_RE = /Esc to cancel|Enter to confirm/i;
-export interface PaneDialog { title: string | null; options: string[] }
+export interface PaneDialog { title: string | null; options: string[]; /** index into options of the ❯ row, if one is painted */ selected?: number }
 /** Parse the CLI's API-retry spinner line from pane text, e.g.
  *  `✻ 529 Overloaded · Retrying in 18s · attempt 10/10`.
  *  Claude Code ≥2.1.x stopped writing api_error transcript entries for these
@@ -5265,6 +5281,30 @@ export function retryFromPane(text: string): { status: number; attempt: number; 
   const m = /\b([45]\d\d)\s+[A-Za-z][\w ]{0,30}·\s*Retrying in\s+(\d+)\s*s\b.*?attempt\s+(\d+)\/(\d+)/i.exec(text);
   if (!m) return null;
   return { status: parseInt(m[1], 10), delaySec: parseInt(m[2], 10), attempt: parseInt(m[3], 10), total: parseInt(m[4], 10) };
+}
+
+/**
+ * Dialogs the daemon answers on the human's behalf with a bare Enter — the
+ * ones `/model <x>` and `/effort <x>` open. Faraz, 2026-09-10: "why can't you
+ * just hard code enter for both if the question is present?" Enter picks the
+ * HIGHLIGHTED row, so the one guard kept is that the highlight reads "Yes"
+ * (the folder-trust dialog taught us the option order flips between claude
+ * builds; a hard-coded key then answers *no*). The effort slider opens on the
+ * level the command asked for, so Enter simply confirms it. Anything else —
+ * the bare /model picker, a permission prompt, AskUserQuestion — is left for
+ * the human. Returns the keys to send, or null to surface the dialog.
+ */
+export function dialogAutoAnswerKeys(dialog: PaneDialog): string[] | null {
+  const title = (dialog.title ?? "").trim();
+  if (/^Switch model\?/i.test(title)) {
+    // Options arrive with the ❯ stripped; the highlighted row is the one the
+    // parser found selected — recover it from the raw marker when present,
+    // else claude's default (first row).
+    const highlighted = dialog.selected ?? 0;
+    return /^\d+\.\s+Yes\b/i.test(dialog.options[highlighted] ?? "") ? ["Enter"] : null;
+  }
+  if (/^Effort$/i.test(title) && dialog.options.length === 0) return ["Enter"];
+  return null;
 }
 
 export function dialogFromPane(text: string): PaneDialog | null {
@@ -5283,13 +5323,13 @@ export function dialogFromPane(text: string): PaneDialog | null {
   // UN-match it (that quote sits above the dialog's rule, outside the region).
   const regionText = region.join("\n");
   if (paneShowsReadyPrompt(regionText) || paneShowsGenerating(regionText)) return null;
-  const options = region
-    .filter((l) => DIALOG_OPTION_RE.test(l))
-    .map((l) => l.trim().replace(/^❯\s*/, "").slice(0, 120));
+  const optionLines = region.filter((l) => DIALOG_OPTION_RE.test(l));
+  const options = optionLines.map((l) => l.trim().replace(/^❯\s*/, "").slice(0, 120));
   const hasFooter = region.some((l) => DIALOG_FOOTER_RE.test(l));
   if (options.length === 0 && !hasFooter) return null;
   const title = region.find((l) => l.trim())?.trim().slice(0, 120) ?? null;
-  return { title, options };
+  const sel = optionLines.findIndex((l) => /^\s*❯/.test(l));
+  return sel >= 0 ? { title, options, selected: sel } : { title, options };
 }
 
 /** Fallback for pickers that do NOT use the ▔ modal rule (e.g. the
@@ -5323,6 +5363,7 @@ function numberedPickerFromPane(lines: string[]): PaneDialog | null {
   }
   if (!best) return null;
   const options = best.map((r) => lines[r.i].trim().replace(/^❯\s*/, "").slice(0, 120));
+  const selected = best.findIndex((r) => r.sel);
   // Title: nearest non-empty, non-rule line above the first option row.
   let title: string | null = null;
   for (let i = best[0].i - 1; i >= 0; i--) {
@@ -5332,7 +5373,7 @@ function numberedPickerFromPane(lines: string[]): PaneDialog | null {
     title = t.slice(0, 120);
     break;
   }
-  return { title, options };
+  return selected >= 0 ? { title, options, selected } : { title, options };
 }
 
 /**

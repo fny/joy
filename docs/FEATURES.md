@@ -478,6 +478,11 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- `/model <x>` and `/effort <x>` no longer stall on Claude Code's own confirm:
+  the daemon answers the "Switch model?" dialog with Enter when the highlighted
+  row reads *Yes* (otherwise it surfaces it, the folder-trust lesson) and
+  confirms the effort slider the same way. Permission prompts, the bare
+  `/model` picker and AskUserQuestion are still yours to answer.
 - Extended thinking reaches the app: the daemon forwards Claude's `thinking`
   blocks as text events flagged `thinking: true`, and the chat shows each as a
   collapsed italic row (tap to read) — Settings → Features → *Show thinking*

@@ -7,7 +7,7 @@ import { join } from "path";
 let home: string;
 beforeAll(() => { home = mkdtempSync(join(tmpdir(), "joy-session-test-")); process.env.JOY_HOME_DIR = home; });
 afterAll(() => { delete process.env.JOY_HOME_DIR; rmSync(home, { recursive: true, force: true }); });
-import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, thinkingLeaseMs, THINKING_LEASE_MS, SLASH_THINKING_LEASE_MS, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
+import { joyTitleValue, joyNotifyEvents, paneShowsReadyPrompt, paneShowsClaudeRunning, paneShowsWorking, paneShowsGenerating, paneInputText, paneInputLineSpan, paneShowsEmptyReadyPrompt, parsePermissionModeFromPane, formatRetryDelay, parseJoyCommand, thinkingLeaseMs, THINKING_LEASE_MS, SLASH_THINKING_LEASE_MS, toolResultText, TOOL_RESULT_MAX_CHARS, flattenForMatch, loginContinueFromPane, bgTaskEvent, goalStatusFromEntry, authUrlFromPane, loginFromPane, dialogFromPane, dialogAutoAnswerKeys, joyBgLongRunningIds, classifyBgTasks, BG_LAUNCH_TTL_MS, trustPromptKeys } from "./session";
 import { queueFor } from "../domain/queueFacade";
 
 test("flattenForMatch: collapses every newline form to a space (dedup key)", () => {
@@ -1076,6 +1076,19 @@ test("dialogFromPane: switch-model confirm — footerless, options carry it", ()
   expect(d).not.toBeNull();
   expect(d!.title).toBe("Switch model?");
   expect(d!.options).toEqual(["1. Yes, switch to Opus 4.8", "2. No, go back"]);
+});
+
+test("dialogAutoAnswerKeys: Enter on Switch model? when the highlight is Yes, on the effort slider; nothing else", () => {
+  const confirm = dialogFromPane(DIALOG_SWITCH_CONFIRM)!;
+  expect(confirm.selected).toBe(0);
+  expect(dialogAutoAnswerKeys(confirm)).toEqual(["Enter"]);
+  // Option order flipped in a later build (the trust-dialog lesson): the
+  // highlight is on "No" — surface it rather than answer the wrong way.
+  const flipped = dialogFromPane(DIALOG_SWITCH_CONFIRM.replace("❯ 1. Yes, switch to Opus 4.8", "  1. Yes, switch to Opus 4.8").replace("  2. No, go back", "❯ 2. No, go back"))!;
+  expect(flipped.selected).toBe(1);
+  expect(dialogAutoAnswerKeys(flipped)).toBeNull();
+  expect(dialogAutoAnswerKeys(dialogFromPane(DIALOG_EFFORT_SLIDER)!)).toEqual(["Enter"]);
+  expect(dialogAutoAnswerKeys(dialogFromPane(DIALOG_MODEL_PICKER)!)).toBeNull();
 });
 
 test("dialogFromPane: /effort slider — no numbered options, footer carries it", () => {

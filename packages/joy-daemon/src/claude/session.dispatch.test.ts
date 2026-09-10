@@ -118,6 +118,31 @@ test("#33 a steer never types into an open dialog — it parks on the queue head
   s.end("killed");
 });
 
+test("a Switch model? confirm is answered with one Enter; a permission prompt is not touched", async () => {
+  const SWITCH = [
+    "❯ /model opus",
+    "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+    "   Switch model?",
+    "   This conversation is cached for the current model. Switching to Opus 4.8 means the full history gets re-read.",
+    "   ❯ 1. Yes, switch to Opus 4.8",
+    "     2. No, go back",
+  ].join("\n");
+  const { st, driver } = fakeTmux({ pane: SWITCH });
+  const s = mkSession(uid("switch-model"), driver);
+  s.attachRelay(relayStub("rs-switch").rs, true);   // the pane poll runs only with a relay attached
+  s.beginWatching();
+  await vi.waitFor(() => expect(st.keys).toContain("Enter"), { timeout: 8000 });
+  // The dialog lingers one more poll (keystroke in flight): no second Enter.
+  await settle(3500);
+  expect(st.keys.filter((k) => k === "Enter")).toHaveLength(1);
+  // A permission prompt is the human's — never auto-answered.
+  st.keys.length = 0;
+  st.pane = PERMISSION_DIALOG;
+  await settle(7000);
+  expect(st.keys).toEqual([]);
+  s.end("killed");
+}, 25000);
+
 // ── #34 ──────────────────────────────────────────────────────────────────────
 
 test("#34 the drain pump stands down while a steer owns the pane (no C-u on the steered text)", async () => {
