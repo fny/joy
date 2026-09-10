@@ -58,7 +58,10 @@ const styles = StyleSheet.create((theme) => ({
 const BADGE_MIN = 11;
 
 function badgeSize(size: number, flavor: string) {
-    const circle = Math.max(Math.round(size * 0.35), BADGE_MIN);
+    // Floored so it stays readable, but never larger than the avatar it sits
+    // on — at the bottom of the size range the floor would otherwise win and
+    // the badge would swallow the mark.
+    const circle = Math.min(Math.max(Math.round(size * 0.35), BADGE_MIN), size);
     const scale = flavor === 'codex' ? 0.8 : flavor === 'claude' ? 0.8 : 1;
     return { circle, icon: Math.round(circle * scale) };
 }
