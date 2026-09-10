@@ -5,10 +5,9 @@
 // work itself is visible in the sidebar while it runs, and openable from the
 // history here afterwards.
 //
-// Authoring a NEW automation is the CLI's job for now (`joy automation create`
-// in the folder you want) because the spec must be sealed under the target
-// machine's key. This page does everything that does not require sealing:
-// see what exists, run one, read its history, enable, disable, delete.
+// Authoring happens here too. The app holds the ACCOUNT key, so it can derive
+// every machine's spawn-spec key and author for any of them — where the CLI,
+// holding one machine key, can only ever author for its own machine.
 import * as React from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -20,6 +19,7 @@ import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Modal } from '@/modal';
 import { v2, type V2Automation, type V2AutomationRun } from '@/sync/v2/api';
+import { openAutomationSpec, type AutomationSpec } from '@/sync/automations';
 import { formatPathRelativeToHome } from '@/utils/pathUtils';
 
 /** The colour a run's outcome carries, from the same family the sidebar uses:
@@ -49,6 +49,10 @@ export default React.memo(function AutomationsScreen() {
     const [busy, setBusy] = React.useState<string | null>(null);
     const [runs, setRuns] = React.useState<Record<string, V2AutomationRun[]>>({});
     const [expanded, setExpanded] = React.useState<string | null>(null);
+    // The prompt, opened locally. Absent for a machine whose key this device
+    // cannot derive — the page then shows what the relay knows and says so,
+    // rather than rendering a sealed blob as if it were text.
+    const [specs, setSpecs] = React.useState<Record<string, AutomationSpec | null>>({});
 
     const load = React.useCallback(async () => {
         try {
@@ -67,12 +71,16 @@ export default React.memo(function AutomationsScreen() {
 
     const openHistory = React.useCallback(async (a: V2Automation) => {
         setExpanded(expanded === a.id ? null : a.id);
+        if (!(a.id in specs)) {
+            const opened = await openAutomationSpec(a);
+            setSpecs((prev) => ({ ...prev, [a.id]: opened }));
+        }
         if (runs[a.id]) return;
         try {
             const { runs: list } = await v2.automationRuns(a.id, 50);
             setRuns((prev) => ({ ...prev, [a.id]: list }));
         } catch { /* the row still works without history */ }
-    }, [expanded, runs]);
+    }, [expanded, runs, specs]);
 
     const runNow = React.useCallback(async (a: V2Automation) => {
         setBusy(a.id);
@@ -132,19 +140,18 @@ export default React.memo(function AutomationsScreen() {
                 </ItemGroup>
             )}
 
-            {automations.length === 0 && !error && (
-                <ItemGroup
-                    title="No automations"
-                    footer={'Create one from a terminal on the machine that should run it:\n\n  joy automation create -m "run the tests and fix what breaks"\n\nIt runs in the folder you are in. An automation is authored where it runs, because its instructions are sealed with that machine\'s key.'}
-                >
-                    <Item
-                        title="What an automation is"
-                        subtitle="A folder, a prompt and a trigger. Each run is a headless session — and it fails loudly the moment it needs a human."
-                        icon={<Ionicons name="repeat-outline" size={29} color={theme.colors.textSecondary} />}
-                        showChevron={false}
-                    />
-                </ItemGroup>
-            )}
+            <ItemGroup
+                footer={automations.length === 0 && !error
+                    ? 'A folder, a prompt and a trigger. Each run is a headless session — and it fails loudly the moment it needs a human, instead of waiting to be noticed.'
+                    : undefined}
+            >
+                <Item
+                    title="New automation"
+                    subtitle={automations.length === 0 ? 'A folder, a prompt, and what should start it' : undefined}
+                    icon={<Ionicons name="add-circle-outline" size={29} color={theme.colors.textLink} />}
+                    onPress={() => router.push('/settings/automation-new' as any)}
+                />
+            </ItemGroup>
 
             {automations.map((a) => {
                 const history = runs[a.id] ?? [];
@@ -180,6 +187,16 @@ export default React.memo(function AutomationsScreen() {
                             onPress={() => remove(a)}
                             showChevron={false}
                         />
+                        {isOpen && (
+                            <Item
+                                title={specs[a.id]?.prompt ?? 'Prompt not readable on this device'}
+                                subtitle={specs[a.id]
+                                    ? `${specs[a.id]?.agent ?? 'claude'}${specs[a.id]?.model ? ` · ${specs[a.id]?.model}` : ''}`
+                                    : 'Its instructions are sealed with that machine\'s key, which this device has not decrypted.'}
+                                icon={<Ionicons name="chatbox-ellipses-outline" size={29} color={theme.colors.textSecondary} />}
+                                showChevron={false}
+                            />
+                        )}
                         {isOpen && history.length === 0 && (
                             <Item title="No runs yet" showChevron={false} />
                         )}
