@@ -30,6 +30,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
     const pinned = useSetting('pinnedSessions');
     const hideInactive = useSetting('hideInactiveSessions');
     const pinnedSort = useLocalSetting('pinnedSort');
+    const showHeadless = useLocalSetting('showHeadlessSessions');
 
     const sessions = storage(useShallow((state) => (state.isDataReady ? state.sessions : null)));
     const unread = storage(useShallow((state) => state.unreadSessionIds));
@@ -38,9 +39,14 @@ export function useSessionListV2(): SessionListViewItem[] | null {
     return React.useMemo(() => {
         if (!enabled || !sessions) return null;
 
-        const all = Object.values(sessions)
-            // `joy new --headless`: out of the list until it needs a human.
-            .filter((s) => !hiddenFromList(liveFacts(s)));
+        // `joy new --headless`: out of the list until it needs a human, or
+        // until you ask to see them (the toggle below the archive one).
+        let headlessHidden = 0;
+        const all = Object.values(sessions).filter((s) => {
+            if (!hiddenFromList(liveFacts(s))) return true;
+            headlessHidden++;
+            return showHeadless;
+        });
 
         // A pin outranks the active block, so a pinned session sits in Pinned
         // whatever it is doing — see partitionForList, which exists because
@@ -112,10 +118,12 @@ export function useSessionListV2(): SessionListViewItem[] | null {
         // "hide archived" is a one-way door: it empties every machine section,
         // and nothing in the list can bring them back.
         if (archived > 0) items.push({ type: 'archive-toggle', hidden: hideInactive });
+        // Emitted while they are shown too, or there is no way back.
+        if (headlessHidden > 0) items.push({ type: 'headless-toggle', hidden: !showHeadless });
 
         for (const section of sections) {
             if (section.kind !== 'pinned') emit(section);
         }
         return items;
-    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive, pinnedSort]);
+    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive, pinnedSort, showHeadless]);
 }

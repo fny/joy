@@ -740,6 +740,8 @@ export const en = {
         unpin: 'Unpin',
         noMachine: 'No machine',
         pinned: 'Pinned',
+        showHeadless: 'Show headless',
+        hideHeadless: 'Hide headless',
         sortByProject: 'by project',
         sortByState: 'by state',
         sessionsTitle: 'Joy',

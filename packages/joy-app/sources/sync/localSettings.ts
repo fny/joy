@@ -42,6 +42,7 @@ export const LocalSettingsSchema = z.object({
     machineIconSize: z.number().describe('Machine-separator glyph size in px, clamped to [7, 16]'),
     pinnedAvatarSize: z.number().describe('Pinned-row identicon size in px, clamped to [8, 24]'),
     pinnedAvatarShape: z.enum(['match', 'circles', 'squares']).catch('match').describe("Pinned-row identicon shape; 'match' follows Appearance → Identicons"),
+    showHeadlessSessions: z.boolean().describe('Show `joy new --headless` sessions in the list, the way Show archived reveals archived ones'),
 });
 
 //
@@ -87,6 +88,7 @@ export const localSettingsDefaults: LocalSettings = {
     machineIconSize: 9,
     pinnedAvatarSize: 16,
     pinnedAvatarShape: 'match' as const,
+    showHeadlessSessions: false,
 };
 Object.freeze(localSettingsDefaults);
 

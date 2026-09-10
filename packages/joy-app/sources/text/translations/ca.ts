@@ -691,6 +691,8 @@ export const ca: TranslationStructure = {
         unpin: 'No fixis',
         noMachine: 'Sense màquina',
         pinned: 'Fixades',
+        showHeadless: 'Mostra headless',
+        hideHeadless: 'Amaga headless',
         sortByProject: 'per projecte',
         sortByState: 'per estat',
         sessionsTitle: 'Joy',

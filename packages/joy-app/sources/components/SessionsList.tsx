@@ -280,6 +280,10 @@ export function SessionsList() {
     // Which machine sections are folded away. Device-local: a phone wants far
     // more collapsed than a wide desktop, and that difference is real.
     const [collapsedSections, setCollapsedSections] = useLocalSettingMutable('collapsedSessionGroups');
+    const [showHeadless, setShowHeadless] = useLocalSettingMutable('showHeadlessSessions');
+    const toggleHeadless = React.useCallback(() => {
+        setShowHeadless(!showHeadless);
+    }, [showHeadless, setShowHeadless]);
     const [pinnedSort, setPinnedSort] = useLocalSettingMutable('pinnedSort');
     const togglePinnedSort = React.useCallback(() => {
         setPinnedSort(pinnedSort === 'project' ? 'state' : 'project');
@@ -311,6 +315,7 @@ export function SessionsList() {
             case 'header': return `header-${item.sectionKey ?? item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'archive-toggle': return 'archive-toggle';
+            case 'headless-toggle': return 'headless-toggle';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
         }
@@ -374,6 +379,21 @@ export function SessionsList() {
                 );
             }
 
+            case 'headless-toggle':
+                // Same control as the archive toggle, and it appears on the
+                // same rule: only when there is something to reveal. Headless
+                // sessions are the ones nobody is watching — `joy new
+                // --headless` — so this is the answer to "where did that go".
+                return (
+                    <Pressable style={styles.archiveToggle} onPress={toggleHeadless}>
+                        <View style={styles.archiveToggleLine} />
+                        <Text style={styles.archiveToggleText}>
+                            {item.hidden ? t('sidebar.showHeadless') : t('sidebar.hideHeadless')}
+                        </Text>
+                        <View style={styles.archiveToggleLine} />
+                    </Pressable>
+                );
+
             case 'archive-toggle':
                 return (
                     <Pressable style={styles.archiveToggle} onPress={toggleArchived}>
@@ -412,7 +432,7 @@ export function SessionsList() {
                 const nextItem = data && index < data.length - 1 ? data[index + 1] : null;
 
                 const isFirst = prevItem?.type === 'header';
-                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle';
+                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle' || nextItem?.type === 'headless-toggle';
                 const isSingle = isFirst && isLast;
                 const selected = item.session.id === selectedSessionId;
 
@@ -430,7 +450,7 @@ export function SessionsList() {
         // toggleSection and togglePinnedSort close over the CURRENT setting
         // value, so leaving them out froze the first closure: the first press
         // worked and every one after it wrote a stale list back.
-    }, [selectedSessionId, data, toggleArchived, toggleSection, togglePinnedSort]);
+    }, [selectedSessionId, data, toggleArchived, toggleHeadless, toggleSection, togglePinnedSort]);
 
 
     // Remove this section as we'll use FlatList for all items now

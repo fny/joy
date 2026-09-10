@@ -27,7 +27,7 @@ import { sync } from "./sync";
 import { isMutableTool } from "@/components/tools/knownTools";
 import { compareMessagesNewestFirst, insertionIndexNewestFirst } from "./messageOrdering";
 import { isFresh, isSessionActive, isSessionInActiveGroup } from "./sessionLiveness";
-import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, hiddenFromList, type SessionFacts } from "./sessionFacts";
+import { sessionFacts, liveFacts, statusState, isTurnActive, finishedWork, type SessionFacts } from "./sessionFacts";
 import { sessionsToRetain } from "./sessionMemory";
 export { isFresh, isSessionInActiveGroup } from "./sessionLiveness";
 
@@ -181,6 +181,9 @@ export type SessionListViewItem =
     }
     | { type: 'active-sessions'; sessions: SessionRowData[] }
     | { type: 'archive-toggle'; hidden: boolean }
+    /** Shown only when there is at least one headless session to reveal —
+     *  the same rule the archive toggle follows. */
+    | { type: 'headless-toggle'; hidden: boolean }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     /**
      * A session row. `compact` is the one-line form used for pins: a pinned
@@ -361,10 +364,11 @@ function buildSessionListViewDataInner(
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
-        // `joy new --headless`: nobody is watching, so it stays out of the
-        // list — until it needs a human, which is the one case hiding it
-        // would cost you (sessionFacts.hiddenFromList).
-        if (hiddenFromList(liveFacts(session))) return;
+        // `joy new --headless` sessions stay IN the built list and are hidden
+        // by the view (sessionListVisibility), the same way archived ones are.
+        // Dropping them here instead made the reveal impossible to build: the
+        // list is rebuilt by the store on session change, not on settings
+        // change, so a toggle could not have put back what this had removed.
         if (isSessionInActiveGroup(session)) {
             activeSessions.push(session);
         } else {

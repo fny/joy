@@ -692,6 +692,8 @@ export const zhHans: TranslationStructure = {
         unpin: '取消置顶',
         noMachine: '无机器',
         pinned: '已置顶',
+        showHeadless: '显示无人值守',
+        hideHeadless: '隐藏无人值守',
         sortByProject: '按项目',
         sortByState: '按状态',
         sessionsTitle: 'Joy',
