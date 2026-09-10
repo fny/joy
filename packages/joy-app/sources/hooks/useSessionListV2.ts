@@ -17,7 +17,7 @@ import { storage, sessionRowDataFor, useLocalSetting, useSetting, type SessionLi
 import { useShallow } from 'zustand/react/shallow';
 import { isSessionInActiveGroup } from '@/sync/sessionLiveness';
 import { hiddenFromList, liveFacts } from '@/sync/sessionFacts';
-import { buildListLayout, type ListSession } from '@/sync/sessionListModel';
+import { buildListLayout, partitionForList, type ListSession } from '@/sync/sessionListModel';
 import { t } from '@/text';
 
 interface Row extends ListSession { id: string }
@@ -39,26 +39,27 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             // `joy new --headless`: out of the list until it needs a human.
             .filter((s) => !hiddenFromList(liveFacts(s)));
 
-        // The active block keeps its place at the top, exactly as before —
-        // so those sessions are NOT also placed into a machine section.
-        const active = all.filter((s) => isSessionInActiveGroup(s));
-        const rest = hideInactive ? [] : all.filter((s) => !isSessionInActiveGroup(s));
-
-        const rows: Row[] = rest.map((s) => ({
+        // A pin outranks the active block, so a pinned session sits in Pinned
+        // whatever it is doing — see partitionForList, which exists because
+        // getting this wrong made pinning silently do nothing.
+        const rows: Array<Row & { session: (typeof all)[number] }> = all.map((s) => ({
             id: s.id,
             state: sessionRowDataFor(s, unread).state,
             machineId: s.metadata?.machineId ?? null,
             activeAt: s.activeAt,
             createdAt: s.createdAt,
+            active: isSessionInActiveGroup(s),
+            session: s,
         }));
+        const { pins, active, rest } = partitionForList({ sessions: rows, pinned, hideInactive });
 
         const items: SessionListViewItem[] = [];
         if (active.length > 0) {
             items.push({
                 type: 'active-sessions',
                 sessions: active
-                    .sort((a, b) => b.createdAt - a.createdAt)
-                    .map((s) => sessionRowDataFor(s, unread)),
+                    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+                    .map((r) => sessionRowDataFor(r.session, unread)),
             });
         }
 
@@ -68,7 +69,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             return m?.metadata?.displayName || m?.metadata?.host || id;
         };
 
-        for (const section of buildListLayout({ sessions: rows, pinned, collapsed })) {
+        for (const section of buildListLayout({ sessions: [...pins, ...rest], pinned, collapsed })) {
             items.push({
                 type: 'header',
                 title: section.kind === 'pinned' ? t('sidebar.pinned') : machineName(section.machineId),

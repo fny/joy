@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildListLayout, stateUrgency, type ListSession } from './sessionListModel';
+import { buildListLayout, partitionForList, stateUrgency, type ListSession } from './sessionListModel';
 
 const NOW = 1_800_000_000_000;
 
@@ -124,6 +124,48 @@ describe('rule 2 — a collapsed section still reports what is inside', () => {
     it('pinned never collapses, whatever the collapse list says', () => {
         const l = layout({ sessions: [s({ id: 'a' })], pinned: ['a'], collapsed: ['pinned'] });
         expect(l[0].collapsed).toBe(false);
+    });
+});
+
+describe('partitionForList — the two ways pinning silently did nothing', () => {
+    const part = (over: Partial<Parameters<typeof partitionForList>[0]>) =>
+        partitionForList({ sessions: [], pinned: [], hideInactive: false, ...over });
+    const ids = (xs: ListSession[]) => xs.map((x) => x.id);
+
+    it('pins a RUNNING session — a pin outranks the active block', () => {
+        const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'b', active: true })], pinned: ['a'] });
+        expect(ids(p.pins)).toEqual(['a']);
+        expect(ids(p.active)).toEqual(['b']); // and it is not in both
+    });
+
+    it('pins with "hide archived" on, where there is nothing inactive to pin from', () => {
+        const p = part({
+            sessions: [s({ id: 'a', active: true }), s({ id: 'old' })],
+            pinned: ['a'],
+            hideInactive: true,
+        });
+        expect(ids(p.pins)).toEqual(['a']);
+        expect(ids(p.rest)).toEqual([]); // the archived one is still hidden
+    });
+
+    it('keeps a pinned session even when it is archived and archived are hidden', () => {
+        const p = part({ sessions: [s({ id: 'old' })], pinned: ['old'], hideInactive: true });
+        expect(ids(p.pins)).toEqual(['old']);
+    });
+
+    it('places every session exactly once', () => {
+        const sessions = [s({ id: 'a', active: true }), s({ id: 'b' }), s({ id: 'c', active: true })];
+        const p = part({ sessions, pinned: ['c'] });
+        const seen = [...ids(p.pins), ...ids(p.active), ...ids(p.rest)];
+        expect(seen.slice().sort()).toEqual(['a', 'b', 'c']);
+        expect(new Set(seen).size).toBe(seen.length);
+    });
+
+    it('changes nothing when nothing is pinned', () => {
+        const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'b' })] });
+        expect(ids(p.pins)).toEqual([]);
+        expect(ids(p.active)).toEqual(['a']);
+        expect(ids(p.rest)).toEqual(['b']);
     });
 });
 

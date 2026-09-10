@@ -25,6 +25,41 @@ export interface ListSession {
     machineId?: string | null;
     activeAt?: number;
     createdAt?: number;
+    /** In the active block at the top of the list. */
+    active?: boolean;
+}
+
+/**
+ * Who goes where, before any grouping: the pinned section, the active block,
+ * and everything left over.
+ *
+ * This is separated out because getting it wrong is invisible. The first cut
+ * built the pinned section from the NON-ACTIVE sessions only — so pinning a
+ * running session did nothing at all, and with "hide archived" on there was
+ * nothing to pin from and the section never appeared. Pinning simply did not
+ * work, and nothing failed.
+ *
+ * A pin outranks the active block: a pinned session appears in Pinned and
+ * nowhere else, so it is always in the same place whatever it is doing. The
+ * alternative — leaving it in the active block — means a pin moves your
+ * session around depending on whether it happens to be running.
+ */
+export function partitionForList<T extends ListSession>(input: {
+    sessions: T[];
+    pinned: string[];
+    /** "Hide archived": drop everything that is not in the active block. */
+    hideInactive: boolean;
+}): { pins: T[]; active: T[]; rest: T[] } {
+    const isPinned = new Set(input.pinned);
+    const pins: T[] = [];
+    const active: T[] = [];
+    const rest: T[] = [];
+    for (const s of input.sessions) {
+        if (isPinned.has(s.id)) { pins.push(s); continue; }
+        if (s.active) { active.push(s); continue; }
+        if (!input.hideInactive) rest.push(s);
+    }
+    return { pins, active, rest };
 }
 
 export interface ListSection<T extends ListSession = ListSession> {
