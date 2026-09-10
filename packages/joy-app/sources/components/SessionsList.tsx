@@ -23,7 +23,7 @@ import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
 import { projectLabel } from '@/utils/projectLabel';
-import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
+import { usePinnedAvatar } from '@/hooks/usePinnedAvatar';
 import { useSettingMutable } from '@/sync/storage';
 import { t } from '@/text';
 import { isTouchWeb } from '@/utils/isTouchWeb';
@@ -535,10 +535,9 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
     };
 
     const projectName = projectLabel(session.path);
-    // The same knob the project headers use — Appearance → Identicons → Size.
-    // This row hardcoded 16 and so ignored it, which made the setting look
-    // like it only worked in half the list.
-    const avatarSize = useSessionAvatarSize();
+    // Pins carry their own size and shape (Appearance → Pinned rows): they sit
+    // above everything and are one line tall where an ordinary row is three.
+    const pinnedAvatar = usePinnedAvatar();
 
     // The compact form drops the status sentence and keeps what
     // identifies the row: a small avatar, the name, and the dot. A pin is a
@@ -562,7 +561,13 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                     onPress={handlePress}
                     {...menuProps}
                 >
-                    <Avatar id={session.avatarId} size={avatarSize} monochrome={!status.isConnected} flavor={session.flavor} />
+                    <Avatar
+                        id={session.avatarId}
+                        size={pinnedAvatar.size}
+                        variant={pinnedAvatar.variant}
+                        monochrome={!status.isConnected}
+                        flavor={session.flavor}
+                    />
                     {/* Project first, then title. The project is what you scan
                         for — two pins can carry the same title — so it leads
                         and it never shrinks; the title after it is what gives

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { View } from "react-native";
 import { Image } from "expo-image";
-import { AvatarIdenticon } from "./AvatarIdenticon";
+import { AvatarIdenticon, type AvatarVariant } from "./AvatarIdenticon";
 import { useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
@@ -14,6 +14,8 @@ interface AvatarProps {
     flavor?: string | null;
     imageUrl?: string | null;
     thumbhash?: string | null;
+    /** Override Appearance → Identicons for this one mark (pinned rows). */
+    variant?: AvatarVariant;
 }
 
 const flavorIcons = {
@@ -67,7 +69,7 @@ function badgeSize(size: number, flavor: string) {
 }
 
 export const Avatar = React.memo((props: AvatarProps) => {
-    const { flavor, size = 48, imageUrl, thumbhash, ...avatarProps } = props;
+    const { flavor, size = 48, imageUrl, thumbhash, variant, ...avatarProps } = props;
     const showFlavorIcons = useSetting('showFlavorIcons');
     const { theme } = useUnistyles();
 
@@ -129,7 +131,7 @@ export const Avatar = React.memo((props: AvatarProps) => {
     if (showFlavorIcons && flavor !== null) {
         return (
             <View style={[styles.container, { width: size, height: size }]}>
-                <AvatarComponent {...avatarProps} size={size} />
+                <AvatarComponent {...avatarProps} size={size} variant={variant} />
                 <View style={[styles.flavorIcon, {
                     width: circleSize,
                     height: circleSize,
@@ -148,5 +150,5 @@ export const Avatar = React.memo((props: AvatarProps) => {
     }
 
     // Return avatar without wrapper when not showing flavor icons
-    return <AvatarComponent {...avatarProps} size={size} />;
+    return <AvatarComponent {...avatarProps} size={size} variant={variant} />;
 });

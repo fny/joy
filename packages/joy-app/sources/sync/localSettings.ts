@@ -40,6 +40,8 @@ export const LocalSettingsSchema = z.object({
     avatarVariant: z.enum(['circles', 'squares']).catch('circles').describe('Identicon style: circular (default) or square confetti grid'),
     sessionAvatarSize: z.number().describe('Session-list identicon size in px, clamped to [8, 24]'),
     machineIconSize: z.number().describe('Machine-separator glyph size in px, clamped to [7, 16]'),
+    pinnedAvatarSize: z.number().describe('Pinned-row identicon size in px, clamped to [8, 24]'),
+    pinnedAvatarShape: z.enum(['match', 'circles', 'squares']).catch('match').describe("Pinned-row identicon shape; 'match' follows Appearance → Identicons"),
 });
 
 //
@@ -83,6 +85,8 @@ export const localSettingsDefaults: LocalSettings = {
     avatarVariant: 'circles',
     sessionAvatarSize: 16,
     machineIconSize: 9,
+    pinnedAvatarSize: 16,
+    pinnedAvatarShape: 'match' as const,
 };
 Object.freeze(localSettingsDefaults);
 

@@ -10,6 +10,7 @@ import { Switch } from '@/components/Switch';
 import { AvatarSquares, AvatarCircles } from '@/components/AvatarIdenticon';
 import { clampSessionAvatarSize, AVATAR_SIZE_MIN, AVATAR_SIZE_MAX, AVATAR_SIZE_STEP } from '@/hooks/useSessionAvatarSize';
 import { clampMachineIconSize, MACHINE_ICON_MIN, MACHINE_ICON_MAX, MACHINE_ICON_STEP } from '@/hooks/useMachineIconSize';
+import { clampPinnedAvatarSize, PINNED_AVATAR_MIN, PINNED_AVATAR_MAX, PINNED_AVATAR_STEP } from '@/hooks/usePinnedAvatar';
 import { Appearance, Platform, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
@@ -64,6 +65,12 @@ export default function AppearanceSettingsScreen() {
     const avatarSizePx = clampSessionAvatarSize(sessionAvatarSizeRaw);
     const [machineIconSizeRaw, setMachineIconSize] = useLocalSettingMutable('machineIconSize');
     const machineIconPx = clampMachineIconSize(machineIconSizeRaw);
+    const [pinnedAvatarSizeRaw, setPinnedAvatarSize] = useLocalSettingMutable('pinnedAvatarSize');
+    const pinnedAvatarPx = clampPinnedAvatarSize(pinnedAvatarSizeRaw);
+    const [pinnedAvatarShape, setPinnedAvatarShape] = useLocalSettingMutable('pinnedAvatarShape');
+    const PinnedPreview = (pinnedAvatarShape === 'match' ? avatarVariant : pinnedAvatarShape) === 'squares'
+        ? AvatarSquares
+        : AvatarCircles;
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
     const [chatFontScaleRaw, setChatFontScale] = useLocalSettingMutable('chatFontScale');
     const chatFontScale = clampChatFontScale(chatFontScaleRaw);
@@ -176,6 +183,67 @@ export default function AppearanceSettingsScreen() {
             </ItemGroup>
 
             {/* Theme Settings */}
+            {/* Pinned rows carry their own mark. They sit above every section
+                and are one line tall where an ordinary row is three, so it is
+                worth being able to tell a pin apart at a glance rather than by
+                reading it. Shape defaults to matching the setting above. */}
+            <ItemGroup title="Pinned rows" footer="The identicon on a pinned session, in the new session list. Shape follows Identicons above unless you pick one here.">
+                {([
+                    { key: 'match' as const, name: 'Match Identicons' },
+                    { key: 'circles' as const, name: 'Circles' },
+                    { key: 'squares' as const, name: 'Squares' },
+                ]).map(({ key, name }) => {
+                    const Comp = key === 'squares' ? AvatarSquares
+                        : key === 'circles' ? AvatarCircles
+                            : (avatarVariant === 'squares' ? AvatarSquares : AvatarCircles);
+                    return (
+                        <Item
+                            key={key}
+                            title={name}
+                            icon={<Comp id="preview-joy" size={29} />}
+                            rightElement={(
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                    <Comp id="sample-a" size={20} />
+                                    <Comp id="sample-b" size={20} />
+                                    {pinnedAvatarShape === key && (
+                                        <Ionicons name="checkmark" size={18} color={theme.colors.textLink} style={{ marginLeft: 4 }} />
+                                    )}
+                                </View>
+                            )}
+                            showChevron={false}
+                            onPress={() => setPinnedAvatarShape(key)}
+                        />
+                    );
+                })}
+                <Item
+                    title="Size"
+                    subtitle="Pinned-row identicon size"
+                    icon={<View style={{ width: 29, alignItems: 'center' }}>
+                        <PinnedPreview id="preview-joy" size={pinnedAvatarPx} />
+                    </View>}
+                    rightElement={(
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                            <Pressable
+                                hitSlop={8}
+                                onPress={() => setPinnedAvatarSize(Math.max(PINNED_AVATAR_MIN, pinnedAvatarPx - PINNED_AVATAR_STEP))}
+                                disabled={pinnedAvatarPx <= PINNED_AVATAR_MIN}
+                            >
+                                <Ionicons name="remove-circle-outline" size={22} color={pinnedAvatarPx <= PINNED_AVATAR_MIN ? theme.colors.textSecondary : theme.colors.textLink} />
+                            </Pressable>
+                            <Text style={{ color: theme.colors.text, fontVariant: ['tabular-nums'], minWidth: 30, textAlign: 'center' }}>{pinnedAvatarPx}px</Text>
+                            <Pressable
+                                hitSlop={8}
+                                onPress={() => setPinnedAvatarSize(Math.min(PINNED_AVATAR_MAX, pinnedAvatarPx + PINNED_AVATAR_STEP))}
+                                disabled={pinnedAvatarPx >= PINNED_AVATAR_MAX}
+                            >
+                                <Ionicons name="add-circle-outline" size={22} color={pinnedAvatarPx >= PINNED_AVATAR_MAX ? theme.colors.textSecondary : theme.colors.textLink} />
+                            </Pressable>
+                        </View>
+                    )}
+                    showChevron={false}
+                />
+            </ItemGroup>
+
             <ItemGroup title={t('settingsAppearance.theme')} footer={t('settingsAppearance.themeDescription')}>
                 <Item
                     title={t('settings.appearance')}

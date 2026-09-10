@@ -133,9 +133,15 @@ export const AvatarCircles = React.memo((props: Props) => {
 
 export type AvatarVariant = 'circles' | 'squares';
 
-/** The variant the user picked in Appearance → Identicons (circles default). */
-export const AvatarIdenticon = React.memo((props: Props) => {
-    const variant = useLocalSetting('avatarVariant');
+/**
+ * The variant the user picked in Appearance → Identicons (circles default),
+ * unless the caller names one. The override exists for the pinned rows, which
+ * carry their own shape so a pin can be told apart from an ordinary row at a
+ * glance rather than by reading it.
+ */
+export const AvatarIdenticon = React.memo(({ variant: override, ...props }: Props & { variant?: AvatarVariant }) => {
+    const setting = useLocalSetting('avatarVariant');
+    const variant = override ?? setting;
     if (variant === 'squares') return <AvatarSquares {...props} />;
     return <AvatarCircles {...props} />;
 });
