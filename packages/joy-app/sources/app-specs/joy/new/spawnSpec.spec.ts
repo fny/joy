@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSpawnSpec, type SpawnChoices } from './spawnSpec';
+import { buildSpawnSpec, type SpawnChoices } from '@/app/(app)/joy/new/spawnSpec';
 import { FALLBACK_HARNESS_CAPABILITIES, type HarnessCapabilities } from '@/sync/harnessCapabilities';
 
 const everything: SpawnChoices = {

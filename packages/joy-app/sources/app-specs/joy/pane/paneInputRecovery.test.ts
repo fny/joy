@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     clearPendingScript, pendingAfterScript, performSendKeys, planTextSubmit, resizePending, restoreFailedInput,
     sendKeysOutcome, submitTextOperation, transportFailureOutcome, type SendOutcome, type TypedPending,
-} from './paneInputRecovery';
+} from '@/app/(app)/joy/pane/[machine]/paneInputRecovery';
 
 describe('restoreFailedInput (#155)', () => {
     it('puts the submitted text back into an empty box', () => {

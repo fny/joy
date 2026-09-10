@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { ResourceStore, type ResourceEntry, type ResourceSpec } from '@/sync/resource';
-import { onlineMachineIds, planMachineAutoSelect, type DiscoveryView } from './machineAutoSelect';
+import { onlineMachineIds, planMachineAutoSelect, type DiscoveryView } from '@/app/(app)/joy/new/machineAutoSelect';
 
 type M = { id: string; online: boolean };
 const isOnline = (m: M) => m.online;

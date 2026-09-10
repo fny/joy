@@ -77,7 +77,7 @@ vi.mock('@/utils/downloadFile', () => ({ downloadFile: async () => {} }));
 
 import { resources } from '@/sync/resource';
 import { decodeFileContents, fileContentsKey, gitDiffKey } from '@/sync/fileContents';
-import FileScreen from './file';
+import FileScreen from '@/app/(app)/session/[id]/file';
 
 const FILE_KEY = fileContentsKey(SESSION, ABS);
 const DIFF_KEY = gitDiffKey(SESSION, 'a');

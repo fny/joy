@@ -26,7 +26,7 @@ vi.mock('@/components/ItemGroup', () => ({ ItemGroup: (props: { children?: React
 vi.mock('@/components/ItemList', () => ({ ItemList: (props: { children?: React.ReactNode }) => React.createElement('list-stub', null, props.children) }));
 vi.mock('@/components/RoundButton', () => ({ RoundButton: () => null }));
 
-import ModalDemoScreen from './modal-demo';
+import ModalDemoScreen from '@/app/(app)/dev/modal-demo';
 
 type ItemStub = { props: { title: string; onPress: () => void } };
 

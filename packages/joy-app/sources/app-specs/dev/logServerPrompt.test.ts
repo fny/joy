@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { logServerPromptOutcome } from './logServerPrompt';
+import { logServerPromptOutcome } from '@/app/(app)/dev/logServerPrompt';
 
 describe('logServerPromptOutcome (#138)', () => {
     it('a cancelled prompt (null) keeps the configured server, never disables logging', () => {
