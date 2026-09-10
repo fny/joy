@@ -17,6 +17,7 @@ import { tmuxArgv } from "./tmux/shell";
 import { launchdPlist } from "./launchdPlist";
 import { shellQuote } from "./domain/quote";
 import { isHarness, joinExtraArgs } from "./domain/harnessCapabilities";
+import { relayIdentity, relayCall, sealSpawnSpec } from "./relay/automationApi";
 import { mkdirSecure, SECRET_FILE_MODE } from "./domain/secretFile";
 import { SUPERVISOR_ENV, processStartId, type DaemonLauncher } from "./daemonLauncher";
 
@@ -1528,6 +1529,166 @@ export async function cmdAbout(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `joy automation …` — saved intentions and the runs they produce.
+ *
+ * Everything here talks to the RELAY as the account, not to the local daemon:
+ * an automation is account state, and the machine that authors one need not
+ * be running when it fires. The one thing that is machine-local is the
+ * SEALING — see relay/automationApi.ts for why this can only author for its
+ * own machine.
+ */
+export async function cmdAutomation(rest: string[]): Promise<number> {
+  const sub = rest[0];
+  const args = rest.slice(1);
+  const id = relayIdentity();
+  if (!id) { console.error(`${bad} not authenticated (joy auth)`); return 1; }
+
+  const fail = (r: { status: number; body: any }, what: string): number => {
+    const err = r.body?.error ?? `HTTP ${r.status}`;
+    console.error(`${bad} ${what}: ${err}`);
+    return 1;
+  };
+
+  if (sub === "create" || sub === "add") {
+    const json = takeBool(args, "--json");
+    const dir = takeFlag(args, "--dir") || takeFlag(args, "-C");
+    const prompt = takeFlag(args, "-m") ?? takeFlag(args, "--message");
+    const name = takeFlag(args, "--name");
+    const agent = takeFlag(args, "--agent") || "claude";
+    const model = takeFlag(args, "--model");
+    const effort = takeFlag(args, "--effort");
+    const on = takeFlag(args, "--on") || "manual";
+    if (!prompt || !prompt.trim()) {
+      console.error('usage: joy automation create [--dir <path>] -m "<prompt>" [--on manual|turn_done|session_state|machine_online|automation_done] [--name n] [--agent a] [--model m] [--effort e] [--json]');
+      return 2;
+    }
+    const cwd = resolve(expandTilde(dir || process.cwd()));
+    // The spec IS a spawn spec: an automation run is an ordinary headless
+    // session, so the same shape the new-session screen builds.
+    const spec = sealSpawnSpec({
+      cwd, agent, model, effort,
+      prompt,
+      headless: true,          // nobody is watching a run
+      yolo: true,              // no prompts: a run that stops is a failure
+    }, id.spawnSpecKey);
+    const r = await relayCall(id, "POST", "/automations", {
+      name: name || prompt.trim().split(/\s+/).slice(0, 6).join(" "),
+      machineId: id.machineId,
+      directory: cwd,
+      spec,
+      triggers: [{ kind: on }],
+    });
+    if (r.status !== 201) return fail(r, "create failed");
+    const a = r.body.automation;
+    if (json) console.log(JSON.stringify(a));
+    else {
+      console.log(`${ok} ${a.name}`);
+      console.log(`  id       ${a.id}`);
+      console.log(`  folder   ${a.directory}`);
+      console.log(`  trigger  ${a.triggers.map((t: any) => t.kind).join(", ")}`);
+      console.log(`  run it   ${c.b(`joy automation run ${a.id} --wait`)}`);
+    }
+    return 0;
+  }
+
+  if (sub === "ls" || sub === "list" || sub === undefined) {
+    const json = takeBool(args, "--json");
+    const r = await relayCall(id, "GET", "/automations");
+    if (r.status !== 200) return fail(r, "list failed");
+    const rows = r.body.automations ?? [];
+    if (json) { console.log(JSON.stringify(rows)); return 0; }
+    if (rows.length === 0) { console.log('no automations (joy automation create -m "…")'); return 0; }
+    for (const a of rows) {
+      const last = a.latestRun ? `${a.latestRun.state}${a.latestRun.errorCode ? ` (${a.latestRun.errorCode})` : ""}` : "never run";
+      console.log(`  ${c.b(a.id.slice(0, 8))}  ${a.enabled ? " " : c.dim("off")} ${a.name}`);
+      console.log(`  ${" ".repeat(8)}  ${c.dim(`${a.directory} · ${a.triggers.map((t: any) => t.kind).join(",")} · ${last}`)}`);
+    }
+    return 0;
+  }
+
+  if (sub === "show") {
+    const target = args[0];
+    if (!target) { console.error("usage: joy automation show <id>"); return 2; }
+    const r = await relayCall(id, "GET", `/automations/${encodeURIComponent(target)}`);
+    if (r.status !== 200) return fail(r, "not found");
+    console.log(JSON.stringify(r.body.automation, null, 2));
+    return 0;
+  }
+
+  if (sub === "run") {
+    const wait = takeBool(args, "--wait");
+    const json = takeBool(args, "--json");
+    const target = args[0];
+    if (!target) { console.error("usage: joy automation run <id> [--wait] [--json]"); return 2; }
+    const r = await relayCall(id, "POST", `/automations/${encodeURIComponent(target)}/runs`, {});
+    if (r.status !== 201) return fail(r, "run failed");
+    let run = r.body.run;
+    if (r.body.skipped) {
+      console.error(`${bad} skipped: ${run.errorMessage ?? "a run is already going"}`);
+      return 1;
+    }
+    if (!wait) {
+      if (json) console.log(JSON.stringify(run));
+      else console.log(run.id);
+      return 0;
+    }
+    // --wait is the scripting contract: block until the run is terminal and
+    // EXIT WITH THE OUTCOME, so an automation is callable from a shell script
+    // or another agent without parsing anything.
+    const deadline = Date.now() + 30 * 60_000;
+    while (Date.now() < deadline) {
+      await new Promise((res) => setTimeout(res, 2000));
+      const runs = await relayCall(id, "GET", `/automations/${encodeURIComponent(target)}/runs?limit=10`);
+      const found = (runs.body?.runs ?? []).find((x: any) => x.id === run.id);
+      if (found) run = found;
+      if (run.state !== "queued" && run.state !== "running") break;
+    }
+    if (json) console.log(JSON.stringify(run));
+    else if (run.state === "succeeded") console.log(`${ok} succeeded${run.sessionId ? ` (session ${run.sessionId.slice(0, 8)})` : ""}`);
+    else console.error(`${bad} ${run.state}${run.errorCode ? `: ${run.errorCode}` : ""}${run.errorMessage ? ` — ${run.errorMessage}` : ""}`);
+    return run.state === "succeeded" ? 0 : 1;
+  }
+
+  if (sub === "runs") {
+    const json = takeBool(args, "--json");
+    const target = args[0];
+    if (!target) { console.error("usage: joy automation runs <id> [--json]"); return 2; }
+    const r = await relayCall(id, "GET", `/automations/${encodeURIComponent(target)}/runs`);
+    if (r.status !== 200) return fail(r, "not found");
+    const runs = r.body.runs ?? [];
+    if (json) { console.log(JSON.stringify(runs)); return 0; }
+    if (runs.length === 0) { console.log("no runs yet"); return 0; }
+    for (const run of runs) {
+      const when = new Date(run.createdAt).toISOString().replace("T", " ").slice(0, 19);
+      const detail = run.errorCode ? ` ${run.errorCode}` : run.sessionId ? ` session ${run.sessionId.slice(0, 8)}` : "";
+      console.log(`  ${when}  ${run.state.padEnd(9)} ${c.dim(run.triggerKind)}${detail}`);
+    }
+    return 0;
+  }
+
+  if (sub === "enable" || sub === "disable") {
+    const target = args[0];
+    if (!target) { console.error(`usage: joy automation ${sub} <id>`); return 2; }
+    const r = await relayCall(id, "PATCH", `/automations/${encodeURIComponent(target)}`, { enabled: sub === "enable" });
+    if (r.status !== 200) return fail(r, `${sub} failed`);
+    console.log(`${ok} ${sub}d ${r.body.automation.name}`);
+    return 0;
+  }
+
+  if (sub === "rm" || sub === "delete") {
+    const target = args[0];
+    if (!target) { console.error("usage: joy automation rm <id>"); return 2; }
+    const r = await relayCall(id, "DELETE", `/automations/${encodeURIComponent(target)}`);
+    if (r.status !== 200) return fail(r, "delete failed");
+    console.log(`${ok} deleted (its sessions are untouched)`);
+    return 0;
+  }
+
+  console.error(`unknown: joy automation ${sub}\n  create · ls · show · run · runs · enable · disable · rm`);
+  return 2;
+}
+
 export async function cmdNew(rest: string[]): Promise<number> {
   // `--` FIRST, before any flag is taken. takeFlag/takeBool scan the whole
   // array, so parsing first would let joy steal a flag it shares with the
@@ -1980,6 +2141,14 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
                account backup code (one code works on every relay) — e.g.
                ${c.dim("joy auth joy joy-dev")}
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
+  ${c.b("automation")}   Saved work: a folder, a prompt and a trigger — and the runs it produces
+                 create [--dir p] -m "prompt" [--on manual|turn_done|session_state|
+                 machine_online|automation_done] · ls · show · run <id> [--wait] ·
+                 runs <id> · enable/disable <id> · rm <id>
+                 (a run is a headless session; it FAILS the moment it needs a human —
+                  blocked:login, blocked:trust, blocked:permission, agent_died, stalled.
+                  run --wait exits with the outcome, so scripts and agents can use it.
+                  Authors for THIS machine only: the spec is sealed with its key.)
   ${c.b("update")}       Update @fny/joy-daemon from the repo's release branch, then reinstall + restart
   ${c.b("install")}      Install autostart service (systemd on Linux, launchd on macOS)
   ${c.b("uninstall")}    Remove the autostart service
@@ -2006,6 +2175,7 @@ async function main(): Promise<void> {
     case "jump": case "j": code = await cmdJump(rest); break;
     case "run": code = await cmdRun(rest); break;
     case "new": code = await cmdNew(rest); break;
+    case "automation": case "auto": code = await cmdAutomation(rest); break;
     case "ask": code = await cmdAsk(rest); break;
     case "send": code = await cmdSend(rest); break;
     case "wait": code = await cmdWaitIdle(rest); break;
