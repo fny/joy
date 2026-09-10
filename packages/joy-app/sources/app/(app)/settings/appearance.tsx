@@ -9,6 +9,7 @@ import { useUnistyles, UnistylesRuntime, StyleSheet } from 'react-native-unistyl
 import { Switch } from '@/components/Switch';
 import { AvatarSquares, AvatarCircles } from '@/components/AvatarIdenticon';
 import { clampSessionAvatarSize, AVATAR_SIZE_MIN, AVATAR_SIZE_MAX, AVATAR_SIZE_STEP } from '@/hooks/useSessionAvatarSize';
+import { clampMachineIconSize, MACHINE_ICON_MIN, MACHINE_ICON_MAX, MACHINE_ICON_STEP } from '@/hooks/useMachineIconSize';
 import { Appearance, Platform, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
@@ -61,6 +62,8 @@ export default function AppearanceSettingsScreen() {
     const [avatarVariant, setAvatarVariant] = useLocalSettingMutable('avatarVariant');
     const [sessionAvatarSizeRaw, setSessionAvatarSize] = useLocalSettingMutable('sessionAvatarSize');
     const avatarSizePx = clampSessionAvatarSize(sessionAvatarSizeRaw);
+    const [machineIconSizeRaw, setMachineIconSize] = useLocalSettingMutable('machineIconSize');
+    const machineIconPx = clampMachineIconSize(machineIconSizeRaw);
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
     const [chatFontScaleRaw, setChatFontScale] = useLocalSettingMutable('chatFontScale');
     const chatFontScale = clampChatFontScale(chatFontScaleRaw);
@@ -134,6 +137,37 @@ export default function AppearanceSettingsScreen() {
                                 disabled={avatarSizePx >= AVATAR_SIZE_MAX}
                             >
                                 <Ionicons name="add-circle-outline" size={22} color={avatarSizePx >= AVATAR_SIZE_MAX ? theme.colors.textSecondary : theme.colors.textLink} />
+                            </Pressable>
+                        </View>
+                    )}
+                    showChevron={false}
+                />
+                {/* The monitor before a host name on a machine separator. It
+                    sits beside an 11px label, so a couple of pixels either way
+                    changes whether it reads as a mark or competes with the
+                    name — which is a thing to see rather than to argue about. */}
+                <Item
+                    title="Machine glyph"
+                    subtitle="Size of the monitor on a machine separator"
+                    icon={<View style={{ width: 29, alignItems: 'center' }}>
+                        <Ionicons name="desktop-outline" size={machineIconPx} color={theme.colors.textSecondary} />
+                    </View>}
+                    rightElement={(
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                            <Pressable
+                                hitSlop={8}
+                                onPress={() => setMachineIconSize(Math.max(MACHINE_ICON_MIN, machineIconPx - MACHINE_ICON_STEP))}
+                                disabled={machineIconPx <= MACHINE_ICON_MIN}
+                            >
+                                <Ionicons name="remove-circle-outline" size={22} color={machineIconPx <= MACHINE_ICON_MIN ? theme.colors.textSecondary : theme.colors.textLink} />
+                            </Pressable>
+                            <Text style={{ color: theme.colors.text, fontVariant: ['tabular-nums'], minWidth: 30, textAlign: 'center' }}>{machineIconPx}px</Text>
+                            <Pressable
+                                hitSlop={8}
+                                onPress={() => setMachineIconSize(Math.min(MACHINE_ICON_MAX, machineIconPx + MACHINE_ICON_STEP))}
+                                disabled={machineIconPx >= MACHINE_ICON_MAX}
+                            >
+                                <Ionicons name="add-circle-outline" size={22} color={machineIconPx >= MACHINE_ICON_MAX ? theme.colors.textSecondary : theme.colors.textLink} />
                             </Pressable>
                         </View>
                     )}

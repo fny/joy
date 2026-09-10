@@ -15,6 +15,7 @@ import { useAllMachines, useLocalSettingMutable } from '@/sync/storage';
 import { useSessionGitStatusLive } from '@/sync/gitStatusResource';
 import { knownLines } from '@/sync/gitStatusModel';
 import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
+import { useMachineIconSize } from '@/hooks/useMachineIconSize';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
@@ -190,6 +191,7 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
+    const iconSize = useMachineIconSize();
 
     const handlePress = React.useCallback((event?: { stopPropagation?: () => void }) => {
         // On web the name sits inside the toggle's click target and the event
@@ -225,7 +227,7 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
                 style={{ marginRight: 10 }}
             />
             <Pressable onPress={handlePress} style={styles.machineSeparatorName} hitSlop={{ top: 8, bottom: 8 }}>
-                <Ionicons name="desktop-outline" size={9} color={theme.colors.textSecondary} style={{ marginRight: 6 }} />
+                <Ionicons name="desktop-outline" size={iconSize} color={theme.colors.textSecondary} style={{ marginRight: 6 }} />
                 <Text style={styles.machineSeparatorText} numberOfLines={1}>
                     {machineName}
                 </Text>

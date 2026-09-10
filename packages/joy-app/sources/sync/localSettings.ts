@@ -39,6 +39,7 @@ export const LocalSettingsSchema = z.object({
     // rather than treated as invalid, so the preference survives an upgrade.
     avatarVariant: z.enum(['circles', 'squares']).catch('circles').describe('Identicon style: circular (default) or square confetti grid'),
     sessionAvatarSize: z.number().describe('Session-list identicon size in px, clamped to [8, 24]'),
+    machineIconSize: z.number().describe('Machine-separator glyph size in px, clamped to [7, 16]'),
 });
 
 //
@@ -81,6 +82,7 @@ export const localSettingsDefaults: LocalSettings = {
     appLock: false,
     avatarVariant: 'circles',
     sessionAvatarSize: 16,
+    machineIconSize: 9,
 };
 Object.freeze(localSettingsDefaults);
 
