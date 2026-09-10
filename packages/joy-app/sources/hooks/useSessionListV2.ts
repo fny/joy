@@ -74,7 +74,13 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             if (section.collapsed) return;
             for (const row of section.sessions) {
                 const session = sessions[row.id];
-                if (session) items.push({ type: 'session', session: sessionRowDataFor(session, unread) });
+                if (!session) continue;
+                items.push({
+                    type: 'session',
+                    session: sessionRowDataFor(session, unread),
+                    // Pins are one-liners: see the note on SessionListViewItem.
+                    compact: section.kind === 'pinned',
+                });
             }
         };
 

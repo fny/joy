@@ -176,7 +176,13 @@ export type SessionListViewItem =
     | { type: 'active-sessions'; sessions: SessionRowData[] }
     | { type: 'archive-toggle'; hidden: boolean }
     | { type: 'project-group'; displayPath: string; machine: Machine }
-    | { type: 'session'; session: SessionRowData };
+    /**
+     * A session row. `compact` is the one-line form used for pins: a pinned
+     * session is one you already know, so it needs to be findable, not
+     * described — three lines each would push everything else off the screen,
+     * which is the opposite of what pinning is for.
+     */
+    | { type: 'session'; session: SessionRowData; compact?: boolean };
 
 // Legacy type for backward compatibility - to be removed
 export type SessionListItem = string | Session;

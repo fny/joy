@@ -80,6 +80,24 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 14,
         backgroundColor: theme.colors.surface,
     },
+    // The pinned form: one line. Same horizontal padding so pins line up with
+    // the rows below them; the height comes down from ~68px to ~36px.
+    sessionItemCompact: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        paddingVertical: 8,
+        paddingHorizontal: 14,
+        backgroundColor: theme.colors.surface,
+    },
+    sessionTitleCompact: {
+        fontSize: 14,
+        flex: 1,
+        ...Typography.default('regular'),
+    },
+    compactTrailingIcon: {
+        color: theme.colors.textSecondary,
+    },
     sessionItemContainer: {
         marginHorizontal: 16,
         marginBottom: 1,
@@ -359,7 +377,7 @@ export function SessionsList() {
                 const nextItem = data && index < data.length - 1 ? data[index + 1] : null;
 
                 const isFirst = prevItem?.type === 'header';
-                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions';
+                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle';
                 const isSingle = isFirst && isLast;
                 const selected = item.session.id === selectedSessionId;
 
@@ -370,6 +388,7 @@ export function SessionsList() {
                         isFirst={isFirst}
                         isLast={isLast}
                         isSingle={isSingle}
+                        compact={item.compact}
                     />
                 );
         }
@@ -415,12 +434,14 @@ export function SessionsList() {
     );
 }
 
-const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }: {
+const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, compact }: {
     session: SessionRowData;
     selected?: boolean;
     isFirst?: boolean;
     isLast?: boolean;
     isSingle?: boolean;
+    /** One line instead of three — the pinned form. */
+    compact?: boolean;
 }) => {
     const styles = stylesheet;
     const navigateToSession = useNavigateToSession();
@@ -474,6 +495,55 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }
     } as any : {
         onLongPress: showActionAlert,
     };
+
+    // The compact form drops the path and the status sentence and keeps what
+    // identifies the row: a small avatar, the name, and the dot. A pin is a
+    // session you already know — it has to be findable, not described.
+    if (compact) {
+        return (
+            <View style={[
+                styles.sessionItemContainer,
+                isSingle ? styles.sessionItemContainerSingle :
+                    isFirst ? styles.sessionItemContainerFirst :
+                        isLast ? styles.sessionItemContainerLast : {}
+            ]}>
+                <Pressable
+                    style={[
+                        styles.sessionItemCompact,
+                        selected && styles.sessionItemSelected,
+                        isSingle ? styles.sessionItemSingle :
+                            isFirst ? styles.sessionItemFirst :
+                                isLast ? styles.sessionItemLast : {}
+                    ]}
+                    onPress={handlePress}
+                    {...menuProps}
+                >
+                    <Avatar id={session.avatarId} size={20} monochrome={!status.isConnected} flavor={session.flavor} />
+                    <Text style={[
+                        styles.sessionTitleCompact,
+                        status.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                    ]} numberOfLines={1}>
+                        {session.name}
+                    </Text>
+                    {session.hasDraft && (
+                        <Ionicons name="pencil" size={11} style={styles.compactTrailingIcon} />
+                    )}
+                    {session.facts.muted && (
+                        <Ionicons name="notifications-off" size={11} style={styles.compactTrailingIcon} />
+                    )}
+                    <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />
+                </Pressable>
+                {Platform.OS === 'web' && (
+                    <SessionActionsPopover
+                        anchor={actionsAnchor}
+                        onClose={() => setActionsAnchor(null)}
+                        sessionId={session.id}
+                        visible={!!actionsAnchor}
+                    />
+                )}
+            </View>
+        );
+    }
 
     return (
         <View style={[
