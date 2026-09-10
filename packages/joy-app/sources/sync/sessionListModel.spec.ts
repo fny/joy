@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { buildListLayout, partitionForList, pinnedStateRank, stateUrgency, type ListSession } from './sessionListModel';
+import { buildListLayout, partitionForList, pinnedDotColour, pinnedStateRank, stateUrgency, type ListSession } from './sessionListModel';
+import { STATUS_PALETTE } from '@/utils/statusPalette';
+import type { SessionState } from '@/sync/sessionFacts';
 
 const NOW = 1_800_000_000_000;
 
@@ -206,18 +208,42 @@ describe('the pinned order', () => {
             .toEqual(pinnedIds({ sessions: after, pinned: ['a', 'b'] }));
     });
 
-    it('by state: needs-a-decision, then done, then working, then gone', () => {
+    it('by state: amber, then green, then blue, then grey', () => {
         const ids = pinnedIds({
             sessions: [
-                s({ id: 'gone', state: 'disconnected', project: '~/a' }),
-                s({ id: 'working', state: 'thinking', project: '~/a' }),
-                s({ id: 'done', state: 'waiting', project: '~/a' }),
-                s({ id: 'decide', state: 'permission_required', project: '~/a' }),
+                s({ id: 'grey', state: 'disconnected', project: '~/a' }),
+                s({ id: 'blue', state: 'thinking', project: '~/a' }),
+                s({ id: 'green', state: 'disconnected', hasUnread: true, project: '~/a' }),
+                s({ id: 'amber', state: 'permission_required', project: '~/a' }),
             ],
-            pinned: ['gone', 'working', 'done', 'decide'],
+            pinned: ['grey', 'blue', 'green', 'amber'],
             pinnedSort: 'state',
         });
-        expect(ids).toEqual(['decide', 'done', 'working', 'gone']);
+        expect(ids).toEqual(['amber', 'green', 'blue', 'grey']);
+    });
+
+    it('unread outranks working — a green row is above a pulsing blue one', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'busy', state: 'thinking', project: '~/a' }),
+                s({ id: 'unread', state: 'thinking', hasUnread: true, project: '~/b' }),
+            ],
+            pinned: ['busy', 'unread'],
+            pinnedSort: 'state',
+        });
+        expect(ids).toEqual(['unread', 'busy']);
+    });
+
+    it('a read, idle session sorts to the bottom with the greys', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'seen', state: 'disconnected', project: '~/a' }),
+                s({ id: 'working', state: 'agents', project: '~/b' }),
+            ],
+            pinned: ['seen', 'working'],
+            pinnedSort: 'state',
+        });
+        expect(ids).toEqual(['working', 'seen']);
     });
 
     it('by state: falls back to project name inside a bucket, so it stays stable', () => {
@@ -233,20 +259,40 @@ describe('the pinned order', () => {
         expect(ids).toEqual(['a', 'm', 'z']);
     });
 
-    it('puts blocked with permission_required — both are stopped until you answer', () => {
-        expect(pinnedStateRank('blocked')).toBe(pinnedStateRank('permission_required'));
-        expect(pinnedStateRank('permission_required')).toBeLessThan(pinnedStateRank('waiting'));
-        expect(pinnedStateRank('waiting')).toBeLessThan(pinnedStateRank('thinking'));
-        expect(pinnedStateRank('thinking')).toBeLessThan(pinnedStateRank('disconnected'));
+    it('ranks every amber state together — permission, blocked, stalled, retrying, detached', () => {
+        const amber = ['permission_required', 'blocked', 'stalled', 'retrying', 'detached'];
+        for (const state of amber) expect(pinnedStateRank(state)).toBe(0);
     });
 
-    it('keeps amber out of the answer-me bucket — stalled is not a question', () => {
-        expect(pinnedStateRank('stalled')).toBe(pinnedStateRank('thinking'));
-        expect(pinnedStateRank('retrying')).toBe(pinnedStateRank('thinking'));
+    it('ranks the pulsing working states together', () => {
+        for (const state of ['thinking', 'tasks', 'agents', 'compacting']) {
+            expect(pinnedStateRank(state)).toBe(2);
+        }
+    });
+
+    it('unread is green whatever the session is doing', () => {
+        for (const state of ['thinking', 'disconnected', 'waiting', 'agents']) {
+            expect(pinnedDotColour(state, true)).toBe('#34C759');
+            expect(pinnedStateRank(state, true)).toBe(1);
+        }
+    });
+
+    it('reads the dot straight off the shared palette, so the order is the one on screen', () => {
+        for (const state of Object.keys(STATUS_PALETTE) as SessionState[]) {
+            expect(pinnedDotColour(state)).toBe(STATUS_PALETTE[state].dotColor);
+        }
+    });
+
+    it('every palette colour has a rank — a new one must be placed, not silently sorted last', () => {
+        // The tripwire: add a colour to STATUS_PALETTE and this fails until
+        // somebody decides where in the pinned order it belongs.
+        const unplaced = (Object.keys(STATUS_PALETTE) as SessionState[])
+            .filter((state) => pinnedStateRank(state) === 3 && STATUS_PALETTE[state].dotColor !== '#999');
+        expect(unplaced).toEqual([]);
     });
 
     it('sorts an unknown state last rather than to the front', () => {
-        expect(pinnedStateRank('something-new')).toBe(pinnedStateRank('disconnected'));
+        expect(pinnedStateRank('something-new')).toBe(3);
     });
 
     it('machine sections are still newest-first — only pins are by project', () => {

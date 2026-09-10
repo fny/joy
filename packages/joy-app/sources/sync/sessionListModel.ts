@@ -17,6 +17,9 @@
  *      without concealing the thing you would want to act on.
  */
 
+import { STATUS_PALETTE } from '@/utils/statusPalette';
+import type { SessionState } from './sessionFacts';
+
 /** The part of a session this model reads. Structural, so specs need no store. */
 export interface ListSession {
     id: string;
@@ -29,43 +32,56 @@ export interface ListSession {
     active?: boolean;
     /** The project, as it is shown on the row — the pinned sort key. */
     project?: string | null;
+    /** Unread turns the row's dot green, so it decides the order too. */
+    hasUnread?: boolean;
 }
 
 /** How the pinned section is ordered. */
 export type PinnedSort = 'project' | 'state';
 
 /**
- * The four things a pinned session can be, in the order you want to deal with
- * them. This is deliberately coarser than stateUrgency, which ranks eleven
- * states for a collapsed header's single dot; here the ranking IS the reading
- * order, and four groups you can name beat eleven you cannot.
+ * Order by the COLOUR the row is showing, top to bottom:
  *
- *   0  needs a decision  — yellow. It is stopped until you answer.
- *   1  done              — green. It finished and is waiting for you.
- *   2  working           — blue/teal/pink/purple/orange. It needs nothing.
- *   3  gone              — grey and red. Nothing is running behind it.
+ *   0  amber   — needs permission, or needs intervention
+ *   1  green   — unread
+ *   2  blue    — thinking, or otherwise working (these pulse)
+ *   3  grey    — read and idle; you have already seen it
  *
- * Amber (stalled, retrying) sits with working rather than with needs-a-
- * decision: something is off, but nothing is asking you a question, and a
- * bucket that cries wolf stops meaning "answer me".
+ * Keyed on the dot's colour rather than on a private list of state names,
+ * because the order has to be the one you can SEE. An earlier version ranked
+ * eleven state names into four buckets nobody could read off the screen, and
+ * put `waiting` in "done" while unread — the thing that actually turns a row
+ * green — was not considered at all.
+ *
+ * STATUS_PALETTE is the authority for what colour a state is; this maps
+ * colour → position, so a state that changes colour changes position with it
+ * and nothing here has to be remembered. A palette colour with no entry here
+ * fails the spec rather than silently sorting last.
  */
-const STATE_BUCKET: Record<string, number> = {
-    permission_required: 0,
-    blocked: 0,
-    waiting: 1,
-    thinking: 2,
-    tasks: 2,
-    agents: 2,
-    compacting: 2,
-    retrying: 2,
-    stalled: 2,
-    detached: 3,
-    disconnected: 3,
+const COLOUR_RANK: Record<string, number> = {
+    '#FFCC00': 0, // permission_required, blocked — stopped until you answer
+    '#FF9500': 0, // stalled, retrying — off the rails, needs a hand
+    '#FF3B30': 0, // detached — the agent is gone; nothing resumes without you
+    '#34C759': 1, // unread (and a finished session waiting on you)
+    '#007AFF': 2, // thinking
+    '#30B0C7': 2, // tasks
+    '#FF2D95': 2, // agents
+    '#AF52DE': 2, // compacting
+    '#999':    3, // disconnected — read and idle
 };
 
-/** Unknown states sort last rather than jumping the queue. */
-export function pinnedStateRank(state: string): number {
-    return STATE_BUCKET[state] ?? 3;
+/**
+ * The dot a row shows, by the same rule the rows themselves use: the state's
+ * palette colour, unless the row is unread, which overrides to green.
+ */
+export function pinnedDotColour(state: string, hasUnread?: boolean): string {
+    if (hasUnread) return '#34C759';
+    return STATUS_PALETTE[state as SessionState]?.dotColor ?? '#999';
+}
+
+/** Unknown colours sort last rather than jumping the queue. */
+export function pinnedStateRank(state: string, hasUnread?: boolean): number {
+    return COLOUR_RANK[pinnedDotColour(state, hasUnread)] ?? 3;
 }
 
 /**
@@ -169,7 +185,8 @@ function pinnedComparator<T extends ListSession>(sort: PinnedSort) {
     const byProject = (a: T, b: T) =>
         (a.project ?? '').localeCompare(b.project ?? '') || a.id.localeCompare(b.id);
     if (sort === 'state') {
-        return (a: T, b: T) => (pinnedStateRank(a.state) - pinnedStateRank(b.state)) || byProject(a, b);
+        return (a: T, b: T) =>
+            (pinnedStateRank(a.state, a.hasUnread) - pinnedStateRank(b.state, b.hasUnread)) || byProject(a, b);
     }
     return byProject;
 }
