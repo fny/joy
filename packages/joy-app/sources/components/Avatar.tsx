@@ -43,6 +43,26 @@ const styles = StyleSheet.create((theme) => ({
     },
 }));
 
+/**
+ * The harness badge, sized from the avatar.
+ *
+ * The circle is 35% of the avatar, but with a floor: at the small sizes the
+ * pinned rows and the avatar-size setting (8-24) use, 35% is a 6px smudge that
+ * says nothing about which harness is running. Below the floor the badge stops
+ * shrinking and simply overhangs a little more.
+ *
+ * The icons inside are not the same weight, so each is scaled against the
+ * circle rather than the avatar: codex is a dense square mark and claude a
+ * heavier glyph, both of which read larger than the rest at the same box.
+ */
+const BADGE_MIN = 11;
+
+function badgeSize(size: number, flavor: string) {
+    const circle = Math.max(Math.round(size * 0.35), BADGE_MIN);
+    const scale = flavor === 'codex' ? 0.8 : flavor === 'claude' ? 0.8 : 1;
+    return { circle, icon: Math.round(circle * scale) };
+}
+
 export const Avatar = React.memo((props: AvatarProps) => {
     const { flavor, size = 48, imageUrl, thumbhash, ...avatarProps } = props;
     const showFlavorIcons = useSetting('showFlavorIcons');
@@ -67,12 +87,8 @@ export const Avatar = React.memo((props: AvatarProps) => {
         if (showFlavorIcons && flavor) {
             const effectiveFlavor = flavor || 'claude';
             const flavorIcon = flavorIcons[effectiveFlavor as keyof typeof flavorIcons] || flavorIcons.claude;
-            const circleSize = Math.round(size * 0.35);
-            const iconSize = effectiveFlavor === 'codex'
-                ? Math.round(size * 0.25)
-                : effectiveFlavor === 'claude'
-                    ? Math.round(size * 0.28)
-                    : Math.round(size * 0.35);
+            const { circle: circleSize, icon: iconSizePx } = badgeSize(size, effectiveFlavor);
+            const iconSize = iconSizePx;
 
             return (
                 <View style={[styles.container, { width: size, height: size }]}>
@@ -104,14 +120,7 @@ export const Avatar = React.memo((props: AvatarProps) => {
     // Determine flavor icon for generated avatars
     const effectiveFlavor = flavor || 'claude';
     const flavorIcon = flavorIcons[effectiveFlavor as keyof typeof flavorIcons] || flavorIcons.claude;
-    // Make icons smaller while keeping same circle size
-    // Claude slightly bigger than codex
-    const circleSize = Math.round(size * 0.35);
-    const iconSize = effectiveFlavor === 'codex'
-        ? Math.round(size * 0.25)
-        : effectiveFlavor === 'claude'
-            ? Math.round(size * 0.28)
-            : Math.round(size * 0.35);
+    const { circle: circleSize, icon: iconSize } = badgeSize(size, effectiveFlavor);
 
     // Only wrap in container if showing flavor icons and flavor was provided
     if (showFlavorIcons && flavor !== null) {

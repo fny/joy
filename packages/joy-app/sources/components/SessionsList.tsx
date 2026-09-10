@@ -92,11 +92,23 @@ const stylesheet = StyleSheet.create((theme) => ({
     },
     sessionTitleCompact: {
         fontSize: 14,
-        flex: 1,
+        flexShrink: 1,
+        ...Typography.default('regular'),
+    },
+    // Given the leftover width, and the first thing to give it back: the
+    // title identifies the session, the project only disambiguates it.
+    sessionProjectCompact: {
+        fontSize: 12,
+        flexShrink: 2,
+        color: theme.colors.textSecondary,
         ...Typography.default('regular'),
     },
     compactTrailingIcon: {
         color: theme.colors.textSecondary,
+    },
+    compactSpacer: {
+        flexGrow: 1,
+        flexShrink: 0,
     },
     sessionItemContainer: {
         marginHorizontal: 16,
@@ -496,7 +508,11 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
         onLongPress: showActionAlert,
     };
 
-    // The compact form drops the path and the status sentence and keeps what
+    const projectName = session.path
+        ? session.path.split(/[/\\]/).filter(Boolean).pop()
+        : null;
+
+    // The compact form drops the status sentence and keeps what
     // identifies the row: a small avatar, the name, and the dot. A pin is a
     // session you already know — it has to be findable, not described.
     if (compact) {
@@ -518,19 +534,28 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                     onPress={handlePress}
                     {...menuProps}
                 >
-                    <Avatar id={session.avatarId} size={20} monochrome={!status.isConnected} flavor={session.flavor} />
+                    <Avatar id={session.avatarId} size={16} monochrome={!status.isConnected} flavor={session.flavor} />
                     <Text style={[
                         styles.sessionTitleCompact,
                         status.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
                     ]} numberOfLines={1}>
                         {session.name}
                     </Text>
+                    {/* Which project, on the same line. Two pins can carry the
+                        same title — the project is what tells them apart, and
+                        it is the first thing you look for anyway. */}
+                    {!!projectName && (
+                        <Text style={styles.sessionProjectCompact} numberOfLines={1}>
+                            {projectName}
+                        </Text>
+                    )}
                     {session.hasDraft && (
                         <Ionicons name="pencil" size={11} style={styles.compactTrailingIcon} />
                     )}
                     {session.facts.muted && (
                         <Ionicons name="notifications-off" size={11} style={styles.compactTrailingIcon} />
                     )}
+                    <View style={styles.compactSpacer} />
                     <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />
                 </Pressable>
                 {Platform.OS === 'web' && (
