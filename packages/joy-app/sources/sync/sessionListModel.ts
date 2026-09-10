@@ -32,7 +32,8 @@ export interface ListSession {
     active?: boolean;
     /** The project, as it is shown on the row — the pinned sort key. */
     project?: string | null;
-    /** Unread turns the row's dot green, so it decides the order too. */
+    /** Unread is a STATE now (`state === 'unread'`, green); this flag is the
+     *  raw per-device fact the rows still read for the draft pencil. */
     hasUnread?: boolean;
 }
 
@@ -59,29 +60,29 @@ export type PinnedSort = 'project' | 'state';
  * fails the spec rather than silently sorting last.
  */
 const COLOUR_RANK: Record<string, number> = {
-    '#FFCC00': 0, // permission_required, blocked — stopped until you answer
-    '#FF9500': 0, // stalled, retrying — off the rails, needs a hand
-    '#FF3B30': 0, // detached — the agent is gone; nothing resumes without you
-    '#34C759': 1, // unread (and a finished session waiting on you)
-    '#007AFF': 2, // thinking
-    '#30B0C7': 2, // tasks
-    '#FF2D95': 2, // agents
-    '#AF52DE': 2, // compacting
-    '#999':    3, // disconnected — read and idle
+    '#FFCC00': 0, // amber — permission_required, blocked (a login, a dialog): stopped until you answer
+    '#34C759': 1, // green — unread: finished work you have not seen
+    '#007AFF': 2, // active — thinking
+    '#30B0C7': 2, // active — tasks
+    '#FF2D95': 2, // active — agents
+    '#AF52DE': 2, // active — compacting
+    '#8E8E93': 3, // read — online and idle; you have already seen it
+    '#FF9500': 4, // error — stalled, retrying
+    '#FF3B30': 4, // error — detached: the agent is gone
+    '#C7C7CC': 5, // offline
 };
 
 /**
  * The dot a row shows, by the same rule the rows themselves use: the state's
  * palette colour, unless the row is unread, which overrides to green.
  */
-export function pinnedDotColour(state: string, hasUnread?: boolean): string {
-    if (hasUnread) return '#34C759';
-    return STATUS_PALETTE[state as SessionState]?.dotColor ?? '#999';
+export function pinnedDotColour(state: string): string {
+    return STATUS_PALETTE[state as SessionState]?.dotColor ?? '#C7C7CC';
 }
 
 /** Unknown colours sort last rather than jumping the queue. */
-export function pinnedStateRank(state: string, hasUnread?: boolean): number {
-    return COLOUR_RANK[pinnedDotColour(state, hasUnread)] ?? 3;
+export function pinnedStateRank(state: string): number {
+    return COLOUR_RANK[pinnedDotColour(state)] ?? 5;
 }
 
 /**
@@ -139,16 +140,19 @@ export interface ListSection<T extends ListSession = ListSession> {
  * outranks anything merely running.
  */
 const URGENCY: Record<string, number> = {
+    // The same order as the pinned section, top to bottom: amber, unread,
+    // active, read, error, offline.
     blocked: 100,
     permission_required: 95,
-    detached: 80,
-    stalled: 70,
-    retrying: 60,
+    unread: 90,
     compacting: 40,
     thinking: 30,
     agents: 25,
     tasks: 24,
     waiting: 10,
+    detached: 8,
+    stalled: 7,
+    retrying: 6,
     disconnected: 1,
 };
 
@@ -190,7 +194,7 @@ function pinnedComparator<T extends ListSession>(sort: PinnedSort) {
         (a.project ?? '').localeCompare(b.project ?? '') || a.id.localeCompare(b.id);
     if (sort === 'state') {
         return (a: T, b: T) =>
-            (pinnedStateRank(a.state, a.hasUnread) - pinnedStateRank(b.state, b.hasUnread)) || byProject(a, b);
+            (pinnedStateRank(a.state) - pinnedStateRank(b.state)) || byProject(a, b);
     }
     return byProject;
 }

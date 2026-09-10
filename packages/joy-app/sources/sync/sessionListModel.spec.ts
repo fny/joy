@@ -237,7 +237,7 @@ describe('the pinned order', () => {
             sessions: [
                 s({ id: 'grey', state: 'disconnected', project: '~/a' }),
                 s({ id: 'blue', state: 'thinking', project: '~/a' }),
-                s({ id: 'green', state: 'disconnected', hasUnread: true, project: '~/a' }),
+                s({ id: 'green', state: 'unread', project: '~/a' }),
                 s({ id: 'amber', state: 'permission_required', project: '~/a' }),
             ],
             pinned: ['grey', 'blue', 'green', 'amber'],
@@ -250,7 +250,7 @@ describe('the pinned order', () => {
         const ids = pinnedIds({
             sessions: [
                 s({ id: 'busy', state: 'thinking', project: '~/a' }),
-                s({ id: 'unread', state: 'thinking', hasUnread: true, project: '~/b' }),
+                s({ id: 'unread', state: 'unread', project: '~/b' }),
             ],
             pinned: ['busy', 'unread'],
             pinnedSort: 'state',
@@ -283,9 +283,29 @@ describe('the pinned order', () => {
         expect(ids).toEqual(['a', 'm', 'z']);
     });
 
-    it('ranks every amber state together — permission, blocked, stalled, retrying, detached', () => {
-        const amber = ['permission_required', 'blocked', 'stalled', 'retrying', 'detached'];
-        for (const state of amber) expect(pinnedStateRank(state)).toBe(0);
+    it('the order top to bottom: amber (needs you), unread, active, read, error, offline', () => {
+        for (const state of ['permission_required', 'blocked']) expect(pinnedStateRank(state), state).toBe(0);
+        expect(pinnedStateRank('unread')).toBe(1);
+        for (const state of ['thinking', 'tasks', 'agents', 'compacting']) expect(pinnedStateRank(state), state).toBe(2);
+        expect(pinnedStateRank('waiting')).toBe(3);
+        for (const state of ['stalled', 'retrying', 'detached']) expect(pinnedStateRank(state), state).toBe(4);
+        expect(pinnedStateRank('disconnected')).toBe(5);
+    });
+
+    it('a read, idle session sits above the errors and offline, below everything active', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'offline', state: 'disconnected', project: '~/a' }),
+                s({ id: 'dead', state: 'detached', project: '~/b' }),
+                s({ id: 'read', state: 'waiting', project: '~/c' }),
+                s({ id: 'working', state: 'tasks', project: '~/d' }),
+                s({ id: 'new', state: 'unread', project: '~/e' }),
+                s({ id: 'login', state: 'blocked', project: '~/f' }),
+            ],
+            pinned: ['offline', 'dead', 'read', 'working', 'new', 'login'],
+            pinnedSort: 'state',
+        });
+        expect(ids).toEqual(['login', 'new', 'working', 'read', 'dead', 'offline']);
     });
 
     it('ranks the pulsing working states together', () => {
@@ -294,11 +314,10 @@ describe('the pinned order', () => {
         }
     });
 
-    it('unread is green whatever the session is doing', () => {
-        for (const state of ['thinking', 'disconnected', 'waiting', 'agents']) {
-            expect(pinnedDotColour(state, true)).toBe('#34C759');
-            expect(pinnedStateRank(state, true)).toBe(1);
-        }
+    it('unread is a state of its own: green, and the only green — read-and-idle is grey', () => {
+        expect(pinnedDotColour('unread')).toBe('#34C759');
+        expect(pinnedDotColour('waiting')).not.toBe('#34C759');
+        expect(pinnedDotColour('waiting')).not.toBe(pinnedDotColour('disconnected'));
     });
 
     it('reads the dot straight off the shared palette, so the order is the one on screen', () => {
@@ -311,12 +330,12 @@ describe('the pinned order', () => {
         // The tripwire: add a colour to STATUS_PALETTE and this fails until
         // somebody decides where in the pinned order it belongs.
         const unplaced = (Object.keys(STATUS_PALETTE) as SessionState[])
-            .filter((state) => pinnedStateRank(state) === 3 && STATUS_PALETTE[state].dotColor !== '#999');
+            .filter((state) => pinnedStateRank(state) === 5 && state !== 'disconnected');
         expect(unplaced).toEqual([]);
     });
 
     it('sorts an unknown state last rather than to the front', () => {
-        expect(pinnedStateRank('something-new')).toBe(3);
+        expect(pinnedStateRank('something-new')).toBe(5);
     });
 
     it('machine sections are still newest-first — only pins are by project', () => {
@@ -337,6 +356,13 @@ describe('stateUrgency', () => {
         expect(stateUrgency('blocked')).toBeGreaterThan(stateUrgency('thinking'));
         expect(stateUrgency('permission_required')).toBeGreaterThan(stateUrgency('agents'));
         expect(stateUrgency('thinking')).toBeGreaterThan(stateUrgency('waiting'));
+    });
+
+    it('follows the pinned order: unread above active, read above the errors, offline last', () => {
+        expect(stateUrgency('permission_required')).toBeGreaterThan(stateUrgency('unread'));
+        expect(stateUrgency('unread')).toBeGreaterThan(stateUrgency('thinking'));
+        expect(stateUrgency('waiting')).toBeGreaterThan(stateUrgency('detached'));
+        expect(stateUrgency('detached')).toBeGreaterThan(stateUrgency('disconnected'));
     });
 
     it('gives an unknown state the bottom rank rather than throwing', () => {

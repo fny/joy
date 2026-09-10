@@ -19,7 +19,10 @@ import type { SessionState } from '@/sync/sessionFacts';
  * contextual and are computed per-branch in useSessionStatus.
  */
 export const STATUS_PALETTE: Record<SessionState, { color: string; dotColor: string; isPulsing: boolean; isConnected: boolean }> = {
-    disconnected:        { color: '#999',    dotColor: '#999',    isPulsing: false, isConnected: false },
+    // Offline: a lighter grey than read-and-idle, so the two greys are two
+    // positions in the pinned order (and two looks) — the row also dims its
+    // title and desaturates its avatar.
+    disconnected:        { color: '#C7C7CC', dotColor: '#C7C7CC', isPulsing: false, isConnected: false },
     detached:            { color: '#FF3B30', dotColor: '#FF3B30', isPulsing: false, isConnected: false },
     retrying:            { color: '#FF9500', dotColor: '#FF9500', isPulsing: true,  isConnected: true },
     compacting:          { color: '#AF52DE', dotColor: '#AF52DE', isPulsing: true,  isConnected: true },
@@ -33,6 +36,9 @@ export const STATUS_PALETTE: Record<SessionState, { color: string; dotColor: str
     tasks:               { color: '#30B0C7', dotColor: '#30B0C7', isPulsing: true,  isConnected: true },
     agents:              { color: '#FF2D95', dotColor: '#FF2D95', isPulsing: true,  isConnected: true },
     thinking:            { color: '#007AFF', dotColor: '#007AFF', isPulsing: true,  isConnected: true },
-    waiting:             { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
+    // Online, idle, and you have seen it: grey. Green is UNREAD's alone —
+    // the two used to share it, so a read idle session looked unread.
+    waiting:             { color: '#8E8E93', dotColor: '#8E8E93', isPulsing: false, isConnected: true },
+    unread:              { color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: true },
 };
 

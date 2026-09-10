@@ -504,12 +504,9 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
     const styles = stylesheet;
     const navigateToSession = useNavigateToSession();
     const [actionsAnchor, setActionsAnchor] = React.useState<SessionActionsAnchor | null>(null);
-    const baseStatus = STATUS_PALETTE[session.state];
-    // Mod 11: use the same green (#34C759) as the rest of the app for unread results,
-    // not the iOS blue that overlaps with the `thinking` state.
-    const status = session.hasUnread
-        ? { ...baseStatus, color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: baseStatus.isConnected }
-        : baseStatus;
+    // Unread is a state of its own (green) since 2026-09-10 — the ladder in
+    // sessionFacts.ts places it; nothing is painted over the palette here.
+    const status = STATUS_PALETTE[session.state];
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
@@ -521,12 +518,10 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
     // and any state it had not been taught fell through to "online" while the
     // dot showed that state's colour — the sidebar text contradicting the
     // session it described.
-    const statusTextWithBg = session.hasUnread
-        ? t('status.unread')
-        : statusTextFor(session.state, session.facts, {
-            vibing: vibingMessage,
-            lastSeen: t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) }),
-        });
+    const statusTextWithBg = statusTextFor(session.state, session.facts, {
+        vibing: vibingMessage,
+        lastSeen: t('status.lastSeen', { time: formatLastSeen(session.activeAt!, false) }),
+    });
 
     const handlePress = React.useCallback(() => {
         navigateToSession(session.id);

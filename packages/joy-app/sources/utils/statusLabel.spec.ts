@@ -9,7 +9,7 @@ import { sessionFacts, type SessionState, type SessionFacts } from '@/sync/sessi
 
 const ALL_STATES: SessionState[] = [
     'disconnected', 'detached', 'blocked', 'retrying', 'compacting',
-    'stalled', 'thinking', 'tasks', 'agents', 'waiting', 'permission_required',
+    'stalled', 'thinking', 'tasks', 'agents', 'waiting', 'permission_required', 'unread',
 ];
 
 const words = { vibing: 'brewing…', lastSeen: 'last seen 5m ago' };

@@ -14,13 +14,16 @@ import {
  * pane-owning prompt, so `blocked` is a deliberate divergence, asserted
  * separately below rather than smuggled past this oracle.
  */
-function legacyState(s: SessionFactsInput, isOnline: boolean): SessionState {
+function legacyState(s: SessionFactsInput, isOnline: boolean, unread: boolean): SessionState {
     const hasPermissions = !!(s.agentState?.requests && Object.keys(s.agentState.requests).length > 0);
     if (isOnline && s.metadata?.joy__state === 'detached') return 'detached';
     if (!isOnline) return 'disconnected';
+    // 2026-09-10: a permission request outranks a retry/compaction (amber
+    // first), and UNREAD is a state below amber and above anything active.
+    if (hasPermissions) return 'permission_required';
+    if (unread) return 'unread';
     if (s.metadata?.joy__retry) return 'retrying';
     if (s.metadata?.joy__compacting) return 'compacting';
-    if (hasPermissions) return 'permission_required';
     if (s.thinking || (isOnline && s.metadata?.joy__thinking != null)) return 'thinking';
     if (s.metadata?.joy__agents && s.metadata.joy__agents.total > 0) return 'agents';
     if (s.metadata?.joy__tasks && s.metadata.joy__tasks.total > 0) return 'tasks';
@@ -35,8 +38,9 @@ const PERMS = [null, { 'req-1': {} }];
 const THINKING = [true, false];
 const MIRROR = [null, { since: 0 }];
 const COUNTS = [null, { done: 0, total: 0 }, { done: 1, total: 3 }];
+const UNREAD = [false, true];
 
-function* everyCombination(): Generator<{ session: SessionFactsInput; online: boolean }> {
+function* everyCombination(): Generator<{ session: SessionFactsInput; online: boolean; unread: boolean }> {
     const now = Date.now();
     for (const online of ONLINE)
         for (const joy__state of LIFECYCLE)
@@ -46,9 +50,10 @@ function* everyCombination(): Generator<{ session: SessionFactsInput; online: bo
                         for (const thinking of THINKING)
                             for (const joy__thinking of MIRROR)
                                 for (const joy__agents of COUNTS)
-                                    for (const joy__tasks of COUNTS) {
+                                    for (const joy__tasks of COUNTS)
+                                    for (const unread of UNREAD) {
                                         yield {
-                                            online,
+                                            online, unread,
                                             session: {
                                                 thinking,
                                                 // Online is presence + freshness; make the pair agree with
@@ -69,9 +74,9 @@ describe('statusState is the ladder that storage.ts and sessionUtils.ts each had
     it('agrees with the previous inline implementation on every combination', () => {
         let checked = 0;
         const disagreements: string[] = [];
-        for (const { session, online } of everyCombination()) {
-            const got = statusState(sessionFacts(session, online));
-            const want = legacyState(session, online);
+        for (const { session, online, unread } of everyCombination()) {
+            const got = statusState(sessionFacts(session, online, { unread }));
+            const want = legacyState(session, online, unread);
             if (got !== want) {
                 disagreements.push(`${JSON.stringify({ online, ...session.metadata, thinking: session.thinking })}: ${got} ≠ ${want}`);
             }
@@ -79,7 +84,7 @@ describe('statusState is the ladder that storage.ts and sessionUtils.ts each had
         }
         expect(disagreements).toEqual([]);
         // Guard the guard: a generator that silently yields nothing would pass.
-        expect(checked).toBe(2 * 4 * 2 * 2 * 2 * 2 * 2 * 3 * 3);
+        expect(checked).toBe(2 * 4 * 2 * 2 * 2 * 2 * 2 * 3 * 3 * 2);
     });
 
     it('a pane-owning prompt wins from every state we can still hear from', () => {
@@ -88,12 +93,12 @@ describe('statusState is the ladder that storage.ts and sessionUtils.ts each had
         // is true, if something is waiting on a human at the terminal that is
         // what the badge says — unless we cannot reach the session at all, or
         // Claude itself is gone, which are both worse news.
-        for (const { session, online } of everyCombination()) {
+        for (const { session, online, unread } of everyCombination()) {
             const blocked = {
                 ...session,
                 metadata: { ...session.metadata, joy__dialog: { title: 'Switch model?', options: ['Yes', 'No'] } },
             };
-            const got = statusState(sessionFacts(blocked, online));
+            const got = statusState(sessionFacts(blocked, online, { unread }));
             const expected = !online ? 'disconnected'
                 : session.metadata?.joy__state === 'detached' ? 'detached'
                 : 'blocked';

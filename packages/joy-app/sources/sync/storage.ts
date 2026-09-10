@@ -122,7 +122,10 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
     // twice, kept in step by a comment — and had already drifted apart over the
     // thinking predicate. Both now project the same derived facts; the online
     // reading stays each caller's own (the header debounces it, this does not).
-    const facts = sessionFacts(session, isOnline);
+    // Unread is a per-device fact (which sessions you have opened), so it is
+    // supplied here rather than read off the session: the ladder turns it into
+    // the `unread` state, green, below the amber "needs you" states.
+    const facts = sessionFacts(session, isOnline, { unread: unreadSessionIds?.has(session.id) ?? false });
     const state = statusState(facts);
 
     return {

@@ -402,12 +402,9 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
 const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: SessionRowData; selected?: boolean; showBorder?: boolean }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
-    const baseStatus = STATUS_PALETTE[session.state];
-    // Mod 11: use the same green (#34C759) as the rest of the app for unread results,
-    // not the iOS blue that overlaps with the `thinking` state.
-    const status = session.hasUnread
-        ? { ...baseStatus, color: '#34C759', dotColor: '#34C759', isPulsing: false, isConnected: baseStatus.isConnected }
-        : baseStatus;
+    // Unread is a state of its own (green) since 2026-09-10; `waiting` is grey
+    // in the palette. Nothing is painted over it here any more.
+    const status = STATUS_PALETTE[session.state];
     const navigateToSession = useNavigateToSession();
     const swipeableRef = React.useRef<Swipeable | null>(null);
     const swipeEnabled = Platform.OS !== 'web';
@@ -454,9 +451,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     const renderLeadingIndicator = () => {
         let indicator: React.ReactNode = null;
 
-        if (session.hasUnread) {
-            indicator = <StatusDot color={status.dotColor} isPulsing={false} />;
-        } else if (session.state === 'waiting' && session.hasDraft) {
+        if (session.state === 'waiting' && session.hasDraft) {
             indicator = (
                 <Ionicons
                     name="pencil"
@@ -464,13 +459,11 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                     color={theme.colors.textSecondary}
                 />
             );
-        } else if (session.state === 'waiting') {
-            indicator = <StatusDot color={theme.colors.textSecondary} isPulsing={false} />;
         } else {
-            // Every other state (thinking=blue, tasks=orange, compacting=purple,
-            // retrying/permission=orange, detached=red, …) shows its configured
-            // STATUS_PALETTE color. Previously only thinking/permission got a dot,
-            // so background-task and compaction sessions showed NO indicator.
+            // The palette colour, every state: unread green, waiting grey,
+            // thinking blue, tasks teal, agents pink, compacting purple,
+            // retrying/stalled amber, detached red. This branch used to hold
+            // the "read is grey" rule by hand; the palette holds it now.
             indicator = <StatusDot color={status.dotColor} isPulsing={status.isPulsing} />;
         }
 

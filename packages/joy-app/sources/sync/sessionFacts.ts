@@ -69,6 +69,10 @@ export interface QueueFacts {
 export interface SessionFacts {
     /** Can we hear from it? Supplied by the caller — see `sessionFacts`. */
     online: boolean;
+    /** Finished work this device has not looked at yet. A per-device fact
+     *  (which sessions you have opened), so the caller supplies it — the list
+     *  does, the session screen never does (you are looking at it). */
+    unread: boolean;
     lifecycle: Lifecycle;
     turn: TurnPhase;
     /** Attempt counts, present exactly when `turn === 'retrying'`. */
@@ -182,12 +186,13 @@ function turnOf(session: SessionFactsInput): TurnPhase {
  * hook with a clock, the other a pure builder — so it stays the caller's
  * decision, and everything downstream of it is shared.
  */
-export function sessionFacts(session: SessionFactsInput, online: boolean): SessionFacts {
+export function sessionFacts(session: SessionFactsInput, online: boolean, opts: { unread?: boolean } = {}): SessionFacts {
     const m = session.metadata;
     const retry = m?.joy__retry ?? null;
     const q = m?.joy__queue ?? null;
     return {
         online,
+        unread: opts.unread === true,
         lifecycle: lifecycleOf(m?.joy__state),
         turn: turnOf(session),
         retry: retry ? { attempt: retry.attempt, total: retry.total } : null,
@@ -233,7 +238,7 @@ export function liveFacts(session: SessionFactsInput): SessionFacts {
  */
 export type SessionState =
     | 'disconnected' | 'detached' | 'blocked' | 'retrying' | 'compacting'
-    | 'stalled' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required';
+    | 'stalled' | 'thinking' | 'tasks' | 'agents' | 'waiting' | 'permission_required' | 'unread';
 
 /**
  * The ladder — ONE implementation, where there were two.
@@ -262,10 +267,17 @@ export type SessionState =
 export function statusState(facts: SessionFacts): SessionState {
     if (facts.online && facts.lifecycle === 'detached') return 'detached';
     if (!facts.online) return 'disconnected';
+    // Amber first — it is stopped until you do something. Then unread: work
+    // finished that you have not seen outranks whatever the session is doing
+    // now (Faraz, 2026-09-10: "amber at top, then unread, then active, then
+    // read, then error, then offline"). Before this, unread was painted over
+    // the state by three components each in their own way, and `waiting` and
+    // unread shared one green, so a read idle session looked unread.
     if (facts.blocked) return 'blocked';
+    if (facts.permission) return 'permission_required';
+    if (facts.unread) return 'unread';
     if (facts.turn === 'retrying') return 'retrying';
     if (facts.turn === 'compacting') return 'compacting';
-    if (facts.permission) return 'permission_required';
     if (facts.stalled) return 'stalled';
     if (facts.turn === 'thinking') return 'thinking';
     if (facts.agents) return 'agents';

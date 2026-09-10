@@ -510,6 +510,16 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- **Unread is a state, and read is grey.** `unread` is a `SessionState` of its
+  own (sessionFacts.ts): the list supplies the per-device unread fact and the
+  ladder places it below the amber "needs you" states and above anything
+  active. `waiting` (online, idle, seen) is grey; green belongs to unread
+  alone. The pinned order and the collapsed-section dot follow the same
+  reading order, top to bottom: amber (permission, login/dialog) → green
+  (unread) → active (blue/teal/pink/purple, pulsing) → read (grey) → error
+  (stalled, retrying, detached) → offline (light grey). Before 2026-09-10
+  three components each painted "unread" over the palette by hand and
+  `waiting` shared unread's green, so a read idle session looked unread.
 - Every harness defaults to its own no-prompts mode: claude/agy `bypassPermissions`,
   codex and opencode `yolo`, pi `default` (which never asks). The daemon's
   capability table is the single source (`defaultPermissionModeFor`); a create

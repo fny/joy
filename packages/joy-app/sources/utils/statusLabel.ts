@@ -50,6 +50,7 @@ export function statusHeadline(state: SessionState, facts: SessionFacts, words: 
         case 'agents': return t('status.agentsRunning', facts.agents ?? { done: 0, total: 0 });
         case 'tasks': return t('status.tasksCompleted', facts.tasks ?? { done: 0, total: 0 });
         case 'waiting': return t('status.online');
+        case 'unread': return t('status.unread');
     }
 }
 
