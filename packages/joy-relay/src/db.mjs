@@ -208,23 +208,6 @@ const MIGRATIONS = [
   // poll consumes the request; later polls with the same public key get no
   // token. Answered requests also age out fast (see accounts.sweepPairings).
   `ALTER TABLE auth_requests ADD COLUMN consumed_at TIMESTAMPTZ;`,
-  // Account settings: ONE sealed blob per account, with a CAS version.
-  //
-  // Until now the app's "synced" settings were nothing of the kind — the
-  // client queued a delta, cleared the queue and never sent it, because no
-  // endpoint survived the happy-server retirement. A pin made on a phone was
-  // invisible on a laptop, and the schema said otherwise.
-  //
-  // The relay stores the ciphertext and the version and reads neither: the
-  // blob is sealed with the account key, exactly like machine metadata.
-  `
-  CREATE TABLE account_settings (
-    account_id TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    version INT NOT NULL DEFAULT 1,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
-  `,
   // 007 — attachment references become a JOIN TABLE (#58): one blob may be
   // cited by several prompts (a re-upload dedupes to the same id, a second
   // message reuses it), and the single `referenced_by` column kept only the
@@ -255,6 +238,31 @@ const MIGRATIONS = [
   ALTER TABLE auth_requests ADD COLUMN challenge TEXT;
   ALTER TABLE auth_requests ADD COLUMN relay_secret TEXT;
   ALTER TABLE auth_requests ADD COLUMN proven_at TIMESTAMPTZ;
+  `,
+  // 009 — account settings: ONE sealed blob per account, with a CAS version.
+  //
+  // Until now the app's "synced" settings were nothing of the kind — the
+  // client queued a delta, cleared the queue and never sent it, because no
+  // endpoint survived the happy-server retirement. A pin made on a phone was
+  // invisible on a laptop, and the schema said otherwise.
+  //
+  // The relay stores the ciphertext and the version and reads neither: the
+  // blob is sealed with the account key, exactly like machine metadata.
+  //
+  // APPEND-ONLY, and this one is why: _migrations tracks applied migrations by
+  // their INDEX in this array, so inserting a migration in the middle shifts
+  // every later one onto an index the database already recorded as done. The
+  // runner then re-runs a migration that has already been applied and dies on
+  // it (`42701`, duplicate column) — which is exactly what a mid-array insert
+  // of this block did to the live relay on 2026-09-10. New migrations go HERE,
+  // at the end, always.
+  `
+  CREATE TABLE account_settings (
+    account_id TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    version INT NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
   `,
 ];
 
