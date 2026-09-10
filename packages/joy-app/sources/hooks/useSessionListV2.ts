@@ -3,9 +3,10 @@
  * reads today, plus two things — sessions you have pinned, and machine
  * sections you can collapse.
  *
- * The active block at the top is untouched, and so are the rows. What changes
- * is that the sessions BELOW it are grouped by machine instead of by date,
- * under the same section headers, with a chevron.
+ * The active block and the rows themselves are untouched. What changes is
+ * that Pinned sits above the active block, and the sessions below it are
+ * grouped by machine instead of by date, under the same section headers,
+ * with a chevron.
  *
  * Built here rather than in the store because the pins and the collapse set
  * are preferences: a store-side rebuild would have to be re-triggered by every
@@ -17,7 +18,7 @@ import { storage, sessionRowDataFor, useLocalSetting, useSetting, type SessionLi
 import { useShallow } from 'zustand/react/shallow';
 import { isSessionInActiveGroup } from '@/sync/sessionLiveness';
 import { hiddenFromList, liveFacts } from '@/sync/sessionFacts';
-import { buildListLayout, partitionForList, type ListSession } from '@/sync/sessionListModel';
+import { buildListLayout, partitionForList, type ListSection, type ListSession } from '@/sync/sessionListModel';
 import { t } from '@/text';
 
 interface Row extends ListSession { id: string }
@@ -53,23 +54,14 @@ export function useSessionListV2(): SessionListViewItem[] | null {
         }));
         const { pins, active, rest } = partitionForList({ sessions: rows, pinned, hideInactive });
 
-        const items: SessionListViewItem[] = [];
-        if (active.length > 0) {
-            items.push({
-                type: 'active-sessions',
-                sessions: active
-                    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-                    .map((r) => sessionRowDataFor(r.session, unread)),
-            });
-        }
-
         const machineName = (id: string | null): string => {
             if (!id) return t('sidebar.noMachine');
             const m = machines[id];
             return m?.metadata?.displayName || m?.metadata?.host || id;
         };
 
-        for (const section of buildListLayout({ sessions: [...pins, ...rest], pinned, collapsed })) {
+        const items: SessionListViewItem[] = [];
+        const emit = (section: ListSection<Row>) => {
             items.push({
                 type: 'header',
                 title: section.kind === 'pinned' ? t('sidebar.pinned') : machineName(section.machineId),
@@ -79,11 +71,33 @@ export function useSessionListV2(): SessionListViewItem[] | null {
                 collapsed: section.collapsed,
                 worstState: section.collapsed ? section.worstState : null,
             });
-            if (section.collapsed) continue;
+            if (section.collapsed) return;
             for (const row of section.sessions) {
                 const session = sessions[row.id];
                 if (session) items.push({ type: 'session', session: sessionRowDataFor(session, unread) });
             }
+        };
+
+        // Pinned goes ABOVE the active block, not below it. A pin is the one
+        // thing in this list whose position you chose yourself; anything that
+        // can push it down — and the active block grows and shrinks on its
+        // own — means the pin no longer answers "where is it".
+        const sections = buildListLayout({ sessions: [...pins, ...rest], pinned, collapsed });
+        for (const section of sections) {
+            if (section.kind === 'pinned') emit(section);
+        }
+
+        if (active.length > 0) {
+            items.push({
+                type: 'active-sessions',
+                sessions: active
+                    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+                    .map((r) => sessionRowDataFor(r.session, unread)),
+            });
+        }
+
+        for (const section of sections) {
+            if (section.kind !== 'pinned') emit(section);
         }
         return items;
     }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive]);
