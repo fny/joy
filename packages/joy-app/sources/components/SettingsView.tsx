@@ -247,6 +247,12 @@ export const SettingsView = React.memo(function SettingsView() {
                     onPress={() => router.push('/settings/machines' as any)}
                 />
                 <Item
+                    title="Automations"
+                    subtitle="Saved work: a folder, a prompt and a trigger"
+                    icon={<Ionicons name="repeat-outline" size={29} color={theme.colors.accents.pink} />}
+                    onPress={() => router.push('/settings/automations' as any)}
+                />
+                <Item
                     title="Relays"
                     subtitle={relayNameForUrl(getServerUrl())}
                     icon={<Ionicons name="git-network-outline" size={29} color={theme.colors.accents.indigo} />}

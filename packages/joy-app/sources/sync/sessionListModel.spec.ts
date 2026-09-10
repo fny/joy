@@ -179,9 +179,9 @@ describe('partitionForList — the two ways pinning silently did nothing', () =>
 });
 
 describe('automation runs are placed before everything else', () => {
-    const part = (over) =>
+    const part = (over: Partial<Parameters<typeof partitionForList>[0]>) =>
         partitionForList({ sessions: [], pinned: [], hideInactive: false, ...over });
-    const ids = (xs) => xs.map((x) => x.id);
+    const ids = (xs: ListSession[]) => xs.map((x) => x.id);
 
     it('a running run goes to its own bucket, not the active block', () => {
         const p = part({ sessions: [s({ id: 'run', active: true, automation: 'running' }), s({ id: 'ordinary', active: true })] });

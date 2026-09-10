@@ -357,6 +357,23 @@ every relay; machines register per account.
   Reveal them from the app with **Show headless**, a toggle below Show
   archived on the same rule: it appears only when there is something to
   reveal, and stays while they are shown so there is a way back.
+- **Automations** (`joy automation …`, Settings → Automations): a folder, a
+  prompt and a trigger, and the runs they produce. A run IS a headless joy
+  session, which is what makes the visibility rules fall out: while it runs it
+  shows in an Automations section (collapsed by default); when it succeeds the
+  marker clears and headless hiding reclaims the row, so there is no retention
+  rule anywhere; when it FAILS it stays above Pinned until dismissed. A run
+  fails the moment it needs a human — `blocked:login` (its own code: one
+  expired sign-in fails every automation on a machine), `blocked:trust`,
+  `blocked:permission`, `agent_died`, `stalled` — because unattended work that
+  quietly waits is worse than work that never ran. Triggers replace cron
+  entirely (`manual`, `turn_done`, `session_state`, `machine_online`,
+  `automation_done`), so there is no clock, no timezone and no catch-up
+  policy; a session an automation produced fires no triggers, which closes the
+  loop both `turn_done` and `automation_done` make easy to write. The spec is
+  sealed under the target machine's key, so the CLI authors only for its own
+  machine and `run --wait` exits with the outcome — which is how a script, CI,
+  or another agent uses one.
 - **Agent arguments** (`joy new <dir> [joy flags] -- <args for the agent>`):
   everything after `--` goes to the AGENT, so a flag they share — `--model`
   — can mean the agent's. The separator is split off BEFORE joy parses its

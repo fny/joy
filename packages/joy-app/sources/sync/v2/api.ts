@@ -102,6 +102,37 @@ export interface V2Machine {
     leaseAlive: boolean;
 }
 
+export interface V2Automation {
+    id: string;
+    machineId: string;
+    directory: string;
+    name: string;
+    enabled: boolean;
+    /** Sealed under the machine's spawn-spec key; opaque unless this device
+     *  can derive that machine's key. */
+    spec: string;
+    specVersion: number;
+    lastRunAt: number | null;
+    createdAt: number;
+    updatedAt: number;
+    triggers: Array<{ kind: string; filter: string }>;
+    latestRun?: V2AutomationRun | null;
+}
+
+export interface V2AutomationRun {
+    id: string;
+    automationId: string;
+    state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+    triggerKind: string;
+    sessionId: string | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    acknowledgedAt: number | null;
+    startedAt: number | null;
+    finishedAt: number | null;
+    createdAt: number;
+}
+
 export interface V2SessionState {
     sessionId: string;
     revision: string;
@@ -156,6 +187,29 @@ export const v2 = {
      *  without a second round trip. */
     putAccountSettings: (settings: string, expectedVersion: number): Promise<{ settings: string; version: number }> =>
         v2fetch('POST', '/account/settings', { settings, expectedVersion }),
+    // ── automations ────────────────────────────────────────────────────────
+    // A folder, a prompt and a trigger, and the runs they produce. `spec` is
+    // a SpawnSpec sealed under the TARGET MACHINE's key — the relay stores it
+    // and cannot read it, and neither can any other machine's daemon.
+    listAutomations: (): Promise<{ automations: V2Automation[] }> => v2fetch('GET', '/automations'),
+    getAutomation: (id: string): Promise<{ automation: V2Automation }> => v2fetch('GET', `/automations/${id}`),
+    createAutomation: (body: {
+        name: string; machineId: string; directory: string; spec: string;
+        triggers: Array<{ kind: string; filter?: string }>; enabled?: boolean;
+    }): Promise<{ automation: V2Automation }> => v2fetch('POST', '/automations', body),
+    patchAutomation: (id: string, body: Partial<{
+        name: string; directory: string; machineId: string; enabled: boolean;
+        spec: string; expectedSpecVersion: number; triggers: Array<{ kind: string; filter?: string }>;
+    }>): Promise<{ automation: V2Automation }> => v2fetch('PATCH', `/automations/${id}`, body),
+    deleteAutomation: (id: string) => v2fetch('DELETE', `/automations/${id}`),
+    runAutomation: (id: string): Promise<{ run: V2AutomationRun; skipped?: boolean }> =>
+        v2fetch('POST', `/automations/${id}/runs`, {}),
+    automationRuns: (id: string, limit?: number): Promise<{ runs: V2AutomationRun[] }> =>
+        v2fetch('GET', `/automations/${id}/runs${limit ? `?limit=${limit}` : ''}`),
+    /** Failures nobody has dismissed — the sidebar's top tier. */
+    automationFailures: (): Promise<{ failures: Array<V2AutomationRun & { automationName: string }> }> =>
+        v2fetch('GET', '/automations/failures'),
+    acknowledgeAutomationRun: (runId: string) => v2fetch('POST', `/automation-runs/${runId}/ack`, {}),
     registerPushToken: (token: string) => v2fetch('POST', '/push-tokens', { token }),
     sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),
     // The full option set the new-session screen can set. Keep in sync with the
