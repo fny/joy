@@ -5004,6 +5004,14 @@ export class Session {
           if (blockType === "text") {
             const text = String(block.text || "").trim();
             if (text) this.#relay.send(encodeTextEvent(text, opts));
+          } else if (blockType === "thinking") {
+            // Extended thinking is forwarded too, flagged so the app can fold
+            // it: a turn that runs for an hour on tool calls alone otherwise
+            // shows nothing but Terminal chips while Claude is narrating the
+            // whole time in blocks the app never saw (fny 4477e540, 2026-09-10:
+            // 81 thinking blocks, 130 tool calls, 0 text in 77 minutes).
+            const text = String(block.thinking || "").trim();
+            if (text) this.#relay.send(encodeTextEvent(text, { ...opts, thinking: true }));
           } else if (blockType === "tool_use") {
             const callId = String(block.id || crypto.randomUUID());
             this.#openTools.set(callId, this.#turn.turnId); // track for tool-call-end

@@ -478,6 +478,11 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- Extended thinking reaches the app: the daemon forwards Claude's `thinking`
+  blocks as text events flagged `thinking: true`, and the chat shows each as a
+  collapsed italic row (tap to read) — Settings → Features → *Show thinking*
+  turns them off. Without this a turn that ran for an hour on tool calls
+  alone showed nothing but Terminal chips while Claude narrated throughout.
 - `/steer` (and `/btw`, `/title`, `/login-code`, `/joy-prompt`) sent while
   the agent is busy go over the MACHINE TUNNEL (`joy-send`), not as a relay
   turn: the relay serialises turns per session, so a relay-queued steer was

@@ -25,6 +25,7 @@ export default function FeaturesSettingsScreen() {
     // are personal-build features, matching the other plain-string rows above.
     const [chatHistoryLimit, setChatHistoryLimit] = useSettingMutable('joy__chatHistoryLimit');
     const [doubleTapEnabled, setDoubleTapEnabled] = useSettingMutable('joy__doubleTapEnabled');
+    const [showThinking, setShowThinking] = useLocalSettingMutable('showThinking');
 
     const handleChatHistoryLimit = async () => {
         const value = await Modal.prompt(
@@ -116,6 +117,18 @@ export default function FeaturesSettingsScreen() {
                     detail={chatHistoryLimit != null ? `${chatHistoryLimit}` : 'off'}
                     onPress={handleChatHistoryLimit}
                     rightElement={chatHistoryLimit != null ? limitWithClear(String(chatHistoryLimit), 'Turn off chat history limit', () => setChatHistoryLimit(null)) : undefined}
+                />
+                <Item
+                    title="Show thinking"
+                    subtitle="The agent's extended-thinking blocks as collapsed rows — tap one to read it. A long turn of tool calls otherwise shows nothing"
+                    icon={<Ionicons name="bulb-outline" size={29} color="#AF52DE" />}
+                    rightElement={
+                        <Switch
+                            value={!!showThinking}
+                            onValueChange={setShowThinking}
+                        />
+                    }
+                    showChevron={false}
                 />
                 <Item
                     title="Double tap"

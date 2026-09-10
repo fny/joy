@@ -84,6 +84,8 @@
 
 - **/steer reaches a busy agent now.** It was sent the same way as any message — as a turn queued on the relay — and the relay hands a session one turn at a time, so a steer waited behind whatever the agent was already doing; on a long tool call it sat "pending" for minutes and then arrived after the thing it was meant to steer. While the agent is busy, steers (and /btw, /title, /login-code, /joy-prompt) now go straight to the daemon over the machine tunnel, which types them into the live terminal at once. If the tunnel is down they take the old path.
 
+- **You can see what the agent is thinking.** A turn that runs on tool calls alone used to show nothing but Terminal chips — one session went 77 minutes with 81 thinking blocks, 130 tool calls and not a word to you. The daemon now forwards Claude's extended-thinking blocks, and the chat shows each as a collapsed one-line row you can tap to read. Settings → Features → *Show thinking* turns them off. Needs the updated daemon.
+
 
 # Sep 9 — Reading stays put
 

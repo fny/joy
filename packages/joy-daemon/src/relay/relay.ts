@@ -1199,8 +1199,11 @@ export function encodeTurnStart(opts: { turn: string; claudeUuid?: string; time?
   return sessionEnvelope({ t: 'turn-start' }, opts);
 }
 
-export function encodeTextEvent(text: string, opts: { turn: string; claudeUuid?: string; time?: number }): WireRecord {
-  return sessionEnvelope({ t: 'text', text }, opts);
+/** A text event; `thinking: true` marks an extended-thinking block, which the
+ *  app renders as a collapsed "Thinking" row rather than as the reply. */
+export function encodeTextEvent(text: string, opts: { turn: string; claudeUuid?: string; time?: number; thinking?: boolean }): WireRecord {
+  const { thinking, ...rest } = opts;
+  return sessionEnvelope(thinking ? { t: 'text', text, thinking: true } : { t: 'text', text }, rest);
 }
 
 export function encodeToolCallStart(opts: {

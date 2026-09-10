@@ -5,7 +5,7 @@ import { MarkdownView } from "./markdown/MarkdownView";
 import { t } from '@/text';
 import { Message, UserTextMessage, AgentTextMessage, ToolCallMessage } from "@/sync/typesMessage";
 import { Metadata } from "@/sync/storageTypes";
-import { storage, useAllSessions } from "@/sync/storage";
+import { storage, useAllSessions, useLocalSetting } from "@/sync/storage";
 import { Typography } from '@/constants/Typography';
 import { hasJoyTags, splitJoySegments } from "@/utils/joyImg";
 import { JoyFileChip } from "@/components/JoyFileChip";
@@ -392,6 +392,26 @@ function GenericBlockChip({ tag }: { tag: string }) {
   return <HarnessBlockRow icon="cube-outline" iconColor={theme.colors.textSecondary} title={tag} />;
 }
 
+function ThinkingRow({ text }: { text: string }) {
+  const { theme } = useUnistyles();
+  const show = useLocalSetting('showThinking');
+  const [open, setOpen] = React.useState(false);
+  if (!show) return null;
+  const body = text.replace(/^\*+|\*+$/g, '').trim();
+  const firstLine = body.split('\n').find((l) => l.trim()) ?? '';
+  return (
+    <Pressable onPress={() => setOpen((v) => !v)} style={styles.thinkingRow} accessibilityRole="button" accessibilityLabel={open ? 'Collapse thinking' : 'Expand thinking'}>
+      <View style={styles.thinkingHeader}>
+        <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={12} color={theme.colors.textSecondary} style={{ marginTop: 3 }} />
+        <Ionicons name="bulb-outline" size={12} color={theme.colors.textSecondary} style={{ marginLeft: 4, marginRight: 6, marginTop: 3 }} />
+        <Text style={[styles.thinkingText, { color: theme.colors.textSecondary }]} numberOfLines={open ? undefined : 1}>
+          {open ? body : firstLine}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
 function AgentTextBlock(props: {
   message: AgentTextMessage;
   sessionId: string;
@@ -399,9 +419,11 @@ function AgentTextBlock(props: {
 }) {
   const handleOptionPress = useOptionPress(props.sessionId); // failures are surfaced + retained (#231)
 
-  // Hide thinking messages
+  // Thinking: a collapsed row (Settings → Features → Show thinking), so a turn
+  // that runs on tool calls alone still shows what the agent is reasoning
+  // about. The daemon forwards these flagged; the reducer wraps them in *…*.
   if (props.message.isThinking) {
-    return null;
+    return <ThinkingRow text={props.message.text} />;
   }
 
   // Compaction boundary marker → divider.
@@ -536,6 +558,9 @@ function ToolCallBlock(props: {
 }
 
 const styles = StyleSheet.create((theme) => ({
+  thinkingRow: { paddingHorizontal: 16, paddingVertical: 4 },
+  thinkingHeader: { flexDirection: 'row', alignItems: 'flex-start' },
+  thinkingText: { flex: 1, fontSize: 13, fontStyle: 'italic', lineHeight: 18, ...Typography.default() },
   messageContainer: {
     flexDirection: 'row',
     justifyContent: 'center',

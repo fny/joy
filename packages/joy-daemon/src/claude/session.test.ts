@@ -400,6 +400,13 @@ test("agent event falls back to a fresh timestamp when time omitted", () => {
   expect((rec.content.data as any).time).toBeGreaterThanOrEqual(before);
 });
 
+test("encodeTextEvent: a thinking block carries thinking:true, a reply carries no flag", () => {
+  const think = encodeTextEvent("let me check", { turn: "turn-1", thinking: true }) as any;
+  expect(think.content.data.ev).toMatchObject({ t: "text", text: "let me check", thinking: true });
+  const say = encodeTextEvent("done", { turn: "turn-1" }) as any;
+  expect(say.content.data.ev).toEqual({ t: "text", text: "done" });
+});
+
 import { Session } from "./session";
 import { ledgerFor, SessionEndedError, LedgerWriteError } from "../domain/ledger";
 

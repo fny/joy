@@ -268,6 +268,23 @@ test("#477 a content-block user prompt (text + image) is mirrored like a string 
   s.end("killed");
 });
 
+test("an assistant thinking block is forwarded as a text event flagged thinking", () => {
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("think"), driver, { claudeSessionId: "sid" });
+  const { rs, sent } = relayStub("rs-think");
+  s.attachRelay(rs, true);
+  s.onTranscriptEntry({
+    type: "assistant", uuid: "a-think", timestamp: new Date().toISOString(),
+    message: { role: "assistant", model: "m", content: [{ type: "thinking", thinking: "the cascade test needs the org filter" }, { type: "text", text: "On it." }] },
+  } as any);
+  const texts = sent.filter((r: any) => r?.content?.data?.ev?.t === "text").map((r: any) => r.content.data.ev);
+  expect(texts).toEqual([
+    { t: "text", text: "the cascade test needs the org filter", thinking: true },
+    { t: "text", text: "On it." },
+  ]);
+  s.end("killed");
+});
+
 // ── #110 ─────────────────────────────────────────────────────────────────────
 
 test("#110 a <task-notification> user entry is never the 5xx retry prompt", () => {
