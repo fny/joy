@@ -31,6 +31,8 @@ import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../doma
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, canonicalCwd } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, relaySessionFor, type WireRecord } from "./relay";
+import { automationRunIdOf } from "../domain/automationRun";
+import { saveWindowRecord } from "../domain/windowRecord";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
 import { coordinatorFor } from "../domain/coordinator";
@@ -130,6 +132,9 @@ interface Lease { leaseId: string; leaseToken: string; epoch: string }
 
 interface WorkOffer {
   deliveryId: string; commandId: string; sessionId: string;
+  /** The creation intent. Namespaced `automation-run:<id>` when this spawn IS
+   *  an automation run — see domain/automationRun.ts. */
+  clientIntentId?: string | null;
   kind: "spawn_session" | "prompt";
   turnId?: string; ciphertext?: string | null;
   attachments?: Array<{ id: string; size: number }>;
@@ -227,6 +232,13 @@ export interface SpawnSpec {
   /** Clone (or reuse) this repository into cwd before launching — the same
    *  contract as the `create` op's gitUrl (#151). */
   gitUrl?: string;
+  /** The first message, delivered locally right after the spawn — the same
+   *  thing `joy new -m` does. An automation's prompt travels here because the
+   *  spec is sealed under the machine key and the relay must not read it. */
+  prompt?: string;
+  /** Keep the session out of the app's list (`joy new --headless`). Every
+   *  automation run sets this: nobody is watching it. */
+  headless?: boolean;
 }
 
 /** The spawn spec on the wire is either the sealed `v2e1:` envelope under the
@@ -1631,6 +1643,30 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         });
         if (session.id !== chosen) writeSpawnIntent(offer.commandId, session.id); // create() returned an existing session instead
         spawning.add(localId = session.id);
+        // An automation run is an ordinary headless session plus a watchdog.
+        // The relay says so by namespacing the creation intent, so nothing on
+        // the wire had to change; from here the session reports its own
+        // outcome and fails itself the moment it needs a human.
+        const runId = automationRunIdOf(offer.clientIntentId);
+        if (runId || spec.headless) {
+          saveWindowRecord(session.id, {
+            ...(runId ? { automationRunId: runId } : {}),
+            ...(spec.headless ? { headless: true } : {}),
+          });
+          const rs = relaySessionFor(session.id);
+          if (runId) rs?.setAutomationRun(runId);
+          if (spec.headless) rs?.setHeadless(true);
+        }
+        // The first message, exactly as `joy new -m` delivers it. An
+        // automation's prompt rides the sealed spec because the relay must
+        // not be able to read what an automation does.
+        if (spec.prompt && spec.prompt.trim()) {
+          try {
+            queueFor(session).accept(spec.prompt, { source: "rpc", mirrorToRelay: true });
+          } catch (e) {
+            log(`spawn ${session.id}: first message not accepted — ${String(e)}`);
+          }
+        }
       }
       // Already bound to ANOTHER relay row (an announce raced this spawn, or
       // an earlier daemon generation bound it and this command was re-offered):

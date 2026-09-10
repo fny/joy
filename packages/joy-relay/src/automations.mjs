@@ -22,6 +22,9 @@ const MAX_TRIGGERS = 16;
 const RUN_HISTORY_DEFAULT = 50;
 const RUN_HISTORY_MAX = 200;
 
+/** Shared with the daemon (domain/automationRun.ts) — a wire constant. */
+export const AUTOMATION_INTENT_PREFIX = 'automation-run:';
+
 const TRIGGER_KINDS = new Set(['manual', 'turn_done', 'session_state', 'machine_online', 'automation_done']);
 /** A run that has not reached a terminal state yet. */
 const LIVE_RUN_STATES = ['queued', 'running'];
@@ -248,7 +251,11 @@ export function createAutomations(db, core, notify) {
       const created = await core.createSession(accountId, actorId, {
         mode: 'spawn',
         daemonId: a.machine_id,
-        creationIntentId: prepared.runId, // idempotency: one run, one spawn
+        // Namespaced so the daemon can tell an automation run from an
+        // ordinary spawn without a schema change or a new wire field: the
+        // intent id IS the run, and saying so costs nothing. Still unique,
+        // so the relay's existing idempotency still means one run, one spawn.
+        creationIntentId: `${AUTOMATION_INTENT_PREFIX}${prepared.runId}`,
         spawnSpec: a.spec,
       });
       const { rows: [r] } = await db.query(

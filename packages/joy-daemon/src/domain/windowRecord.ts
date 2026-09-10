@@ -27,6 +27,11 @@ import type { JoyHandoffInfo } from "../relay/relay";
 export interface WindowRecord {
   /** joy session id (the tmux window suffix j-<id>). */
   id: string;
+  /** This session IS an automation run (domain/automationRun.ts). Persisted
+   *  because the run's outcome must still be reportable after a daemon
+   *  restart — a run stuck in `running` blocks every later firing of its
+   *  automation, since an overlapping one is skipped. */
+  automationRunId?: string;
   /** Per-session tmux server label (-L <socket>), or absent/null for a
    *  legacy window on the shared server (pre per-session-servers). */
   socket?: string | null;
@@ -273,7 +278,7 @@ export function loadWindowRecord(id: string, baseDir = defaultStateDir()): Windo
  *  when the state dir refused the write. */
 export function saveWindowRecord(
   id: string,
-  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string; permissionMode?: string; effort?: string }; piSettings?: { model?: string; sessionId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; agySettings?: { model?: string; conversationId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; handoff?: JoyHandoffInfo | null; notificationsMuted?: boolean; headless?: boolean; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
+  patch: { launchCwd?: string; socket?: string | null; v2SessionId?: string; v2SessionKey?: string; claudeSessionId?: string; titleLockedByUser?: boolean; userTitle?: string | null; lastAiTitle?: string; agentTitle?: string | null; agent?: "claude" | "codex" | "opencode" | "pi" | "agy"; codexThreadId?: string; codexSocketPath?: string; codexServerPid?: number; codexSettings?: { model?: string; effort?: string; permissionMode?: string; developerInstructions?: string; config?: Record<string, string> }; opencodeSessionId?: string; opencodeServerPid?: number; opencodeServerStart?: string; opencodeServerMarker?: string; opencodeSettings?: { model?: string; providerID?: string; permissionMode?: string; effort?: string }; piSettings?: { model?: string; sessionId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; agySettings?: { model?: string; conversationId?: string; effort?: string; permissionMode?: string; extraArgs?: string }; handoff?: JoyHandoffInfo | null; notificationsMuted?: boolean; headless?: boolean; automationRunId?: string; claudePermissionMode?: string; hookLaunchId?: string; v2AnnounceEnvelope?: string },
   baseDir = defaultStateDir(),
 ): boolean {
   try {
@@ -299,6 +304,7 @@ export function saveWindowRecord(
       handoff: patch.handoff === null ? undefined : patch.handoff ?? prev?.handoff,
       notificationsMuted: patch.notificationsMuted ?? prev?.notificationsMuted,
       headless: patch.headless ?? prev?.headless,
+      automationRunId: patch.automationRunId ?? prev?.automationRunId,
       titleLockedByUser: patch.titleLockedByUser ?? prev?.titleLockedByUser,
       userTitle: patch.userTitle === null ? undefined : patch.userTitle ?? prev?.userTitle,
       lastAiTitle: patch.lastAiTitle ?? prev?.lastAiTitle,

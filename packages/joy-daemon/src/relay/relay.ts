@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { hostname, platform, cpus, freemem, totalmem, loadavg, homedir } from 'node:os';
 import { joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey } from '../paths';
 import { publishV2Card, v2SessionIdFor } from './v2Card';
+import { classifyRunFailure } from '../domain/automationRun';
 import tweetnacl from 'tweetnacl';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -534,6 +535,27 @@ export class RelayClient {
    * targeted. Title/body are NOT end-to-end encrypted — no conversation
    * content in them.
    */
+  /**
+   * Tell the relay how an automation run ended.
+   *
+   * Fire-and-forget on purpose: a run's outcome is worth reporting but never
+   * worth wedging a session over, and the relay treats terminal states as
+   * final, so a retry that arrives late is harmless — it is refused rather
+   * than rewriting history.
+   */
+  async reportAutomationRun(runId: string, body: { state: string; errorCode?: string; errorMessage?: string }): Promise<boolean> {
+    try {
+      const res = await fetch(this.url(`/automation-runs/${encodeURIComponent(runId)}/report`), {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify(body),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   async sendPush(title: string, body: string, data?: Record<string, unknown>): Promise<{ sent: number }> {
     const res = await fetch(this.url('/push'), {
       method: 'POST',
@@ -739,6 +761,58 @@ export class RelaySession {
   // Serializes metadata writes for this session (see mergeMetadata).
   private metadataChain: Promise<void> = Promise.resolve();
 
+  // ── automation run watchdog ───────────────────────────────────────────────
+  //
+  // Set when this session was spawned BY an automation (the nucleus lane reads
+  // the namespaced creation intent). While it is set, anything that means "a
+  // human has to do something" ends the run as a FAILURE rather than leaving
+  // it waiting — which is the entire value of unattended work, since nobody is
+  // watching to notice.
+  private automationRunId: string | null = null;
+  private automationReported = false;
+
+  /** Mark this session as one automation run. Idempotent. */
+  setAutomationRun(runId: string | null): void {
+    if (runId && this.automationRunId !== runId) {
+      this.automationRunId = runId;
+      this.automationReported = false;
+    }
+  }
+
+  get automationRun(): string | null { return this.automationRunId; }
+
+  /**
+   * Report a terminal outcome for this session's run, at most once. Later
+   * calls are dropped locally as well as refused by the relay: the first
+   * reason a run stopped is the true one, and a block that is followed by the
+   * session being torn down should not be overwritten by the teardown.
+   */
+  reportAutomationOutcome(state: 'succeeded' | 'failed' | 'cancelled', failure?: { code: string; message: string }): void {
+    const runId = this.automationRunId;
+    if (!runId || this.automationReported) return;
+    this.automationReported = true;
+    void this.client.reportAutomationRun(runId, {
+      state,
+      errorCode: failure?.code,
+      errorMessage: failure?.message,
+    });
+  }
+
+  /** Re-run the watchdog over whatever the card now says. Called after every
+   *  write that could mean a human is needed. */
+  private checkAutomationRun(): void {
+    if (!this.automationRunId || this.automationReported) return;
+    const m = this.metadata as Record<string, any>;
+    const failure = classifyRunFailure({
+      login: m?.joy__login ?? null,
+      dialog: m?.joy__dialog ?? null,
+      approval: m?.joy__codexApproval ?? null,
+      state: typeof m?.joy__state === 'string' ? m.joy__state : null,
+      stalled: !!m?.joy__stalled,
+    });
+    if (failure) this.reportAutomationOutcome('failed', failure);
+  }
+
   /** Read-only snapshot of the current card metadata (nucleus lane bind). */
   get metadataSnapshot(): Record<string, unknown> | null { return this.metadata; }
 
@@ -841,6 +915,7 @@ export class RelaySession {
    */
   async updateJoyState(state: JoyLifecycleState): Promise<void> {
     await this.mergeKey('joy__state', state, (cur) => cur === state);
+    this.checkAutomationRun();
   }
 
   /**
@@ -914,10 +989,12 @@ export class RelaySession {
 
   async updateLogin(info: JoyLoginInfo | null): Promise<void> {
     await this.mergeKey('joy__login', info);
+    this.checkAutomationRun();
   }
 
   async updateCodexApproval(info: JoyCodexApprovalInfo | null): Promise<void> {
     await this.mergeKey('joy__codexApproval', info);
+    this.checkAutomationRun();
   }
 
   /** Single-flight latest-desired-value reconciler. Callers assert the desired
@@ -945,6 +1022,7 @@ export class RelaySession {
         const want = this.desiredDialog;
         if (eq(want, this.metadata?.joy__dialog as JoyDialogInfo | null | undefined)) return;
         await this.mergeMetadata({ joy__dialog: want }).catch(() => false);
+        this.checkAutomationRun();
         // loop: re-check a desired value that moved while writing
       }
     } finally {
@@ -1149,6 +1227,11 @@ export class RelaySession {
    *  Title is the location "<host>/<folder>" (e.g. "faraz.vip/proj") so you see
    *  WHICH session at a glance; body is the reply snippet (or the per-kind reason). */
   notify(kind: 'done' | 'permission' | 'question', snippet?: string): void {
+    // A run ends when its turn does. This is the ONLY success path: everything
+    // else the watchdog sees is a failure, so a run that neither finishes nor
+    // blocks stays `running` and is caught by the stall check rather than
+    // being declared good by default.
+    if (kind === 'done') this.reportAutomationOutcome('succeeded');
     if (this.muted) return;
     // Headless suppresses "finished" and nothing else: permission and question
     // are the session asking for a human, which is exactly when it must speak.
@@ -1374,6 +1457,10 @@ export function createRelaySession(
   const rs = new RelaySession({ client, relaySessionId: opts.id, metadata });
   if (record?.notificationsMuted) rs.setNotificationsMuted(true);
   if (record?.headless) rs.setHeadless(true);
+  // A daemon restart must not strand a run: an automation whose previous run
+  // is still `running` skips every later firing, so the watchdog has to come
+  // back with the session.
+  if (record?.automationRunId) rs.setAutomationRun(record.automationRunId);
   holders.set(opts.id, rs);
   return rs;
 }
