@@ -94,6 +94,13 @@ const AGY_MODES: HarnessPermissionMode[] = [
   { key: "plan", name: "plan", description: "--mode plan: planning without edits; approvals still skipped." },
 ];
 
+// Permission DEFAULTS are the harness's own "never asks" mode everywhere
+// (Faraz, 2026-09-10: "we want yolo-esque modes to be the default across all
+// sessions"). A Codex session created without a mode used to land in the
+// collaborative default — approvals on request, workspace-write sandbox —
+// while the app's agent defaults said yolo; the user believed they were on
+// yolo and Codex could neither leave the sandbox nor ask to. pi's `default`
+// already never asks; agy's headless mode cannot.
 export const HARNESS_CAPABILITIES: Record<Harness, HarnessCapabilities> = {
   claude: {
     harness: "claude",
@@ -109,7 +116,7 @@ export const HARNESS_CAPABILITIES: Record<Harness, HarnessCapabilities> = {
     harness: "codex",
     models: { pick: true, source: "live", switchLive: true },
     effort: { levels: ["low", "medium", "high", "xhigh"], default: "medium", perModel: true, switchLive: true },
-    permissions: { modes: CODEX_MODES, default: "default", switchLive: true },
+    permissions: { modes: CODEX_MODES, default: "yolo", switchLive: true },
     resume: { continueLast: true, byId: true, pastList: true, fork: true },
     extraArgs: "config",
     fallbackModel: false,
@@ -121,7 +128,7 @@ export const HARNESS_CAPABILITIES: Record<Harness, HarnessCapabilities> = {
     // A model's reasoning variants (its `variants` keys in the catalog) are
     // its effort levels; the table itself lists none.
     effort: { levels: [], default: null, perModel: true, switchLive: true },
-    permissions: { modes: OPENCODE_MODES, default: "default", switchLive: true },
+    permissions: { modes: OPENCODE_MODES, default: "yolo", switchLive: true },
     resume: { continueLast: true, byId: true, pastList: true, fork: false },
     extraArgs: null,
     fallbackModel: false,
@@ -168,6 +175,13 @@ export function normalizePermissionMode(h: Harness, mode: string | undefined): s
   if (mode === "default" && h === "agy") return "bypassPermissions";
   if (mode === "acceptEdits" && h === "codex") return "default";
   return mode;
+}
+
+/** The mode a harness runs in when none is named: the table's default, i.e.
+ *  its own no-prompts mode. registry.create fills an absent mode from here so
+ *  every create path (app, CLI, teleport, handoff) agrees. */
+export function defaultPermissionModeFor(h: Harness): string | undefined {
+  return HARNESS_CAPABILITIES[h].permissions?.default ?? undefined;
 }
 
 /** The permission-mode keys a harness accepts on create, or null when it has

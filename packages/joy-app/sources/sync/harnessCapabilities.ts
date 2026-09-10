@@ -101,7 +101,7 @@ export const FALLBACK_HARNESS_CAPABILITIES: Record<HarnessId, HarnessCapabilitie
         harness: 'codex',
         models: { pick: true, source: 'live', switchLive: false },
         effort: { levels: ['low', 'medium', 'high', 'xhigh'], default: 'medium', perModel: true, switchLive: false },
-        permissions: { modes: CODEX_MODES, default: 'default', switchLive: true },
+        permissions: { modes: CODEX_MODES, default: 'yolo', switchLive: true },
         resume: { continueLast: true, byId: true, pastList: false, fork: false },
         extraArgs: 'config',
         fallbackModel: false,

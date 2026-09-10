@@ -478,6 +478,12 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- Every harness defaults to its own no-prompts mode: claude/agy `bypassPermissions`,
+  codex and opencode `yolo`, pi `default` (which never asks). The daemon's
+  capability table is the single source (`defaultPermissionModeFor`); a create
+  with no mode named — app, CLI, handoff — fills from it. Before 2026-09-10 a
+  Codex session created from the app landed in `default` (approvals on request,
+  workspace-write sandbox) while the app's agent defaults said yolo.
 - `/model <x>` and `/effort <x>` no longer stall on Claude Code's own confirm:
   the daemon answers the "Switch model?" dialog with Enter when the highlighted
   row reads *Yes* (otherwise it surfaces it, the folder-trust lesson) and

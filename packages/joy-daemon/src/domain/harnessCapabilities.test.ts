@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { HARNESSES, HARNESS_CAPABILITIES, effortLevelsFor, isHarness, permissionModesFor } from "./harnessCapabilities";
+import { HARNESSES, HARNESS_CAPABILITIES, defaultPermissionModeFor, effortLevelsFor, isHarness, permissionModesFor } from "./harnessCapabilities";
 
 describe("HARNESS_CAPABILITIES", () => {
   it("names every harness, once, under its own key", () => {
     for (const h of HARNESSES) expect(HARNESS_CAPABILITIES[h].harness).toBe(h);
     expect(Object.keys(HARNESS_CAPABILITIES).sort()).toEqual([...HARNESSES].sort());
+  });
+
+  it("every harness defaults to its own no-prompts mode (yolo across the board)", () => {
+    expect(defaultPermissionModeFor("claude")).toBe("bypassPermissions");
+    expect(defaultPermissionModeFor("codex")).toBe("yolo");
+    expect(defaultPermissionModeFor("opencode")).toBe("yolo");
+    expect(defaultPermissionModeFor("pi")).toBe("default");       // pi's default never asks
+    expect(defaultPermissionModeFor("agy")).toBe("bypassPermissions");
   });
 
   it("a default permission mode is always one of the listed modes", () => {

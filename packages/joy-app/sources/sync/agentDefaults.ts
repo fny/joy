@@ -40,7 +40,7 @@ const codeAgentDefaults: Record<AgentKey, AgentDefaultConfig> = {
     openclaw: { permissionMode: 'default', modelMode: 'default', effortLevel: null },
     // opencode v1 has no permission-mode surface; model default mirrors the
     // daemon's curated allowlist (joy-opencode-models).
-    opencode: { permissionMode: 'default', modelMode: 'accounts/fireworks/models/kimi-k3', effortLevel: null },
+    opencode: { permissionMode: 'yolo', modelMode: 'accounts/fireworks/models/kimi-k3', effortLevel: null },
     // pi (bare v1): daemon default is fireworks kimi-k3; no permission surface.
     pi: { permissionMode: 'default', modelMode: 'default', effortLevel: null },
     // Antigravity (agy): headless with permissions skipped; model is the CLI's own default.

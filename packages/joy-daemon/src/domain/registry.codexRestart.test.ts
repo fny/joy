@@ -94,3 +94,14 @@ test("#561: a codex restart carries the session's config overrides — live sess
   expect(loadWindowRecord(s1.id)?.codexSettings?.config).toEqual(overrides);
   s3.end("killed");
 }, 20_000);
+
+test("a codex session created with NO mode lands in yolo — the capability table's default, not the collaborative one", async () => {
+  const { SessionRegistry } = await import("./registry");
+  const { loadWindowRecord } = await import("./windowRecord");
+  const reg = new SessionRegistry({ tmuxSession: "joy-test", relayClient: null });
+  const s = await reg.create({ agent: "codex", cwd });
+  await vi.waitFor(() => expect(s.status).toBe("active"));
+  expect(s.detectPermissionMode()).toBe("yolo");
+  expect(loadWindowRecord(s.id)?.codexSettings?.permissionMode).toBe("yolo");
+  s.end("killed");
+});

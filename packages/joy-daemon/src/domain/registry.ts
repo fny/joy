@@ -30,7 +30,7 @@ import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
 import { claimTranscript, claimProject, claimedTranscriptPaths, transcriptClaims, type TranscriptClaim } from "./transcriptClaims";
-import { effortLevelsFor, normalizePermissionMode, permissionModesFor, type Harness } from "./harnessCapabilities";
+import { defaultPermissionModeFor, effortLevelsFor, normalizePermissionMode, permissionModesFor, type Harness } from "./harnessCapabilities";
 import { splitShellWords } from "./shellWords";
 import { forkAgyConversation, forkCodexThread, forkPiSession } from "./forkHarness";
 import { resolveOpencodeModel } from "../opencode/models";
@@ -560,9 +560,9 @@ export class SessionRegistry {
     const harness: Harness = opts.agent ?? "claude";
     if (harness !== "claude") {
       // `yolo: false` is claude's opt-out; for the others the table's default
-      // stands when no mode is named. Aliases (a CLI's bypassPermissions)
-      // become the harness's own key first.
-      opts = { ...opts, permissionMode: normalizePermissionMode(harness, opts.permissionMode) };
+      // (the harness's own no-prompts mode) fills in when no mode is named.
+      // Aliases (a CLI's bypassPermissions) become the harness's own key first.
+      opts = { ...opts, permissionMode: normalizePermissionMode(harness, opts.permissionMode) ?? defaultPermissionModeFor(harness) };
       validateHarnessLaunchOptions(harness, opts);
       // forkSession + resume_id for a harness with no native fork: copy the
       // history under a fresh id first (what the fork op does for a live
@@ -1084,8 +1084,9 @@ export class SessionRegistry {
       tmuxSocket: sockLabel,
       model: opts.model,
       effort: opts.effort,
-      // Fail closed (finding #1): absent mode → collaborative default, not yolo.
-      permissionMode: opts.permissionMode ?? "default",
+      // create() has already filled an absent mode from the capability table;
+      // this fallback only guards a direct construction.
+      permissionMode: opts.permissionMode ?? defaultPermissionModeFor("codex") ?? "default",
       status: "starting",
       startedAt: Date.now(),
       // resume_id (a codex thread id) → thread/resume instead of thread/start.
