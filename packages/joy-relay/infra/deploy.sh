@@ -36,7 +36,7 @@ if [[ "$TARGET" == "mcp" ]]; then
     sudo cp ~/joy-relay/infra/joy-mcp.service /etc/systemd/system/
     sudo cp ~/joy-relay/infra/Caddyfile /etc/caddy/Caddyfile
     sudo systemctl daemon-reload
-    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null && sudo systemctl reload caddy
+    sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null 2>&1 && sudo systemctl reload caddy
     if [ -f ~/.joy-mcp/account.json ]; then sudo systemctl enable joy-mcp.service > /dev/null 2>&1 || true; sudo systemctl restart joy-mcp.service; sleep 2; systemctl is-active joy-mcp; curl -fsS --max-time 5 http://127.0.0.1:3107/healthz; echo; else echo "joy-mcp installed; not paired yet — run: cd ~/joy-mcp && node cli.mjs pair --relay https://joy.voltai.party:4997"; fi'
   RELAY_KEY="$(relay_key)"
   probe 4997 && echo "https://joy.voltai.party:4997 OK (relay still answering)" || { echo "4997 FAILED" >&2; exit 1; }
