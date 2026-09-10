@@ -374,3 +374,81 @@ describe('session card publish (daemon PATCH)', () => {
     expect(r.status).toBe(400);
   });
 });
+
+describe('account settings', () => {
+  it('is empty at version 0 before anything is written', async () => {
+    const fresh = await loginNew();
+    const r = await call('GET', '/joy/v2/account/settings', { token: fresh.token });
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ settings: null, version: 0 });
+  });
+
+  it('stores a blob and hands it back, version by version', async () => {
+    const me = await loginNew();
+    const put = await call('POST', '/joy/v2/account/settings', {
+      token: me.token, body: { settings: 'sealed-one', expectedVersion: 0 },
+    });
+    expect(put.status).toBe(200);
+    expect(put.json).toEqual({ settings: 'sealed-one', version: 1 });
+
+    const again = await call('POST', '/joy/v2/account/settings', {
+      token: me.token, body: { settings: 'sealed-two', expectedVersion: 1 },
+    });
+    expect(again.json).toEqual({ settings: 'sealed-two', version: 2 });
+
+    const get = await call('GET', '/joy/v2/account/settings', { token: me.token });
+    expect(get.json).toEqual({ settings: 'sealed-two', version: 2 });
+  });
+
+  it('a stale write loses, and is told what it lost to in the same answer', async () => {
+    const me = await loginNew();
+    await call('POST', '/joy/v2/account/settings', { token: me.token, body: { settings: 'from-phone', expectedVersion: 0 } });
+    // A second device that still believes the account is at version 0.
+    const stale = await call('POST', '/joy/v2/account/settings', {
+      token: me.token, body: { settings: 'from-laptop', expectedVersion: 0 },
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.json.error).toBe('settings_version_mismatch');
+    // Carries the winner, so the loser can merge without another round trip.
+    expect(stale.json).toMatchObject({ version: 1, settings: 'from-phone' });
+
+    const get = await call('GET', '/joy/v2/account/settings', { token: me.token });
+    expect(get.json.settings).toBe('from-phone');
+  });
+
+  it('writes unconditionally when no version is named', async () => {
+    const me = await loginNew();
+    await call('POST', '/joy/v2/account/settings', { token: me.token, body: { settings: 'a', expectedVersion: 0 } });
+    const r = await call('POST', '/joy/v2/account/settings', { token: me.token, body: { settings: 'b' } });
+    expect(r.json).toEqual({ settings: 'b', version: 2 });
+  });
+
+  it('is per account — one account never sees another\'s blob', async () => {
+    const a = await loginNew();
+    const b = await loginNew();
+    await call('POST', '/joy/v2/account/settings', { token: a.token, body: { settings: 'a-only', expectedVersion: 0 } });
+    const seen = await call('GET', '/joy/v2/account/settings', { token: b.token });
+    expect(seen.json).toEqual({ settings: null, version: 0 });
+  });
+
+  it('needs a token', async () => {
+    const r = await call('GET', '/joy/v2/account/settings', { token: null });
+    expect(r.status).toBe(401);
+  });
+
+  it('refuses an empty or oversized blob rather than storing it', async () => {
+    const me = await loginNew();
+    expect((await call('POST', '/joy/v2/account/settings', { token: me.token, body: {} })).status).toBe(400);
+    expect((await call('POST', '/joy/v2/account/settings', { token: me.token, body: { settings: '' } })).status).toBe(400);
+    const huge = 'x'.repeat(256 * 1024 + 1);
+    expect((await call('POST', '/joy/v2/account/settings', { token: me.token, body: { settings: huge } })).status).toBe(413);
+  });
+
+  it('rejects a non-integer expectedVersion instead of coercing it', async () => {
+    const me = await loginNew();
+    const r = await call('POST', '/joy/v2/account/settings', {
+      token: me.token, body: { settings: 'x', expectedVersion: 'soon' },
+    });
+    expect(r.status).toBe(400);
+  });
+});

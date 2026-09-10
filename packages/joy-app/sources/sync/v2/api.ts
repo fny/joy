@@ -147,6 +147,15 @@ export const v2 = {
         error?: string;
     }> => v2fetch('PATCH', `/machines/${id}`, body),
     accountProfile: (): Promise<Record<string, unknown>> => v2fetch('GET', '/account/profile'),
+    /** The account's settings blob, sealed with the account key. `version` 0
+     *  means this account has never written any. */
+    accountSettings: (): Promise<{ settings: string | null; version: number }> =>
+        v2fetch('GET', '/account/settings'),
+    /** Conditional replace. On a version clash the relay answers 409 with the
+     *  CURRENT version and blob in the error body, so the caller can merge
+     *  without a second round trip. */
+    putAccountSettings: (settings: string, expectedVersion: number): Promise<{ settings: string; version: number }> =>
+        v2fetch('POST', '/account/settings', { settings, expectedVersion }),
     registerPushToken: (token: string) => v2fetch('POST', '/push-tokens', { token }),
     sessionState: (id: string): Promise<V2SessionState> => v2fetch('GET', `/sessions/${id}`),
     // The full option set the new-session screen can set. Keep in sync with the

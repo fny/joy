@@ -569,8 +569,59 @@ export function createAccounts(db, tokens, {
     return { sent, targeted: list.length, errors };
   }
 
+  // ── account settings: one sealed blob, CAS-versioned ────────────────────
+
+  /** A generous ceiling: the whole settings object sealed and base64'd. A
+   *  client with a runaway list should be told, not silently truncated. */
+  const SETTINGS_MAX = 256 * 1024;
+
+  /** Version 0 means "this account has never written settings" — the client
+   *  uses it as the expectedVersion for its first push. */
+  async function getSettings(accountId) {
+    const { rows: [row] } = await db.query(
+      `SELECT value, version FROM account_settings WHERE account_id = $1`, [accountId]);
+    return { settings: row?.value ?? null, version: row ? Number(row.version) : 0 };
+  }
+
+  /**
+   * Replace the blob. With `expectedVersion` it is a conditional replace: any
+   * other version answers 409 and CARRIES the current blob and version, so a
+   * client that lost the race can merge and retry in one more round trip
+   * instead of fetching again to find out what it lost.
+   */
+  async function putSettings(accountId, { settings, expectedVersion } = {}) {
+    if (typeof settings !== 'string' || settings.length === 0) throw new ApiError(400, 'missing_settings');
+    if (settings.length > SETTINGS_MAX) throw new ApiError(413, 'settings_too_large');
+    const expect = expectedVersion === undefined || expectedVersion === null ? null : Number(expectedVersion);
+    if (expect !== null && !Number.isInteger(expect)) throw new ApiError(400, 'bad_expected_version');
+    return db.tx(async (t) => {
+      const { rows: [existing] } = await t.query(
+        `SELECT value, version FROM account_settings WHERE account_id = $1`, [accountId]);
+      const current = existing ? Number(existing.version) : 0;
+      if (expect !== null && expect !== current) {
+        // The object form of `code` IS the response body (v2.mjs), so the
+        // loser of a race gets the winner's blob in the same round trip.
+        throw new ApiError(409, {
+          error: 'settings_version_mismatch',
+          version: current,
+          settings: existing?.value ?? null,
+        });
+      }
+      if (!existing) {
+        const { rows: [created] } = await t.query(
+          `INSERT INTO account_settings (account_id, value, version) VALUES ($1, $2, 1)
+           RETURNING value, version`, [accountId, settings]);
+        return { settings: created.value, version: Number(created.version) };
+      }
+      const { rows: [updated] } = await t.query(
+        `UPDATE account_settings SET value = $2, version = version + 1, updated_at = now()
+         WHERE account_id = $1 RETURNING value, version`, [accountId, settings]);
+      return { settings: updated.value, version: Number(updated.version) };
+    });
+  }
+
   return {
-    login, accountExists, profile,
+    login, accountExists, profile, getSettings, putSettings,
     pairingRequest, pairingStatus, pairingRespond, sweepPairings,
     listMachines, getMachine, upsertMachine, patchMachine, deleteMachine,
     registerPushToken, listPushTokens, deletePushToken, sendPush,

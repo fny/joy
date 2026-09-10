@@ -26,7 +26,7 @@ import { reconcileDisabledPushState, syncCurrentPushToken } from './pushRegistra
 import { SyncInitGate } from './initGate';
 import { Platform, AppState } from 'react-native';
 import { NormalizedMessage, normalizeRawMessage } from './typesRaw';
-import { Settings, settingsParse } from './settings';
+import { Settings, settingsParse, settingsToSyncPayload } from './settings';
 import { profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings } from './persistence';
 import { parseToken } from '@/utils/parseToken';
@@ -165,6 +165,10 @@ class Sync {
                 this.pushTokenSync.invalidate();
                 this.sessionsSync.invalidate();
                 this.nativeUpdateSync.invalidate();
+                // Settings too: they are pulled, not pushed to us, so without
+                // this a pin made on another device only arrived if THIS
+                // device happened to change a setting of its own.
+                this.settingsSync.invalidate();
                 // Refetch the session the user is looking at. sessionsSync above
                 // restores metadata but NOT messages (and it preserves thinking),
                 // so a chat that missed `update`/`ephemeral` events while the app
@@ -1015,10 +1019,70 @@ class Sync {
     // Settings are device-local: joy-relay has no account-settings store, so
     // "sync" just retires the pending delta — applySettingsLocal/applySettingsRaw
     // already persisted the merged settings on this device.
+    /**
+     * Settings, both directions, against ONE sealed blob on the relay.
+     *
+     * This used to clear the pending queue and return — the upload half never
+     * survived the happy-server retirement, and there was no endpoint to
+     * upload to. Every "synced" setting was device-local in fact while the
+     * schema said otherwise: a pin made on a phone was invisible on a laptop.
+     *
+     * Pull first, then replay the local deltas ON TOP, then push. That order
+     * is what makes two devices adding a pin each end with both pins rather
+     * than whichever wrote last. The relay never sees any of it: the blob is
+     * sealed with the account key, like machine metadata.
+     */
     private syncSettings = async () => {
-        if (Object.keys(this.pendingSettings).length === 0) return;
+        if (!this.credentials) return;
+
+        const remote = await v2.accountSettings();
+        await this.absorbRemoteSettings(remote.settings, remote.version);
+
+        const pending = this.pendingSettings;
+        if (Object.keys(pending).length === 0) return;
+
+        // The pull may have replaced the store with the relay's copy, so the
+        // deltas this device has not yet pushed go back on top before we seal.
+        storage.getState().applySettingsLocal(pending);
+
+        try {
+            await this.pushSettings(storage.getState().settingsVersion ?? 0);
+        } catch (e) {
+            // Lost a race with another device. The relay hands back the
+            // winner's blob with the 409, so one merge and one retry settles
+            // it — no second fetch to discover what we lost to.
+            if (!(e instanceof V2ApiError) || e.status !== 409) throw e;
+            const body = e.body as { version?: number; settings?: string | null } | null;
+            await this.absorbRemoteSettings(body?.settings ?? null, body?.version ?? 0, { force: true });
+            storage.getState().applySettingsLocal(pending);
+            await this.pushSettings(body?.version ?? 0);
+        }
+
         this.pendingSettings = {};
         savePendingSettings(this.pendingSettings);
+    }
+
+    /** Open a sealed blob from the relay and adopt it, unless what we hold is
+     *  already at least as new. `force` is for the 409 path, where the version
+     *  we are adopting can equal one we have already seen locally. */
+    private absorbRemoteSettings = async (sealed: string | null, version: number, opts?: { force?: boolean }) => {
+        if (!sealed) return;
+        const opened = await this.encryption.decryptRaw(sealed);
+        if (!opened) return; // a blob this device cannot open: leave ours alone
+        if (opts?.force) {
+            storage.getState().applySettingsRaw(settingsParse(opened));
+            return;
+        }
+        storage.getState().applySettings(settingsParse(opened), version);
+    }
+
+    private pushSettings = async (expectedVersion: number) => {
+        const sealed = await this.encryption.encryptRaw(
+            settingsToSyncPayload(storage.getState().settings));
+        const saved = await v2.putAccountSettings(sealed, expectedVersion);
+        // Record the version the relay assigned, so the next push is
+        // conditional on the right one.
+        storage.getState().applySettings(storage.getState().settings, saved.version);
     }
 
     private fetchProfile = async () => {

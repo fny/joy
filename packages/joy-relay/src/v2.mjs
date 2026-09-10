@@ -420,6 +420,12 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   route('POST', '/auth/account/response', {}, async (ctx, m, body) => accounts.pairingRespond('account', ctx.accountId, body));
   route('GET', '/account/profile', {}, async (ctx) => accounts.profile(ctx.accountId));
 
+  // Account settings: one sealed blob the relay stores and never reads.
+  // POST with `expectedVersion` is a conditional replace; a mismatch answers
+  // 409 with the current version and blob so the client can merge and retry.
+  route('GET', '/account/settings', {}, async (ctx) => accounts.getSettings(ctx.accountId));
+  route('POST', '/account/settings', {}, async (ctx, m, body) => accounts.putSettings(ctx.accountId, body));
+
   // Machines: sealed metadata + daemonState with CAS versions; presence is
   // derived from lease liveness (see accounts.liveness).
   route('GET', '/machines', {}, async (ctx) => accounts.listMachines(ctx.accountId));
