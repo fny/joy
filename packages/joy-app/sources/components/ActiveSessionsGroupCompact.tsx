@@ -225,7 +225,7 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
                 style={{ marginRight: 10 }}
             />
             <Pressable onPress={handlePress} style={styles.machineSeparatorName} hitSlop={{ top: 8, bottom: 8 }}>
-                <Ionicons name="desktop-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 6 }} />
+                <Ionicons name="desktop-outline" size={9} color={theme.colors.textSecondary} style={{ marginRight: 6 }} />
                 <Text style={styles.machineSeparatorText} numberOfLines={1}>
                     {machineName}
                 </Text>
