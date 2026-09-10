@@ -278,7 +278,9 @@ export function createAutomations(db, core, notify) {
   async function report(accountId, runId, body = {}) {
     const state = str(body.state);
     if (!['running', 'succeeded', 'failed', 'cancelled'].includes(state)) throw new ApiError(400, 'bad_run_state');
-    return db.tx(async (t) => {
+    // Collected inside, fired outside — a chained automation spawns a session.
+    const chained = [];
+    const out = await db.tx(async (t) => {
       const { rows: [r] } = await t.query(`SELECT * FROM automation_runs WHERE id = $1`, [runId]);
       if (!r || r.account_id !== accountId) throw new ApiError(404, 'run_not_found');
       if (['succeeded', 'failed', 'cancelled'].includes(r.state)) {
@@ -290,8 +292,15 @@ export function createAutomations(db, core, notify) {
            finished_at = CASE WHEN $5 THEN now() ELSE finished_at END
          WHERE id = $1 RETURNING *`,
         [runId, state, str(body.errorCode) || null, str(body.errorMessage) || null, finished]);
+      if (finished) chained.push({ automationId: updated.automation_id, state });
       return { run: runOut(updated) };
     });
+    for (const c of chained) {
+      // `automation_done` fires with the FINISHED automation's id as the
+      // filter, so a chain is written as "when THAT one ends, run this".
+      void onEvent('automation_done', { accountId, filters: [c.automationId] });
+    }
+    return out;
   }
 
   async function listRuns(accountId, id, limit) {
@@ -323,5 +332,58 @@ export function createAutomations(db, core, notify) {
     return { run: runOut(r) };
   }
 
-  return { list, get, create, patch, remove, trigger, report, listRuns, unacknowledgedFailures, acknowledge };
+  // ── triggers ──────────────────────────────────────────────────────────────
+
+  /**
+   * An event happened; fire whatever listens for it.
+   *
+   * This is the whole scheduler. There is no clock and no cron: a trigger is a
+   * subscription to events the relay already writes, evaluated when they
+   * happen. Dropping cron dropped the timezone column, DST, and the question
+   * of what to do when a machine has been offline for a week — an interval
+   * scheduler owes 2,016 firings on reconnect, and a `machine_online` trigger
+   * owes exactly one.
+   *
+   * Never throws and never blocks the caller: core fires this after its
+   * transaction commits and ignores the result. A trigger that cannot run is
+   * recorded as a failed run, not an exception in somebody else's write.
+   */
+  async function onEvent(kind, ctx = {}) {
+    if (!TRIGGER_KINDS.has(kind) || kind === 'manual') return { fired: 0 };
+    if (!ctx.accountId) return { fired: 0 };
+    try {
+      // A session an automation PRODUCED must not fire triggers back into it.
+      // turn_done on a run whose own turn just finished is an infinite loop,
+      // and automation_done makes a cycle trivial to write by accident. One
+      // rule, checked here rather than trusted from the caller, closes both.
+      if (ctx.sessionId) {
+        const { rows: [own] } = await db.query(
+          `SELECT id FROM automation_runs WHERE session_id = $1 LIMIT 1`, [ctx.sessionId]);
+        if (own) return { fired: 0 };
+      }
+
+      // The filter narrows: a machine id for machine_online and turn_done, an
+      // automation id for automation_done. An empty filter means "any".
+      const named = [ctx.machineId, ...(ctx.filters ?? [])].filter((f) => typeof f === 'string' && f);
+      const filters = ['', ...named];
+      const { rows } = await db.query(
+        `SELECT a.id FROM automations a
+         JOIN automation_triggers t ON t.automation_id = a.id
+         WHERE a.account_id = $1 AND a.enabled = TRUE AND t.kind = $2 AND t.filter = ANY($3)`,
+        [ctx.accountId, kind, filters]);
+
+      let fired = 0;
+      for (const { id } of rows) {
+        try {
+          await trigger(ctx.accountId, ctx.actorId ?? 'automation', id, { triggerKind: kind });
+          fired++;
+        } catch { /* a disabled or vanished automation is not this event's problem */ }
+      }
+      return { fired };
+    } catch {
+      return { fired: 0 };
+    }
+  }
+
+  return { list, get, create, patch, remove, trigger, report, listRuns, unacknowledgedFailures, acknowledge, onEvent };
 }

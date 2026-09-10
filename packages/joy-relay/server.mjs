@@ -36,6 +36,10 @@ const core = createCore(db, notify);
 const tokens = await createTokenAuthority({ secret: tokenSecret(), issuers: ISSUERS });
 const accounts = createAccounts(db, tokens);
 const automations = createAutomations(db, core, notify);
+// Triggers are a subscription to events the relay already writes. Wired after
+// both exist: an automation RUN is an ordinary spawned session, so automations
+// needs core, and a direct import back would be a cycle.
+core.setAutomationHook(automations.onEvent);
 const auth = createAuth({ tokens, accounts });
 const tunnel = createTunnel({ notify });
 const attachments = createAttachments(db);

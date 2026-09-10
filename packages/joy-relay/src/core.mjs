@@ -108,6 +108,23 @@ async function findExistingIntent(t, sessionId, actorId, clientIntentId, hash) {
 }
 
 export function createCore(db, notify) {
+  /**
+   * Where automations listen. Set by the server (createAutomations) after both
+   * exist, because an automation RUN is an ordinary spawned session and so
+   * automations needs core — a hook breaks the cycle that a direct import
+   * would make.
+   *
+   * Always called AFTER the transaction commits, never inside one: firing a
+   * trigger spawns a session, and doing that inside another session's write
+   * would hold a transaction open across a spawn.
+   */
+  let automationHook = null;
+  function setAutomationHook(fn) { automationHook = fn; }
+  function fireTrigger(kind, ctx) {
+    if (!automationHook) return;
+    try { void Promise.resolve(automationHook(kind, ctx)).catch(() => {}); } catch { /* never the caller's problem */ }
+  }
+
   async function loadSession(t, sessionId, accountId) {
     const s = await one(t, `SELECT * FROM native_sessions WHERE id = $1`, [sessionId]);
     if (!s || (accountId && s.account_id !== accountId)) throw new ApiError(404, 'session_not_found');
@@ -622,6 +639,11 @@ export function createCore(db, notify) {
     });
     // A new epoch fences out the old process; anything it had in flight will
     // be rejected on write and re-resolved via reconcile.
+    //
+    // It also means the machine is BACK: a fresh lease is the only signal the
+    // relay gets that a daemon has started, so it is what `machine_online`
+    // listens to. Renewals are not — those happen every few seconds.
+    fireTrigger('machine_online', { accountId, machineId: daemonId, sessionId: null });
     return { ...lease, leaseToken: token, ttlSeconds: 20 };
   }
 
@@ -843,7 +865,11 @@ export function createCore(db, notify) {
   }
 
   async function turnFact(turnId, leaseRef, body) {
-    return withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
+    // Captured inside, fired outside: a `turn_done` trigger spawns a session,
+    // and doing that inside this transaction would hold it open across a
+    // spawn. Same shape as the `wake`/`poke` deferrals above.
+    let finished = null;
+    const out = await withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       // Centralized runtime-fact idempotency: an exact retry of ANY fact kind
       // that carries a runtimeEventId replays instead of erroring.
       if (body.runtimeEventId) {
@@ -882,12 +908,15 @@ export function createCore(db, notify) {
             throw new ApiError(400, 'bad_terminal_state');
           }
           const seq = await terminalizeTurn(t, s, turn, terminalState, body.meta, body.runtimeEventId, body.ciphertext);
+          finished = { accountId: s.account_id, sessionId: s.id, machineId: s.owner_daemon_id, terminalState };
           return { ok: true, seq };
         }
         default:
           throw new ApiError(400, 'bad_fact_type');
       }
     });
+    if (finished) fireTrigger('turn_done', finished);
+    return out;
   }
 
   /** Output the daemon produced OUTSIDE any relay turn (a prompt typed at
@@ -1155,6 +1184,7 @@ export function createCore(db, notify) {
   }
 
   return {
+    setAutomationHook,
     createSession, bindSession, acceptPrompt, acceptCancellation,
     acquireLease, renewLease, claimWork, claimControl, deliveryReceived,
     turnSubmitted, turnStarted, turnFact, sessionFact, reconcileTurn,

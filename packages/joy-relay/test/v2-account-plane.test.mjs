@@ -15,7 +15,7 @@ import { createAccounts, PAIRING_PROOF_LABEL } from '../src/accounts.mjs';
 import { createAutomations } from '../src/automations.mjs';
 import { createAuth } from '../src/auth.mjs';
 
-let server, base, db, core, notify, tokens, accounts;
+let server, base, db, core, notify, tokens, accounts, automations;
 let expoCalls;
 
 /** ed25519 identity → the base64 fields /auth expects. */
@@ -61,7 +61,8 @@ beforeAll(async () => {
   const auth = createAuth({ tokens, accounts });
   const tunnel = createTunnel({ notify });
   const attachments = createAttachments(db);
-  const automations = createAutomations(db, core, notify);
+  automations = createAutomations(db, core, notify);
+  core.setAutomationHook(automations.onEvent);
   const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, automations });
   server = http.createServer(async (req, res) => {
     if (await v2.handle(req, res)) return;
@@ -669,5 +670,95 @@ describe('automations', () => {
 
   it('needs a token', async () => {
     expect((await call('GET', '/joy/v2/automations', { token: null })).status).toBe(401);
+  });
+
+  /**
+   * Triggers are the whole scheduler: no clock, no cron, just a subscription
+   * to events the relay already writes. `onEvent` is called by core after its
+   * transaction commits.
+   */
+  describe('triggers', () => {
+    let seq = 0;
+    /** Each test gets its OWN account and machine, or automations created by
+     *  an earlier test fire too and the counts are meaningless. */
+    const inIsolation = async (body) => {
+      const fresh = await loginNew();
+      const prevApp = APP; APP = fresh;
+      try {
+        const accountId = (await call('GET', '/joy/v2/account/profile')).json.id;
+        return await body({ accountId, machine: () => `mach-trig-${++seq}` });
+      } finally { APP = prevApp; }
+    };
+
+    it('fires every enabled automation listening for the kind, and no others', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const listening = await create({ machineId, name: 'listens', triggers: [{ kind: 'machine_online' }] });
+        const other = await create({ machineId, name: 'manual only', triggers: [{ kind: 'manual' }] });
+
+        expect((await automations.onEvent('machine_online', { accountId, machineId })).fired).toBe(1);
+        expect((await call('GET', `/joy/v2/automations/${listening.id}/runs`)).json.runs).toHaveLength(1);
+        expect((await call('GET', `/joy/v2/automations/${other.id}/runs`)).json.runs).toHaveLength(0);
+      });
+    });
+
+    it('a disabled automation does not fire', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const a = await create({ machineId, triggers: [{ kind: 'machine_online' }] });
+        await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { enabled: false } });
+        expect((await automations.onEvent('machine_online', { accountId, machineId })).fired).toBe(0);
+      });
+    });
+
+    it('a filter narrows to one machine', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const mine = machine();
+        const theirs = machine();
+        for (const m of [mine, theirs]) { const d = makeDaemon(m); await d.acquire(); }
+        await create({ machineId: mine, triggers: [{ kind: 'machine_online', filter: mine }] });
+        expect((await automations.onEvent('machine_online', { accountId, machineId: theirs })).fired).toBe(0);
+        expect((await automations.onEvent('machine_online', { accountId, machineId: mine })).fired).toBe(1);
+      });
+    });
+
+    it('a session an automation PRODUCED never fires triggers — that is the loop', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const a = await create({ machineId, triggers: [{ kind: 'turn_done' }] });
+        // Its own run finishing must not fire it again, or it runs forever.
+        const { json: { run } } = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+        const before = (await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs.length;
+        expect((await automations.onEvent('turn_done', { accountId, machineId, sessionId: run.sessionId })).fired).toBe(0);
+        expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(before);
+      });
+    });
+
+    it('an ORDINARY session finishing a turn does fire it', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const a = await create({ machineId, triggers: [{ kind: 'turn_done' }] });
+        // A session nothing produced — the case turn_done exists for.
+        expect((await automations.onEvent('turn_done', { accountId, machineId, sessionId: 'some-hand-driven-session' })).fired).toBe(1);
+      });
+    });
+
+    it('manual is never fired by an event — it is the one you ask for', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        await create({ machineId, triggers: [{ kind: 'manual' }] });
+        expect((await automations.onEvent('manual', { accountId, machineId })).fired).toBe(0);
+      });
+    });
+
+    it('an unknown kind, or no account, fires nothing rather than throwing', async () => {
+      expect((await automations.onEvent('full_moon', { accountId: 'x' })).fired).toBe(0);
+      expect((await automations.onEvent('machine_online', {})).fired).toBe(0);
+    });
   });
 });
