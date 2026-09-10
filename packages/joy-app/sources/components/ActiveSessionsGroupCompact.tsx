@@ -221,13 +221,20 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
                 color={theme.colors.textSecondary}
                 style={{ marginRight: 4 }}
             />
-            <View style={styles.machineSeparatorLine} />
             <Pressable onPress={handlePress} style={styles.machineSeparatorName} hitSlop={{ top: 8, bottom: 8 }}>
-                <Ionicons name="desktop-outline" size={11} color={theme.colors.textSecondary} style={{ marginHorizontal: 6 }} />
+                <Ionicons name="desktop-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 6 }} />
                 <Text style={styles.machineSeparatorText} numberOfLines={1}>
                     {machineName}
                 </Text>
             </Pressable>
+            {/* The one rule, between the name and the numbers. It used to be
+                two, with the label centred between them — which put the label
+                wherever its own width happened to land. Three collapsed
+                machines meant three different left edges, and a collapsed row
+                is not a title over a section any more, it is a row you act on.
+                Now the name starts at a fixed indent and the rule takes what
+                is left, so alignment is structural rather than tuned. */}
+            <View style={styles.machineSeparatorLine} />
             {/* Collapsed, the row still says how much is inside and whether any
                 of it is waiting on you — folding away is not hiding. */}
             {collapsed && (
@@ -248,7 +255,6 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
                     <Text style={styles.machineLoadText} numberOfLines={1}>{ram}%</Text>
                 </View>
             )}
-            <View style={styles.machineSeparatorLine} />
         </Pressable>
     );
 });
@@ -648,6 +654,11 @@ const stylesheet = StyleSheet.create((theme) => ({
         flex: 1,
         height: StyleSheet.hairlineWidth,
         backgroundColor: theme.colors.divider,
+        // Keeps the rule off the name and the numbers at both ends, and gives
+        // it a floor so a long host name on a narrow sidebar leaves a stub
+        // rather than collapsing the rule to nothing.
+        minWidth: 12,
+        marginHorizontal: 8,
     },
     machineSeparatorText: {
         fontSize: 11,
