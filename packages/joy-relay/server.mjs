@@ -11,6 +11,7 @@ import { createNotify } from './src/notify.mjs';
 import { createAuth } from './src/auth.mjs';
 import { createTokenAuthority } from './src/tokens.mjs';
 import { createAccounts } from './src/accounts.mjs';
+import { createAutomations } from './src/automations.mjs';
 import { createGate } from './src/gate.mjs';
 import { createTunnel } from './src/tunnel.mjs';
 import { createV2Router } from './src/v2.mjs';
@@ -34,11 +35,12 @@ const notify = createNotify();
 const core = createCore(db, notify);
 const tokens = await createTokenAuthority({ secret: tokenSecret(), issuers: ISSUERS });
 const accounts = createAccounts(db, tokens);
+const automations = createAutomations(db, core, notify);
 const auth = createAuth({ tokens, accounts });
 const tunnel = createTunnel({ notify });
 const attachments = createAttachments(db);
 const VERSION = '0.2.0';
-const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, dataDir: DATA_DIR, version: VERSION });
+const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, automations, dataDir: DATA_DIR, version: VERSION });
 
 // Lease-expiry sweep: orphans running turns whose daemon lease lapsed.
 setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-relay] sweep failed:', e)); }, 5_000).unref();

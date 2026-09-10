@@ -85,7 +85,7 @@ const MSG_SELECT = `
   FROM commands c JOIN turns tu ON tu.id = c.turn_id
   WHERE c.session_id = $1 AND c.kind = 'prompt'`;
 
-export function createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, dataDir = null, version = null }) {
+export function createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, automations, dataDir = null, version = null }) {
   const startedAt = Date.now();
   const routes = [];
   const route = (method, pattern, opts, handler) =>
@@ -95,7 +95,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   route('GET', '/capabilities', { auth: false, summary: 'Relay flavor + protocol version (no auth); clients probe this before trusting a server URL' }, async () => ({
     relay: 'joy-relay',
     protocol: { major: 2, minor: 0 },
-    features: ['accounts', 'pairing', 'machines', 'push', 'sessions', 'messages', 'turns', 'cancellations', 'attachments', 'events', 'sse', 'tunnel'],
+    features: ['accounts', 'pairing', 'machines', 'push', 'sessions', 'messages', 'turns', 'cancellations', 'attachments', 'events', 'sse', 'tunnel', 'automations'],
   }));
 
   async function ownedSession(t, sessionId, accountId) {
@@ -425,6 +425,32 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   // 409 with the current version and blob so the client can merge and retry.
   route('GET', '/account/settings', {}, async (ctx) => accounts.getSettings(ctx.accountId));
   route('POST', '/account/settings', {}, async (ctx, m, body) => accounts.putSettings(ctx.accountId, body));
+
+  // Automations: a folder + a prompt + a trigger, and the runs it produces.
+  // The relay schedules and arbitrates; `spec` is sealed under the target
+  // machine's key and never read here. A run is an ordinary spawned session
+  // (core.createSession), so there is no second execution path.
+  route('GET', '/automations', { summary: 'Automations on the account, each with its latest run' },
+    async (ctx) => automations.list(ctx.accountId));
+  route('POST', '/automations', { summary: 'Create an automation (sealed spec + triggers)' },
+    async (ctx, m, body) => ({ status: 201, body: await automations.create(ctx.accountId, body) }));
+  // Failures the user has not dismissed — the sidebar's top tier. Declared
+  // BEFORE /automations/:id so the literal path is not eaten by the id regex.
+  route('GET', '/automations/failures', { summary: 'Unacknowledged automation failures' },
+    async (ctx) => automations.unacknowledgedFailures(ctx.accountId));
+  route('GET', '/automations/([\\w-]+)', {}, async (ctx, m) => automations.get(ctx.accountId, m[1]));
+  route('PATCH', '/automations/([\\w-]+)', { summary: 'Partial update; `expectedSpecVersion` makes the spec write conditional' },
+    async (ctx, m, body) => automations.patch(ctx.accountId, m[1], body));
+  route('DELETE', '/automations/([\\w-]+)', {}, async (ctx, m) => automations.remove(ctx.accountId, m[1]));
+  route('POST', '/automations/([\\w-]+)/runs', { summary: 'Fire a run now; an overlapping firing is recorded as cancelled/skipped_overlap' },
+    async (ctx, m, body) => ({ status: 201, body: await automations.trigger(ctx.accountId, ctx.actorId, m[1], body ?? {}) }));
+  route('GET', '/automations/([\\w-]+)/runs', {}, async (ctx, m, body, url) =>
+    automations.listRuns(ctx.accountId, m[1], url.searchParams.get('limit')));
+  // The daemon's word on how a run ended. Terminal states are final.
+  route('POST', '/automation-runs/([\\w-]+)/report', { summary: 'Daemon reports a run terminal state' },
+    async (ctx, m, body) => automations.report(ctx.accountId, m[1], body ?? {}));
+  route('POST', '/automation-runs/([\\w-]+)/ack', { summary: 'Dismiss a failure so it leaves the sidebar' },
+    async (ctx, m) => automations.acknowledge(ctx.accountId, m[1]));
 
   // Machines: sealed metadata + daemonState with CAS versions; presence is
   // derived from lease liveness (see accounts.liveness).

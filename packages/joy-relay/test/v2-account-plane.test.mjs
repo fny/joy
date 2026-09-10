@@ -12,6 +12,7 @@ import { createTunnel } from '../src/tunnel.mjs';
 import { createAttachments } from '../src/attachments.mjs';
 import { createTokenAuthority } from '../src/tokens.mjs';
 import { createAccounts, PAIRING_PROOF_LABEL } from '../src/accounts.mjs';
+import { createAutomations } from '../src/automations.mjs';
 import { createAuth } from '../src/auth.mjs';
 
 let server, base, db, core, notify, tokens, accounts;
@@ -60,7 +61,8 @@ beforeAll(async () => {
   const auth = createAuth({ tokens, accounts });
   const tunnel = createTunnel({ notify });
   const attachments = createAttachments(db);
-  const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts });
+  const automations = createAutomations(db, core, notify);
+  const v2 = createV2Router({ core, auth, notify, db, tunnel, attachments, accounts, automations });
   server = http.createServer(async (req, res) => {
     if (await v2.handle(req, res)) return;
     res.writeHead(599); res.end();
@@ -450,5 +452,222 @@ describe('account settings', () => {
       token: me.token, body: { settings: 'x', expectedVersion: 'soon' },
     });
     expect(r.status).toBe(400);
+  });
+});
+
+/**
+ * Automations: a folder + a prompt + a trigger, and the runs it produces.
+ *
+ * The relay never reads `spec` — it is sealed under the target machine's key —
+ * so these tests treat it as an opaque string, which is exactly how the relay
+ * treats it.
+ */
+describe('automations', () => {
+  const draft = (over = {}) => ({
+    name: 'nightly tidy',
+    machineId: 'mach-auto',
+    directory: '/srv/work',
+    spec: 'sealed-spawn-spec',
+    triggers: [{ kind: 'manual' }],
+    ...over,
+  });
+  const create = async (over = {}, token) => {
+    const r = await call('POST', '/joy/v2/automations', { body: draft(over), ...(token ? { token } : {}) });
+    expect(r.status).toBe(201);
+    return r.json.automation;
+  };
+
+  it('creates, reads back, and lists with the latest run attached', async () => {
+    const a = await create({ name: 'lint after work' });
+    expect(a).toMatchObject({ name: 'lint after work', directory: '/srv/work', enabled: true, specVersion: 1 });
+    expect(a.triggers).toEqual([{ kind: 'manual', filter: '' }]);
+
+    const one = await call('GET', `/joy/v2/automations/${a.id}`);
+    expect(one.json.automation.id).toBe(a.id);
+
+    const listed = await call('GET', '/joy/v2/automations');
+    const mine = listed.json.automations.find((x) => x.id === a.id);
+    expect(mine.latestRun).toBeNull(); // nothing has fired yet
+  });
+
+  it('refuses a draft that is missing what it cannot invent', async () => {
+    for (const over of [{ name: '' }, { machineId: '' }, { directory: '' }, { spec: '' }, { triggers: [] }]) {
+      const r = await call('POST', '/joy/v2/automations', { body: draft(over) });
+      expect(r.status).toBe(400);
+    }
+    const huge = await call('POST', '/joy/v2/automations', { body: draft({ spec: 'x'.repeat(256 * 1024 + 1) }) });
+    expect(huge.status).toBe(413);
+  });
+
+  it('refuses a trigger kind it does not know, rather than storing a dead one', async () => {
+    const r = await call('POST', '/joy/v2/automations', { body: draft({ triggers: [{ kind: 'full_moon' }] }) });
+    expect(r.status).toBe(400);
+    expect(r.json.error).toBe('bad_trigger_kind');
+  });
+
+  it('is per account — another account cannot see it, read it, or delete it', async () => {
+    const a = await create();
+    for (const [method, path] of [['GET', ''], ['DELETE', '']]) {
+      const r = await call(method, `/joy/v2/automations/${a.id}${path}`, { token: OTHER.token });
+      expect(r.status).toBe(404);
+    }
+    // Still there.
+    expect((await call('GET', `/joy/v2/automations/${a.id}`)).status).toBe(200);
+  });
+
+  it('bumps specVersion only when the spec actually changes', async () => {
+    const a = await create();
+    const renamed = await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { name: 'renamed' } });
+    expect(renamed.json.automation.specVersion).toBe(1);
+    expect(renamed.json.automation.name).toBe('renamed');
+
+    const respec = await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { spec: 'sealed-v2' } });
+    expect(respec.json.automation.specVersion).toBe(2);
+  });
+
+  it('a conditional spec write loses to a concurrent one, and says what it lost to', async () => {
+    const a = await create();
+    await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { spec: 'from-phone', expectedSpecVersion: 1 } });
+    const stale = await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { spec: 'from-laptop', expectedSpecVersion: 1 } });
+    expect(stale.status).toBe(409);
+    expect(stale.json).toMatchObject({ error: 'spec_version_mismatch', specVersion: 2 });
+  });
+
+  it('deleting takes the automation and its history, and leaves the sessions alone', async () => {
+    const d = makeDaemon('mach-auto'); await d.acquire();
+    const a = await create();
+    const run = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+    expect(run.status).toBe(201);
+    const sessionId = run.json.run.sessionId;
+    expect(sessionId).toBeTruthy();
+
+    expect((await call('DELETE', `/joy/v2/automations/${a.id}`)).status).toBe(200);
+    expect((await call('GET', `/joy/v2/automations/${a.id}`)).status).toBe(404);
+    // The work it produced is an ordinary session and survives.
+    expect((await call('GET', `/joy/v2/sessions/${sessionId}`)).status).toBe(200);
+  });
+
+  describe('runs', () => {
+    it('a manual run spawns a session and goes running', async () => {
+      const d = makeDaemon('mach-auto'); await d.acquire();
+      const a = await create();
+      const r = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      expect(r.status).toBe(201);
+      expect(r.json.run).toMatchObject({ state: 'running', triggerKind: 'manual' });
+      expect(r.json.run.sessionId).toBeTruthy();
+
+      // And the automation now reports when it last ran.
+      const one = await call('GET', `/joy/v2/automations/${a.id}`);
+      expect(one.json.automation.lastRunAt).toBeTruthy();
+    });
+
+    it('an overlapping firing is RECORDED as skipped, not silently dropped', async () => {
+      const d = makeDaemon('mach-auto'); await d.acquire();
+      const a = await create();
+      await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      const second = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      expect(second.json.skipped).toBe(true);
+      expect(second.json.run).toMatchObject({ state: 'cancelled', errorCode: 'skipped_overlap' });
+
+      // Both are in the history: a firing that did nothing still happened.
+      const runs = await call('GET', `/joy/v2/automations/${a.id}/runs`);
+      expect(runs.json.runs).toHaveLength(2);
+    });
+
+    it('a disabled automation refuses to run at all', async () => {
+      const a = await create();
+      await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { enabled: false } });
+      const r = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      expect(r.status).toBe(409);
+      expect(r.json.error).toBe('automation_disabled');
+    });
+
+    it('a spawn that cannot happen leaves the run FAILED, never queued forever', async () => {
+      // No daemon owns this machine, so createSession refuses.
+      const a = await create({ machineId: 'mach-that-does-not-exist' });
+      const r = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      expect(r.status).toBe(201);
+      expect(r.json.run.state).toBe('failed');
+      expect(r.json.run.errorCode).toBeTruthy();
+      expect(r.json.run.finishedAt).toBeTruthy();
+    });
+
+    it('the daemon reports the outcome, and a terminal state is final', async () => {
+      const d = makeDaemon('mach-auto'); await d.acquire();
+      const a = await create();
+      const { json: { run } } = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+
+      const failed = await call('POST', `/joy/v2/automation-runs/${run.id}/report`, {
+        body: { state: 'failed', errorCode: 'blocked:login', errorMessage: 'claude login expired' },
+      });
+      expect(failed.json.run).toMatchObject({ state: 'failed', errorCode: 'blocked:login' });
+
+      // A late or retried report cannot rewrite it.
+      const late = await call('POST', `/joy/v2/automation-runs/${run.id}/report`, { body: { state: 'succeeded' } });
+      expect(late.json.alreadyFinal).toBe(true);
+      expect(late.json.run.state).toBe('failed');
+    });
+
+    it('refuses a run state it does not know', async () => {
+      const d = makeDaemon('mach-auto'); await d.acquire();
+      const a = await create();
+      const { json: { run } } = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      const r = await call('POST', `/joy/v2/automation-runs/${run.id}/report`, { body: { state: 'exploded' } });
+      expect(r.status).toBe(400);
+    });
+  });
+
+  describe('failures stay until dismissed', () => {
+    // Each of these runs as its OWN account, so the failures list contains
+    // only what the test put there. A machine is owned by one account, so the
+    // machine id has to be fresh too — reusing one is 403, not a lease.
+    let machineSeq = 0;
+    const onFreshAccount = async (body) => {
+      const fresh = await loginNew();
+      const prevApp = APP; APP = fresh;
+      try { return await body(`mach-auto-${++machineSeq}`); } finally { APP = prevApp; }
+    };
+    const failOne = async (name, machineId) => {
+      const d = makeDaemon(machineId); await d.acquire();
+      const a = await create({ name, machineId });
+      const { json: { run } } = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+      await call('POST', `/joy/v2/automation-runs/${run.id}/report`, { body: { state: 'failed', errorCode: 'blocked:login' } });
+      return { a, run };
+    };
+
+    it('lists unacknowledged failures with the automation that caused them', async () => {
+      await onFreshAccount(async (machineId) => {
+        await failOne('nightly', machineId);
+        const r = await call('GET', '/joy/v2/automations/failures');
+        expect(r.json.failures).toHaveLength(1);
+        expect(r.json.failures[0]).toMatchObject({ errorCode: 'blocked:login', automationName: 'nightly' });
+      });
+    });
+
+    it('dismissing removes it from the list without touching the history', async () => {
+      await onFreshAccount(async (machineId) => {
+        const { a, run } = await failOne('nightly', machineId);
+        await call('POST', `/joy/v2/automation-runs/${run.id}/ack`, { body: {} });
+        expect((await call('GET', '/joy/v2/automations/failures')).json.failures).toHaveLength(0);
+        // Still in the run history, still failed.
+        const runs = await call('GET', `/joy/v2/automations/${a.id}/runs`);
+        expect(runs.json.runs[0]).toMatchObject({ state: 'failed', errorCode: 'blocked:login' });
+        expect(runs.json.runs[0].acknowledgedAt).toBeTruthy();
+      });
+    });
+
+    it('a succeeded run never appears as a failure', async () => {
+      await onFreshAccount(async (machineId) => {
+        const d = makeDaemon(machineId); await d.acquire();
+        const a = await create({ machineId });
+        const { json: { run } } = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
+        await call('POST', `/joy/v2/automation-runs/${run.id}/report`, { body: { state: 'succeeded' } });
+        expect((await call('GET', '/joy/v2/automations/failures')).json.failures).toHaveLength(0);
+      });
+    });
+  });
+
+  it('needs a token', async () => {
+    expect((await call('GET', '/joy/v2/automations', { token: null })).status).toBe(401);
   });
 });

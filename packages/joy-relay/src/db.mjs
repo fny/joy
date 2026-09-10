@@ -264,6 +264,52 @@ const MIGRATIONS = [
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
   `,
+  // 010 — automations: a saved intention (folder + prompt + trigger) and its
+  // runs. The relay schedules and arbitrates; it never sees the prompt, which
+  // is sealed under the target MACHINE's key (the daemon holds no account
+  // key). A run is a headless session, so `session_id` is the whole result.
+  `
+  CREATE TABLE automations (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    spec TEXT NOT NULL,
+    spec_version INT NOT NULL DEFAULT 1,
+    last_run_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX automations_by_account ON automations (account_id, enabled, updated_at DESC);
+  CREATE INDEX automations_by_machine ON automations (machine_id, enabled);
+
+  CREATE TABLE automation_triggers (
+    automation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('manual','turn_done','session_state','machine_online','automation_done')),
+    filter TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (automation_id, kind, filter)
+  );
+  CREATE INDEX automation_triggers_by_kind ON automation_triggers (kind, filter);
+
+  CREATE TABLE automation_runs (
+    id TEXT PRIMARY KEY,
+    automation_id TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','cancelled')),
+    trigger_kind TEXT NOT NULL,
+    session_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    acknowledged_at TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX automation_runs_live ON automation_runs (account_id, state, created_at DESC);
+  CREATE INDEX automation_runs_by_automation ON automation_runs (automation_id, created_at DESC);
+  `,
 ];
 
 /** Exclusive ownership of a data directory. Two relay processes opening the
