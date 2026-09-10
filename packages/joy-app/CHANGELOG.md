@@ -1,3 +1,12 @@
+# Sep 10 (5) — Automations
+
+- **Saved work that runs itself.** An automation is a folder, a prompt and a trigger. Create one from a terminal on the machine that should run it — `joy automation create -m "run the tests and fix what breaks"` — and it runs there, in that folder, whenever its trigger fires.
+- **A run is a session.** Each firing starts a headless agent session, so everything you already know about sessions applies: you can open it, read it, see what it did. It appears in an **Automations** section in the list while it works, and leaves on its own when it finishes.
+- **If it stops for a human, it fails — loudly.** A run that hits a sign-in prompt, a permission question or the folder-trust dialog does not sit there waiting to be noticed: it fails, with a reason, and the failure sits **above everything else in the list** until you dismiss it. That is the whole point of unattended work — you stop watching, so it has to tell you.
+- **Triggers, not schedules.** `manual` (you, or a script), `turn_done` (a session finished a turn), `session_state`, `machine_online` (a machine came back), and `automation_done` (chain one after another). No cron, no timezones, and nothing owes you 2,000 catch-up runs after a machine was offline for a week.
+- **`joy automation run <id> --wait`** blocks until the run finishes and exits with the outcome, so a script, CI, or another agent can use one directly.
+- **Settings → Automations** lists what you have, runs one now, and shows each one's run history with a link to the session it produced.
+
 # Sep 10 (3) — Settings follow you, headless sessions can be found
 
 - **Your settings now reach your other devices.** Pins, voice agents, notification preferences, hide-archived — everything the app called a synced setting was in fact stored only on the device that set it, because the endpoint it used to sync to did not survive an earlier server change and the upload quietly went nowhere. There is a real one now: one encrypted blob per account, which the relay stores and cannot read. Two devices changing settings at once both keep their changes rather than the later one winning.
