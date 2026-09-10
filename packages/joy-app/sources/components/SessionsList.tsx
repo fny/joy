@@ -91,17 +91,16 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: 14,
         backgroundColor: theme.colors.surface,
     },
+    // The title takes what is left and ellipsizes; the project never does.
     sessionTitleCompact: {
-        fontSize: 14,
+        fontSize: 13,
         flexShrink: 1,
+        color: theme.colors.textSecondary,
         ...Typography.default('regular'),
     },
-    // Given the leftover width, and the first thing to give it back: the
-    // title identifies the session, the project only disambiguates it.
     sessionProjectCompact: {
-        fontSize: 12,
-        flexShrink: 2,
-        color: theme.colors.textSecondary,
+        fontSize: 14,
+        flexShrink: 0,
         ...Typography.default('regular'),
     },
     compactTrailingIcon: {
@@ -534,9 +533,7 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
         onLongPress: showActionAlert,
     };
 
-    // The full path, not just the last segment: a pin sits above every
-    // section, so nothing else on screen says which checkout it is.
-    const projectName = projectLabel(session.path, session.homeDir);
+    const projectName = projectLabel(session.path);
 
     // The compact form drops the status sentence and keeps what
     // identifies the row: a small avatar, the name, and the dot. A pin is a
@@ -561,24 +558,21 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                     {...menuProps}
                 >
                     <Avatar id={session.avatarId} size={16} monochrome={!status.isConnected} flavor={session.flavor} />
-                    <Text style={[
-                        styles.sessionTitleCompact,
-                        status.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
-                    ]} numberOfLines={1}>
-                        {session.name}
-                    </Text>
-                    {/* Which project, on the same line. Two pins can carry the
-                        same title — the project is what tells them apart, and
-                        it is the first thing you look for anyway. */}
+                    {/* Project first, then title. The project is what you scan
+                        for — two pins can carry the same title — so it leads
+                        and it never shrinks; the title after it is what gives
+                        up width on a narrow sidebar. */}
                     {!!projectName && (
-                        <Text
-                            style={styles.sessionProjectCompact}
-                            numberOfLines={1}
-                            ellipsizeMode="head"
-                        >
+                        <Text style={[
+                            styles.sessionProjectCompact,
+                            status.isConnected ? styles.sessionTitleConnected : styles.sessionTitleDisconnected
+                        ]} numberOfLines={1}>
                             {projectName}
                         </Text>
                     )}
+                    <Text style={styles.sessionTitleCompact} numberOfLines={1}>
+                        {session.name}
+                    </Text>
                     {session.hasDraft && (
                         <Ionicons name="pencil" size={11} style={styles.compactTrailingIcon} />
                     )}

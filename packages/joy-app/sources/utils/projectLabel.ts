@@ -1,16 +1,11 @@
-import { formatPathRelativeToHome } from './pathUtils';
-
 /**
- * The project as a pinned row shows it — the whole path, with the home
- * directory folded to `~`.
+ * The project as a pinned row shows it: the last segment of the path.
  *
- * The rest of the list shows only the last segment, which is enough when the
- * row sits under a machine section that already said where it is. A pin has no
- * such context: it is at the top of the list, above everything, and `joy` on
- * its own does not say which checkout. So pins carry the full path, and the
- * row ellipsizes from the FRONT — the tail is the part that identifies it.
+ * It leads the row and it never shrinks — the title after it does. Between
+ * the two, the project is the one you scan for, so it is the one that must
+ * survive a narrow sidebar intact.
  */
-export function projectLabel(path: string | null | undefined, homeDir: string | null | undefined): string | null {
+export function projectLabel(path: string | null | undefined): string | null {
     if (!path) return null;
-    return formatPathRelativeToHome(path, homeDir ?? undefined);
+    return path.split(/[/\\]/).filter(Boolean).pop() ?? null;
 }

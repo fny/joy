@@ -54,7 +54,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             active: isSessionInActiveGroup(s),
             // The project as the row shows it — the pinned sort key, so the
             // order matches what you are reading rather than a hidden field.
-            project: projectLabel(s.metadata?.path ?? null, s.metadata?.homeDir ?? null),
+            project: projectLabel(s.metadata?.path ?? null),
             session: s,
         }));
         const { pins, active, rest, archived } = partitionForList({ sessions: rows, pinned, hideInactive });
