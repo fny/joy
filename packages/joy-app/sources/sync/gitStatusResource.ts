@@ -147,6 +147,27 @@ export function useSessionGitStatus(sessionId: string): GitStatus | null {
     return summaryOf(entry.data, entry.dataUpdatedAt);
 }
 
+/**
+ * Active: the project's summary, fetched if it is not already cached.
+ *
+ * `useSessionGitStatus` is passive, and for a long time the sidebar's project
+ * headers used it — so a branch and its +/- counts appeared only for projects
+ * whose status something ELSE had already fetched, which in practice meant the
+ * sessions you had opened since the app started. Everything else showed a bare
+ * project name, and the counts looked like they had been taken away. They had
+ * never been asked for.
+ *
+ * A header is a legitimate reason to read a project's status: it is on screen
+ * and it is showing the answer. One fetch per project either way — the
+ * resource is keyed by `machineId:path`, so several sessions in one repo share
+ * a single read, and staleTime keeps a re-render from re-asking.
+ */
+export function useSessionGitStatusLive(sessionId: string): GitStatus | null {
+    const pathKey = useProjectKey(sessionId);
+    const view = useResource<GitStatusData>(pathKey ? gitStatusSpec(pathKey) : null);
+    return summaryOf(view.data, view.dataUpdatedAt);
+}
+
 /** Passive: the project's file list as cached. Never fetches. */
 export function useSessionGitStatusFiles(sessionId: string): GitStatusFiles | null {
     const pathKey = useProjectKey(sessionId);

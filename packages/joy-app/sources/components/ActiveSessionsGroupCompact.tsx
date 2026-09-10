@@ -12,7 +12,7 @@ import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
 import { useAllMachines, useLocalSettingMutable } from '@/sync/storage';
-import { useSessionGitStatus } from '@/sync/gitStatusResource';
+import { useSessionGitStatusLive } from '@/sync/gitStatusResource';
 import { knownLines } from '@/sync/gitStatusModel';
 import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -53,7 +53,7 @@ const TITLE_X = CARD_MARGIN + ROW_PADDING + INDICATOR_SLOT + INDICATOR_GAP;
  * branch name, line changes, and worktree status.
  */
 function useSectionGitInfo(sessionId: string) {
-    const gitStatus = useSessionGitStatus(sessionId);
+    const gitStatus = useSessionGitStatusLive(sessionId);
 
     return React.useMemo(() => {
         if (!gitStatus || gitStatus.lastUpdatedAt === 0) {
