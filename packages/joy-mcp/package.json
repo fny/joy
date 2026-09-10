@@ -1,0 +1,22 @@
+{
+  "name": "@fny/joy-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote MCP server that is a full client of one joy account — sees and drives every session on every machine through the relay, and tells a connected agent when a turn finishes",
+  "type": "module",
+  "bin": { "joy-mcp": "./cli.mjs" },
+  "scripts": {
+    "start": "node cli.mjs serve",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "qrcode-terminal": "^0.12.0",
+    "tweetnacl": "^1.0.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0"
+  }
+}

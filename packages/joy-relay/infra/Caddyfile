@@ -9,7 +9,15 @@
 }
 joy.voltai.party:4997 {
     tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem
-    reverse_proxy 127.0.0.1:3105
+    # The account MCP server (joy-mcp.service, :3107) shares the origin: the
+    # MCP endpoint plus the OAuth paths a connector discovers at the root.
+    @mcp path /mcp /mcp/* /authorize /authorize/* /token /register /revoke /.well-known/oauth-* /healthz
+    handle @mcp {
+        reverse_proxy 127.0.0.1:3107
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3105
+    }
 }
 joy.voltai.party:14997 {
     tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem

@@ -527,6 +527,20 @@ changed file's contents while on.
   asked and no launch evidence exists, #502), release-branch installs.
 - Machine cleanup page: close detached panes, purge per-folder or per-machine
   records, delete machines.
+- **joy-mcp — the account as an MCP server** (`packages/joy-mcp`, 2026-09-10): a
+  remote Streamable-HTTP MCP server on the relay origin (`/mcp` on :4997,
+  caddy → :3107) that is a full client of ONE account — paired with the
+  backup code or an approval from the app, holding the content key and the
+  machine keys, opening cards/records and sealing sends exactly as the app
+  does, and reaching daemons over the sealed tunnel for check/approvals/
+  queue/abort/kill. Fifteen tools (list_sessions · session · check · send ·
+  ask · wait_for_turns · updates_since · events · approvals · approve · deny
+  · abort · queue · queue_cancel · queue_resume · kill · machines ·
+  new_session), four resources (`joy://sessions[/{id}[/state]]`,
+  `joy://machines`) with subscriptions that fire on turn end / needs input /
+  ended, OAuth 2.1 + dynamic registration for the Claude app (login = the
+  backup code, never stored) and CLI-minted bearers for Claude Code. Sends
+  are stamped `from="mcp:<client>"`. Semantics are the CLI matrix's.
 - **Unread is a state, and read is grey.** `unread` is a `SessionState` of its
   own (sessionFacts.ts): the list supplies the per-device unread fact and the
   ladder places it below the amber "needs you" states and above anything

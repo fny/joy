@@ -49,15 +49,19 @@ echo "== relay deps + data dirs =="
 # the checkout (deploy rsyncs with --delete; data must survive).
 (cd ~/joy-relay && npm install --omit=dev --no-audit --no-fund --silent)
 (cd ~/joy-relay-dev && npm install --omit=dev --no-audit --no-fund --silent)
+[ -d ~/joy-mcp ] && (cd ~/joy-mcp && npm install --omit=dev --no-audit --no-fund --silent)
 mkdir -p ~/joy-relay-data/stable ~/joy-relay-data/dev
 
 echo "== units =="
 sudo cp "$INFRA/joy-relay.service" /etc/systemd/system/
 sudo cp "$INFRA/joy-relay-dev.service" /etc/systemd/system/
+sudo cp "$INFRA/joy-mcp.service" /etc/systemd/system/
 sudo cp "$INFRA/Caddyfile" /etc/caddy/Caddyfile
 sudo systemctl daemon-reload
 sudo systemctl enable joy-relay.service joy-relay-dev.service > /dev/null 2>&1 || true
 sudo systemctl restart joy-relay.service joy-relay-dev.service caddy
+# joy-mcp runs only once the box is paired (~/.joy-mcp/account.json); enable it then.
+if [ -f ~/.joy-mcp/account.json ]; then sudo systemctl enable joy-mcp.service > /dev/null 2>&1 || true; sudo systemctl restart joy-mcp.service; fi
 sleep 2
 sudo systemctl is-active joy-relay joy-relay-dev caddy fail2ban | tr '\n' ' '; echo
 

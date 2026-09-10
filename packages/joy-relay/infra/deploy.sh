@@ -27,6 +27,22 @@ probe() { # port
   curl -fsS --max-time 10 "${hdr[@]}" "https://joy.voltai.party:$port/joy/v2/capabilities" | grep -q '"joy-relay"'
 }
 
+if [[ "$TARGET" == "mcp" ]]; then
+  echo "== joy-mcp only: rsync ~/joy-mcp, unit + caddy routes; relays untouched =="
+  rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=test \
+    "$ROOT/packages/joy-mcp/" "$HOST":joy-mcp/
+  rsync -az -e "$SSH" "$ROOT/packages/joy-relay/infra/joy-mcp.service" "$ROOT/packages/joy-relay/infra/Caddyfile" "$HOST":joy-relay/infra/
+  $SSH "$HOST" 'set -e; cd ~/joy-mcp && npm install --omit=dev --no-audit --no-fund --silent
+    sudo cp ~/joy-relay/infra/joy-mcp.service /etc/systemd/system/
+    sudo cp ~/joy-relay/infra/Caddyfile /etc/caddy/Caddyfile
+    sudo systemctl daemon-reload
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null && sudo systemctl reload caddy
+    if [ -f ~/.joy-mcp/account.json ]; then sudo systemctl enable joy-mcp.service > /dev/null 2>&1 || true; sudo systemctl restart joy-mcp.service; sleep 2; systemctl is-active joy-mcp; curl -fsS --max-time 5 http://127.0.0.1:3107/healthz; echo; else echo "joy-mcp installed; not paired yet — run: cd ~/joy-mcp && node cli.mjs pair --relay https://joy.voltai.party:4997"; fi'
+  RELAY_KEY="$(relay_key)"
+  probe 4997 && echo "https://joy.voltai.party:4997 OK (relay still answering)" || { echo "4997 FAILED" >&2; exit 1; }
+  curl -fsS --max-time 10 "https://joy.voltai.party:4997/.well-known/oauth-authorization-server" | grep -q registration_endpoint && echo "OAuth metadata OK" || echo "OAuth metadata not served yet (joy-mcp not running?)"
+  exit 0
+fi
 if [[ "$TARGET" == "dev" ]]; then
   echo "== DEV relay only: rsync + restart joy-relay-dev (stable untouched) =="
   rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=infra --exclude=data \
@@ -44,6 +60,9 @@ rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json 
 # through `deploy.sh dev`, which touches only this copy.
 rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=infra --exclude=data \
   "$ROOT/packages/joy-relay/" "$HOST":joy-relay-dev/
+echo "== rsync joy-mcp package -> $HOST:~/joy-mcp =="
+rsync -az --delete -e "$SSH" --exclude=node_modules --exclude=package-lock.json --exclude=test \
+  "$ROOT/packages/joy-mcp/" "$HOST":joy-mcp/
 
 echo "== bootstrap =="
 $SSH "$HOST" 'bash ~/joy-relay/infra/bootstrap.sh'

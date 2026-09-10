@@ -2,4 +2,5 @@ packages:
   - "packages/joy-app"
   - "packages/joy-daemon"
   - "packages/joy-relay"
+  - "packages/joy-mcp"
   - "packages/codium"

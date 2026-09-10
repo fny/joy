@@ -187,6 +187,27 @@ environment (all optional; the service unit lists them too):
 account pairing flavour requires the #127 proof; unset = legacy one-shot
 pickup for the app's restore flow — see the Pairing row).
 
+## MCP surface (joy-mcp, `/mcp` on the relay origin)
+
+`packages/joy-mcp` — a remote MCP server (Streamable HTTP) that is a client of
+one account, beside the relay (internal `:3107`, caddy routes `/mcp`,
+`/authorize`, `/token`, `/register`, `/revoke`, `/.well-known/oauth-*` and
+`/healthz` on `:4997` to it). Auth: OAuth 2.1 with dynamic client
+registration (`/.well-known/oauth-protected-resource/mcp` → authorization
+server metadata → `/authorize` shows a page that takes the account backup
+code, checked against the paired account's signing key and never stored;
+tokens are random, stored hashed, 7-day access + 180-day refresh) or a
+bearer minted with `joy-mcp token new <name>`. Tools and resources: see
+`packages/joy-mcp/README.md`; every session tool takes `session` (joy id,
+relay id, or unique prefix). Sends go through `POST /sessions/:id/messages`
+sealed with the session key (`from="mcp:<client>"` wrapper stamped by the
+server, `reply-to` unless `no_reply`); daemon-only facts (check, approvals,
+queue, abort, kill, harnesses) go over `POST /machines/:id/http`. The event
+feed (turn_ended with the reply text, needs_input, ended, unreachable) is
+built from the SSE doorbell + `GET /sessions/:id/events` scans, exposed as
+`wait_for_turns` / `updates_since` and as `resources/updated` on
+`joy://sessions/{id}` subscriptions.
+
 ## Structured git status (`GET /v2/sessions/:id/git/status?v=2`)
 
 The daemon parses git's machine formats ONCE — `status --porcelain=v2 -z

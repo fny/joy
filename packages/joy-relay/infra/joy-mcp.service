@@ -1,0 +1,23 @@
+# systemd — /etc/systemd/system/joy-mcp.service
+# The account-level MCP server: a full client of ONE joy account, beside the
+# relay. Caddy routes /mcp, /authorize, /token, /register and the OAuth
+# well-known paths on :4997 to internal port 3107. Pair it once on the box:
+#   cd ~/joy-mcp && node cli.mjs pair --relay https://joy.voltai.party:4997
+# (credentials, tokens and OAuth clients live in ~/.joy-mcp, owner-only).
+[Unit]
+Description=joy-mcp (account MCP server)
+After=network-online.target joy-relay.service
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/joy-mcp
+Environment=JOY_MCP_PORT=3107
+Environment=JOY_MCP_PUBLIC_URL=https://joy.voltai.party:4997
+Environment=JOY_MCP_HOME=/home/ubuntu/.joy-mcp
+# JOY_RELAY_ACCESS_KEY (the perimeter key) comes from the same env file the
+# relay reads, when the gate is on; unset = derived from the account secret.
+EnvironmentFile=-/home/ubuntu/joy-relay.env
+ExecStart=/usr/bin/node cli.mjs serve
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
