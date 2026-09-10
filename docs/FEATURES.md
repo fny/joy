@@ -339,6 +339,23 @@ every relay; machines register per account.
   unattended job cannot wedge unseen. Explicit only: nothing becomes
   headless implicitly, and `joy run` needs none of it (it already kills
   the session and deletes the transcript on the way out).
+  Reveal them from the app with **Show headless**, a toggle below Show
+  archived on the same rule: it appears only when there is something to
+  reveal, and stays while they are shown so there is a way back.
+- **Agent arguments** (`joy new <dir> [joy flags] -- <args for the agent>`):
+  everything after `--` goes to the AGENT, so a flag they share — `--model`
+  — can mean the agent's. The separator is split off BEFORE joy parses its
+  own flags, or joy would take it first. Joined in the form the harness
+  reads (`joinExtraArgs`): claude/pi/agy get a command line with every word
+  re-quoted (your shell already stripped your quoting, so a bare join would
+  turn `--allowedTools "Bash(git:*)"` into unquoted parens the launch line
+  dies on); codex gets bare `key=value` config overrides, because its parser
+  scrapes pairs and a quoted value would keep its quote silently; opencode
+  takes none and is refused before anything is created. For claude the string
+  reaches a shell, so `$(…)` and backticks are live unless you quote them.
+  Note `--system-prompt-snapshot` defaults to on: a prompt passed this way
+  takes effect on a FRESH session, not on `--continue`/`--resume`, until the
+  conversation compacts.
 - **Mute a session's notifications** (session info → Actions): silences its
   pushes on every device until unmuted — turn-done, permission, question
   and the agent's own `<joy-notify>` tags. The daemon enforces it

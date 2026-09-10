@@ -9,6 +9,8 @@
 // `permissionMode`, `resume_id`, `continue`, `forkSession`, `extraArgs`,
 // `fallbackModel`, `resume_limit_mb`). Names/descriptions are UI copy.
 
+import { shellJoin } from "./quote";
+
 export const HARNESSES = ["claude", "codex", "opencode", "pi", "agy"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
@@ -101,6 +103,33 @@ const AGY_MODES: HarnessPermissionMode[] = [
 // while the app's agent defaults said yolo; the user believed they were on
 // yolo and Codex could neither leave the sandbox nor ask to. pi's `default`
 // already never asks; agy's headless mode cannot.
+/**
+ * Turn a passthrough argv (`joy new <dir> -- <extra args>`) into the single
+ * `extraArgs` string the create path takes, in the form THIS harness reads.
+ *
+ * Two forms, and using the wrong one corrupts arguments silently:
+ *
+ *   'cli' (claude, pi, agy) — the string is a command line. The caller's
+ *     shell already stripped their quoting, so every token is re-quoted;
+ *     joining bare would turn `--allowedTools "Bash(git:*)"` into an
+ *     unquoted `Bash(git:*)` and the launch line would die on the parens.
+ *     For pi and agy this round-trips exactly: shellJoin then the daemon's
+ *     splitShellWords returns the argv it started from.
+ *
+ *   'config' (codex) — the string is NOT a command line. It is scraped for
+ *     `key=value` pairs by parseCodexConfigArgs, whose value alternation
+ *     falls through to `\S+` — so a shell-quoted `'k=v'` captures `v'`,
+ *     trailing quote included, with no error. These join bare.
+ *
+ * `null` (opencode) means the harness takes none; the caller refuses rather
+ * than building a string that would be rejected at create.
+ */
+export function joinExtraArgs(harness: Harness, argv: readonly string[]): string | null {
+    const form = HARNESS_CAPABILITIES[harness]?.extraArgs ?? null;
+    if (form === null || argv.length === 0) return null;
+    return form === "config" ? argv.join(" ") : shellJoin(argv);
+}
+
 export const HARNESS_CAPABILITIES: Record<Harness, HarnessCapabilities> = {
   claude: {
     harness: "claude",

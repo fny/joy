@@ -287,6 +287,52 @@ const busyUntil = (scenario: () => Promise<void>) => {
 };
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+describe("joy new -- : everything after the separator belongs to the AGENT", () => {
+  const bodyOf = async (argv: string[]) => {
+    let seen: any = null;
+    route("POST /sessions", (_req, res, _url, body) => { seen = JSON.parse(body); json(res, 201, { id: SID, cwd: "/tmp/x" }); });
+    expect(await cmdNew(argv)).toBe(0);
+    return seen;
+  };
+
+  test("a flag joy shares with the agent is NOT stolen by joy's own parser", async () => {
+    // The reason the separator has to be split off before any takeFlag runs:
+    // takeFlag scans the whole array, so parsing first would take this
+    // --model as joy's own and the agent would never see it.
+    const body = await bodyOf(["/tmp/x", "--model", "sonnet", "--", "--model", "opus"]);
+    expect(body.model).toBe("sonnet");
+    expect(body.extraArgs).toBe("'--model' 'opus'");
+  });
+
+  test("re-quotes each word, so a shell metacharacter reaches the agent intact", async () => {
+    const body = await bodyOf(["/tmp/x", "--", "--allowedTools", "Bash(git:*)"]);
+    expect(body.extraArgs).toBe("'--allowedTools' 'Bash(git:*)'");
+  });
+
+  test("codex gets bare key=value, not a quoted command line", async () => {
+    const body = await bodyOf(["/tmp/x", "--agent", "codex", "--", "model_reasoning_effort=high"]);
+    expect(body.extraArgs).toBe("model_reasoning_effort=high");
+  });
+
+  test("opencode is refused before anything is created", async () => {
+    let created = false;
+    route("POST /sessions", (_q, res) => { created = true; json(res, 201, { id: SID, cwd: "/tmp/x" }); });
+    expect(await cmdNew(["/tmp/x", "--agent", "opencode", "--", "--anything"])).toBe(2);
+    expect(created).toBe(false);
+    expect(log.err.join("\n")).toMatch(/opencode takes no extra arguments/);
+  });
+
+  test("no separator means no extraArgs at all", async () => {
+    const body = await bodyOf(["/tmp/x", "--model", "sonnet"]);
+    expect(body.extraArgs).toBeUndefined();
+  });
+
+  test("a bare trailing -- sets nothing rather than an empty string", async () => {
+    const body = await bodyOf(["/tmp/x", "--"]);
+    expect(body.extraArgs).toBeUndefined();
+  });
+});
+
 describe("joy new -m: a rejected first message fails the command (#494)", () => {
   test("the daemon refuses the send (500): exit 1, the id is still printed, retry guidance on stderr", async () => {
     route("POST /sessions", (_q, res) => json(res, 201, { id: SID, cwd: "/tmp/x" }));

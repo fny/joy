@@ -16,6 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
 import { launchdPlist } from "./launchdPlist";
 import { shellQuote } from "./domain/quote";
+import { isHarness, joinExtraArgs } from "./domain/harnessCapabilities";
 import { mkdirSecure, SECRET_FILE_MODE } from "./domain/secretFile";
 import { SUPERVISOR_ENV, processStartId, type DaemonLauncher } from "./daemonLauncher";
 
@@ -1528,6 +1529,12 @@ async function cmdAbout(rest: string[]): Promise<number> {
 }
 
 export async function cmdNew(rest: string[]): Promise<number> {
+  // `--` FIRST, before any flag is taken. takeFlag/takeBool scan the whole
+  // array, so parsing first would let joy steal a flag it shares with the
+  // agent — `joy new . -- --model opus` means the AGENT's --model, and that
+  // is most of the point of having a separator at all.
+  const sep = rest.indexOf("--");
+  const passthrough = sep >= 0 ? rest.splice(sep).slice(1) : [];
   const json = takeBool(rest, "--json");
   const readOnly = takeBool(rest, "--read-only");
   // Headless: nobody is watching this one. It stays out of the app's session
@@ -1542,13 +1549,23 @@ export async function cmdNew(rest: string[]): Promise<number> {
   const agent = takeFlag(rest, "--agent") || "claude";
   const msg = takeFlag(rest, "-m") ?? takeFlag(rest, "--message");
   const dir = rest[0];
-  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m] [--effort e] [--read-only] [--headless] [--continue|--resume id] [--json]"); return 2; }
+  if (!dir) { console.error("usage: joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m] [--effort e] [--read-only] [--headless] [--continue|--resume id] [--json] [-- <args for the agent>]"); return 2; }
   const mode = permissionModeFor(agent, readOnly);
   if (!mode.ok) { console.error(`${bad} ${mode.error}`); return 2; }
+  // Joined in the form THIS harness reads — a command line for claude/pi/agy,
+  // bare `key=value` pairs for codex. See joinExtraArgs.
+  let extraArgs: string | undefined;
+  if (passthrough.length > 0) {
+    if (!isHarness(agent)) { console.error(`${bad} unknown agent "${agent}"`); return 2; }
+    const joined = joinExtraArgs(agent, passthrough);
+    if (joined === null) { console.error(`${bad} ${agent} takes no extra arguments (it runs as a server)`); return 2; }
+    extraArgs = joined;
+  }
   const cwd = resolve(expandTilde(dir));
   const r = await api("POST", "/sessions", {
     cwd, createDir: true, model, effort,
     agent,
+    extraArgs,
     permissionMode: mode.mode,
     headless: headless || undefined,
     continue: cont || undefined,
@@ -1913,9 +1930,14 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("check")}        Can it be talked to right now?  joy check <session>  → exit 0 idle · 3 busy · 6 needs input · 1 gone
   ${c.b("jump")}         Attach/switch to a session's tmux window [id|prefix|path; default cwd]
   ${c.b("new")}          Create a session:  joy new <dir> [-m msg] [--agent claude|codex|opencode|pi|agy] [--model m]
-                 [--effort e] [--read-only] [--headless] [--continue|--resume <id>] [--json]  → prints session id
+                 [--effort e] [--read-only] [--headless] [--continue|--resume <id>] [--json]
+                 [-- <args for the agent>]  → prints session id
                  (--headless: keep it out of the app's session list and send no turn-done push;
                   it still surfaces and pushes when it needs a human)
+                 (everything after -- goes to the AGENT, not to joy — so a flag they
+                  share, like --model, means the agent's. claude/pi/agy take CLI
+                  arguments; codex takes key=value config overrides; opencode takes
+                  none. Quote as you would for the agent: joy re-quotes each word.)
                  (a -m message the daemon did not accept fails the command with the send's exit code; the id is still printed)
   ${c.b("run")}          One-shot (ephemeral, like claude -p): create → prompt → print response → kill session.
                  joy run <prompt...> [--dir d] [--agent a] [--model m] [--read-only] [--timeout s] [--json]
