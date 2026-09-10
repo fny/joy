@@ -11,7 +11,7 @@ import { type SessionState, formatPathRelativeToHome, vibingMessages, formatLast
 import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
-import { useAllMachines } from '@/sync/storage';
+import { useAllMachines, useLocalSettingMutable } from '@/sync/storage';
 import { useSessionGitStatus } from '@/sync/gitStatusResource';
 import { knownLines } from '@/sync/gitStatusModel';
 import { useSessionAvatarSize } from '@/hooks/useSessionAvatarSize';
@@ -27,6 +27,7 @@ import { isWorktreePath, getRepoPath, getWorktreeName } from '@/utils/worktree';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 import { isTouchWeb } from '@/utils/isTouchWeb';
 import { useRouter } from 'expo-router';
+import { stateUrgency } from '@/sync/sessionListModel';
 
 
 interface ActiveSessionsGroupProps {
@@ -169,12 +170,32 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
 });
 
 // Full-width separator between machine groups: ——— 🖥 name ———
-const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram }: { machineName: string; machineId: string; cpu?: number; ram?: number }) => {
+//
+// Two targets, because the row answers two different questions. The machine
+// NAME opens the machine — that is what a machine's name has always done, and
+// moving it would break the one thing people already know. Everything else in
+// the row folds the machine away, which is the thing you want while scanning a
+// list, not while inspecting a host.
+const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collapsed, count, worstState, onToggle }: {
+    machineName: string;
+    machineId: string;
+    cpu?: number;
+    ram?: number;
+    collapsed: boolean;
+    count: number;
+    /** What inside most wants a human — the dot on a collapsed machine. */
+    worstState: SessionState | null;
+    onToggle: () => void;
+}) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
     const router = useRouter();
 
-    const handlePress = React.useCallback(() => {
+    const handlePress = React.useCallback((event?: { stopPropagation?: () => void }) => {
+        // On web the name sits inside the toggle's click target and the event
+        // bubbles, so without this a tap on the name both navigates AND folds
+        // the machine away. Native responders don't bubble; the guard is free.
+        event?.stopPropagation?.();
         router.navigate(`/machine/${machineId}` as any);
     }, [router, machineId]);
 
@@ -184,13 +205,37 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram }: { mac
     const showCpu = typeof cpu === 'number';
     const showRam = typeof ram === 'number';
 
+    const dot = collapsed && worstState ? STATUS_PALETTE[worstState]?.dotColor : undefined;
+
     return (
-        <Pressable onPress={handlePress} style={styles.machineSeparator} hitSlop={{ top: 8, bottom: 8 }}>
+        <Pressable
+            onPress={onToggle}
+            style={styles.machineSeparator}
+            hitSlop={{ top: 8, bottom: 8 }}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: !collapsed }}
+        >
+            <Ionicons
+                name={collapsed ? 'chevron-forward' : 'chevron-down'}
+                size={11}
+                color={theme.colors.textSecondary}
+                style={{ marginRight: 4 }}
+            />
             <View style={styles.machineSeparatorLine} />
-            <Ionicons name="desktop-outline" size={11} color={theme.colors.textSecondary} style={{ marginHorizontal: 6 }} />
-            <Text style={styles.machineSeparatorText} numberOfLines={1}>
-                {machineName}
-            </Text>
+            <Pressable onPress={handlePress} style={styles.machineSeparatorName} hitSlop={{ top: 8, bottom: 8 }}>
+                <Ionicons name="desktop-outline" size={11} color={theme.colors.textSecondary} style={{ marginHorizontal: 6 }} />
+                <Text style={styles.machineSeparatorText} numberOfLines={1}>
+                    {machineName}
+                </Text>
+            </Pressable>
+            {/* Collapsed, the row still says how much is inside and whether any
+                of it is waiting on you — folding away is not hiding. */}
+            {collapsed && (
+                <View style={styles.machineLoadItem}>
+                    {!!dot && <View style={[styles.machineCollapsedDot, { backgroundColor: dot }]} />}
+                    <Text style={styles.machineLoadText} numberOfLines={1}>{count}</Text>
+                </View>
+            )}
             {showCpu && (
                 <View style={styles.machineLoadItem}>
                     <Ionicons name="speedometer-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />
@@ -211,6 +256,15 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram }: { mac
 export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: ActiveSessionsGroupProps) {
     const styles = stylesheet;
     const machines = useAllMachines();
+    // Same keys the session-list sections use (`m:<id>`), so folding a machine
+    // away folds it away everywhere it appears rather than once per list.
+    const [collapsedSections, setCollapsedSections] = useLocalSettingMutable('collapsedSessionGroups');
+    const toggleMachine = React.useCallback((machineId: string) => {
+        const key = `m:${machineId}`;
+        setCollapsedSections(collapsedSections.indexOf(key) === -1
+            ? [...collapsedSections, key]
+            : collapsedSections.filter((k: string) => k !== key));
+    }, [collapsedSections, setCollapsedSections]);
 
     const machinesMap = React.useMemo(() => {
         const map: Record<string, Machine> = {};
@@ -282,6 +336,12 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
                 const sortedProjects = Array.from(machineGroup.projects.entries()).sort(
                     ([, a], [, b]) => a.displayPath.localeCompare(b.displayPath)
                 );
+                const collapsed = collapsedSections.indexOf(`m:${machineGroup.machineId}`) !== -1;
+                const all = sortedProjects.flatMap(([, pg]) => pg.sessions);
+                let worst: SessionState | null = null;
+                for (const s of all) {
+                    if (worst === null || stateUrgency(s.state) > stateUrgency(worst)) worst = s.state;
+                }
 
                 return (
                     <React.Fragment key={machineGroup.machineId}>
@@ -292,8 +352,12 @@ export function ActiveSessionsGroupCompact({ sessions, selectedSessionId }: Acti
                             machineId={machineGroup.machineId}
                             cpu={machineGroup.cpu}
                             ram={machineGroup.ram}
+                            collapsed={collapsed}
+                            count={all.length}
+                            worstState={worst}
+                            onToggle={() => toggleMachine(machineGroup.machineId)}
                         />
-                        {sortedProjects.map(([projectPath, projectGroup]) => {
+                        {!collapsed && sortedProjects.map(([projectPath, projectGroup]) => {
                             const firstSession = projectGroup.sessions[0];
                             if (!firstSession) return null;
 
@@ -568,6 +632,17 @@ const stylesheet = StyleSheet.create((theme) => ({
         paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
         paddingTop: 8,
         paddingBottom: 0,
+    },
+    machineSeparatorName: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flexShrink: 1,
+    },
+    machineCollapsedDot: {
+        width: 6,
+        height: 6,
+        borderRadius: 3,
+        marginRight: 4,
     },
     machineSeparatorLine: {
         flex: 1,
