@@ -691,6 +691,8 @@ export const ca: TranslationStructure = {
         unpin: 'No fixis',
         noMachine: 'Sense màquina',
         pinned: 'Fixades',
+        sortByProject: 'per projecte',
+        sortByState: 'per estat',
         sessionsTitle: 'Joy',
         showArchived: 'Mostra arxivades',
         hideArchived: 'Amaga arxivades',

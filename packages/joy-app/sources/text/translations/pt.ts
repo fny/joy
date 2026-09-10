@@ -690,6 +690,8 @@ export const pt: TranslationStructure = {
         unpin: 'Desafixar',
         noMachine: 'Sem máquina',
         pinned: 'Fixadas',
+        sortByProject: 'por projeto',
+        sortByState: 'por estado',
         sessionsTitle: 'Joy',
         showArchived: 'Mostrar arquivadas',
         hideArchived: 'Ocultar arquivadas',

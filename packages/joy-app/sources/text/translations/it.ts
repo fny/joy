@@ -689,6 +689,8 @@ export const it: TranslationStructure = {
         unpin: 'Non fissare',
         noMachine: 'Nessuna macchina',
         pinned: 'Fissate',
+        sortByProject: 'per progetto',
+        sortByState: 'per stato',
         sessionsTitle: 'Joy',
         showArchived: 'Mostra archiviate',
         hideArchived: 'Nascondi archiviate',

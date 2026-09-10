@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildListLayout, partitionForList, stateUrgency, type ListSession } from './sessionListModel';
+import { buildListLayout, partitionForList, pinnedStateRank, stateUrgency, type ListSession } from './sessionListModel';
 
 const NOW = 1_800_000_000_000;
 
@@ -173,6 +173,92 @@ describe('partitionForList — the two ways pinning silently did nothing', () =>
         expect(ids(p.pins)).toEqual([]);
         expect(ids(p.active)).toEqual(['a']);
         expect(ids(p.rest)).toEqual(['b']);
+    });
+});
+
+describe('the pinned order', () => {
+    const pinnedIds = (over: Partial<Parameters<typeof buildListLayout>[0]>) =>
+        buildListLayout({ sessions: [], pinned: [], collapsed: [], ...over })
+            .find((x) => x.key === 'pinned')?.sessions.map((x) => x.id) ?? [];
+
+    it('is by project name by default, not by recency', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'c', project: '~/work/zebra', activeAt: NOW }),
+                s({ id: 'a', project: '~/work/apple', activeAt: NOW - 90_000 }),
+                s({ id: 'b', project: '~/work/mango', activeAt: NOW - 1_000 }),
+            ],
+            pinned: ['a', 'b', 'c'],
+        });
+        expect(ids).toEqual(['a', 'b', 'c']);
+    });
+
+    it('does not reorder itself when a pinned agent speaks', () => {
+        const before = [
+            s({ id: 'a', project: '~/apple', activeAt: NOW - 50_000 }),
+            s({ id: 'b', project: '~/mango', activeAt: NOW - 10_000 }),
+        ];
+        const after = [
+            s({ id: 'a', project: '~/apple', activeAt: NOW }), // just spoke
+            s({ id: 'b', project: '~/mango', activeAt: NOW - 10_000 }),
+        ];
+        expect(pinnedIds({ sessions: before, pinned: ['a', 'b'] }))
+            .toEqual(pinnedIds({ sessions: after, pinned: ['a', 'b'] }));
+    });
+
+    it('by state: needs-a-decision, then done, then working, then gone', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'gone', state: 'disconnected', project: '~/a' }),
+                s({ id: 'working', state: 'thinking', project: '~/a' }),
+                s({ id: 'done', state: 'waiting', project: '~/a' }),
+                s({ id: 'decide', state: 'permission_required', project: '~/a' }),
+            ],
+            pinned: ['gone', 'working', 'done', 'decide'],
+            pinnedSort: 'state',
+        });
+        expect(ids).toEqual(['decide', 'done', 'working', 'gone']);
+    });
+
+    it('by state: falls back to project name inside a bucket, so it stays stable', () => {
+        const ids = pinnedIds({
+            sessions: [
+                s({ id: 'z', state: 'thinking', project: '~/zebra', activeAt: NOW }),
+                s({ id: 'a', state: 'tasks', project: '~/apple', activeAt: NOW - 99_000 }),
+                s({ id: 'm', state: 'agents', project: '~/mango' }),
+            ],
+            pinned: ['z', 'a', 'm'],
+            pinnedSort: 'state',
+        });
+        expect(ids).toEqual(['a', 'm', 'z']);
+    });
+
+    it('puts blocked with permission_required — both are stopped until you answer', () => {
+        expect(pinnedStateRank('blocked')).toBe(pinnedStateRank('permission_required'));
+        expect(pinnedStateRank('permission_required')).toBeLessThan(pinnedStateRank('waiting'));
+        expect(pinnedStateRank('waiting')).toBeLessThan(pinnedStateRank('thinking'));
+        expect(pinnedStateRank('thinking')).toBeLessThan(pinnedStateRank('disconnected'));
+    });
+
+    it('keeps amber out of the answer-me bucket — stalled is not a question', () => {
+        expect(pinnedStateRank('stalled')).toBe(pinnedStateRank('thinking'));
+        expect(pinnedStateRank('retrying')).toBe(pinnedStateRank('thinking'));
+    });
+
+    it('sorts an unknown state last rather than to the front', () => {
+        expect(pinnedStateRank('something-new')).toBe(pinnedStateRank('disconnected'));
+    });
+
+    it('machine sections are still newest-first — only pins are by project', () => {
+        const l = buildListLayout({
+            sessions: [
+                s({ id: 'old', project: '~/apple', activeAt: NOW - 5_000 }),
+                s({ id: 'new', project: '~/zebra', activeAt: NOW }),
+            ],
+            pinned: [],
+            collapsed: [],
+        });
+        expect(l[0].sessions.map((x) => x.id)).toEqual(['new', 'old']);
     });
 });
 

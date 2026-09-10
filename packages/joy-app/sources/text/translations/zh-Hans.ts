@@ -692,6 +692,8 @@ export const zhHans: TranslationStructure = {
         unpin: '取消置顶',
         noMachine: '无机器',
         pinned: '已置顶',
+        sortByProject: '按项目',
+        sortByState: '按状态',
         sessionsTitle: 'Joy',
         showArchived: '显示已归档',
         hideArchived: '隐藏已归档',

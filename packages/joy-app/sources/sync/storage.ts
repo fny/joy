@@ -172,6 +172,12 @@ export type SessionListViewItem =
         count?: number;
         collapsed?: boolean;
         worstState?: string | null;
+        /**
+         * The Pinned header only. It has nothing to collapse, so its press
+         * does the other thing the section needs — switch how it is ordered —
+         * and the current mode is the label on the right.
+         */
+        sortMode?: 'project' | 'state';
     }
     | { type: 'active-sessions'; sessions: SessionRowData[] }
     | { type: 'archive-toggle'; hidden: boolean }

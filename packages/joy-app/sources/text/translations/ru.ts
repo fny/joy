@@ -707,6 +707,8 @@ export const ru: TranslationStructure = {
         unpin: 'Открепить',
         noMachine: 'Без машины',
         pinned: 'Закреплённые',
+        sortByProject: 'по проекту',
+        sortByState: 'по состоянию',
         sessionsTitle: 'Joy',
         showArchived: 'Показать архив',
         hideArchived: 'Скрыть архив',

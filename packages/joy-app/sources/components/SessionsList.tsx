@@ -22,6 +22,7 @@ import { layout } from './layout';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
 import { SessionActionsAnchor, SessionActionsPopover } from './SessionActionsPopover';
 import { useSessionActionAlert } from '@/hooks/useSessionQuickActions';
+import { projectLabel } from '@/utils/projectLabel';
 import { useSettingMutable } from '@/sync/storage';
 import { t } from '@/text';
 import { isTouchWeb } from '@/utils/isTouchWeb';
@@ -279,6 +280,10 @@ export function SessionsList() {
     // Which machine sections are folded away. Device-local: a phone wants far
     // more collapsed than a wide desktop, and that difference is real.
     const [collapsedSections, setCollapsedSections] = useLocalSettingMutable('collapsedSessionGroups');
+    const [pinnedSort, setPinnedSort] = useLocalSettingMutable('pinnedSort');
+    const togglePinnedSort = React.useCallback(() => {
+        setPinnedSort(pinnedSort === 'project' ? 'state' : 'project');
+    }, [pinnedSort, setPinnedSort]);
     const toggleSection = React.useCallback((key: string) => {
         setCollapsedSections(collapsedSections.indexOf(key) === -1
             ? [...collapsedSections, key]
@@ -336,6 +341,24 @@ export function SessionsList() {
                         )}
                     </View>
                 );
+                // Pinned has nothing to collapse, so its press switches how
+                // it is ordered instead, and says which order it is in.
+                if (item.sortMode) {
+                    return (
+                        <Pressable
+                            onPress={togglePinnedSort}
+                            accessibilityRole="button"
+                            style={styles.headerSection}
+                        >
+                            <View style={styles.headerRow}>
+                                <Text style={styles.headerText}>{item.title}</Text>
+                                <Text style={styles.headerCount}>
+                                    {item.sortMode === 'state' ? t('sidebar.sortByState') : t('sidebar.sortByProject')}
+                                </Text>
+                            </View>
+                        </Pressable>
+                    );
+                }
                 if (!item.sectionKey) {
                     return <View style={styles.headerSection}>{body}</View>;
                 }
@@ -404,7 +427,10 @@ export function SessionsList() {
                     />
                 );
         }
-    }, [selectedSessionId, data, toggleArchived]);
+        // toggleSection and togglePinnedSort close over the CURRENT setting
+        // value, so leaving them out froze the first closure: the first press
+        // worked and every one after it wrote a stale list back.
+    }, [selectedSessionId, data, toggleArchived, toggleSection, togglePinnedSort]);
 
 
     // Remove this section as we'll use FlatList for all items now
@@ -508,9 +534,9 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
         onLongPress: showActionAlert,
     };
 
-    const projectName = session.path
-        ? session.path.split(/[/\\]/).filter(Boolean).pop()
-        : null;
+    // The full path, not just the last segment: a pin sits above every
+    // section, so nothing else on screen says which checkout it is.
+    const projectName = projectLabel(session.path, session.homeDir);
 
     // The compact form drops the status sentence and keeps what
     // identifies the row: a small avatar, the name, and the dot. A pin is a
@@ -545,7 +571,11 @@ const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, 
                         same title — the project is what tells them apart, and
                         it is the first thing you look for anyway. */}
                     {!!projectName && (
-                        <Text style={styles.sessionProjectCompact} numberOfLines={1}>
+                        <Text
+                            style={styles.sessionProjectCompact}
+                            numberOfLines={1}
+                            ellipsizeMode="head"
+                        >
                             {projectName}
                         </Text>
                     )}

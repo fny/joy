@@ -691,6 +691,8 @@ export const zhHant: TranslationStructure = {
         unpin: '取消置頂',
         noMachine: '無機器',
         pinned: '已置頂',
+        sortByProject: '按專案',
+        sortByState: '按狀態',
         sessionsTitle: 'Joy',
         showArchived: '顯示已封存',
         hideArchived: '隱藏已封存',

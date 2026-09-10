@@ -27,6 +27,45 @@ export interface ListSession {
     createdAt?: number;
     /** In the active block at the top of the list. */
     active?: boolean;
+    /** The project, as it is shown on the row — the pinned sort key. */
+    project?: string | null;
+}
+
+/** How the pinned section is ordered. */
+export type PinnedSort = 'project' | 'state';
+
+/**
+ * The four things a pinned session can be, in the order you want to deal with
+ * them. This is deliberately coarser than stateUrgency, which ranks eleven
+ * states for a collapsed header's single dot; here the ranking IS the reading
+ * order, and four groups you can name beat eleven you cannot.
+ *
+ *   0  needs a decision  — yellow. It is stopped until you answer.
+ *   1  done              — green. It finished and is waiting for you.
+ *   2  working           — blue/teal/pink/purple/orange. It needs nothing.
+ *   3  gone              — grey and red. Nothing is running behind it.
+ *
+ * Amber (stalled, retrying) sits with working rather than with needs-a-
+ * decision: something is off, but nothing is asking you a question, and a
+ * bucket that cries wolf stops meaning "answer me".
+ */
+const STATE_BUCKET: Record<string, number> = {
+    permission_required: 0,
+    blocked: 0,
+    waiting: 1,
+    thinking: 2,
+    tasks: 2,
+    agents: 2,
+    compacting: 2,
+    retrying: 2,
+    stalled: 2,
+    detached: 3,
+    disconnected: 3,
+};
+
+/** Unknown states sort last rather than jumping the queue. */
+export function pinnedStateRank(state: string): number {
+    return STATE_BUCKET[state] ?? 3;
 }
 
 /**
@@ -109,6 +148,30 @@ export interface ListLayoutInput<T extends ListSession = ListSession> {
     collapsed: string[];
     /** Machine ids in the order the caller wants their sections to appear. */
     machineOrder?: string[];
+    /** Pinned order. Default 'project'. */
+    pinnedSort?: PinnedSort;
+}
+
+/**
+ * Pins are ordered by PROJECT, not by recency.
+ *
+ * Every other section is newest-first, because you are scanning for what just
+ * happened. A pinned list is the opposite: you put things in it so you could
+ * find them again, and a list that reorders itself whenever an agent speaks is
+ * one you have to re-read every time. Project name is stable and it is what
+ * you remember the session by.
+ *
+ * Sorting by state gives that up on purpose — it answers "what needs me" — so
+ * it still falls back to project name inside a bucket, which keeps the order
+ * stable for everything that is in the same condition.
+ */
+function pinnedComparator<T extends ListSession>(sort: PinnedSort) {
+    const byProject = (a: T, b: T) =>
+        (a.project ?? '').localeCompare(b.project ?? '') || a.id.localeCompare(b.id);
+    if (sort === 'state') {
+        return (a: T, b: T) => (pinnedStateRank(a.state) - pinnedStateRank(b.state)) || byProject(a, b);
+    }
+    return byProject;
 }
 
 /**
@@ -141,7 +204,7 @@ export function buildListLayout<T extends ListSession>(input: ListLayoutInput<T>
             key: 'pinned',
             kind: 'pinned',
             machineId: null,
-            sessions: [...pins].sort(byRecency),
+            sessions: [...pins].sort(pinnedComparator(input.pinnedSort ?? 'project')),
             collapsed: false,
             worstState: worstOf(pins),
         });

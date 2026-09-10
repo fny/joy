@@ -19,6 +19,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { isSessionInActiveGroup } from '@/sync/sessionLiveness';
 import { hiddenFromList, liveFacts } from '@/sync/sessionFacts';
 import { buildListLayout, partitionForList, type ListSection, type ListSession } from '@/sync/sessionListModel';
+import { projectLabel } from '@/utils/projectLabel';
 import { t } from '@/text';
 
 interface Row extends ListSession { id: string }
@@ -28,6 +29,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
     const collapsed = useLocalSetting('collapsedSessionGroups');
     const pinned = useSetting('pinnedSessions');
     const hideInactive = useSetting('hideInactiveSessions');
+    const pinnedSort = useLocalSetting('pinnedSort');
 
     const sessions = storage(useShallow((state) => (state.isDataReady ? state.sessions : null)));
     const unread = storage(useShallow((state) => state.unreadSessionIds));
@@ -50,6 +52,9 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             activeAt: s.activeAt,
             createdAt: s.createdAt,
             active: isSessionInActiveGroup(s),
+            // The project as the row shows it — the pinned sort key, so the
+            // order matches what you are reading rather than a hidden field.
+            project: projectLabel(s.metadata?.path ?? null, s.metadata?.homeDir ?? null),
             session: s,
         }));
         const { pins, active, rest, archived } = partitionForList({ sessions: rows, pinned, hideInactive });
@@ -67,6 +72,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
                 title: section.kind === 'pinned' ? t('sidebar.pinned') : machineName(section.machineId),
                 // Pinned is a label, not a control: no key means no chevron.
                 sectionKey: section.kind === 'pinned' ? undefined : section.key,
+                sortMode: section.kind === 'pinned' ? pinnedSort : undefined,
                 count: section.sessions.length,
                 collapsed: section.collapsed,
                 worstState: section.collapsed ? section.worstState : null,
@@ -88,7 +94,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
         // thing in this list whose position you chose yourself; anything that
         // can push it down — and the active block grows and shrinks on its
         // own — means the pin no longer answers "where is it".
-        const sections = buildListLayout({ sessions: [...pins, ...rest], pinned, collapsed });
+        const sections = buildListLayout({ sessions: [...pins, ...rest], pinned, collapsed, pinnedSort });
         for (const section of sections) {
             if (section.kind === 'pinned') emit(section);
         }
@@ -111,5 +117,5 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             if (section.kind !== 'pinned') emit(section);
         }
         return items;
-    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive]);
+    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive, pinnedSort]);
 }
