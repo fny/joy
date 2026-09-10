@@ -170,9 +170,9 @@ async function cmdStatus(): Promise<number> {
   return 0;
 }
 
-async function cmdList(): Promise<number> {
+export async function cmdList(): Promise<number> {
   const r = await api("GET", "/sessions").catch(() => null);
-  if (!r || !r.ok) { console.log(`${bad} daemon not running (joy start)`); return 1; }
+  if (!r || !r.ok) { console.error(`${bad} daemon not running (joy start)`); return 1; } // stderr, like every other verb (matrix: daemon_down × ls)
   const sessions = (await r.json()) as any[];
   if (sessions.length === 0) { console.log("no sessions"); return 0; }
   const checks = await Promise.all(sessions.map((s) => checkState(s.id)));
@@ -1465,7 +1465,7 @@ async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?
 }
 
 // joy check <session> — one line; the exit code IS the answer.
-async function cmdCheck(rest: string[]): Promise<number> {
+export async function cmdCheck(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const target = rest[0];
   if (!target) { console.error("usage: joy check <session> [--json]"); return 2; }
@@ -1484,7 +1484,7 @@ async function cmdCheck(rest: string[]): Promise<number> {
 }
 
 // joy about <session> — everything about one session.
-async function cmdAbout(rest: string[]): Promise<number> {
+export async function cmdAbout(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const target = rest[0];
   if (!target) { console.error("usage: joy about <session> [--json]"); return 2; }
@@ -1707,7 +1707,7 @@ async function cmdRun(rest: string[]): Promise<number> {
 }
 
 // joy send <session> <text...> — exclusive fire-and-forget (no wait).
-async function cmdSend(rest: string[]): Promise<number> {
+export async function cmdSend(rest: string[]): Promise<number> {
   const noQueue = takeBool(rest, "--no-queue");
   const noReply = takeBool(rest, "--no-reply");
   const from = takeFlag(rest, "--from");
@@ -1746,7 +1746,7 @@ export async function cmdWaitIdle(rest: string[]): Promise<number> {
 }
 
 // joy log <session> [-n count] — recent user/assistant text from the transcript.
-async function cmdEvents(rest: string[]): Promise<number> {
+export async function cmdEvents(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   const follow = takeBool(rest, "--follow") || takeBool(rest, "-f");
   const last = takeFlag(rest, "--last") ?? takeFlag(rest, "-n");
@@ -1770,17 +1770,21 @@ async function cmdEvents(rest: string[]): Promise<number> {
 
 // joy kill <session> — end the session (kills its tmux window).
 // ── controls: the app's session menu, as verbs ──────────────────────────────
-async function cmdAbort(rest: string[]): Promise<number> {
+export async function cmdAbort(rest: string[]): Promise<number> {
   if (!rest[0]) { console.error("usage: joy abort <session>"); return 2; }
   const rec = await resolveSession(rest[0]);
   if (!rec) return 1;
   const r = await api("POST", `/sessions/${rec.id}/abort`).catch(() => null);
-  if (!r || !r.ok) { console.error(`${bad} abort failed`); return 1; }
+  const body = r ? await r.json().catch(() => ({})) as any : null;
+  // The daemon answers ok:false when the interrupt was refused or there is no
+  // runtime to interrupt (a detached session) — HTTP 200 alone is not success
+  // (the app's Stop already reads this, #8; the matrix caught the CLI not).
+  if (!r || !r.ok || body?.ok === false) { console.error(`${bad} abort failed${body?.error ? `: ${body.error}` : ""}`); return 1; }
   console.log(`${ok} interrupted ${rec.id}`);
   return 0;
 }
 
-async function cmdApprovals(rest: string[]): Promise<number> {
+export async function cmdApprovals(rest: string[]): Promise<number> {
   const json = takeBool(rest, "--json");
   if (!rest[0]) { console.error("usage: joy approvals <session> [--json]"); return 2; }
   const rec = await resolveSession(rest[0]);
@@ -1795,7 +1799,7 @@ async function cmdApprovals(rest: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdDecide(rest: string[], decision: "allow" | "deny"): Promise<number> {
+export async function cmdDecide(rest: string[], decision: "allow" | "deny"): Promise<number> {
   const [target, requestId] = rest;
   if (!target) { console.error(`usage: joy ${decision === "allow" ? "approve" : "deny"} <session> [requestId]`); return 2; }
   const rec = await resolveSession(target);
@@ -1814,11 +1818,21 @@ async function cmdDecide(rest: string[], decision: "allow" | "deny"): Promise<nu
   return 0;
 }
 
-async function cmdQueue(rest: string[]): Promise<number> {
+export async function cmdQueue(rest: string[]): Promise<number> {
   const target = rest[0];
-  if (!target) { console.error("usage: joy queue <session> [cancel <id>]"); return 2; }
+  if (!target) { console.error("usage: joy queue <session> [cancel <id> | resume]"); return 2; }
   const rec = await resolveSession(target);
   if (!rec) return 1;
+  if (rest[1] === "resume") {
+    // A paused queue (a dispatch that timed out / mismatched / found the box
+    // dirty) holds its rows until someone resumes it; the app has a button,
+    // the CLI had nothing (found by the state × action matrix, 2026-09-10).
+    const r = await api("POST", `/sessions/${rec.id}/queue/resume`).catch(() => null);
+    const body = r ? await r.json().catch(() => ({})) as any : null;
+    if (!r || !r.ok || body?.ok === false) { console.error(`${bad} resume failed`); return 1; }
+    console.log(`${ok} resumed ${rec.id}${body?.pendingCount ? ` (${body.pendingCount} queued)` : ""}`);
+    return 0;
+  }
   if (rest[1] === "cancel") {
     const qid = rest[2];
     if (!qid) { console.error("usage: joy queue <session> cancel <id>"); return 2; }
@@ -1838,7 +1852,7 @@ async function cmdQueue(rest: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdMode(rest: string[]): Promise<number> {
+export async function cmdMode(rest: string[]): Promise<number> {
   const [target, mode] = rest;
   if (!target) { console.error("usage: joy mode <session> [<permission mode>]"); return 2; }
   const rec = await resolveSession(target);
@@ -1899,7 +1913,7 @@ async function cmdEnv(rest: string[]): Promise<number> {
   return 2;
 }
 
-async function cmdKill(rest: string[]): Promise<number> {
+export async function cmdKill(rest: string[]): Promise<number> {
   const target = rest[0];
   if (!target) { console.error("usage: joy kill <session>"); return 2; }
   const rec = await resolveSession(target);
@@ -1952,6 +1966,7 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("abort")}        Interrupt the running turn:  joy abort <session>
   ${c.b("approvals")}    Held tool-call approvals (codex):  joy approvals <session> · joy approve|deny <session> [id]
   ${c.b("queue")}        Queued messages:  joy queue <session> [cancel <id>]
+                 joy queue <session> resume — release a paused queue (dispatch gave up on the pane)
   ${c.b("mode")}         Show or set the permission mode:  joy mode <session> [<mode>]
   ${c.b("pane")}         The terminal view as text:  joy pane <session> [--color]
   ${c.b("kill")}         End a session:  joy kill <session>

@@ -143,8 +143,23 @@ every relay; machines register per account.
   (exit code = idle / busy / needs input), `joy send` queues behind a running
   turn and returns the turn id, `joy wait --turn` blocks on it, `joy ask`
   returns a typed outcome, `joy events --follow` streams the session's
-  records, plus `abort`, `approvals`/`approve`/`deny`, `queue`, `mode`, `pane`,
-  `about`. Outcomes of `ask`/`wait`/`run`: `answered` 0 · `needs_input` 6 ·
+  records, plus `abort`, `approvals`/`approve`/`deny`, `queue` (list ·
+  `cancel <id>` · `resume` for a paused queue), `mode`, `pane`, `about`.
+  The CLI's contract is a TABLE — `packages/joy-daemon/src/cli.matrix.oracle.ts`:
+  11 session states (gone, detached, idle, busy, busy+queued, paused,
+  approval, permission prompt, question, unscriptable mode, daemon down) ×
+  14 verbs → exit code, daemon-side effect, and what `check` says after.
+  `cli.matrix.test.ts` walks every cell against the real transport →
+  operations → coordinator path over a scripted runtime; `cli.sequences.test.ts`
+  covers the multi-step contracts (FIFO delivery, a queued ask answered by its
+  own turn, abort keeps the queue, kill drops it, restart keeps it, approve
+  continues the turn, `new --headless -m`). Two things the table makes
+  explicit: `abort` fails (exit 1) when the daemon reports nothing to interrupt
+  — a detached session — and otherwise exit 0 even when idle (a session-wide
+  Escape goes out: a turn started in the terminal is invisible to the daemon);
+  and `check`/`wait` read a PAUSED queue as idle with N queued — `joy queue`
+  names the pause, `joy queue <s> resume` clears it.
+  Outcomes of `ask`/`wait`/`run`: `answered` 0 · `needs_input` 6 ·
   `timeout` 4 · `gone` 1 (the session ended or no longer exists — a 404 from
   `/check` is never "answered", #496) · `error` 1 with a `reason` (`/check`
   failed or returned an unknown state; or the log holds records past what the
