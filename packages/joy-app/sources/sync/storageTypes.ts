@@ -157,6 +157,15 @@ export const MetadataSchema = z.object({
     // while healthy — but NOT while it needs a human, which is the one case
     // hiding it would cost you (see sessionFacts.headless).
     joy__headless: z.boolean().nullable().optional(),
+    /** This session IS an automation run. Present while the run is going, and
+     *  kept after a FAILED one so the failure stays visible until dismissed;
+     *  a succeeded run clears it and the row goes back to being hidden. */
+    joy__automation: z.object({
+        runId: z.string(),
+        failed: z.boolean().nullable().optional(),
+        errorCode: z.string().nullable().optional(),
+        errorMessage: z.string().nullable().optional(),
+    }).nullable().optional(),
     // WHAT is running behind the session, alongside the counts above (#646).
     // The counts alone say a number is stuck but never which thing — and an
     // outstanding count also suppresses the turn-done push, so this is what

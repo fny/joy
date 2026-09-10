@@ -10,13 +10,17 @@ import { isSessionInActiveGroup, SESSION_STALE_AFTER_MS } from '@/sync/sessionLi
 import { filterVisibleSessionListViewData } from '@/sync/sessionListVisibility';
 import type { SessionListViewItem } from '@/sync/storage';
 
-const row = (id: string, active: boolean, facts?: { headless?: boolean; blocked?: boolean; permission?: boolean }) =>
+const row = (
+    id: string,
+    active: boolean,
+    facts?: { headless?: boolean; blocked?: boolean; permission?: boolean; automation?: unknown },
+) =>
     ({
         type: 'session',
         session: {
             id,
             active,
-            facts: { headless: false, blocked: false, permission: false, ...facts },
+            facts: { headless: false, blocked: false, permission: false, automation: null, ...facts },
         } as any,
     }) as SessionListViewItem;
 
@@ -149,6 +153,29 @@ describe('headless sessions', () => {
         expect(hidden.sessions.map((s) => s.id)).toEqual(['ordinary']);
         const shown = filterVisibleSessionListViewData(data, false, true)[0] as { sessions: Array<{ id: string }> };
         expect(shown.sessions.map((s) => s.id)).toEqual(['ordinary', 'quiet']);
+    });
+
+    it('an automation run is NOT hidden while it runs, even though it is headless', () => {
+        // The marker is a visibility override that lasts exactly as long as
+        // the run. Without it a run would be invisible for its whole life and
+        // then appear as history, which is backwards.
+        const data: SessionListViewItem[] = [
+            { type: 'active-sessions', sessions: [] },
+            { type: 'header', title: 'Yesterday' },
+            row('run', false, { headless: true, automation: { runId: 'r1' } }),
+        ];
+        const out = filterVisibleSessionListViewData(data, false);
+        expect(out.map((i) => i.type)).toContain('session');
+        expect(out.map((i) => i.type)).not.toContain('headless-toggle');
+    });
+
+    it('a FAILED run stays visible — dismissing it is the only way it goes', () => {
+        const data: SessionListViewItem[] = [
+            { type: 'active-sessions', sessions: [] },
+            { type: 'header', title: 'Yesterday' },
+            row('broke', false, { headless: true, automation: { runId: 'r1', failed: true, errorCode: 'blocked:login' } }),
+        ];
+        expect(filterVisibleSessionListViewData(data, false).map((i) => i.type)).toContain('session');
     });
 
     it('treats a row with no facts as ordinary rather than throwing', () => {

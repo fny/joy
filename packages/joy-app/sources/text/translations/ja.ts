@@ -692,6 +692,8 @@ export const ja: TranslationStructure = {
         unpin: 'ピン留めを解除',
         noMachine: 'マシンなし',
         pinned: 'ピン留め',
+        automations: 'オートメーション',
+        automationFailures: 'オートメーションの失敗',
         showHeadless: 'ヘッドレスを表示',
         hideHeadless: 'ヘッドレスを隠す',
         sortByProject: 'プロジェクト順',

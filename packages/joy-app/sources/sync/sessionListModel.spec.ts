@@ -178,6 +178,59 @@ describe('partitionForList — the two ways pinning silently did nothing', () =>
     });
 });
 
+describe('automation runs are placed before everything else', () => {
+    const part = (over) =>
+        partitionForList({ sessions: [], pinned: [], hideInactive: false, ...over });
+    const ids = (xs) => xs.map((x) => x.id);
+
+    it('a running run goes to its own bucket, not the active block', () => {
+        const p = part({ sessions: [s({ id: 'run', active: true, automation: 'running' }), s({ id: 'ordinary', active: true })] });
+        expect(ids(p.automationsRunning)).toEqual(['run']);
+        expect(ids(p.active)).toEqual(['ordinary']);
+    });
+
+    it('a failed run goes to the failures bucket', () => {
+        const p = part({ sessions: [s({ id: 'broke', automation: 'failed' })] });
+        expect(ids(p.automationsFailed)).toEqual(['broke']);
+        expect(ids(p.rest)).toEqual([]);
+    });
+
+    it('outranks a pin — a run appears ONCE, and its section is above Pinned', () => {
+        const p = part({ sessions: [s({ id: 'run', automation: 'running' })], pinned: ['run'] });
+        expect(ids(p.automationsRunning)).toEqual(['run']);
+        expect(ids(p.pins)).toEqual([]);
+    });
+
+    it('survives hide-archived: an idle run is still a run, not archived history', () => {
+        const p = part({
+            sessions: [s({ id: 'run', automation: 'running' }), s({ id: 'old' })],
+            hideInactive: true,
+        });
+        expect(ids(p.automationsRunning)).toEqual(['run']);
+        expect(ids(p.rest)).toEqual([]);
+    });
+
+    it('places every session exactly once across all five buckets', () => {
+        const sessions = [
+            s({ id: 'failed', automation: 'failed' }),
+            s({ id: 'running', automation: 'running' }),
+            s({ id: 'pinned' }),
+            s({ id: 'active', active: true }),
+            s({ id: 'history' }),
+        ];
+        const p = part({ sessions, pinned: ['pinned'] });
+        const seen = [...ids(p.automationsFailed), ...ids(p.automationsRunning), ...ids(p.pins), ...ids(p.active), ...ids(p.rest)];
+        expect(seen.slice().sort()).toEqual(['active', 'failed', 'history', 'pinned', 'running']);
+        expect(new Set(seen).size).toBe(seen.length);
+    });
+
+    it('changes nothing when no session is an automation run', () => {
+        const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'b' })] });
+        expect(p.automationsRunning).toEqual([]);
+        expect(p.automationsFailed).toEqual([]);
+    });
+});
+
 describe('the pinned order', () => {
     const pinnedIds = (over: Partial<Parameters<typeof buildListLayout>[0]>) =>
         buildListLayout({ sessions: [], pinned: [], collapsed: [], ...over })

@@ -17,8 +17,8 @@ import * as React from 'react';
 import { storage, sessionRowDataFor, useLocalSetting, useSetting, type SessionListViewItem } from '@/sync/storage';
 import { useShallow } from 'zustand/react/shallow';
 import { isSessionInActiveGroup } from '@/sync/sessionLiveness';
-import { hiddenFromList, liveFacts } from '@/sync/sessionFacts';
-import { buildListLayout, partitionForList, type ListSection, type ListSession } from '@/sync/sessionListModel';
+import { automationPlacement, hiddenFromList, liveFacts } from '@/sync/sessionFacts';
+import { buildListLayout, partitionForList, stateUrgency, type ListSection, type ListSession } from '@/sync/sessionListModel';
 import { projectLabel } from '@/utils/projectLabel';
 import { t } from '@/text';
 
@@ -58,13 +58,15 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             activeAt: s.activeAt,
             createdAt: s.createdAt,
             active: isSessionInActiveGroup(s),
+            automation: automationPlacement(liveFacts(s)),
             // The project as the row shows it — the pinned sort key, so the
             // order matches what you are reading rather than a hidden field.
             project: projectLabel(s.metadata?.path ?? null),
             hasUnread: unread.has(s.id),
             session: s,
         }));
-        const { pins, active, rest, archived } = partitionForList({ sessions: rows, pinned, hideInactive });
+        const { pins, active, rest, archived, automationsRunning, automationsFailed } =
+            partitionForList({ sessions: rows, pinned, hideInactive });
 
         const machineName = (id: string | null): string => {
             if (!id) return t('sidebar.noMachine');
@@ -73,6 +75,12 @@ export function useSessionListV2(): SessionListViewItem[] | null {
         };
 
         const items: SessionListViewItem[] = [];
+        const emitRows = (rowsIn: Array<Row & { session: (typeof all)[number] }>) => {
+            for (const row of rowsIn) {
+                const session = sessions[row.id];
+                if (session) items.push({ type: 'session', session: sessionRowDataFor(session, unread) });
+            }
+        };
         const emit = (section: ListSection<Row>) => {
             items.push({
                 type: 'header',
@@ -97,6 +105,21 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             }
         };
 
+        // A failed automation outranks even the section you built by hand.
+        // Like Pinned it gets no chevron: it is a statement, not a control,
+        // and it stays until dismissed or headless hiding would reclaim it
+        // unseen — which is the one thing unattended work must never do.
+        if (automationsFailed.length > 0) {
+            items.push({
+                type: 'header',
+                title: t('sidebar.automationFailures'),
+                count: automationsFailed.length,
+                collapsed: false,
+                worstState: null,
+            });
+            emitRows(automationsFailed as Array<Row & { session: (typeof all)[number] }>);
+        }
+
         // Pinned goes ABOVE the active block, not below it. A pin is the one
         // thing in this list whose position you chose yourself; anything that
         // can push it down — and the active block grows and shrinks on its
@@ -113,6 +136,26 @@ export function useSessionListV2(): SessionListViewItem[] | null {
                     .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
                     .map((r) => sessionRowDataFor(r.session, unread)),
             });
+        }
+
+        // Running automations: ambient, so collapsed by default. The header
+        // still carries a count and a worst-state dot, which is how a run that
+        // hit blocked:login is visible without opening anything.
+        if (automationsRunning.length > 0) {
+            const collapsedHere = collapsed.indexOf('automations') !== -1;
+            let worst: string | null = null;
+            for (const r of automationsRunning) {
+                if (worst === null || stateUrgency(r.state) > stateUrgency(worst)) worst = r.state;
+            }
+            items.push({
+                type: 'header',
+                title: t('sidebar.automations'),
+                sectionKey: 'automations',
+                count: automationsRunning.length,
+                collapsed: collapsedHere,
+                worstState: collapsedHere ? worst : null,
+            });
+            if (!collapsedHere) emitRows(automationsRunning as Array<Row & { session: (typeof all)[number] }>);
         }
 
         // The archive toggle, exactly where the old list puts it. Without it

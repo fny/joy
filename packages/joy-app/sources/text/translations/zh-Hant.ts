@@ -691,6 +691,8 @@ export const zhHant: TranslationStructure = {
         unpin: '取消置頂',
         noMachine: '無機器',
         pinned: '已置頂',
+        automations: '自動化',
+        automationFailures: '自動化失敗',
         showHeadless: '顯示無人值守',
         hideHeadless: '隱藏無人值守',
         sortByProject: '按專案',

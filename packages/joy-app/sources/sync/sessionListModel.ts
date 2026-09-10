@@ -35,6 +35,8 @@ export interface ListSession {
     /** Unread is a STATE now (`state === 'unread'`, green); this flag is the
      *  raw per-device fact the rows still read for the draft pencil. */
     hasUnread?: boolean;
+    /** An automation run: 'running' while it works, 'failed' until dismissed. */
+    automation?: 'failed' | 'running' | null;
 }
 
 /** How the pinned section is ordered. */
@@ -105,27 +107,36 @@ export function partitionForList<T extends ListSession>(input: {
     pinned: string[];
     /** "Hide archived": drop everything that is not in the active block. */
     hideInactive: boolean;
-}): { pins: T[]; active: T[]; rest: T[]; archived: number } {
+}): { pins: T[]; active: T[]; rest: T[]; archived: number; automationsRunning: T[]; automationsFailed: T[] } {
     const isPinned = new Set(input.pinned);
     const pins: T[] = [];
     const active: T[] = [];
     const rest: T[] = [];
+    const automationsRunning: T[] = [];
+    const automationsFailed: T[] = [];
     let archived = 0;
     for (const s of input.sessions) {
+        // Automation runs are placed FIRST, ahead of pins and the active
+        // block, because a run appears in exactly ONE place: one that also
+        // sat in the active block would be in the list twice while working,
+        // which is the thing the pinned rule already refuses.
+        if (s.automation === 'failed') { automationsFailed.push(s); continue; }
+        if (s.automation === 'running') { automationsRunning.push(s); continue; }
         if (isPinned.has(s.id)) { pins.push(s); continue; }
         if (s.active) { active.push(s); continue; }
         archived++;
         if (!input.hideInactive) rest.push(s);
     }
-    // Counted whether or not they were kept: the caller needs to know they
-    // exist in order to offer the toggle that brings them back.
-    return { pins, active, rest, archived };
+    // `archived` is counted whether or not they were kept: the caller needs to
+    // know they exist in order to offer the toggle that brings them back.
+    return { pins, active, rest, archived, automationsRunning, automationsFailed };
 }
 
 export interface ListSection<T extends ListSession = ListSession> {
-    /** Stable across renders — the collapse key. 'pinned', else `m:<id>`. */
+    /** Stable across renders — the collapse key. 'pinned', 'automations',
+     *  'automation-failures', else `m:<id>`. */
     key: string;
-    kind: 'pinned' | 'machine';
+    kind: 'pinned' | 'machine' | 'automations' | 'automation-failures';
     /** Machine id for the caller to resolve to a display name; null for pins. */
     machineId: string | null;
     sessions: T[];

@@ -690,6 +690,8 @@ export const pt: TranslationStructure = {
         unpin: 'Desafixar',
         noMachine: 'Sem máquina',
         pinned: 'Fixadas',
+        automations: 'Automações',
+        automationFailures: 'Falhas de automação',
         showHeadless: 'Mostrar headless',
         hideHeadless: 'Ocultar headless',
         sortByProject: 'por projeto',

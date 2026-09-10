@@ -771,11 +771,20 @@ export class RelaySession {
   private automationRunId: string | null = null;
   private automationReported = false;
 
-  /** Mark this session as one automation run. Idempotent. */
+  /**
+   * Mark this session as one automation run, and SAY so on the card.
+   *
+   * `joy__automation` is the app's visibility override: an automation run is
+   * headless, so it would be hidden, and while this key is present the app
+   * shows it in its own section instead. Cleared the moment the run reaches a
+   * terminal state — which is why a finished run leaves the list on its own
+   * and there is no retention rule anywhere.
+   */
   setAutomationRun(runId: string | null): void {
     if (runId && this.automationRunId !== runId) {
       this.automationRunId = runId;
       this.automationReported = false;
+      void this.mergeKey('joy__automation', { runId }).catch(() => {});
     }
   }
 
@@ -796,6 +805,12 @@ export class RelaySession {
       errorCode: failure?.code,
       errorMessage: failure?.message,
     });
+    // A FAILED run keeps its marker: it has to stay visible until dismissed,
+    // and it carries the reason so the row can say what went wrong without a
+    // lookup. Success clears it, and headless hiding reclaims the row.
+    void this.mergeKey('joy__automation',
+      state === 'failed' ? { runId, failed: true, errorCode: failure?.code, errorMessage: failure?.message } : null,
+    ).catch(() => {});
   }
 
   /** Re-run the watchdog over whatever the card now says. Called after every

@@ -707,6 +707,8 @@ export const pl: TranslationStructure = {
         unpin: 'Odepnij',
         noMachine: 'Bez maszyny',
         pinned: 'Przypięte',
+        automations: 'Automatyzacje',
+        automationFailures: 'Błędy automatyzacji',
         showHeadless: 'Pokaż headless',
         hideHeadless: 'Ukryj headless',
         sortByProject: 'wg projektu',

@@ -99,6 +99,9 @@ export interface SessionFacts {
     muted: boolean;
     /** Created with `joy new --headless`: nobody is watching it. */
     headless: boolean;
+    /** This session IS an automation run. Present while it runs, and kept
+     *  after a failure so the failure stays until dismissed. */
+    automation: { runId: string; failed?: boolean | null; errorCode?: string | null; errorMessage?: string | null } | null;
     queue: QueueFacts | null;
 }
 
@@ -123,6 +126,7 @@ export interface SessionFactsInput {
         joy__longRunning?: number | null;
         joy__muted?: boolean | null;
         joy__headless?: boolean | null;
+        joy__automation?: { runId: string; failed?: boolean | null; errorCode?: string | null; errorMessage?: string | null } | null;
         joy__eventBudget?: { since: number; dropped: number } | null;
         joy__login?: { url?: string; code?: string; error?: string } | null;
         joy__dialog?: { title?: string | null; options: string[] } | null;
@@ -207,6 +211,7 @@ export function sessionFacts(session: SessionFactsInput, online: boolean, opts: 
         budgetExhausted: (m?.joy__eventBudget?.dropped ?? 0) > 0,
         muted: m?.joy__muted === true,
         headless: m?.joy__headless === true,
+        automation: m?.joy__automation ?? null,
         queue: q
             ? { depth: q.queue.length, inFlight: q.inFlight != null, paused: q.paused, pauseReason: q.pauseReason }
             : null,
@@ -328,5 +333,20 @@ export function hasWorkInFlight(facts: SessionFacts): boolean {
  */
 export function hiddenFromList(facts: SessionFacts): boolean {
     if (!facts.headless) return false;
+    // An automation run is headless — nobody is watching it — but while it is
+    // RUNNING it has a home: the automation that produced it, and its own
+    // section in the list. The marker is a visibility override that lasts
+    // exactly as long as the run, which is why a finished run leaves the list
+    // on its own and there is no retention rule anywhere. A FAILED run keeps
+    // the marker until it is dismissed.
+    if (facts.automation) return false;
     return !facts.blocked && !facts.permission;
+}
+
+/** Where an automation run belongs in the list: its own section while it
+ *  works, and above everything when it has failed. Null for anything that is
+ *  not a run. */
+export function automationPlacement(facts: SessionFacts): 'failed' | 'running' | null {
+    if (!facts.automation) return null;
+    return facts.automation.failed ? 'failed' : 'running';
 }

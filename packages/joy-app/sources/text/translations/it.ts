@@ -689,6 +689,8 @@ export const it: TranslationStructure = {
         unpin: 'Non fissare',
         noMachine: 'Nessuna macchina',
         pinned: 'Fissate',
+        automations: 'Automazioni',
+        automationFailures: 'Errori di automazione',
         showHeadless: 'Mostra headless',
         hideHeadless: 'Nascondi headless',
         sortByProject: 'per progetto',
