@@ -1,3 +1,12 @@
+# Sep 10 (3) — Settings follow you, headless sessions can be found
+
+- **Your settings now reach your other devices.** Pins, voice agents, notification preferences, hide-archived — everything the app called a synced setting was in fact stored only on the device that set it, because the endpoint it used to sync to did not survive an earlier server change and the upload quietly went nowhere. There is a real one now: one encrypted blob per account, which the relay stores and cannot read. Two devices changing settings at once both keep their changes rather than the later one winning.
+- **Show headless.** `joy new --headless` keeps a session out of your list, and until now there was no way to see one from the app at all. A toggle below Show archived reveals them, and appears only when there is something to reveal. A headless session that needs you still shows up on its own, as before.
+- **Pinned sessions read at a glance.** A pin is one line — project, then title, then its status dot — and the project never gets cut off. Press the Pinned header to order by status instead of by project: amber first (needs permission, or needs a hand), then green (unread), then blue (working), then grey (already seen). The order is the one you can see, because it follows the dots.
+- **Settings → Appearance → Pinned rows** gives pins their own identicon shape and size, and **Machine glyph** sizes the monitor icon on a machine divider.
+- Machine dividers no longer wander: the name sits at a fixed indent instead of centred, so a column of collapsed machines lines up.
+- Fixes a date header that could be left stranded over no sessions at all.
+
 # Sep 10 — Pin sessions, fold machines away
 
 - **The new session list is now a small change to the old one, not a new one.** The first version added a grouping switcher, filter chips and saved groups; it read like a different app. This keeps the list you know — same header style, same rows, same active block at the top — and adds only two things.
