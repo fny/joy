@@ -219,7 +219,10 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
                 name={collapsed ? 'chevron-forward' : 'chevron-down'}
                 size={11}
                 color={theme.colors.textSecondary}
-                style={{ marginRight: 4 }}
+                // The chevron is a control, the name is the label; 4px read as
+                // one clump. Enough gap that the name starts where the eye
+                // expects a label to start.
+                style={{ marginRight: 10 }}
             />
             <Pressable onPress={handlePress} style={styles.machineSeparatorName} hitSlop={{ top: 8, bottom: 8 }}>
                 <Ionicons name="desktop-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 6 }} />
