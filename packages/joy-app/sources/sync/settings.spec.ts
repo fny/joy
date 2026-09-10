@@ -249,7 +249,6 @@ describe('settings', () => {
                 joy__doubleTapEnabled: false,
                 joy__newSessionDefault: false,
                 pinnedSessions: [],
-                sessionViews: [],
                 voiceAgents: [],
                 voiceActiveAgentId: null,
                 voiceWakeOnEvents: true,

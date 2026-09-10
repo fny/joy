@@ -7,10 +7,11 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { STATUS_PALETTE, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
 import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
-import { SessionListControls } from './SessionListControls';
-import { SessionGroupHeader } from './SessionGroupHeader';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
+import { useLocalSettingMutable } from '@/sync/storage';
+import { STATUS_PALETTE as PALETTE } from '@/utils/sessionUtils';
+import type { SessionState } from '@/sync/sessionFacts';
 import { Typography } from '@/constants/Typography';
 import { StatusDot } from './StatusDot';
 import { StyleSheet } from 'react-native-unistyles';
@@ -207,13 +208,23 @@ const stylesheet = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.groupped.sectionTitle,
         opacity: 0.3,
     },
-    tally: {
-        paddingHorizontal: 16,
-        paddingTop: 10,
-        paddingBottom: 20,
+    headerRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
     },
-    tallyText: {
-        fontSize: 11,
+    headerChevron: {
+        color: theme.colors.groupped.sectionTitle,
+        marginLeft: -2,
+    },
+    headerDot: {
+        width: 7,
+        height: 7,
+        borderRadius: 3.5,
+    },
+    headerCount: {
+        marginLeft: 'auto',
+        fontSize: 13,
         color: theme.colors.textSecondary,
         ...Typography.default(),
     },
@@ -235,6 +246,14 @@ export function SessionsList() {
     const toggleArchived = React.useCallback(() => {
         setHideInactiveSessions(!hideInactiveSessions);
     }, [hideInactiveSessions, setHideInactiveSessions]);
+    // Which machine sections are folded away. Device-local: a phone wants far
+    // more collapsed than a wide desktop, and that difference is real.
+    const [collapsedSections, setCollapsedSections] = useLocalSettingMutable('collapsedSessionGroups');
+    const toggleSection = React.useCallback((key: string) => {
+        setCollapsedSections(collapsedSections.indexOf(key) === -1
+            ? [...collapsedSections, key]
+            : collapsedSections.filter((k) => k !== key));
+    }, [collapsedSections, setCollapsedSections]);
     // Selection is derived once from pathname so the data array stays stable
     // across navigations. This keeps FlatList virtualization intact: only
     // the previously- and newly-selected rows re-render, instead of the
@@ -254,27 +273,53 @@ export function SessionsList() {
 
     const keyExtractor = React.useCallback((item: SessionListViewItem, index: number) => {
         switch (item.type) {
-            case 'header': return `header-${item.title}-${index}`;
+            case 'header': return `header-${item.sectionKey ?? item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'archive-toggle': return 'archive-toggle';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
-            case 'list-controls': return 'list-controls';
-            case 'group-header': return `group-${item.sectionKey}`;
-            case 'list-tally': return 'list-tally';
         }
     }, []);
 
     const renderItem = React.useCallback(({ item, index }: { item: SessionListViewItem, index: number }) => {
         switch (item.type) {
-            case 'header':
-                return (
-                    <View style={styles.headerSection}>
-                        <Text style={styles.headerText}>
-                            {item.title}
-                        </Text>
+            case 'header': {
+                // Unchanged for a plain (date) header. A machine section adds
+                // a chevron, its count, and — collapsed — a dot for whatever
+                // inside most wants a human, in the SAME header style.
+                const dot = item.collapsed && item.worstState
+                    ? PALETTE[item.worstState as SessionState]?.dotColor
+                    : undefined;
+                const body = (
+                    <View style={styles.headerRow}>
+                        {!!item.sectionKey && (
+                            <Ionicons
+                                name={item.collapsed ? 'chevron-forward' : 'chevron-down'}
+                                size={12}
+                                style={styles.headerChevron}
+                            />
+                        )}
+                        <Text style={styles.headerText}>{item.title}</Text>
+                        {!!dot && <View style={[styles.headerDot, { backgroundColor: dot }]} />}
+                        {item.count != null && !!item.sectionKey && (
+                            <Text style={styles.headerCount}>{item.count}</Text>
+                        )}
                     </View>
                 );
+                if (!item.sectionKey) {
+                    return <View style={styles.headerSection}>{body}</View>;
+                }
+                return (
+                    <Pressable
+                        onPress={() => toggleSection(item.sectionKey!)}
+                        accessibilityRole="button"
+                        accessibilityState={{ expanded: !item.collapsed }}
+                        style={styles.headerSection}
+                    >
+                        {body}
+                    </Pressable>
+                );
+            }
 
             case 'archive-toggle':
                 return (
@@ -295,22 +340,6 @@ export function SessionsList() {
                     />
                 );
 
-            case 'list-controls':
-                return <SessionListControls />;
-
-            case 'group-header':
-                return <SessionGroupHeader item={item} />;
-
-            case 'list-tally':
-                return (
-                    <View style={styles.tally}>
-                        <Text style={styles.tallyText}>
-                            {item.shown === item.total
-                                ? null
-                                : t('sidebar.filtered', { shown: item.shown, total: item.total })}
-                        </Text>
-                    </View>
-                );
 
             case 'project-group':
                 return (

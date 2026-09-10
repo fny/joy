@@ -1,81 +1,82 @@
 /**
- * The session list under `localSettings.sessionListV2`: pins, custom groups,
- * a switchable grouping axis, collapsible sections and preset filters.
+ * The session list under `localSettings.sessionListV2`: the list exactly as it
+ * reads today, plus two things — sessions you have pinned, and machine
+ * sections you can collapse.
  *
- * Built HERE rather than in the store, deliberately. The axis, the filter and
- * the collapse set are device-local preferences; a store-side rebuild would
- * have to be re-triggered by every one of them, and the store's list builder
- * takes only sessions. The rules themselves are pure and live in
- * sync/sessionListModel.ts — this hook is the wiring: read the preferences,
- * hand the model the sessions, flatten its sections into list items.
+ * The active block at the top is untouched, and so are the rows. What changes
+ * is that the sessions BELOW it are grouped by machine instead of by date,
+ * under the same section headers, with a chevron.
+ *
+ * Built here rather than in the store because the pins and the collapse set
+ * are preferences: a store-side rebuild would have to be re-triggered by every
+ * change to either. The placement rules are pure and live in
+ * sync/sessionListModel.ts.
  */
 import * as React from 'react';
 import { storage, sessionRowDataFor, useLocalSetting, useSetting, type SessionListViewItem } from '@/sync/storage';
 import { useShallow } from 'zustand/react/shallow';
 import { isSessionInActiveGroup } from '@/sync/sessionLiveness';
-import { buildListLayout, type ListSession } from '@/sync/sessionListModel';
 import { hiddenFromList, liveFacts } from '@/sync/sessionFacts';
+import { buildListLayout, type ListSession } from '@/sync/sessionListModel';
 import { t } from '@/text';
 
-/** The model's view of a session, straight off the store row. */
 interface Row extends ListSession { id: string }
 
 export function useSessionListV2(): SessionListViewItem[] | null {
     const enabled = useLocalSetting('sessionListV2');
-    const axis = useLocalSetting('sessionGroupBy');
-    const filter = useLocalSetting('sessionFilter');
     const collapsed = useLocalSetting('collapsedSessionGroups');
     const pinned = useSetting('pinnedSessions');
-    const views = useSetting('sessionViews');
     const hideInactive = useSetting('hideInactiveSessions');
 
-    // The raw sessions and the unread set. Selected shallowly so this
-    // re-runs on the same cadence the store's own list rebuild did.
     const sessions = storage(useShallow((state) => (state.isDataReady ? state.sessions : null)));
     const unread = storage(useShallow((state) => state.unreadSessionIds));
+    const machines = storage(useShallow((state) => state.machines));
 
     return React.useMemo(() => {
         if (!enabled || !sessions) return null;
 
-        const all = Object.values(sessions);
-        // "Hide archived" is a visibility filter, not a grouping question:
-        // apply it before the model so an archived session cannot hold a
-        // section open or colour its rollup.
-        const shown = all.filter((s) => !hiddenFromList(liveFacts(s)));
-        const visible = hideInactive ? shown.filter((s) => isSessionInActiveGroup(s)) : shown;
+        const all = Object.values(sessions)
+            // `joy new --headless`: out of the list until it needs a human.
+            .filter((s) => !hiddenFromList(liveFacts(s)));
 
-        const rows: Row[] = visible.map((s) => ({
+        // The active block keeps its place at the top, exactly as before —
+        // so those sessions are NOT also placed into a machine section.
+        const active = all.filter((s) => isSessionInActiveGroup(s));
+        const rest = hideInactive ? [] : all.filter((s) => !isSessionInActiveGroup(s));
+
+        const rows: Row[] = rest.map((s) => ({
             id: s.id,
             state: sessionRowDataFor(s, unread).state,
             machineId: s.metadata?.machineId ?? null,
-            path: s.metadata?.path ?? null,
-            flavor: s.metadata?.flavor ?? null,
-            hasUnread: unread.has(s.id),
-            createdAt: s.createdAt,
             activeAt: s.activeAt,
+            createdAt: s.createdAt,
         }));
 
-        const layout = buildListLayout({
-            sessions: rows,
-            pinned,
-            views,
-            axis,
-            filter,
-            collapsed,
-            pinnedTitle: t('sidebar.pinned'),
-        });
-
-        const items: SessionListViewItem[] = [{ type: 'list-controls' }];
-        for (const section of layout.sections) {
+        const items: SessionListViewItem[] = [];
+        if (active.length > 0) {
             items.push({
-                type: 'group-header',
-                sectionKey: section.key,
-                title: section.title,
-                kind: section.kind,
+                type: 'active-sessions',
+                sessions: active
+                    .sort((a, b) => b.createdAt - a.createdAt)
+                    .map((s) => sessionRowDataFor(s, unread)),
+            });
+        }
+
+        const machineName = (id: string | null): string => {
+            if (!id) return t('sidebar.noMachine');
+            const m = machines[id];
+            return m?.metadata?.displayName || m?.metadata?.host || id;
+        };
+
+        for (const section of buildListLayout({ sessions: rows, pinned, collapsed })) {
+            items.push({
+                type: 'header',
+                title: section.kind === 'pinned' ? t('sidebar.pinned') : machineName(section.machineId),
+                // Pinned is a label, not a control: no key means no chevron.
+                sectionKey: section.kind === 'pinned' ? undefined : section.key,
                 count: section.sessions.length,
-                hiddenByFilter: section.hiddenByFilter,
                 collapsed: section.collapsed,
-                worstState: section.worstState,
+                worstState: section.collapsed ? section.worstState : null,
             });
             if (section.collapsed) continue;
             for (const row of section.sessions) {
@@ -83,7 +84,6 @@ export function useSessionListV2(): SessionListViewItem[] | null {
                 if (session) items.push({ type: 'session', session: sessionRowDataFor(session, unread) });
             }
         }
-        items.push({ type: 'list-tally', shown: layout.shown, total: layout.total });
         return items;
-    }, [enabled, sessions, unread, pinned, views, axis, filter, collapsed, hideInactive]);
+    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive]);
 }

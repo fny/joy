@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 10 — Pin sessions, fold machines away",
+      "summary": "",
+      "markdown": "- **The new session list is now a small change to the old one, not a new one.** The first version added a grouping switcher, filter chips and saved groups; it read like a different app. This keeps the list you know — same header style, same rows, same active block at the top — and adds only two things.\n- **Pinned sessions** sit in their own section at the top, on every device. Pin from a session's long-press menu.\n- **Machine sections fold away.** Below the active block, sessions are grouped by machine instead of by date, and each machine's header collapses. A folded section still shows how many sessions are inside and a dot if any of them is waiting on you, so nothing hides behind a collapsed header.\n- Still behind Settings → Features → New session list."
+    },
+    {
       "title": "Sep 9 (10) — Headless sessions",
       "summary": "",
       "markdown": "- **`joy new --headless` makes a session that stays out of your session list.** For work nobody is watching — a script, a scheduled job, one agent asking another. It also sends no \"finished\" notification.\n- **Except when it needs you.** A headless session waiting on an approval or a sign-in appears in the list and still notifies you, because that is the one moment hiding it would cost you a day. Once it is unblocked it goes quiet again.\n- Nothing becomes headless on its own — only the flag does it."
@@ -416,5 +421,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 9 (10) — Headless sessions"
+  "latestTitle": "Sep 10 — Pin sessions, fold machines away"
 }

@@ -158,24 +158,21 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
 
 // Unified list item type for SessionsList component
 export type SessionListViewItem =
-    | { type: 'header'; title: string }
-    // ── session list v2 (localSettings.sessionListV2) ──────────────────────
-    /** The axis switcher and filter chips, once, at the top. */
-    | { type: 'list-controls' }
-    /** A collapsible section head. Carries its own count and worst state so a
-     *  collapsed group compresses without concealing (sessionListModel.ts). */
+    /**
+     * A section head. The plain form is the date header the list has always
+     * had; with `sectionKey` it is a machine section you can collapse
+     * (localSettings.sessionListV2), which adds a chevron, a count, and — when
+     * collapsed — a dot for whatever inside most wants a human. Same style
+     * either way: this is the existing header, not a new kind of control.
+     */
     | {
-        type: 'group-header';
-        sectionKey: string;
+        type: 'header';
         title: string;
-        kind: 'pinned' | 'view' | 'group';
-        count: number;
-        hiddenByFilter: number;
-        collapsed: boolean;
-        worstState: string | null;
+        sectionKey?: string;
+        count?: number;
+        collapsed?: boolean;
+        worstState?: string | null;
     }
-    /** "7 of 18" — a filter must always say what it is hiding. */
-    | { type: 'list-tally'; shown: number; total: number }
     | { type: 'active-sessions'; sessions: SessionRowData[] }
     | { type: 'archive-toggle'; hidden: boolean }
     | { type: 'project-group'; displayPath: string; machine: Machine }

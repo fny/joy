@@ -322,17 +322,16 @@ every relay; machines register per account.
   error. Bump `runtimeVersion` in app.config.js whenever the native surface
   changes; a probe is the belt to that braces.
 - **Session list v2** (Settings → Features → New session list; device-local
-  `sessionListV2`). Pins, custom groups, a switchable grouping axis
-  (project / machine / date — time becomes the SORT, not the grouping),
-  collapsible sections and preset filters (all / needs me / working /
-  unread). A filter and a custom group are ONE object (`sessionViews`: a
-  rule, hand-picked members, or both), and Pinned is the built-in view.
-  Rules live in `sync/sessionListModel.ts`: a session appears once (first
-  view to claim it wins, and it leaves the derived grouping); a filtered
-  section reports what it lost; a collapsed section still carries its
-  count and worst state; the foot always says `7 of 18`. Pins and groups
-  are synced (they are statements about the work); the axis, filter and
-  collapse set are device-local. Pin from a session's long-press menu.
+  `sessionListV2`). The list exactly as it reads today — same active block,
+  same headers, same rows — plus two things: a **Pinned** section at the
+  top (`pinnedSessions`, synced: a pin is a statement about the work, true
+  on every device), and **machine sections you can collapse** in place of
+  the date headers (`collapsedSessionGroups`, device-local: a phone wants
+  far more collapsed than a wide desktop). Rules in
+  `sync/sessionListModel.ts`: a pinned session leaves its machine section
+  so nothing appears twice, and a collapsed section still carries its count
+  and a dot for whatever inside most wants a human — compress, never
+  conceal. Pin from a session's long-press menu.
 - **Headless sessions** (`joy new --headless`): for work nobody is watching.
   Kept out of the app's session list and sends no turn-done push — but a
   session needing a HUMAN (approval, sign-in) still surfaces AND still

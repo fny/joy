@@ -54,16 +54,6 @@ export const SettingsSchema = z.object({
     // and a custom group are statements about the WORK, true on every device —
     // unlike the collapse state, which is device-local by design.
     pinnedSessions: z.array(z.string()).describe('Session ids pinned to the top of the list'),
-    sessionViews: z.array(z.object({
-        id: z.string(),
-        name: z.string(),
-        /** Hand-picked members — Pinned is this and nothing else. */
-        ids: z.array(z.string()).optional(),
-        machineId: z.string().nullish(),
-        path: z.string().nullish(),
-        flavor: z.string().nullish(),
-        filter: z.enum(['all', 'needs', 'working', 'unread']).nullish(),
-    })).describe('Custom session groups. A saved filter and a custom group are the same object: a rule, optional hand-picked members, or both'),
     voiceAgents: z.array(z.object({
         id: z.string(),
         name: z.string(),
@@ -142,7 +132,6 @@ export const settingsDefaults: Settings = {
     joy__tmuxServerUrl: null,
     joy__newSessionDefault: false,
     pinnedSessions: [],
-    sessionViews: [],
     voiceAgents: [],
     voiceActiveAgentId: null,
     harnessModels: {},

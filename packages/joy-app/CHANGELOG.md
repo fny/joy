@@ -1,3 +1,10 @@
+# Sep 10 — Pin sessions, fold machines away
+
+- **The new session list is now a small change to the old one, not a new one.** The first version added a grouping switcher, filter chips and saved groups; it read like a different app. This keeps the list you know — same header style, same rows, same active block at the top — and adds only two things.
+- **Pinned sessions** sit in their own section at the top, on every device. Pin from a session's long-press menu.
+- **Machine sections fold away.** Below the active block, sessions are grouped by machine instead of by date, and each machine's header collapses. A folded section still shows how many sessions are inside and a dot if any of them is waiting on you, so nothing hides behind a collapsed header.
+- Still behind Settings → Features → New session list.
+
 # Sep 9 (10) — Headless sessions
 
 - **`joy new --headless` makes a session that stays out of your session list.** For work nobody is watching — a script, a scheduled job, one agent asking another. It also sends no "finished" notification.
