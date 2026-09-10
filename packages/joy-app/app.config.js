@@ -66,7 +66,13 @@ export default {
         // 22 = the selectable-text module. This takes effect at the next
         // native build; the JS-side probe in that module is what protects the
         // binaries already in the field.
-        runtimeVersion: "22",
+        //
+        // JOY_RUNTIME_VERSION publishes JS to a runtime the fence has already
+        // moved past — for the binaries in the field while no build at the
+        // new number exists (2026-09-10: an OTA went out at 22, every device
+        // was on 21, nobody saw it). Only for JS that runs on that runtime;
+        // the default is the fence.
+        runtimeVersion: process.env.JOY_RUNTIME_VERSION || "22",
         orientation: "default",
         icon: "./sources/assets/images/icon.png",
         scheme: "joy",
