@@ -35,6 +35,7 @@ import { coordinatorFor, type SessionCoordinator, type CommandView, type Handled
 import { PiDriver, type PiRuntimePort } from "./piDriver";
 import { titleFromPrompt } from "../opencode/opencodeSession";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
+import { initialPiProcess, nextPiProcess, piAlive, piExiting, type PiProcessState, type PiProcessEvent, type PiEffect } from "./piProcess";
 
 export interface PiInit {
   id: string;
@@ -119,21 +120,19 @@ export class PiSession implements AgentSession {
 
   #startedAt: number;
   #deps: SessionDeps;
-  #proc: ChildProcess | null = null;
-  /** The process end() sent SIGTERM to, for awaitExit. */
-  #dying: ChildProcess | null = null;
+  /** The child process HANDLE — the live one while running, the one end()
+   *  signalled while it exits (awaitExit's subject). What it means is the
+   *  machine's to say (piProcess.ts): `#pm` decides, this is I/O. */
+  #child: ChildProcess | null = null;
+  /** The process, the open turn and the thinking flag, as one machine. */
+  #pm: PiProcessState;
   #relay: RelaySession | null = null;
-  #started = false;
-  #thinking = false;
   #archivePromise: Promise<boolean> | null = null;
-  // Monotonic turn counter — pi's turn_start carries no id.
-  #turnSeq = 0;
   // Per-process nonce in every turn id (#575): a restart under the same joy
-  // id starts #turnSeq at 0 again, and the relay dedupes by runtime event
-  // id — so a second `pi:<id>:t1` was swallowed as a replay of the old
+  // id starts the turn seq at 0 again, and the relay dedupes by runtime
+  // event id — so a second `pi:<id>:t1` was swallowed as a replay of the old
   // process's turn and the new answer hung off the old bracket.
   readonly #boot = randomUUID().slice(0, 8);
-  #turn: string | null = null;
   #ledger: Ledger;
   #generation: number;
   #coordinator: SessionCoordinator;
@@ -153,6 +152,7 @@ export class PiSession implements AgentSession {
     this.#piSessionId = init.piSessionId;
     this.#continueLast = init.continueLast === true;
     this.status = init.status;
+    this.#pm = initialPiProcess(init.status);
     this.#startedAt = init.startedAt;
     this.#deps = deps;
     const rec = loadWindowRecord(init.id);
@@ -182,8 +182,8 @@ export class PiSession implements AgentSession {
     return {
       sessionId: this.id,
       send: (cmd) => this.#send(cmd),
-      alive: () => this.status !== "ended" && !!this.#proc,
-      thinking: () => this.#thinking,
+      alive: () => piAlive(this.#pm),
+      thinking: () => this.#pm.thinking,
       rejected: (kind, text, error) => this.#rejected(kind, text, error),
       handleCommand: (text, opts) => this.#handleCommand(text, opts),
       mirrorAccepted: (cmd) => this.#mirrorAccepted(cmd),
@@ -197,6 +197,30 @@ export class PiSession implements AgentSession {
   get relayAttached(): boolean { return this.#relay !== null; }
   /** pi's own session id (the session file's id) — what a fork copies. */
   get piSessionId(): string | undefined { return this.#piSessionId; }
+
+  // ── the process machine ────────────────────────────────────────────────────
+
+  /** Advance the machine; the effects come back for the caller to perform
+   *  at the right point (a turn's start row goes out before the thinking
+   *  push it earns, as it always did). Null = the event means nothing now. */
+  #advance(ev: PiProcessEvent): PiEffect[] | null {
+    const t = nextPiProcess(this.#pm, ev);
+    if (!t) return null;
+    this.#pm = t.to;
+    return t.effects;
+  }
+  #perform(effects: PiEffect[]): void {
+    for (const e of effects) {
+      switch (e.type) {
+        case "kill_process": try { this.#child?.kill("SIGTERM"); } catch { /* already gone */ } break;
+        case "turn_end": { const turn = this.#turnId(e.seq); this.#relay?.send(encodeTurnEnd(e.status, { turn }), `${turn}:end`); break; }
+        case "notify_thinking": this.#relay?.setThinking(e.on); break;
+        case "driver_turn_ended": this.#driver.emit({ kind: "turn_ended", status: e.status }); break;
+      }
+    }
+  }
+  /** The open turn's id, or null. */
+  get #turn(): string | null { return this.#pm.turnOpen ? this.#turnId(this.#pm.turnSeq) : null; }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -213,8 +237,7 @@ export class PiSession implements AgentSession {
   }
 
   beginWatching(): void {
-    if (this.#started) return;
-    this.#started = true;
+    if (this.#pm.phase !== "idle") return; // started, or ended before it ever started
     this.#start();
   }
 
@@ -235,19 +258,27 @@ export class PiSession implements AgentSession {
         env,
         stdio: ["pipe", "pipe", "pipe"],
       });
-      this.#proc = proc;
+      this.#child = proc;
       this.pid = proc.pid;
-      proc.on("exit", () => { if (this.status !== "ended") this.end("process_exited"); });
+      this.#perform(this.#advance({ type: "spawned", pid: proc.pid }) ?? []);
+      // The child went (on its own, or after end() signalled it): while
+      // running that ends the session; once ended it is the exit awaitExit
+      // was waiting for.
+      const gone = () => {
+        if (this.#pm.phase === "running") this.end("process_exited");
+        else this.#perform(this.#advance({ type: "exited", pid: proc.pid }) ?? []);
+      };
+      proc.on("exit", gone);
       proc.on("error", (e) => {
         process.stderr.write(`[pi ${this.id}] spawn error: ${e}\n`);
-        if (this.status !== "ended") this.end("process_exited");
+        gone();
       });
       // A write into a pipe pi has already closed (it died, or shut its
       // stdin) emits `error: EPIPE` on stdin; with no listener that is an
       // uncaught exception that killed the whole daemon (issue #46).
       proc.stdin?.on("error", (e) => {
         process.stderr.write(`[pi ${this.id}] stdin error: ${e instanceof Error ? e.message : e}\n`);
-        if (this.status !== "ended") this.end("process_exited");
+        gone();
       });
       proc.stderr?.on("data", (c: Buffer) => {
         const s = String(c).trim();
@@ -269,6 +300,7 @@ export class PiSession implements AgentSession {
       this.#driver.emit({ kind: "ready" });
     } catch (e) {
       process.stderr.write(`[pi ${this.id}] start failed: ${e}\n`);
+      this.#advance({ type: "spawn_failed", error: String(e) });
       this.end("process_exited");
     }
   }
@@ -280,7 +312,7 @@ export class PiSession implements AgentSession {
 
   /** True when the command was handed to pi's stdin. */
   #send(cmd: Record<string, unknown>): boolean {
-    const proc = this.#proc;
+    const proc = piAlive(this.#pm) ? this.#child : null;
     if (!proc?.stdin?.writable || proc.stdin.destroyed) return false;
     try { proc.stdin.write(JSON.stringify(cmd) + "\n"); return true; }
     catch (e) { process.stderr.write(`[pi ${this.id}] write failed: ${e instanceof Error ? e.message : e}\n`); return false; }
@@ -316,9 +348,11 @@ export class PiSession implements AgentSession {
         break;
       }
       case "turn_start": {
-        this.#turn = this.#turnId(++this.#turnSeq);
-        this.#relay?.send(encodeTurnStart({ turn: this.#turn }), `${this.#turn}:start`);
-        this.#setThinking(true);
+        const effects = this.#advance({ type: "turn_start" });
+        if (!effects) break; // the process is gone: a late row changes nothing
+        const turn = this.#turn!;
+        this.#relay?.send(encodeTurnStart({ turn }), `${turn}:start`);
+        this.#perform(effects);
         break;
       }
       case "turn_end": {
@@ -342,18 +376,18 @@ export class PiSession implements AgentSession {
           if (u && (u.input ?? 0) > 0) void this.#relay?.updateContext((u.input ?? 0) + (u.cacheRead ?? 0));
           this.#relay?.send(encodeTurnEnd("completed", { turn }), `${turn}:end`);
         }
-        this.#turn = null;
+        this.#perform(this.#advance({ type: "turn_end" }) ?? []);
         break;
       }
       case "agent_end": {
         // The run has fully settled (all queued steering delivered): every
         // command pi took for it is complete.
-        this.#setThinking(false);
+        this.#perform(this.#advance({ type: "agent_end" }) ?? []);
         this.#driver.emit({ kind: "turn_ended", status: "completed" });
         break;
       }
       case "tool_execution_start": {
-        const turn = this.#turn ?? this.#turnId(this.#turnSeq);
+        const turn = this.#turn ?? this.#turnId(this.#pm.turnSeq);
         this.#relay?.send(encodeToolCallStart({
           call: String(e.toolCallId ?? randomUUID()),
           name: String(e.toolName ?? "PiTool"),
@@ -363,7 +397,7 @@ export class PiSession implements AgentSession {
         break;
       }
       case "tool_execution_end": {
-        const turn = this.#turn ?? this.#turnId(this.#turnSeq);
+        const turn = this.#turn ?? this.#turnId(this.#pm.turnSeq);
         const call = String(e.toolCallId ?? "");
         // Carry the OUTPUT and the failure flag (#578): the record held only
         // the call id, so a permission-denied or crashed tool rendered exactly
@@ -376,11 +410,8 @@ export class PiSession implements AgentSession {
       case "error": {
         const msg = String((e as { message?: unknown }).message ?? JSON.stringify(e).slice(0, 200));
         this.#relay?.send(encodeUserMessage(`⚠ pi error: ${msg}`, Date.now()));
-        if (this.#turn) {
-          this.#relay?.send(encodeTurnEnd("failed", { turn: this.#turn }), `${this.#turn}:end`);
-          this.#turn = null;
-        }
-        this.#setThinking(false);
+        // The open turn (if any) closes failed; thinking clears.
+        this.#perform(this.#advance({ type: "error" }) ?? []);
         this.#driver.emit({ kind: "turn_ended", status: "failed", detail: msg.slice(0, 200) });
         break;
       }
@@ -403,15 +434,9 @@ export class PiSession implements AgentSession {
     this.#deps.addChatMessage({ role: "event", content: note, source: "cli", session_id: this.id, event_type: "pi_rejected", event_status: "error" });
   }
 
-  #setThinking(value: boolean): void {
-    if (this.#thinking === value) return;
-    this.#thinking = value;
-    this.#relay?.setThinking(value);
-  }
-
   // ── AgentSession surface ───────────────────────────────────────────────────
 
-  busy(): boolean { return this.#thinking; }
+  busy(): boolean { return this.#pm.thinking; }
 
   /** Joy-owned slash commands the harness executes itself; the coordinator
    *  completes their row at accept time, so a lane that owns a relay turn
@@ -470,12 +495,9 @@ export class PiSession implements AgentSession {
    *  An abort that never reached pi is reported: nothing was interrupted (#8). */
   async abort(): Promise<{ ok: boolean; error?: string }> {
     const r = await this.#coordinator.abortRunning(this.id);
-    if (r.ok && this.#turn) {
-      this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn }), `${this.#turn}:end`);
-      this.#turn = null;
-      this.#setThinking(false);
-      this.#driver.emit({ kind: "turn_ended", status: "cancelled" });
-    }
+    // With a turn open: its row closes cancelled, thinking clears, the
+    // driver learns the turn is over. With none, the abort changed nothing here.
+    if (r.ok) this.#perform(this.#advance({ type: "abort_ok" }) ?? []);
     return r;
   }
 
@@ -508,7 +530,7 @@ export class PiSession implements AgentSession {
    *  The restart replacement reopens the SAME on-disk conversation; two
    *  writers on it is how history gets corrupted (codex review, 2026-09-04). */
   awaitExit(ms = 3000): Promise<void> {
-    const p = this.#dying;
+    const p = piExiting(this.#pm) ? this.#child : null;
     if (!p || p.exitCode !== null || p.signalCode !== null) return Promise.resolve();
     return new Promise((resolve) => {
       const t = setTimeout(() => { try { p.kill("SIGKILL"); } catch { /* gone */ } resolve(); }, ms);
@@ -517,24 +539,22 @@ export class PiSession implements AgentSession {
   }
 
   end(reason: "killed" | "process_exited" | "restart"): boolean {
-    if (this.status === "ended") return false;
+    if (this.#pm.phase === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
-    if (this.#proc && this.#proc.exitCode === null) {
-      this.#dying = this.#proc;
-      try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
-    }
-    this.#proc = null;
+    // A live child is signalled and stays the handle awaitExit waits on;
+    // one that already exited (or never spawned) leaves nothing to wait for.
+    const alive = !!this.#child && this.#child.exitCode === null;
+    const effects = this.#advance({ type: "end", reason, alive }) ?? [];
+    this.#perform(effects.filter((e) => e.type === "kill_process"));
+    if (!piExiting(this.#pm)) this.#child = null;
     this.#driver.processGone(); // the process that would have answered is gone (#577)
     // Its unanswered attempts become explicit unknowns for the next generation
     // to re-send; queued rows survive a restart / process exit, never a kill.
     this.#unsubscribeQueue();
     this.#coordinator.retire(this.id, reason);
-    if (this.#turn) {
-      this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn }), `${this.#turn}:end`);
-      this.#turn = null;
-    }
-    this.#setThinking(false);
+    // The open turn (if any) closes cancelled; thinking clears.
+    this.#perform(effects.filter((e) => e.type !== "kill_process"));
     if (reason === "process_exited") {
       void this.#relay?.updateJoyState("detached");
       this.#relay?.pausePull();
@@ -594,7 +614,7 @@ export class PiSession implements AgentSession {
       transcript_path: this.transcriptPath,
       relay_session_id: this.relaySessionId,
       summary: this.summary,
-      busy: this.#thinking,
+      busy: this.#pm.thinking,
     };
   }
 
