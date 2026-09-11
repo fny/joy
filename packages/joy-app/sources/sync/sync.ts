@@ -21,6 +21,10 @@ import { v2MessagesAfter, v2MessagesBefore, type V2Lifecycle } from './v2/reads'
 /** Relay poll cadence: the baseline live channel everywhere, and the ONLY one
  *  on native (SSE needs a streaming fetch body React Native lacks). */
 const POLL_INTERVAL_MS = 2500;
+/** How often to re-read account settings while the app is in front. Far slower
+ *  than the session poll because settings change when a HUMAN changes them,
+ *  not continuously — but not never, which is what it was. */
+const SETTINGS_POLL_MS = 30_000;
 
 import { reconcileDisabledPushState, syncCurrentPushToken } from './pushRegistration';
 import { SyncInitGate } from './initGate';
@@ -156,6 +160,17 @@ class Sync {
             void ensureDesktopNotificationPermission();
         }
 
+        // Settings are PULLED, never pushed to us. Foreground alone is not
+        // enough to make a pin made elsewhere show up here: two devices open
+        // side by side never foreground, and a desktop tab in front of you
+        // never does either. A small GET on a slow timer is what makes
+        // cross-device settings feel like they sync rather than like they do
+        // not work.
+        const settingsPoll = setInterval(() => {
+            if (getCurrentAppState() === 'active') this.settingsSync.invalidate();
+        }, SETTINGS_POLL_MS);
+        (settingsPoll as { unref?: () => void }).unref?.();
+
         // Refresh the account-level syncs when the app returns to the foreground.
         AppState.addEventListener('change', (nextAppState) => {
             if (nextAppState === 'active') {
@@ -188,6 +203,12 @@ class Sync {
                 // live pokes while the tab was hidden catches up automatically.
                 if (getCurrentAppState() === 'active') {
                     this.refetchViewedSession();
+                    // Settings too. This is the ONLY place web ever learned
+                    // them after startup: RN's AppState 'active' does not fire
+                    // on tab focus (the reason this handler exists), so the
+                    // invalidate added to that listener never ran on web and a
+                    // pin made on another device arrived only on page reload.
+                    this.settingsSync.invalidate();
                 }
             };
             document.addEventListener('visibilitychange', broadcast);
