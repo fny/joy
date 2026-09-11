@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 (4) — Restore what a reboot took",
+      "summary": "",
+      "markdown": "- **Sessions come back after a restart.** A daemon crash never lost anything — your sessions live in tmux, which outlives it — but a machine reboot killed tmux and left you reopening each folder by hand. The machine page now offers **Restore N sessions**, and each one resumes its conversation rather than just reopening the folder. From a terminal: `joy restore`, or `joy restore --dry-run` to see what it would bring back first.\n- **Restore latest, per project.** In Projects, a folder that lost something offers to bring back just its newest session — for when you want the one thing you were in the middle of rather than everything.\n- A session that is still running is never offered: restoring it would put two agents in one folder.\n- **\"Sessions\" on the machine page is now \"Projects\"**, and the list is ordered by most recent instead of alphabetically — what you were working on was being buried under whatever started with an 'a'.\n- **Automations are editable.** Name, folder, machine, prompt and trigger, from the automation's own row. The name comes first and is required now; deriving it from the first few words of the prompt gave everything a name that read like a fragment of a sentence.\n- Two triggers were removed — \"after a session finishes a turn\" and \"when the machine comes back\" — along with one that never worked. What is left is **Only when I ask**, **On a schedule** and **After another automation**."
+    },
+    {
       "title": "Sep 11 (3) — Messages from other sessions stay out of your queue",
       "summary": "",
       "markdown": "- **Your queue is yours again.** When another session, the `joy` command or a scheduled job sends a session a message while it is busy, that message used to appear in the Queue above the composer exactly like something you had typed — and a few agents talking to each other could fill it. Those rows now sit in their own **From other sessions** stack, folded by default, each captioned with who sent it. You can still drop one or steer it into the running turn; you cannot edit another party's words. Needs the updated daemon, which now stamps each queued row with its sender."
@@ -451,5 +456,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 11 (3) — Messages from other sessions stay out of your queue"
+  "latestTitle": "Sep 11 (4) — Restore what a reboot took"
 }
