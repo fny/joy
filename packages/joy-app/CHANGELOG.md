@@ -1,3 +1,8 @@
+# Sep 11 (7) — Stop is always within reach
+
+- **A stop button beside send while you type during a turn.** The send button turns into a stop button while the agent is working, but only while the box is empty: the moment you started typing a follow-up it turned back into send, and there was no way to stop the turn without clearing what you had written (Escape worked on web, nothing did on a phone). Now a smaller stop button sits next to send whenever a turn is running and the box has text or an attachment.
+- To keep the row to one extra icon, the save-draft button steps aside while a turn is running; it is back as soon as the turn ends.
+
 # Sep 11 (6) — You choose the relay
 
 - **There is no built-in relay any more.** A new install asks which relay to use on its first screen, checks that it is a joy relay (asking for its access key if it is gated), and only then offers to create or restore an account. Nothing about your account or your data is hard-wired to one server.

@@ -7,6 +7,7 @@ import { AgentInputAttachmentStrip } from './AgentInputAttachmentStrip';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
 import { generateThumbhash } from '@/utils/thumbhash';
 import { getImagesFromClipboard, getImagesFromDrop, fileToAttachmentPreview } from '@/utils/pasteImages.web';
+import { composerSlots } from './composerSlots';
 import { layout } from './layout';
 import { MultiTextInput, KeyPressEvent, MULTI_TEXT_INPUT_FONT_SIZE, MULTI_TEXT_INPUT_LINE_HEIGHT } from './MultiTextInput';
 import { Typography } from '@/constants/Typography';
@@ -606,8 +607,17 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
 
     // ABORT takes over the send slot while a turn is processing and the box is
     // empty; any typed text flips it back to send so mid-turn queueing/steering
-    // stays one tap. Escape still aborts on web regardless.
-    const abortMode = !!(props.showAbortButton && props.onAbort && !hasText && !hasImages && !props.isSending && !isSendBlocked);
+    // stays one tap — and a second stop button appears beside send, so a turn
+    // can be stopped while a message is being typed (composerSlots.ts). Escape
+    // still aborts on web regardless.
+    const slots = composerSlots({
+        turnProcessing: !!(props.showAbortButton && props.onAbort),
+        hasContent: hasText || hasImages,
+        isSending: !!props.isSending,
+        isSendBlocked,
+        canSaveDraft: !!props.onSaveDraft,
+    });
+    const abortMode = slots.abortSlot;
 
     // Check if this is a Codex, Gemini, or OpenClaw session
     // Use metadata.flavor for existing sessions, agentType prop for new sessions
@@ -1310,7 +1320,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                 {/* Stash current input as an on-device draft — lives in the
                                     old abort slot; abort itself now takes over the SEND button
                                     (square icon) while a turn is processing. */}
-                                {props.onSaveDraft && hasText && (
+                                {slots.saveDraft && (
                                     <Pressable
                                         onPress={props.onSaveDraft}
                                         hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
@@ -1335,6 +1345,37 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                     </Pressable>
                                 )}
                                 </View>}
+
+                                {/* Stop beside send: a turn is processing and the box has
+                                    content, so the send slot cannot be the stop button. Same
+                                    handler and spinner as the slot's abort. */}
+                                {slots.secondaryAbort && (
+                                    <Pressable
+                                        onPress={handleAbortPress}
+                                        disabled={isAborting}
+                                        hitSlop={{ top: 5, bottom: 10, left: 4, right: 4 }}
+                                        accessibilityRole="button"
+                                        accessibilityLabel={t('common.stop')}
+                                        testID="composer-abort-secondary"
+                                        style={(p) => ({
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            borderRadius: Platform.select({ default: 16, android: 20 }),
+                                            paddingHorizontal: 4,
+                                            paddingVertical: 6,
+                                            height: 32,
+                                            marginRight: 4,
+                                            opacity: p.pressed ? 0.7 : 1,
+                                        })}
+                                    >
+                                        {isAborting ? (
+                                            <ActivityIndicator size="small" color={theme.colors.button.secondary.tint} />
+                                        ) : (
+                                            <Ionicons name="stop" size={16} color={theme.colors.button.secondary.tint} />
+                                        )}
+                                    </Pressable>
+                                )}
 
                                 {/* Send/Voice button - aligned with first row. While a turn is
                                     processing and the box is empty it becomes the ABORT button

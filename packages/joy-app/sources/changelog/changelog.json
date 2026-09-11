@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 (7) — Stop is always within reach",
+      "summary": "",
+      "markdown": "- **A stop button beside send while you type during a turn.** The send button turns into a stop button while the agent is working, but only while the box is empty: the moment you started typing a follow-up it turned back into send, and there was no way to stop the turn without clearing what you had written (Escape worked on web, nothing did on a phone). Now a smaller stop button sits next to send whenever a turn is running and the box has text or an attachment.\n- To keep the row to one extra icon, the save-draft button steps aside while a turn is running; it is back as soon as the turn ends."
+    },
+    {
       "title": "Sep 11 (6) — You choose the relay",
       "summary": "",
       "markdown": "- **There is no built-in relay any more.** A new install asks which relay to use on its first screen, checks that it is a joy relay (asking for its access key if it is gated), and only then offers to create or restore an account. Nothing about your account or your data is hard-wired to one server.\n- **If you are already signed in, nothing changes.** The app saves the relay you were already using the first time it starts, so you stay signed in with everything where it was.\n- **One relay per device.** The relay list, switching between relays, \"use this key on all relays\" and reset-to-default are gone. To move to another relay, open Settings → relay → **Change relay**: the device signs out first, then asks for the new relay. Your account stays on the old one, and your backup code restores it there.\n- From a terminal: `joy auth <relay url>` pairs a machine with one relay and remembers it. On a Mac the background service is now called `joy-daemon`; the next `joy update` moves it over. Needs the updated daemon."
@@ -466,5 +471,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 11 (6) — You choose the relay"
+  "latestTitle": "Sep 11 (7) — Stop is always within reach"
 }
