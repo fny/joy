@@ -69,8 +69,10 @@ export class Hub {
     }
     try {
       const d = await this.tunnel.check(row);
-      const out = { session: view.id, ladder: view.state, ...d };
+      const relayQueued = Number(row.queuedTurns) || 0;
+      const out = { session: view.id, ladder: view.state, ...d, queue: (Number(d.queue) || 0) + relayQueued, ...(relayQueued ? { relay_queued: relayQueued } : {}) };
       if (out.state === 'idle' && view.blocked) { out.state = 'needs_input'; out.blocked = view.blocked; }
+      if (out.state === 'idle' && relayQueued) out.state = 'busy'; // the relay is about to hand the daemon a turn
       return out;
     } catch (e) {
       if (e instanceof TunnelError || e instanceof RelayError) {
@@ -309,7 +311,16 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
     title: 'The queue',
     description: 'The rows waiting behind the running turn, and whether the queue is paused (a dispatch gave up on the pane).',
     inputSchema: { session: SESSION },
-  }, guard(async (a) => { await hub.index.refresh(); const q = await hub.tunnel.queue(hub.row(a.session)); return { items: (q.queue ?? []).map((x) => ({ turn: x.id, text: x.text })), pending: q.pendingCount ?? 0, running: q.running ? { turn: q.running.id, text: q.running.text } : null, paused: !!q.paused, ...(q.pauseReason ? { pause_reason: q.pauseReason } : {}) }; }));
+  }, guard(async (a) => {
+    await hub.index.refresh();
+    const row = hub.row(a.session);
+    const [q, held] = await Promise.all([hub.tunnel.queue(row), hub.index.relayQueued(row).catch(() => [])]);
+    // Two places a row can wait: the relay's durable queue (until the daemon
+    // claims it — one turn at a time) and the daemon's own queue behind a
+    // running turn. Both are "queued" to a caller.
+    const items = [...held.map((h) => ({ turn: h.turn, text: h.text, at: 'relay' })), ...(q.queue ?? []).map((x) => ({ turn: x.id, text: x.text, at: 'daemon' }))];
+    return { items, pending: items.length, running: q.running ? { turn: q.running.id, text: q.running.text } : null, paused: !!q.paused, ...(q.pauseReason ? { pause_reason: q.pauseReason } : {}) };
+  }));
   server.registerTool('queue_cancel', {
     title: 'Drop a queued row', description: 'Drop one queued row by its turn id (the id send returned).',
     inputSchema: { session: SESSION, turn: z.string() },

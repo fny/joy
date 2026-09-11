@@ -72,6 +72,10 @@ export class RelayClient {
     const q = before !== undefined ? `before=${before}` : `after=${after ?? 0}`;
     return this.call('GET', `/sessions/${encodeURIComponent(id)}/events?${q}&limit=${limit}`);
   }
+  /** The relay's own prompt rows (its queue view), optionally by status (queued | delivered | …). */
+  messages(sessionId, { status, limit = 100 } = {}) {
+    return this.call('GET', `/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`);
+  }
   turn(sessionId, turnId) { return this.call('GET', `/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`); }
   relayStatus() { return this.call('GET', '/relay/status'); }
 

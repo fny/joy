@@ -75,12 +75,12 @@ export function foldMessages(events, key) {
       continue;
     }
     if (!p) continue;
-    if (p.t === 'plain') { out.push({ seq, role: 'assistant', text: p.text, at: e.createdAt, turn: e.turnId ?? null }); continue; }
+    if (p.t === 'plain') { const text = stripDirectives(p.text); if (text) out.push({ seq, role: 'assistant', text, at: e.createdAt, turn: e.turnId ?? null }); continue; }
     const ev = p.record?.content?.data?.ev;
     if (!ev || typeof ev !== 'object') continue;
     const at = typeof p.record.content.data.time === 'number' ? p.record.content.data.time : e.createdAt;
     const turn = p.record.content.data.turn ?? e.turnId ?? null;
-    if (ev.t === 'text' && typeof ev.text === 'string' && !ev.thinking) out.push({ seq, role: 'assistant', text: ev.text, at, turn });
+    if (ev.t === 'text' && typeof ev.text === 'string' && !ev.thinking) { const text = stripDirectives(ev.text); if (text) out.push({ seq, role: 'assistant', text, at, turn }); }
     else if (ev.t === 'tool-call-start') out.push({ seq, role: 'tool', text: `${ev.name ?? 'tool'}${summarizeArgs(ev.args)}`, at, turn });
   }
   return out;
@@ -97,15 +97,25 @@ function joyMessageFrom(text) {
 
 /** Is this event the end of a turn? Returns { turn, status } or null. */
 export function turnEndOf(e, key) {
+  // The relay's turn id is the one `send` returned; the daemon's own runtime
+  // turn id (inside the record) is a fallback for rows that lack it.
   if (e.kind === 'turn.terminal') {
     const p = recordOf(e, key);
     const ev = p?.t === 'record' ? p.record?.content?.data?.ev : null;
-    return { turn: e.turnId ?? ev?.turn ?? null, status: ev?.status ?? 'completed' };
+    return { turn: e.turnId ?? p?.record?.content?.data?.turn ?? null, status: ev?.status ?? null, marker: true };
   }
   const p = recordOf(e, key);
   const ev = p?.t === 'record' ? p.record?.content?.data?.ev : null;
-  if (ev?.t === 'turn-end') return { turn: p.record.content.data.turn ?? e.turnId ?? null, status: ev.status ?? 'completed' };
+  if (ev?.t === 'turn-end') return { turn: e.turnId ?? p.record.content.data.turn ?? null, status: ev.status ?? 'completed', marker: false };
   return null;
+}
+
+/** App directives an agent emits for the joy app — a title, a push, an image,
+ *  a file chip — are not part of the reply a client should read. Options
+ *  (a question with offered answers) stay: they ARE the reply. */
+const DIRECTIVE_RE = /<joy-(?:title|notify|bg|img|file)\b[^>]*\/?>\s*/g;
+export function stripDirectives(text) {
+  return typeof text === 'string' ? text.replace(DIRECTIVE_RE, '').trim() : text;
 }
 
 export class SessionIndex extends EventEmitter {
@@ -127,6 +137,7 @@ export class SessionIndex extends EventEmitter {
     this.cursor = 0;
     this.execution = new Map();   // relay session id → execution.state (from sessionState)
     this.pendingText = new Map(); // relay session id → assistant text of the turn in progress (across scans)
+    this.endedTurns = new Map();  // relay session id → Set of relay turn ids already reported ended
     this.#stop = null;
     this.#timer = null;
     this.#pending = new Set();
@@ -250,6 +261,13 @@ export class SessionIndex extends EventEmitter {
     return folded.length ? folded[folded.length - 1].text : null;
   }
   sealFor(row, text) { return sealText(text, this.keyFor(row)); }
+  /** Prompts the RELAY still holds for this session (its durable queue),
+   *  oldest first — the daemon only sees them once it claims each. */
+  async relayQueued(row) {
+    const key = this.keyFor(row);
+    const { messages = [] } = await this.relay.messages(row.sessionId, { status: 'queued', limit: 100 });
+    return messages.map((m) => { const p = openPayload(m.ciphertext ?? m.content?.ciphertext, key); return { turn: m.turnId ?? null, message: m.id ?? m.messageId ?? null, text: p?.t === 'plain' ? p.text : null, status: m.status }; });
+  }
 
   // ── the feed ─────────────────────────────────────────────────────────────
   start() {
@@ -298,7 +316,21 @@ export class SessionIndex extends EventEmitter {
       for (const e of events) {
         after = Math.max(after, Number(e.seq));
         const end = turnEndOf(e, key);
-        if (end) { ended = { ...end, seq: Number(e.seq) }; this.#emit(row, { kind: 'turn_ended', turn: end.turn, status: end.status, text: texts.join('\n\n').trim() }); texts.length = 0; this.lastEndSeq.set(row.sessionId, Number(e.seq)); continue; }
+        if (end) {
+          // One end per turn: the daemon's turn-end record and the relay's
+          // terminal marker both arrive; whichever comes first ends it.
+          const seen = this.endedTurns.get(row.sessionId) ?? new Set();
+          this.endedTurns.set(row.sessionId, seen);
+          if (end.turn && seen.has(end.turn)) continue;
+          if (end.turn) { seen.add(end.turn); if (seen.size > 500) seen.delete(seen.values().next().value); }
+          const text = stripDirectives(texts.join('\n\n'));
+          const q = questionOf(text);
+          ended = { ...end, seq: Number(e.seq) };
+          this.#emit(row, { kind: 'turn_ended', turn: end.turn, status: end.status ?? 'completed', text, ...(q ? { question: q.question, options: q.options } : {}) });
+          texts.length = 0;
+          this.lastEndSeq.set(row.sessionId, Number(e.seq));
+          continue;
+        }
         const p = recordOf(e, key);
         const ev = p?.t === 'record' ? p.record?.content?.data?.ev : null;
         if (ev?.t === 'text' && typeof ev.text === 'string' && !ev.thinking) texts.push(ev.text);

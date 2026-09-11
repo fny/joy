@@ -2,7 +2,7 @@
 // detection and the question read — pure, no relay.
 import { describe, it, expect } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { stateOf, checkStateOf, foldMessages, turnEndOf, questionOf, blockedOf } from '../src/model.mjs';
+import { stateOf, checkStateOf, foldMessages, turnEndOf, questionOf, blockedOf, stripDirectives } from '../src/model.mjs';
 import { sealText, sealV2Json } from '../src/crypto.mjs';
 
 const key = new Uint8Array(randomBytes(32));
@@ -65,10 +65,20 @@ describe('messages', () => {
     expect(m[0].from).toBe('mcp:claude');
   });
   it('spots a turn end on the relay\'s terminal kind and on the daemon\'s turn-end record', () => {
-    expect(turnEndOf(ev('turn.terminal', sealedRec({ t: 'turn-end', status: 'cancelled' })), key)).toEqual({ turn: 'T1', status: 'cancelled' });
-    expect(turnEndOf(ev('output', sealedRec({ t: 'turn-end', status: 'completed' }, 'T2')), key)).toEqual({ turn: 'T2', status: 'completed' });
+    expect(turnEndOf(ev('turn.terminal', sealedRec({ t: 'turn-end', status: 'cancelled' })), key)).toMatchObject({ turn: 'T1', status: 'cancelled', marker: true });
+    // The relay's turn id on the event wins; the runtime id in the record is the fallback.
+    expect(turnEndOf(ev('output', sealedRec({ t: 'turn-end', status: 'completed' }, 'R2')), key)).toMatchObject({ turn: 'T1', status: 'completed', marker: false });
+    expect(turnEndOf(ev('output', sealedRec({ t: 'turn-end', status: 'completed' }, 'R2'), { turnId: null }), key)).toMatchObject({ turn: 'R2', status: 'completed' });
+    // A bare terminal marker (no payload) still ends the turn, status unknown.
+    expect(turnEndOf(ev('turn.terminal', null), key)).toMatchObject({ turn: 'T1', status: null, marker: true });
     expect(turnEndOf(ev('output', sealedRec({ t: 'text', text: 'x' })), key)).toBeNull();
   });
+  it('strips app directives from reply text but keeps a question', () => {
+    expect(stripDirectives('pong\n\n<joy-title value="MCP lab ping test" />')).toBe('pong');
+    expect(stripDirectives('<joy-notify message="done" detail="x" />\nall good <joy-img src="/a.png" width="1" height="1" alt="a" />')).toBe('all good');
+    expect(stripDirectives('Which?\n<joy-options>\n<joy-option>A</joy-option>\n</joy-options>')).toContain('<joy-options>');
+  });
+
   it('reads a question with offered answers off the last reply', () => {
     expect(questionOf('Which one?\n<joy-options>\n<joy-option>A</joy-option>\n<joy-option>B</joy-option>\n</joy-options>')).toEqual({ question: 'Which one?', options: ['A', 'B'] });
     expect(questionOf('plain reply')).toBeNull();
