@@ -1632,7 +1632,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // create-if-missing comes from the client's retry choice (the
           // relay rides it on the offer) or the spawnSpec. Off + missing →
           // report a spawn failure so the client can offer to create + retry.
-          createDir: offer.createDir ?? spec.createDir ?? false,
+          // The relay stamps createDir: FALSE on a first offer (its column
+          // default), so `??` let that false bury a spec that said true —
+          // every spawn with createDir in the spec failed dir_missing once.
+          createDir: offer.createDir === true || spec.createDir === true,
           continue: spec.continue,
           resume_id: spec.resume_id,
           resumeLimitMb: spec.resumeLimitMb,

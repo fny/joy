@@ -16,6 +16,10 @@ export function stateOf(row, meta, { unread = false, execution = null } = {}) {
   const lifecycle = meta?.joy__state;
   if (online && lifecycle === 'detached') return 'detached';
   if (lifecycle === 'archived') return 'archived';
+  // The relay's own verdicts on a row no daemon ever bound: a spawn that
+  // failed (cwd missing) or was archived reads as such, not as 'waiting'.
+  if (row.state === 'failed') return 'failed';
+  if (row.state === 'archived' && !lifecycle) return 'archived';
   if (!online) return 'disconnected';
   if (meta?.joy__login) return 'blocked';
   if (meta?.joy__dialog) return 'blocked';
@@ -36,7 +40,7 @@ export function checkStateOf(state) {
   switch (state) {
     case 'blocked': return 'needs_input';
     case 'thinking': case 'agents': case 'tasks': case 'retrying': case 'compacting': case 'stalled': return 'busy';
-    case 'detached': case 'archived': return 'ended';
+    case 'detached': case 'archived': case 'failed': return 'ended';
     case 'disconnected': return 'unreachable';
     default: return 'idle';
   }
@@ -348,10 +352,17 @@ export class SessionIndex extends EventEmitter {
           this.endedTurns.set(row.sessionId, seen);
           if (end.turn && seen.has(end.turn)) continue;
           if (end.turn) { seen.add(end.turn); if (seen.size > 500) seen.delete(seen.values().next().value); }
+          // A terminal marker the relay wrote itself (a kill archiving the
+          // session cancels its queued turns; a cancellation) carries no
+          // daemon record, so its state lives on the turn row: read it
+          // rather than calling a cancelled turn 'completed'.
+          if (end.marker && !end.status && end.turn) {
+            try { end.status = (await this.relay.turn(row.sessionId, end.turn))?.terminalState ?? null; } catch { /* unknown stays unknown */ }
+          }
           const text = stripDirectives(texts.join('\n\n'));
           const q = questionOf(text);
           ended = { ...end, seq: Number(e.seq) };
-          this.#emit(row, { kind: 'turn_ended', turn: end.turn, status: end.status ?? 'completed', text, ...(q ? { question: q.question, options: q.options } : {}) });
+          this.#emit(row, { kind: 'turn_ended', turn: end.turn, status: end.status ?? 'unknown', text, ...(q ? { question: q.question, options: q.options } : {}) });
           texts.length = 0;
           this.lastEndSeq.set(row.sessionId, Number(e.seq));
           continue;

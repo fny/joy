@@ -391,3 +391,21 @@ describe("nucleusLane: a deleted relay row behind a live session (#120)", () => 
         expect(records).toEqual([]);
     }, 25_000);
 });
+
+describe("nucleusLane: a spawn spec's createDir survives the relay's default false on the offer", () => {
+    it("offer.createDir === false does not bury spec.createDir === true", async () => {
+        const relay = makeFakeRelay();
+        const url = await relay.listen(); srv = relay.server;
+        const created: any[] = [];
+        const registry: any = {
+            get: () => undefined,
+            create: async (opts: any) => { created.push(opts); throw new Error("stop here: the create options are the point"); },
+            chatHistory: () => [], listRecords: () => [], saveRecord: () => {},
+        };
+        handle = startNucleusLane({ registry, relayUrl: url, token: "tok", machineId: "m1", log: () => {} });
+        const spec = JSON.stringify({ v: 1, t: "spawn", cwd: "/tmp/nope-missing-but-wanted", agent: "claude", createDir: true });
+        relay.pushWork({ deliveryId: "dD1", commandId: "spD", sessionId: "v2sD", kind: "spawn_session", ciphertext: spec, createDir: false });
+        await until(() => created.length === 1, 10_000);
+        expect(created[0]).toMatchObject({ cwd: "/tmp/nope-missing-but-wanted", createDir: true });
+    }, 20_000);
+});

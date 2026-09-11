@@ -414,10 +414,27 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
     const created = await hub.relay.createSession(m.id, sealed);
     const relayId = created.sessionId ?? created.session?.sessionId ?? created.id;
     // Wait for the daemon to bind it (local id + key envelope), briefly.
+    // A fresh harness takes a while to announce its local id (Claude: the
+    // trust dialog, the first transcript line); 20 s was not always enough
+    // and the tool then answered with the relay's id where the caller
+    // expected the session id every other tool speaks. Wait longer, and say
+    // when the id is still the relay's.
     let row = null;
-    for (let i = 0; i < 40 && !row?.localSessionId; i++) { await new Promise((r) => setTimeout(r, 500)); await hub.index.refresh(); row = hub.index.rows.get(relayId) ?? null; }
+    let retried = false;
+    for (let i = 0; i < 120 && !row?.localSessionId; i++) {
+      await new Promise((r) => setTimeout(r, 500)); await hub.index.refresh(); row = hub.index.rows.get(relayId) ?? null;
+      if (row?.state === 'failed') {
+        // The daemon reported the spawn failed. A missing directory is the
+        // one failure the caller already answered (create_dir): retry with
+        // the relay's own create flag, the way the app's "Create it?" does.
+        const st = await hub.relay.sessionState(relayId).catch(() => null);
+        const why = st?.spawnFailure ?? 'spawn_failed';
+        if (String(why).startsWith('dir_missing') && a.create_dir !== false && !retried) { retried = true; await hub.relay.retrySpawn(relayId, true); continue; }
+        throw new ToolError('spawn_failed', `the daemon could not start the session: ${why}`, `fix the cause, then new_session again (this row stays as ${relayId.slice(0, 8)}, failed)`);
+      }
+    }
     if (!row) throw new ToolError('spawn_pending', 'the relay accepted the spawn but the daemon has not announced it yet', `list_sessions, then session ${relayId}`);
-    const out = { ...hub.view(row) };
+    const out = { ...hub.view(row), ...(row.localSessionId ? {} : { pending: true, note: 'the daemon has not announced the session id yet; this is the relay id, which every tool also accepts' }) };
     delete out.relay_id; delete out.relay_state; delete out.readable;
     if (a.message && row.localSessionId) {
       const sent = await hub.send(row, a.message, { from });

@@ -915,7 +915,15 @@ export function createCore(db, notify) {
           throw new ApiError(400, 'bad_fact_type');
       }
     });
-    if (finished) fireTrigger('turn_done', finished);
+    if (finished) {
+      // The session's execution slot just opened. A daemon whose work claim
+      // is parked in a long poll learns of the next queued turn only when
+      // that poll times out (~25 s) unless it is woken here: five prompts
+      // sent at once ran 1.6 s, 25 s, 1.4 s, 1.4 s, 1.4 s apart (2026-09-11).
+      // Correctness never depends on the wake (claims re-query on connect).
+      if (finished.machineId) notify.wakeDaemon(finished.machineId, 'work');
+      fireTrigger('turn_done', finished);
+    }
     return out;
   }
 

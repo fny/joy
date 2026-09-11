@@ -91,6 +91,8 @@ export class RelayClient {
   createSession(machineId, spawnSpecWire, creationIntentId = randomUUID()) {
     return this.call('POST', '/sessions', { mode: 'spawn', daemonId: machineId, creationIntentId, spawnSpec: spawnSpecWire });
   }
+  /** Re-queue a spawn that failed (cwd missing), opting into creating it. */
+  retrySpawn(id, createDir = true) { return this.call('POST', `/sessions/${encodeURIComponent(id)}/spawn/retry`, { createDir }); }
   deleteSession(id, ifStatus) {
     return this.call('DELETE', `/sessions/${encodeURIComponent(id)}${ifStatus ? `?ifStatus=${encodeURIComponent(ifStatus)}` : ''}`);
   }
