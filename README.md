@@ -3,96 +3,85 @@
 </div>
 
 <h4 align="center">
-Control your coding agents — Claude Code, Codex, OpenCode, Pi — from your phone, web, or desktop. End-to-end encrypted.
+Run coding agents on your own machines. Drive them from your phone, the web, or your desktop. End-to-end encrypted.
 </h4>
 
 ---
 
-`joy` pairs a client app with a tmux-based daemon so you can drive coding agents from
-anywhere: the daemon runs your sessions on your machine, the app mirrors them in real time
-over an end-to-end encrypted relay, and you can take over from any device. It started as a
-fork of Happy Coder and is now its own three-package system.
+joy mirrors terminal coding agents — Claude Code, Codex, OpenCode, and Pi — to every device you use. The agent runs in tmux on your computer, exactly as if you had started it by hand. joy watches it, relays what it does to your phone and desktop, and types what you send back into the real session. Walk away from your desk and keep going: answer an approval from your phone, queue the next task from your laptop, stop a turn that went sideways, or pick up in the terminal where the agent left off.
 
-The packages that make up joy are:
+## What you get
 
-- **[joy-app](packages/joy-app)** - the client. Mobile (iOS/Android via Expo), web, and
-  macOS desktop (Tauri). This is the real app you interact with.
-- **[joy-daemon](packages/joy-daemon)** - the daemon + `joy` CLI. Runs agent sessions
-  (claude in tmux control mode; codex, opencode, and pi through their native protocols),
-  tails their transcripts, and bridges everything to the relay. Also serves a local REST
-  API (`/docs?token=…` on each machine) and a scripting CLI (`joy run/ask/send/wait`).
-- **[joy-relay](packages/joy-relay)** - the self-hosted relay and the only server:
-  accounts, pairing, machines, push, and the `/joy/v2` durable-session protocol
-  (server-owned queue, real cancellation, E2E tunnel) in one Node process on an embedded
-  PGlite store (see `/docs` on your relay).
+- **Your agents, anywhere.** Read a session live, send it a message, approve a tool call, or stop it, from iOS, Android, the web, or the macOS app.
+- **Nothing stops when you leave.** Agents run on your machine, so closing the app or losing signal never touches them. Claude Code and Codex sessions live in tmux and outlive a daemon restart too. After a reboot, one command or one tap brings every session back into its conversation.
+- **A queue you can trust.** Messages you send while an agent is busy wait their turn on the relay, in order, and survive restarts on either end. Edit or delete them before they run.
+- **End-to-end encrypted.** Session content, titles, settings, and files are sealed on your devices, and the relay only stores and forwards ciphertext. Push notifications are the one exception, and they carry as little as possible; see [Security](docs/reference/security.md).
+- **No service to sign up for.** joy has no default server. You run the relay, a single small Node process, or use one run by someone you trust.
+- **Scriptable.** A `joy` command line, a local REST API on every machine, and an MCP server let scripts and agents start sessions, ask them questions, and talk to each other.
+- **Automations.** Save a folder, a prompt, and a trigger, and joy runs it as its own session on demand, on a cron schedule, or after another automation finishes.
 
-## How does it work?
+## How it fits together
 
-The `joy-daemon` daemon launches your agent (e.g. `claude`) inside a tmux window and
-manages it for you — scraping the pane, queuing input, and streaming the transcript to
-the relay. The app
-connects to the same relay and shows your sessions live; anything you send from the app is
-typed into the real Claude session, and anything you type directly is mirrored back to the
-app. Because every session runs in tmux, the daemon can restart and re-adopt live sessions
-without losing your work.
+```
+ phone / web / desktop            relay (yours)                  your machine
+┌──────────────────────┐   ┌────────────────────────┐   ┌───────────────────────────┐
+│ joy app              │◄─►│ joy-relay              │◄─►│ joy daemon ──► tmux ──►   │
+│ seals and opens      │   │ accounts, queue,       │   │ Claude Code, Codex,       │
+│ everything you see   │   │ push, encrypted tunnel │   │ OpenCode, Pi              │
+└──────────────────────┘   └────────────────────────┘   └───────────────────────────┘
+```
 
-## Why Joy?
+- **[joy-app](packages/joy-app)** — the client, for iOS and Android (Expo), the web, and macOS (Tauri).
+- **[joy-daemon](packages/joy-daemon)** — the daemon and the `joy` command line. One per machine. It starts and adopts agent sessions, reads their state, and bridges them to the relay.
+- **[joy-relay](packages/joy-relay)** — the only server: accounts, machine pairing, the durable message queue, push notifications, and an end-to-end encrypted tunnel to each daemon.
+- **[joy-mcp](packages/joy-mcp)** — an optional MCP server that gives the Claude app or Claude Code access to your sessions.
 
-- **Mobile access to your agents** - check and steer what they're doing from anywhere
-- **Switch devices instantly** - pick up from phone, web, or desktop; the tmux session keeps running
-- **Everything mirrors** - app, web, and direct terminal input all propagate to every client
-- **End-to-end encrypted** - your code never leaves your devices unencrypted
-- **Yours to hack** - a small, readable daemon and a single app, no telemetry
+## Quick start
 
-## Quick build
+You need Node 22.13 or later, pnpm, and tmux on each machine that will run agents.
 
-Prerequisites: **Node 20+**, **[pnpm](https://pnpm.io) 10+**, and **tmux** (for the daemon).
+1. **Get a relay.** [Run your own](docs/getting-started/self-hosting.md), or get the address of one you trust.
+2. **Open the app** at [joy.expo.app](https://joy.expo.app), enter the relay's address, and create an account. Save the backup code it shows you; it is the only way back into your account.
+3. **Install the daemon** on your machine and pair it:
+
+   ```bash
+   CI=1 pnpm add -g "git+https://github.com/fny/joy.git#release&path:packages/joy-daemon"
+   joy auth relay.example.com      # asks for your backup code
+   joy install                     # start at login (systemd or launchd)
+   joy doctor                      # check node, tmux, agents, pairing
+   ```
+
+4. **Start a session** from the app, or from the terminal:
+
+   ```bash
+   joy new ~/code/my-project -m "Run the tests and fix what fails"
+   ```
+
+The [install guide](docs/getting-started/install.md) walks through each step in detail.
+
+## Documentation
+
+The [documentation](docs/README.md) covers installing and self-hosting, every feature of the app, the command line, the MCP server, the security model, and troubleshooting.
+
+## Development
+
+This is a pnpm workspace. From the repository root:
 
 ```bash
-# 1. Install all workspace dependencies
 pnpm install
 ```
 
-### Run the daemon (joy-daemon)
+| Package | Run | Check |
+|---|---|---|
+| `packages/joy-daemon` | `pnpm start` | `pnpm typecheck && pnpm test` |
+| `packages/joy-relay` | `pnpm start` | `pnpm test`, and `pnpm sim` for the protocol simulator |
+| `packages/joy-app` | `pnpm web`, `pnpm ios`, `pnpm android`, `pnpm tauri:dev` | `pnpm typecheck && pnpm test` |
+| `packages/joy-mcp` | `pnpm start` | `pnpm test` |
 
-Pair a machine with your relays from your account backup code (one code works on every
-relay): `joy auth <relay…>`. Credentials land under `~/.joy/relays/<host>_<port>/`.
+The daemon runs straight from TypeScript with `tsx`, which does not type-check, so run `pnpm typecheck` before you trust a change. Each machine's daemon also serves its own API reference at `/docs` on its local port, and a relay serves its own at `/docs`.
 
-```bash
-cd packages/joy-daemon
-
-pnpm typecheck && pnpm test   # verify the build
-pnpm start                    # run the daemon (tsx src/server.ts)
-```
-
-Or install the CLI globally straight from the repo's release branch (npm publish is
-retired) and run `joy`:
-
-```bash
-pnpm add -g "git+https://github.com/fny/joy.git#release&path:packages/joy-daemon"
-joy install     # autostart service; `joy update` self-updates from the release branch
-```
-
-### Run the app (joy-app)
-
-```bash
-cd packages/joy-app
-
-pnpm web            # web client at http://localhost:8081
-pnpm ios            # iOS (Expo)
-pnpm android        # Android (Expo)
-pnpm tauri:dev      # macOS desktop (Tauri)
-```
-
-Log in with your account secret key, and your daemon's sessions will appear in the app.
-
-## Docs
-
-- [docs/FEATURES.md](docs/FEATURES.md) — the feature map and how the pieces connect.
-- [docs/API.md](docs/API.md) — relay + daemon operation reference. Live, generated specs:
-  `GET /openapi.json` (keyed) on each daemon, and `/docs` on the relay.
-- [packages/joy-daemon/CLAUDE.md](packages/joy-daemon/CLAUDE.md) — daemon dev notes.
+joy began as a fork of [Happy Coder](https://github.com/slopus/happy) and is now its own system.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+GNU Affero General Public License v3.0. See [LICENSE](LICENSE).
