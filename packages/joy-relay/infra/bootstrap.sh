@@ -52,6 +52,17 @@ echo "== relay deps + data dirs =="
 [ -d ~/joy-mcp ] && (cd ~/joy-mcp && npm install --omit=dev --no-audit --no-fund --silent)
 mkdir -p ~/joy-relay-data/stable ~/joy-relay-data/dev
 
+echo "== relay env =="
+# The relay refuses to start without a docs token or an explicit
+# JOY_RELAY_DOCS=off. Both units read ~/joy-relay.env; when it names
+# neither, generate a token once and keep it there (never printed — read it
+# with: grep JOY_RELAY_DOCS_TOKEN ~/joy-relay.env).
+touch ~/joy-relay.env && chmod 600 ~/joy-relay.env
+if ! grep -qE '^JOY_RELAY_DOCS_TOKEN=.+' ~/joy-relay.env && ! grep -qiE '^JOY_RELAY_DOCS=(off|0|false|no|disabled|none)$' ~/joy-relay.env; then
+  printf 'JOY_RELAY_DOCS_TOKEN=%s\n' "$(node -e 'process.stdout.write(require("crypto").randomBytes(18).toString("base64url"))')" >> ~/joy-relay.env
+  echo "generated JOY_RELAY_DOCS_TOKEN in ~/joy-relay.env"
+fi
+
 echo "== units =="
 sudo cp "$INFRA/joy-relay.service" /etc/systemd/system/
 sudo cp "$INFRA/joy-relay-dev.service" /etc/systemd/system/

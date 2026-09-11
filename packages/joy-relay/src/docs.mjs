@@ -104,11 +104,30 @@ const redocPage = (spec) => `<!doctype html><html><head><title>joy relay API</ti
 <script>Redoc.init(${JSON.stringify(spec).replace(/</g, '\\u003c')}, {}, document.getElementById('redoc'));</script>
 </body></html>`;
 
-// Docs gate: a deliberately-simple token so the API surface isn't browsable
-// by anyone who finds the port (deterrent, not cryptography — the perimeter
-// gate is the real lock once flipped). ?token=… on the URL; override via
-// JOY_RELAY_DOCS_TOKEN in the service env.
-const DOCS_TOKEN = process.env.JOY_RELAY_DOCS_TOKEN || 'farazyashar';
+// Docs gate: a token on the URL (?token=…) so the API surface is not
+// browsable by anyone who finds the port — a deterrent, not cryptography; the
+// perimeter access key is the real lock. There is NO default: a relay must be
+// told either its docs token (JOY_RELAY_DOCS_TOKEN) or that it serves no docs
+// (JOY_RELAY_DOCS=off), and server.mjs refuses to start with neither. The
+// built-in token it used to fall back to was one guessable string shared by
+// every relay that never set its own.
+const DISABLED = /^(off|0|false|no|disabled|none)$/i;
+
+/** The docs configuration an environment describes: `disabled` (explicitly
+ *  off), `token` (the configured password), or `error` (neither — the relay
+ *  must not start). Pure, so the launch rule is testable without a server. */
+export function docsConfig(env = process.env) {
+  if (DISABLED.test(String(env.JOY_RELAY_DOCS ?? '').trim())) return { disabled: true, token: null, error: null };
+  const token = String(env.JOY_RELAY_DOCS_TOKEN ?? '').trim();
+  if (!token) {
+    return {
+      disabled: false, token: null,
+      error: 'JOY_RELAY_DOCS_TOKEN is not set. Set it to the password for this relay\'s API docs (/docs?token=…), '
+        + 'or set JOY_RELAY_DOCS=off to serve no API docs.',
+    };
+  }
+  return { disabled: false, token, error: null };
+}
 
 /** JOY_RELAY_TRUST_PROXY: "1"/"true" always honours x-forwarded-proto,
  *  "0"/"false" never does; unset (the deployed default) uses the shape rule
@@ -154,10 +173,15 @@ export function requestScheme(req, trustProxy = TRUST_PROXY) {
 /** Handle /docs and /openapi.json; returns true when the request was ours.
  *  Runs AFTER the gate (callers check the gate first), so a flipped relay
  *  keys these like everything else. */
-export function handleDocs(req, res, { version, routeTable = null, trustProxy = TRUST_PROXY }) {
+export function handleDocs(req, res, { version, routeTable = null, trustProxy = TRUST_PROXY, docs = docsConfig() }) {
   const url = req.url ?? '';
   const path = url.split('?')[0];
   if (req.method !== 'GET' || (path !== '/docs' && path !== '/openapi.json')) return false;
+  // Docs switched off, or no token configured (server.mjs never starts that
+  // way; a caller that embeds the router gets no docs rather than open ones):
+  // not ours — the router answers 404 like any unknown path.
+  if (docs.disabled || !docs.token) return false;
+  const DOCS_TOKEN = docs.token;
   const q = url.match(/[?&]token=([^&]+)/);
   // A malformed percent-escape (`?token=%`) made decodeURIComponent throw
   // out of the request callback — an unhandled rejection that took the relay

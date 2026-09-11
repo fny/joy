@@ -16,7 +16,16 @@ import { createGate } from './src/gate.mjs';
 import { createTunnel } from './src/tunnel.mjs';
 import { createV2Router } from './src/v2.mjs';
 import { createAttachments } from './src/attachments.mjs';
-import { handleDocs } from './src/docs.mjs';
+import { handleDocs, docsConfig } from './src/docs.mjs';
+
+// The API docs need a password, or an explicit "no docs". Checked before
+// anything touches the data directory, so a misconfigured relay fails fast
+// with the reason instead of starting with guessable docs.
+const docs = docsConfig();
+if (docs.error) {
+  console.error(`[joy-relay] refusing to start: ${docs.error}`);
+  process.exit(1);
+}
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
 // Loopback by default: on the relay box Caddy terminates TLS in front of it.
@@ -72,7 +81,7 @@ const server = http.createServer(async (req, res) => {
       if (await v2.handle(req, res)) return;
     }
     if (!gate.allows(req)) return gate.rejectHttp(res, req); // req: CORS on the 401 (#85)
-    if (handleDocs(req, res, { version: VERSION, routeTable: { routes: v2.routeTable(), served: true } })) return;
+    if (handleDocs(req, res, { version: VERSION, routeTable: { routes: v2.routeTable(), served: true }, docs })) return;
     if (await v2.handle(req, res)) return;
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not_found', relay: 'joy-relay' }));
@@ -104,3 +113,28 @@ server.on('upgrade', (req, socket) => {
 server.listen(LISTEN, HOST, () => {
   console.log(`[joy-relay] listening ${HOST}:${LISTEN} (data ${DATA_DIR}, token issuers ${ISSUERS.join(',')})`);
 });
+
+// Graceful stop on SIGTERM/SIGINT. Without a handler, a relay that is PID 1
+// in a container ignores SIGTERM (the kernel gives PID 1 no default action),
+// so `podman stop` / `docker stop` waited ten seconds and then SIGKILLed it,
+// and under systemd the process died with its database still open. Now:
+// stop accepting, drop the long-poll and event-stream connections that would
+// otherwise hold the server open (clients reconnect and re-query — nothing is
+// lost, the queue is durable), close the database cleanly (releasing the
+// data-directory lock), exit 0. A hard deadline keeps a wedged close from
+// holding a restart hostage.
+let stopping = false;
+function stop(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`[joy-relay] ${signal}: stopping`);
+  const deadline = setTimeout(() => { console.error('[joy-relay] stop timed out; exiting'); process.exit(1); }, 8_000);
+  deadline.unref();
+  server.close();
+  server.closeAllConnections?.();
+  db.close()
+    .then(() => { console.log('[joy-relay] stopped'); process.exit(0); })
+    .catch((e) => { console.error('[joy-relay] database close failed:', e); process.exit(1); });
+}
+process.once('SIGTERM', () => stop('SIGTERM'));
+process.once('SIGINT', () => stop('SIGINT'));

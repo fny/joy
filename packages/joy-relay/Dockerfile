@@ -1,8 +1,17 @@
 # joy relay — one container, one relay.
 #
-#   docker build -t joy-relay packages/joy-relay
-#   docker run -d --name joy-relay -p 3105:3105 -v joy-relay-data:/data \
-#     -e JOY_RELAY_ACCESS_KEY=… joy-relay
+#   podman build --format docker -t joy-relay packages/joy-relay
+#   podman run -d --name joy-relay -p 127.0.0.1:3105:3105 -v joy-relay-data:/data \
+#     -e JOY_RELAY_DOCS_TOKEN=… -e JOY_RELAY_ACCESS_KEY=… joy-relay
+#
+# (--format docker keeps the HEALTHCHECK below; Podman's default OCI format
+# drops it. Docker takes the same commands with `docker` for `podman` and no
+# --format flag.)
+# Quadlet, Compose and backup recipes: docs/getting-started/self-hosting.md.
+#
+# JOY_RELAY_DOCS_TOKEN is REQUIRED: the password for the relay's API docs
+# (/docs?token=…). Set JOY_RELAY_DOCS=off instead to serve no docs. With
+# neither, the container exits at once and says so in its log.
 #
 # The relay speaks plain HTTP; put TLS in front of it (Caddy does this on the
 # relay box). Its whole state is the /data volume: the PGlite database, the
