@@ -32,6 +32,7 @@ import type { AgentSession } from "../domain/agentSession";
 import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand, type AttemptRef } from "../domain/coordinator";
 import { AgyDriver, type AgyRuntimePort } from "./agyDriver";
+import { nextRunState, initialRunState, type RunState, type RunEvent } from "./agyRun";
 import type { SessionStatus, SessionRecord, SessionDeps } from "../claude/session";
 import { splitShellWords } from "../domain/shellWords";
 import { saveWindowRecord, deleteWindowRecord, loadWindowRecord } from "../domain/windowRecord";
@@ -110,21 +111,13 @@ const PRINT_TIMEOUT = "30m";
 interface AgyRun {
   turn: string;
   proc: ChildProcess | null;
-  /** The stream announced its own end (`result`), or abort/end pre-empted it. */
-  sawResult: boolean;
-  /** The turn-end row went out (exactly once). */
-  turnEnded: boolean;
-  /** Exit observed (code null = signal). */
-  exit: { code: number | null } | null;
-  /** stdout reached EOF and readline emitted every line. */
-  stdoutDone: boolean;
-  /** Settled: the coordinator was told (or the run was retired). */
-  finalized: boolean;
+  /** Where the run is (agy/agyRun.ts): running / result_seen / cancelled /
+   *  finalized, with exit and stdout EOF tracked inside. Every handler
+   *  feeds an event and performs the effects; none decides. */
+  state: RunState;
   /** The ledger command this run executes, and the attempt the spawn made. */
   commandId: string;
   attemptId: string;
-  /** abort()/end() pre-empted the run: its terminal is `cancelled`. */
-  cancelled: boolean;
   // agent_response text arrives as deltas per step_index; emitted once per
   // step at DONE (one clean row per response, not a re-render storm).
   textByStep: Map<number, string>;
@@ -174,7 +167,7 @@ export class AgySession implements AgentSession {
   readonly #boot = randomUUID().slice(0, 8);
   // The turn currently being run: its process, its wire turn id and its
   // per-turn parser state, as ONE object every handler closes over (#466).
-  // Handlers used to read shared `#turn` / `#sawResult` / `#textByStep`
+  // Handlers used to read shared `#turn` / `#sawResult` / `#textByStep` (now the run's state)
   // fields, so events still draining out of child 1's stdout after its `exit`
   // fired were applied to turn 2 (its answer landed on the wrong turn, its
   // `result` closed the wrong turn, and the real second answer was dropped).
@@ -318,7 +311,7 @@ export class AgySession implements AgentSession {
       effort: this.effort, permissionMode: this.permissionMode, extraArgs: this.#extraArgs,
     });
 
-    const run: AgyRun = { turn, proc: null, sawResult: false, turnEnded: false, exit: null, stdoutDone: false, finalized: false, textByStep: new Map(), commandId: attempt.commandId, attemptId: attempt.attemptId, cancelled: false };
+    const run: AgyRun = { turn, proc: null, state: initialRunState(), textByStep: new Map(), commandId: attempt.commandId, attemptId: attempt.attemptId };
     this.#run = run;
     this.#relay?.send(encodeTurnStart({ turn }), `${turn}:start`);
     this.#relay?.setThinking(true);
@@ -332,9 +325,8 @@ export class AgySession implements AgentSession {
     } catch (e) {
       // Nothing ran: the turn ends failed on the wire and the submission is
       // a permanent rejection (the row fails instead of reading as delivered).
-      run.finalized = true; run.turnEnded = true;
+      this.#step(run, { type: "spawn_failed", error: `spawn failed: ${e}` });
       this.#run = null;
-      this.#relay?.send(encodeTurnEnd("failed", { turn }), `${turn}:end`);
       this.#relay?.setThinking(false);
       return { ok: false, error: `spawn failed: ${e}` };
     }
@@ -358,14 +350,14 @@ export class AgySession implements AgentSession {
     // fully consumed (readline 'close' = EOF reached and every line emitted).
     // `exit` alone is too early: Node delivers it while the pipe can still hold
     // unread events, which is exactly the window the misattribution lived in.
-    rl.on("close", () => { run.stdoutDone = true; this.#maybeFinalize(run); });
+    rl.on("close", () => this.#step(run, { type: "stdout_done" }));
     proc.on("error", (e) => {
       // Spawn/kill failure: there may never be an exit, and stdout may never
       // open — settle now. Idempotent, so a later exit/close is harmless.
       process.stderr.write(`[agy ${this.id}] process error: ${e}\n`);
-      this.#finalize(run, "failed", String(e));
+      this.#step(run, { type: "process_error", error: String(e) });
     });
-    proc.on("exit", (code) => { run.exit = { code }; this.#maybeFinalize(run); });
+    proc.on("exit", (code) => this.#step(run, { type: "exit", code }));
     // EPIPE (agy died before reading its prompt) must not become an uncaught
     // exception that takes the daemon down; exit/close settle the run.
     proc.stdin?.on("error", (e) => process.stderr.write(`[agy ${this.id}] stdin error: ${e instanceof Error ? e.message : e}\n`));
@@ -383,25 +375,48 @@ export class AgySession implements AgentSession {
     const proc = run?.proc;
     if (!run || !proc || proc.exitCode !== null) return "noop";
     if (turn && run.turn !== turn) return "noop";
-    run.sawResult = true; // the exit handler must not report "failed"
-    run.cancelled = true;
+    // The machine marks the run cancelled (the exit handler will not report
+    // "failed") and ends the turn; the kill follows.
+    this.#step(run, { type: "cancel" });
     try { proc.kill("SIGTERM"); } catch { /* gone */ }
-    this.#endTurn(run, "cancelled");
     return "sent";
   }
 
-  /** Settle a run once its exit status AND its stdout EOF have both arrived. */
-  #maybeFinalize(run: AgyRun): void {
-    if (!run.exit || !run.stdoutDone) return;
-    const code = run.exit.code;
-    // A clean run already ended the turn on `result`; anything else is a
-    // failure the stream did not announce (killed, crashed, timed out).
-    if (!run.sawResult) this.#finalize(run, code === 0 ? "completed" : "failed", code === null ? "terminated" : `exit ${code}`);
-    else this.#finalize(run, "completed", "");
+  /** One event of a run's machine (agy/agyRun.ts), and its effects: the
+   *  turn-end row (once, text flushed before it — #467), the failure notice
+   *  for an end the stream did not announce, and the settlement — exit AND
+   *  stdout EOF both in — that tells the coordinator (#466). */
+  #step(run: AgyRun, ev: RunEvent): void {
+    const t = nextRunState(run.state, ev);
+    if (!t) return;
+    run.state = t.to;
+    for (const fx of t.effects) {
+      switch (fx.type) {
+        case "warn":
+          this.#flushText(run); // what was generated, then why it stopped (#467)
+          process.stderr.write(`[agy ${this.id}] turn failed: ${fx.why}\n`);
+          this.#relay?.send(encodeUserMessage(`⚠ agy: ${fx.why}`, Date.now()));
+          break;
+        case "end_turn":
+          this.#flushText(run); // received text precedes the end row, whatever the status (#467)
+          this.#relay?.send(encodeTurnEnd(fx.status, { turn: run.turn }), `${run.turn}:end`);
+          break;
+        case "finalize":
+          if (this.#run !== run) break; // retired by end() / superseded — not ours to settle
+          this.#run = null;
+          this.#proc = null;
+          this.#relay?.setThinking(false);
+          this.#deps.broadcast("session_update", this.toJSON());
+          // The run's settlement IS the command's terminal: the coordinator
+          // ends the command that rode this turn and starts the next one.
+          this.#driver.emit({ kind: "turn_ended", runtimeTurnId: run.turn, status: fx.outcome, detail: fx.why || undefined });
+          break;
+      }
+    }
   }
 
   #onEvent(run: AgyRun, e: AgyEvent): void {
-    if (run.finalized) return; // a settled run's stragglers touch nothing
+    if (run.state.phase === "finalized") return; // a settled run's stragglers touch nothing
     const turn = run.turn;
     switch (e.event) {
       case "init": {
@@ -445,17 +460,16 @@ export class AgySession implements AgentSession {
         break;
       }
       case "result": {
-        run.sawResult = true;
         const r = e.result;
         if (r?.conversation_id && r.conversation_id !== this.#conversationId) {
           this.#conversationId = r.conversation_id;
           this.#persistRecord();
         }
         // The stream may end the last agent_response step only implicitly;
-        // #endTurn flushes whatever is still buffered (#467).
+        // the end_turn effect flushes whatever is still buffered (#467).
         const u = r?.usage;
         if (u && (u.input_tokens ?? 0) > 0) void this.#relay?.updateContext(u.input_tokens ?? 0);
-        this.#endTurn(run, r?.status === "SUCCESS" ? "completed" : "failed");
+        this.#step(run, { type: "result", success: r?.status === "SUCCESS" });
         break;
       }
       default: break;
@@ -477,36 +491,6 @@ export class AgySession implements AgentSession {
     run.textByStep.clear();
   }
 
-  /** Emit the turn-end row for a run exactly once. */
-  #endTurn(run: AgyRun, status: "completed" | "failed" | "cancelled"): void {
-    if (run.turnEnded) return;
-    run.turnEnded = true;
-    this.#flushText(run); // received text precedes the end row, whatever the status (#467)
-    this.#relay?.send(encodeTurnEnd(status, { turn: run.turn }), `${run.turn}:end`);
-  }
-
-  /** Terminal settlement of a run — IDEMPOTENT (#466): exit, stdout close and
-   *  a process error can each arrive, in any order, and only the first one
-   *  settles the run. Ends the turn (if the stream did not), and advances the
-   *  queue only when this run is still the session's current one. */
-  #finalize(run: AgyRun, status: "completed" | "failed", why: string): void {
-    if (run.finalized) return;
-    run.finalized = true;
-    if (status === "failed" && !run.turnEnded) {
-      this.#flushText(run); // what was generated, then why it stopped (#467)
-      process.stderr.write(`[agy ${this.id}] turn failed: ${why}\n`);
-      this.#relay?.send(encodeUserMessage(`⚠ agy: ${why}`, Date.now()));
-    }
-    this.#endTurn(run, status);
-    if (this.#run !== run) return; // retired by end() / superseded — not ours to settle
-    this.#run = null;
-    this.#proc = null;
-    this.#relay?.setThinking(false);
-    this.#deps.broadcast("session_update", this.toJSON());
-    // The run's settlement IS the command's terminal: the coordinator ends
-    // the command that rode this turn and starts the next one.
-    this.#driver.emit({ kind: "turn_ended", runtimeTurnId: run.turn, status: run.cancelled ? "cancelled" : status, detail: why || undefined });
-  }
 
   // ── AgentSession surface ───────────────────────────────────────────────────
 
@@ -594,12 +578,11 @@ export class AgySession implements AgentSession {
     this.endReason = reason;
     const run = this.#run;
     if (run && this.#proc && this.#proc.exitCode === null) {
-      run.sawResult = true;
       this.#dying = this.#proc;
       try { this.#proc.kill("SIGTERM"); } catch { /* already gone */ }
     }
     this.#proc = null;
-    if (run) { this.#endTurn(run, "cancelled"); run.finalized = true; } // stragglers from the dying child are rejected by #onEvent
+    if (run) this.#step(run, { type: "retire" }); // the row ends cancelled; stragglers from the dying child are rejected by #onEvent
     this.#run = null; // whatever the dying child still emits is not ours (#466; Astra on 975eef1d: clearing #run alone let a drained answer reach the ended session)
     // Queued rows survive a restart / process exit for the replacement (#49);
     // a kill interrupts them. The coordinator settles the in-flight run's row.

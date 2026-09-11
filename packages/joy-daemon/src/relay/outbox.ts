@@ -14,6 +14,7 @@
 // line reaches it (#464/#74). Boot is `start()`: every session with unacked
 // rows gets a loop — no separate replay pass, no `replayPending` flag (#462).
 import type { Ledger, OutboxRow } from "../domain/ledger";
+import { nextLineState, initialLineState, waitBeforeSend, settlementOf, backoffMs, type LineState, type LineEvent } from "./outboxRow";
 
 export type PostFate =
   | "transient"   // network, 5xx, lease fencing: retry with backoff
@@ -50,8 +51,9 @@ export interface OutboxSenderOpts {
 
 export class OutboxSender {
   #o: Required<Pick<OutboxSenderOpts, "ledger" | "post" | "ready" | "sleep" | "now" | "baseBackoffMs" | "maxBackoffMs" | "idleMs">> & { log: (line: string) => void };
+  /** One line per session (outboxRow.ts): idle / running(gen, wanted, waited) / stopped. */
+  #lines = new Map<string, LineState>();
   #running = new Map<string, Promise<void>>();
-  #wanted = new Set<string>();
   #stopped = false;
   /** Resolvers waiting for a specific seq to settle (ack or drop). */
   #waiters = new Map<number, Array<() => void>>();
@@ -76,30 +78,42 @@ export class OutboxSender {
 
   stop(): void {
     this.#stopped = true;
+    for (const sid of this.#lines.keys()) this.#send(sid, { type: "stop" });
     for (const [, rs] of this.#waiters) for (const r of rs) r();
     this.#waiters.clear();
+  }
+
+  line(sessionId: string): LineState { return this.#lines.get(sessionId) ?? initialLineState(); }
+
+  /** One step of a session's line; starts a loop incarnation when the
+   *  machine says so. The machine is stepped SYNCHRONOUSLY and the loop
+   *  body starts on a microtask, so a post() that wakes this session while
+   *  a row is being sent finds the line running, not idle (#462). */
+  #send(sessionId: string, ev: LineEvent): LineState {
+    const cur = this.line(sessionId);
+    const t = nextLineState(cur, ev);
+    if (!t) return cur;
+    this.#lines.set(sessionId, t.to);
+    if (t.startLoop) this.#startLoop(sessionId, t.to.gen);
+    return t.to;
+  }
+
+  #startLoop(sessionId: string, gen: number): void {
+    const p = Promise.resolve().then(() => this.#loop(sessionId, gen)).catch((e) => {
+      this.#o.log(`outbox ${sessionId}: loop crashed: ${e instanceof Error ? e.message : e}`);
+      this.#send(sessionId, { type: "exit", gen, reason: "crashed", hasRows: !!this.#o.ledger.nextOutbound(sessionId) });
+    }).finally(() => { if (this.#running.get(sessionId) === p) this.#running.delete(sessionId); });
+    this.#running.set(sessionId, p);
   }
 
   /** Ensure a loop is running for the session (a new row, a bind, a retry). */
   wake(sessionId: string): void {
     if (this.#stopped) return;
-    this.#wanted.add(sessionId);
-    if (this.#running.has(sessionId)) return;
-    // The loop body starts on a microtask, AFTER #running holds it: a post()
-    // that wakes this session synchronously (a record produced while sending)
-    // must find the loop registered, not start a second one.
-    const p = Promise.resolve().then(() => this.#loop(sessionId)).catch((e) => this.#o.log(`outbox ${sessionId}: loop crashed: ${e instanceof Error ? e.message : e}`)).finally(() => {
-      this.#running.delete(sessionId);
-      // A wake that landed between our last empty read and this cleanup
-      // restarts the loop (JS is single-threaded: no wake interleaves the
-      // read-then-exit below, but one may land during an awaited post).
-      if (this.#wanted.has(sessionId) && !this.#stopped && this.#o.ledger.nextOutbound(sessionId)) this.wake(sessionId);
-    });
-    this.#running.set(sessionId, p);
+    this.#send(sessionId, { type: "wake" });
   }
 
   /** Is a loop active for the session? */
-  active(sessionId: string): boolean { return this.#running.has(sessionId); }
+  active(sessionId: string): boolean { return this.line(sessionId).phase === "running"; }
 
   /** Resolves once the row is acked or dropped, or after `timeoutMs` on the
    *  sender's clock (false). The row keeps being retried in the background
@@ -130,56 +144,51 @@ export class OutboxSender {
     for (const r of rs) r();
   }
 
-  backoffFor(attempts: number): number {
-    return Math.min(this.#o.maxBackoffMs, this.#o.baseBackoffMs * Math.pow(2, Math.max(0, attempts)));
-  }
+  backoffFor(attempts: number): number { return backoffMs(attempts, this.#o.baseBackoffMs, this.#o.maxBackoffMs); }
 
-  async #loop(sessionId: string): Promise<void> {
+  /** One loop incarnation (`gen`) for one session's line. Every decision
+   *  is the machine's (outboxRow.ts): the wait before a send, the verdict
+   *  on the result, and whether the line goes idle or restarts on exit. */
+  async #loop(sessionId: string, gen: number): Promise<void> {
     const { ledger, post, ready, sleep, now, idleMs } = this.#o;
-    // The row whose backoff this loop has already slept through (below): its
-    // persisted next_retry_at is for a RESTART's benefit, not a second wait.
-    let waited: number | null = null;
+    const exit = (reason: "drained" | "parked") => { this.#send(sessionId, { type: "exit", gen, reason, hasRows: !!ledger.nextOutbound(sessionId) }); };
     for (;;) {
       if (this.#stopped) return;
-      this.#wanted.delete(sessionId);
+      this.#send(sessionId, { type: "pass", gen });
       const row = ledger.nextOutbound(sessionId);
-      if (!row) return;
+      if (!row) return exit("drained");
       if (!ready()) { await sleep(idleMs); continue; }
-      if (waited !== row.seq) {
-        const wait = row.nextRetryAt - now();
-        if (wait > this.#o.maxBackoffMs) { await sleep(this.#o.maxBackoffMs); continue; }
-        if (wait > 0) await sleep(wait);
-      }
-      waited = null;
+      const w = waitBeforeSend(row, this.line(sessionId), now(), this.#o.maxBackoffMs);
+      if (w.wait > 0) await sleep(w.wait);
+      if (w.recheck) continue;
       let r: PostResult;
       try { r = await post(row); }
       catch (e) { r = { ok: false, fate: "transient", error: e instanceof Error ? e.message : String(e) }; }
       if (this.#stopped) return;
       // The row may have been settled by someone else meanwhile (a drop from
-      // a bind decision, a test): re-read before writing a verdict.
-      const cur = ledger.getOutbound(row.seq);
-      if (!cur || cur.ackedAt != null) { this.#settled(row.seq); continue; }
-      if (r.ok) {
-        ledger.ackOutbound(row.seq);
-        this.#settled(row.seq);
-        continue;
+      // a bind decision, a test): the verdict is against the row as it is NOW.
+      const v = settlementOf(r, ledger.getOutbound(row.seq), this.#o);
+      switch (v.verdict) {
+        case "already_settled": this.#settled(row.seq); continue;
+        case "ack": ledger.ackOutbound(row.seq); this.#settled(row.seq); continue;
+        case "drop":
+          // One transaction: the drop (and the checkpoint it promotes) and
+          // the caller's evidence of it. `settle` joins the drop's
+          // transaction, so a throw there rolls the settlement back too and
+          // the row is retried.
+          if (v.settle) ledger.tx(() => { ledger.dropOutbound(row.seq, v.reason); v.settle!(); }, "drop");
+          else ledger.dropOutbound(row.seq, v.reason);
+          this.#settled(row.seq);
+          continue;
+        case "park": return exit("parked"); // bindOutbound + wake() resumes the line
+        case "retry":
+          ledger.failOutbound(row.seq, v.error, now() + v.delayMs);
+          // Sleep the backoff here; the persisted next_retry_at is for a
+          // restart, and this incarnation must not sleep it twice.
+          await sleep(Math.min(v.delayMs, this.#o.maxBackoffMs));
+          this.#send(sessionId, { type: "slept", gen, seq: row.seq });
+          continue;
       }
-      if (r.fate === "permanent") {
-        // One transaction: the drop (and the checkpoint it promotes) and the
-        // caller's evidence of it. `settle` joins the drop's transaction, so
-        // a throw there rolls the settlement back too and the row is retried.
-        const { settle } = r;
-        if (settle) ledger.tx(() => { ledger.dropOutbound(row.seq, r.error); settle(); }, "drop");
-        else ledger.dropOutbound(row.seq, r.error);
-        this.#settled(row.seq);
-        continue;
-      }
-      if (r.fate === "unbound") return; // parked: bindOutbound + wake() resumes the line
-      const delay = r.retryAfterMs ?? this.backoffFor(cur.attempts);
-      ledger.failOutbound(row.seq, r.error, now() + delay);
-      // Sleep the backoff here (the persisted next_retry_at is for a restart).
-      await sleep(Math.min(delay, this.#o.maxBackoffMs));
-      waited = row.seq;
     }
   }
 }

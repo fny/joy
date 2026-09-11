@@ -44,6 +44,8 @@ import {
   nextLeaseState, initialLeaseState, isLeaseDeath, reacquireBackoffMs, LEASE_RENEW_MS, LEASE_DEATH_RE, CONTROL_LANE_RETRY_MS,
   type Lease, type LeaseEvent,
 } from "./leaseMachine";
+import { isKilledHandle } from "../domain/recordClass";
+import { nextBudgetState, isExhausted, lossOf, OK as BUDGET_OK, type BudgetState, type BudgetEvent, type PersistedBudget, type Loss } from "./budgetState";
 import {
   nextTurnState, initialTurnState, resumedTurnState, projectTurnState, startOwed, isTurnClosed, emptyMailbox,
   settleAdoption as settleAdoptionBox, parkAdoptionAnswer as parkAdoptionBox, isCancelAnswer, fateOf, START_CANCEL_CLASS, SESSION_GONE,
@@ -471,41 +473,48 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // clears by retrying: that is a permanent refusal of THIS record.
   // fateOf (transient / permanent / budget) lives in relayTurnMachine.ts.
   const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 300);
-  // Sessions whose relay event budget is exhausted: logged once, outputs dropped.
-  const budgetExhausted = new Set<string>();
-  // …and what that costs, per session (#130). The drop used to be a single
-  // daemon log line: the user saw the conversation simply stop growing, with
-  // no way to tell a quiet agent from a truncated one. The count rides the
-  // card as `joy__eventBudget`, which the app renders like the retry and
-  // compacting banners, and it names the only recovery the relay allows — a
-  // fresh session (the budget is per session and retrying never clears it,
-  // see docs/API.md). Card PATCHes are coalesced: a burst of dropped records
-  // is one card PATCH, not one per record — the timer coalesces the NETWORK
-  // publication only, never the evidence.
-  // `cardDropped` is the count the relay's card is KNOWN to carry (set after
-  // a PATCH the relay accepted): the boot repair below re-publishes only
-  // cards whose count is behind, not every archived card on every boot.
-  type BudgetState = { localId: string; since: number; dropped: number; cardDropped: number };
-  const budgetDropped = new Map<string, BudgetState>();
+  // The per-session event budget (#130), one explicit record per session
+  // (relay/budgetState.ts): ok / unknown (the ledger row could not be read)
+  // / exhausted (the relay refuses events; `dropped` is the settled loss,
+  // `cardDropped` what the relay's card is known to carry, `publishDueAt` a
+  // coalesced card PATCH owed). The count used to be a single daemon log
+  // line: the user saw the conversation simply stop growing, with no way to
+  // tell a quiet agent from a truncated one. It rides the card as
+  // `joy__eventBudget`, which the app renders like the retry and compacting
+  // banners, and it names the only recovery the relay allows — a fresh
+  // session (the budget is per session and retrying never clears it, see
+  // docs/API.md). The LEDGER is the count's authority (#130 follow-up):
+  // persisted as one small job row per session (no schema change;
+  // `forgetSession` drops it with the session's record), written INSIDE the
+  // outbox transaction that settles the refused row (the `settle` hook on
+  // the permanent verdict): a count that reached the ledger only from the
+  // one-second publish timer left a window — the row dropped, its
+  // checkpoint advanced, the process gone — in which an unclean exit erased
+  // the only evidence of the loss (Astra on ccd08aca). The record here is a
+  // cache of that row, refilled from it on demand; the timer coalesces the
+  // NETWORK publication only, never the evidence.
+  const budgets = new Map<string, BudgetState>();
   const budgetPublish = new Map<string, ReturnType<typeof setTimeout>>();
-  const BUDGET_PUBLISH_MS = 1_000;
-  // The loss OUTLIVES this lane (#130 follow-up), and the LEDGER is its
-  // authority: the count used to live only in these maps and on the card
-  // holder, and since a full session is exactly the one whose further output
-  // never arrives (the relay refuses it), nothing ever re-counted the sole
-  // warning after a restart. Persisted as one small job row per session (no
-  // schema change; `forgetSession` drops it with the session's record),
-  // written INSIDE the outbox transaction that settles the refused row (the
-  // `settle` hook on the permanent verdict): a count that reached the ledger
-  // only from the one-second publish timer left a window — the row dropped,
-  // its checkpoint advanced, the process gone — in which an unclean exit
-  // erased the only evidence of the loss (Astra on ccd08aca). The maps are a
-  // cache of that row, refilled from it on demand.
+  const budgetOf = (v2: string): BudgetState => budgets.get(v2) ?? BUDGET_OK;
+  /** One step of a session's budget record; arms the coalescing timer when
+   *  the machine says a publication is newly owed. */
+  function budgetSend(v2: string, ev: BudgetEvent): BudgetState {
+    const cur = budgetOf(v2);
+    const t = nextBudgetState(cur, ev);
+    if (!t) return cur;
+    budgets.set(v2, t.to);
+    if (t.armPublish && t.to.kind === "exhausted" && t.to.publishDueAt != null && !budgetPublish.has(v2)) {
+      const timer = setTimeout(() => publishBudget(v2), Math.max(0, t.to.publishDueAt - now()));
+      timer.unref?.();
+      budgetPublish.set(v2, timer);
+    }
+    return t.to;
+  }
   const EVENT_BUDGET_JOB_KIND = "event_budget";
   const budgetJobId = (v2: string) => `event_budget:${v2}`;
   /** The persisted count, or null. Throws when the ledger cannot be read —
    *  inside a settling transaction that must roll the settlement back. */
-  function readPersistedBudget(v2: string): BudgetState | null {
+  function readPersistedBudget(v2: string): PersistedBudget | null {
     const job: JobRow | null = ledger.getJob(budgetJobId(v2));
     const p = job?.payload as { localId?: unknown; since?: unknown; dropped?: unknown; cardDropped?: unknown } | null | undefined;
     if (!p || typeof p.localId !== "string" || typeof p.since !== "number" || typeof p.dropped !== "number" || p.dropped <= 0) return null;
@@ -516,55 +525,51 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  left to say), so a card sealed without it would erase the only warning
    *  — every card path treats this as an unknown outcome and defers the
    *  publication until the read succeeds (Astra on a6443ea8). Noted once per
-   *  session; the sweep probes the read and republishes on recovery. */
+   *  session (the `unknown` record); the sweep probes the read and
+   *  republishes on recovery. */
   class BudgetUnreadableError extends Error {
     constructor(readonly v2: string, cause: unknown) { super(`event budget record for ${v2.slice(0, 8)} unreadable: ${errText(cause)}`); }
-  }
-  const budgetUnreadable = new Map<string, string>(); // v2 → localId, while unreadable
-  function noteBudgetUnreadable(localId: string, v2: string, e: unknown): void {
-    if (budgetUnreadable.has(v2)) return;
-    budgetUnreadable.set(v2, localId);
-    log(`${localId}: event budget record unreadable (${errText(e)}) — card publications for ${v2.slice(0, 8)} deferred until the ledger reads again`);
   }
   /** Sweep-tick probe: once a deferred session's record reads again, put its
    *  live card back on the wire (an owed archive's own retry loop carries it). */
   function retryBudgetReads(): void {
-    for (const [v2, localId] of [...budgetUnreadable]) {
-      try { readPersistedBudget(v2); } catch { continue; }
-      budgetUnreadable.delete(v2);
-      log(`${localId}: event budget record readable again — republishing the card`);
-      const current = registry.get(localId)?.cardMetadata?.();
-      if (current) void publishV2Card(localId, current);
+    for (const [v2, st] of [...budgets]) {
+      if (st.kind !== "unknown") continue;
+      let row: PersistedBudget | null;
+      try { row = readPersistedBudget(v2); } catch { continue; }
+      budgetSend(v2, { type: "ledger_read", localId: st.localId, row });
+      log(`${st.localId}: event budget record readable again — republishing the card`);
+      const current = registry.get(st.localId)?.cardMetadata?.();
+      if (current) void publishV2Card(st.localId, current);
     }
   }
   /** The loss on record for a session — memory first, the ledger behind it —
    *  and the permanence it implies: a session with a persisted count keeps
    *  dropping instead of re-asking the relay. Null when nothing was lost. */
-  function budgetStateFor(localId: string, v2: string): BudgetState | null {
-    let st = budgetDropped.get(v2) ?? null;
-    if (!st) {
-      try { st = readPersistedBudget(v2); }
-      catch (e) { noteBudgetUnreadable(localId, v2, e); throw new BudgetUnreadableError(v2, e); }
+  function budgetStateFor(localId: string, v2: string): (Loss & { localId: string }) | null {
+    let st = budgetOf(v2);
+    if (st.kind !== "exhausted") {
+      const was = st.kind;
+      let row: PersistedBudget | null;
+      try { row = readPersistedBudget(v2); }
+      catch (e) {
+        st = budgetSend(v2, { type: "ledger_unreadable", localId, error: errText(e), now: now() });
+        if (was !== "unknown") log(`${localId}: event budget record unreadable (${errText(e)}) — card publications for ${v2.slice(0, 8)} deferred until the ledger reads again`);
+        throw new BudgetUnreadableError(v2, e);
+      }
+      st = budgetSend(v2, { type: "ledger_read", localId, row });
+      if (was === "unknown") log(`${localId}: event budget record readable again`);
     }
-    if (budgetUnreadable.delete(v2)) log(`${localId}: event budget record readable again`);
-    if (!st || st.dropped <= 0) return null;
-    st.localId = localId;
-    budgetDropped.set(v2, st);
-    budgetExhausted.add(v2);
-    return st;
-  }
-  function schedulePublishBudget(v2: string): void {
-    if (budgetPublish.has(v2)) return;
-    const t = setTimeout(() => publishBudget(v2), BUDGET_PUBLISH_MS);
-    t.unref?.();
-    budgetPublish.set(v2, t);
+    const loss = lossOf(st);
+    return loss ? { localId, since: loss.since, dropped: loss.dropped } : null;
   }
   function publishBudget(v2: string): void {
     const t = budgetPublish.get(v2);
     if (t) { clearTimeout(t); budgetPublish.delete(v2); }
-    const st = budgetDropped.get(v2);
-    if (!st) return;
-    void relaySessionFor(st.localId)?.updateEventBudget({ since: st.since, dropped: st.dropped })
+    const st = budgetSend(v2, { type: "publish_due" });
+    const loss = lossOf(st);
+    if (!loss) return;
+    void relaySessionFor(loss.localId)?.updateEventBudget({ since: loss.since, dropped: loss.dropped })
       .catch(() => { /* the card is best effort; the next drop (or any card publication) re-asserts it */ });
   }
   /** The ONE place card metadata passes through on its way to the relay
@@ -589,7 +594,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   function sealSessionCard(localId: string, v2: string, card: Record<string, unknown>, key: Uint8Array | null): { encryptedMetadata: string; carried: number | null } {
     const merged = cardWithEventBudget(localId, v2, card);
     const cur = merged.joy__eventBudget as { dropped?: unknown } | null | undefined;
-    const carried = budgetDropped.has(v2) && cur && typeof cur.dropped === "number" ? cur.dropped : null;
+    const carried = lossOf(budgetOf(v2)) && cur && typeof cur.dropped === "number" ? cur.dropped : null;
     return { encryptedMetadata: sealCard(merged, key), carried };
   }
   /** The relay accepted a card carrying `carried` dropped outputs: remember
@@ -598,8 +603,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  repair PATCH, never the warning. */
   function markBudgetPublished(v2: string, carried: number | null): void {
     if (carried == null) return;
-    const st = budgetDropped.get(v2);
-    if (st) { if (st.cardDropped >= carried) return; st.cardDropped = carried; }
+    const before = budgetOf(v2);
+    const after = budgetSend(v2, { type: "published", carried });
+    if (before.kind === "exhausted" && after === before) return; // the card already carried it
     try {
       const job = ledger.getJob(budgetJobId(v2));
       const p = job?.payload as Record<string, unknown> | null | undefined;
@@ -633,13 +639,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       ok: false, fate: "permanent", error: "session_event_budget_exhausted",
       settle: () => {
         const prev = readPersistedBudget(v2);
-        const st: BudgetState = {
-          localId, since: prev?.since ?? budgetDropped.get(v2)?.since ?? now(), dropped: (prev?.dropped ?? 0) + 1,
-          cardDropped: prev?.cardDropped ?? budgetDropped.get(v2)?.cardDropped ?? 0,
+        const mem = budgetOf(v2);
+        const row: PersistedBudget = {
+          localId, since: prev?.since ?? (mem.kind === "exhausted" ? mem.since : now()), dropped: (prev?.dropped ?? 0) + 1,
+          cardDropped: prev?.cardDropped ?? (mem.kind === "exhausted" ? mem.cardDropped : 0),
         };
-        ledger.putJob({ id: budgetJobId(v2), sessionId: localId, kind: EVENT_BUDGET_JOB_KIND, payload: { v2SessionId: v2, localId, since: st.since, dropped: st.dropped, cardDropped: st.cardDropped } });
-        budgetDropped.set(v2, st);
-        schedulePublishBudget(v2);
+        ledger.putJob({ id: budgetJobId(v2), sessionId: localId, kind: EVENT_BUDGET_JOB_KIND, payload: { v2SessionId: v2, localId, since: row.since, dropped: row.dropped, cardDropped: row.cardDropped } });
+        budgetSend(v2, { type: "drop_settled", row, now: now() });
       },
     };
   }
@@ -701,7 +707,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       else if (!registry.get(row.sessionId) || now() - row.createdAt > 24 * 3_600_000) return { ok: false, fate: "permanent", error: "unbound_abandoned" };
       else return { ok: false, fate: "unbound", error: "session not bound yet" };
     }
-    if (budgetExhausted.has(v2)) return budgetRefused(row.sessionId, v2);
+    if (isExhausted(budgetOf(v2))) return budgetRefused(row.sessionId, v2);
     const l = lease();
     if (!l) return { ok: false, fate: "transient", error: "lease_lost" };
     // The key the record was committed under rides the row (#582): a session
@@ -734,8 +740,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     } catch (e) {
       const fate = fateOf(e);
       if (fate === "budget") {
-        if (!budgetExhausted.has(v2)) {
-          budgetExhausted.add(v2);
+        if (!isExhausted(budgetOf(v2))) {
+          budgetSend(v2, { type: "refused_429", localId: row.sessionId, now: now() });
           log(`${row.sessionId}: relay event budget exhausted for v2 ${v2.slice(0, 8)} — further output for this session is dropped; the session needs a fresh card`);
           // Once, on a plane the budget does not gate (#130): the session
           // events are refused from here on, so the only way to say so is
@@ -2464,7 +2470,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     registry.get(session.id) === session && (session.status === "active" || session.status === "starting");
   /** A handle the registry keeps after a kill (dedup/recovery bookkeeping):
    *  not live, not listed, no card publisher of its own. */
-  const isKilledHandle = (s: AgentSession): boolean => s.status === "ended" && s.endReason === "killed";
+  // (isKilledHandle: domain/recordClass.ts — the one predicate, shared with the registry.)
 
   // ── Archiving a replacement row nobody will ever own (#120) ──────────────
   // A session killed while its announce was in flight leaves the relay
@@ -2875,8 +2881,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       ...(t.turn.phase === "adoption_pending" ? { since: t.turn.since, attempts: t.turn.attempts, lastError: t.turn.lastError } : {}),
     })),
     spawnSpecSealed: () => spawnSpecKey !== null,
-    eventBudgetDrops: () => [...budgetDropped.entries()].map(([v2SessionId, st]) => ({
-      v2SessionId, localSessionId: st.localId, since: st.since, dropped: st.dropped,
-    })),
+    eventBudgetDrops: () => [...budgets.entries()].flatMap(([v2SessionId, st]) => {
+      const loss = lossOf(st);
+      return loss ? [{ v2SessionId, localSessionId: loss.localId, since: loss.since, dropped: loss.dropped }] : [];
+    }),
   };
 }

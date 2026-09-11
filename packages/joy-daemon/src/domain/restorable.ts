@@ -13,6 +13,7 @@
 // that moment, and one that was mid-destructive-task would do it twice.
 // Restoring is a thing you ask for.
 import type { WindowRecord } from "./windowRecord";
+import { classifyRecord } from "./recordClass";
 
 export type Harness = "claude" | "codex" | "opencode" | "pi" | "agy";
 
@@ -83,15 +84,17 @@ export function restorableFrom(
 ): Restorable[] {
   const out: Restorable[] = [];
   for (const rec of records) {
-    if (!rec.id || !rec.launchCwd) continue;
-    if (!rec.socket) continue;
-    if (alive(rec)) continue;
+    // Records without a socket are `files_only` (unprobeable) and live ones
+    // are adopted by recover(): only `restorable` is ours (domain/recordClass.ts).
+    if (!rec.id || !rec.socket) continue;
+    const cls = classifyRecord({ record: rec, windowAlive: alive(rec) });
+    if (cls.kind !== "restorable") continue;
     const s = settingsOf(rec);
     out.push({
       id: rec.id,
-      cwd: rec.launchCwd,
+      cwd: rec.launchCwd!,
       agent: (rec.agent ?? "claude") as Harness,
-      resumeId: resumeIdOf(rec),
+      resumeId: cls.resumeId,
       model: s.model,
       permissionMode: s.permissionMode,
       effort: s.effort,

@@ -27,6 +27,7 @@ import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript, windowRecordMtime } from "./windowRecord";
 import { restorableFrom, type Restorable } from "./restorable";
+import { classifyRecord, isKilledHandle, isDetachedHandle } from "./recordClass";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
@@ -283,9 +284,7 @@ export class SessionRegistry {
   // else the machine page's "Active Sessions" inflates with every kill until the
   // next daemon restart. Detached (process_exited) sessions remain listed — their
   // window/cwd is still around and their file/git RPCs still answer.
-  #isKilled(s: AgentSession): boolean {
-    return s.status === "ended" && s.endReason === "killed";
-  }
+  #isKilled(s: AgentSession): boolean { return isKilledHandle(s); }
 
   list(): AgentSession[] {
     // An import's ownership check reads sessions then claims: settle the
@@ -470,7 +469,7 @@ export class SessionRegistry {
     const conflict = (live: AgentSession): never => {
       throw new Error(`a ${flavor} session (${live.id}) is already live in ${target} with different settings; restart it with the new settings, or resume without --continue`);
     };
-    const detachedInCwd = explicit ? undefined : inCwd.find((s) => s.status === "ended" && s.endReason === "process_exited");
+    const detachedInCwd = explicit ? undefined : inCwd.find((s) => isDetachedHandle(s));
 
     // An EXPLICIT id (a restart's replacement, a spawn's reserved id) is a
     // request for exactly that session: none of the cwd adoption/revival
@@ -1408,7 +1407,10 @@ export class SessionRegistry {
         pid = isNaN(child) ? undefined : child;
       }
 
-      const isAlive = pid !== undefined && run("kill", "-0", String(pid)).ok;
+      // The class (domain/recordClass.ts) from the facts gathered above: the
+      // window is there (it is a candidate), so it is live or detached.
+      const cls = classifyRecord({ record: rec, windowAlive: true, agentAlive: pid !== undefined && run("kill", "-0", String(pid)).ok });
+      const isAlive = cls.kind === "live";
 
       // ── Codex recovery: reconstruct a CodexSession that respawns its own
       // app-server (the old one died with the daemon) and thread/resumes.
