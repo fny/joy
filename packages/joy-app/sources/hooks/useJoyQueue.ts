@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { visibleQueue } from '@/sync/queueVisibility';
 import { sync } from '@/sync/sync';
 import { tunnelJson } from '@/sync/v2/tunnel';
 
@@ -17,6 +18,8 @@ export type QueuePauseReason = 'input_dirty' | 'dispatch_timeout' | 'dispatch_mi
 export interface JoyQueueState { queue: QueuedMessage[]; hidden?: QueuedMessage[]; pendingCount?: number; inFlight: string | null; paused: boolean; pauseReason?: QueuePauseReason; }
 
 const EMPTY: JoyQueueState = { queue: [], inFlight: null, paused: false };
+// The gate itself lives in sync/queueVisibility.ts — dependency-free so it can
+// be tested without react-native in the import graph.
 
 /** What the daemon's queue routes answer with: `ok` on success, an `error`
  *  string otherwise (the body may also be empty or non-JSON). */
@@ -53,13 +56,24 @@ export function queueMutationError(status: number, data: QueueMutationReply | nu
  * failure, non-success daemon reply) so a caller can keep its edit, restore
  * the text, or tell the user — a resolved promise means the daemon applied
  * it (#321). Metadata alone cannot say that: it only reflects successes.
+ *
+ * `live` is why old queues stopped lingering. This is the DAEMON'S in-memory
+ * dispatch queue, published as a snapshot on the card. A session that
+ * detaches, is archived, or whose machine reboots does not get to publish an
+ * empty one on the way out — so the card keeps its last snapshot forever, and
+ * every device went on showing rows that no longer existed anywhere. Worse,
+ * the rows offered steer and cancel, which travel the tunnel to a daemon that
+ * is not there: actions that could only ever fail.
+ *
+ * When nothing is listening there is no queue, only a memory of one.
  */
 export function useJoyQueue(
     machineId: string | undefined,
     joySessionId: string | undefined,
     metaQueue: JoyQueueState | null | undefined,
+    live = true,
 ) {
-    const state = metaQueue ?? EMPTY;
+    const state = visibleQueue(metaQueue, live) as JoyQueueState;
 
     // These operate on the DAEMON's local dispatch queue — qids come from the
     // daemon's joy__queue metadata (a different queue from the relay's durable

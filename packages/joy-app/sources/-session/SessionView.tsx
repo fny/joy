@@ -734,7 +734,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const sessionStatus = useSessionStatus(session);
     // joy message queue: messages sent while Claude is busy line up here and
     // the daemon drains them one at a time. Only meaningful for joy sessions.
-    const joyQueue = useJoyQueue(machineId, joySessionId, session.metadata?.joy__queue);
+    // Gated on the session being reachable: the queue is the daemon's, and a
+    // card outlives the daemon that wrote it (see useJoyQueue).
+    const joyQueue = useJoyQueue(machineId, joySessionId, session.metadata?.joy__queue, liveFacts(session).online);
     const sessionUsage = useSessionUsage(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
     const { canResume, restartSession, restarting } = useSessionQuickActions(session);
