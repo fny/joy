@@ -7,12 +7,15 @@ import { clearPersistence, loadRegisteredPushToken } from '@/sync/persistence';
 import { unregisterPushToken } from '@/sync/apiPush';
 import { Platform } from 'react-native';
 import { t } from '@/text';
+import { setServerUrl } from '@/sync/serverConfig';
 
 interface AuthContextType {
     isAuthenticated: boolean;
     credentials: AuthCredentials | null;
     login: (token: string, secret: string) => Promise<void>;
-    logout: () => Promise<void>;
+    /** forgetRelay: also forget the relay before the reload, so the welcome
+     *  screen asks for one (how a device changes relay). */
+    logout: (opts?: { forgetRelay?: boolean }) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -65,7 +68,7 @@ export function AuthProvider({ children, initialCredentials }: { children: React
         setIsAuthenticated(true);
     };
 
-    const logout = async () => {
+    const logout = async (opts?: { forgetRelay?: boolean }) => {
         const registeredPushToken = credentials ? loadRegisteredPushToken() : null;
         if (credentials && registeredPushToken) {
             // Best effort, bounded (#9): the relay-side token is nice to
@@ -96,6 +99,10 @@ export function AuthProvider({ children, initialCredentials }: { children: React
             throw new Error(t('errors.logoutFailed'));
         }
         clearPersistence();
+        // Changing relay: signed out first (above), then the relay itself is
+        // forgotten, and the reload below lands on the welcome screen's relay
+        // step. The account stays on the old relay; the backup code restores it.
+        if (opts?.forgetRelay === true) setServerUrl(null);
 
         // Tear the previous account's engine down now rather than relying on
         // the reload (which rejects in dev builds, #189): live stream, keys,

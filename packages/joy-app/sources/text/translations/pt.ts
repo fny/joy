@@ -477,37 +477,20 @@ export const pt: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'Relay',
+        changeRelay: 'Trocar de relay',
+        changeRelayMessage: ({ relay }: { relay: string }) => `Você sairá da conta neste dispositivo. Sua conta continua em ${relay}: para voltar, digite-o novamente e restaure com seu código de backup.`,
+        changeRelayFooter: 'Trocar de relay sai da conta neste dispositivo primeiro.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Configuração do servidor',
-        knownRelays: 'Relays conhecidos',
-        relayLogin: 'Entrar no relay',
-        relayLoginMessage: 'Este dispositivo não tem uma conta guardada para este relay. Use a sua chave secreta atual, insira outra ou entre mais tarde.',
-        relayUseCurrentKey: 'Usar a minha chave atual',
-        relayEnterKey: 'Inserir chave secreta',
-        relayLoginLater: 'Entrar mais tarde',
-        relayLoginFailed: 'Não foi possível entrar neste relay. Verifique a chave e tente novamente.',
-        relayApplyKeyAll: 'Usar esta chave em todos os relays',
         relayAccessKeyLabel: 'Chave de acesso do relay',
         relayAccessKeyFooter: 'Chave de perímetro deste relay (portão joy-relay). Enviada com cada pedido; deixe vazio para relays abertos. Reconecta após guardar.',
         relayAccessKeySaved: 'Chave do relay guardada',
         relayCopyDerivedKey: 'Copiar a chave derivada do relay',
-        relayApplyKeyAllMessage: 'Entrar em todos os relays conhecidos com a chave da conta atual? Isto substitui qualquer outra conta guardada para esses relays neste dispositivo.',
-        relayApplyKeyAllFooter: 'A sua chave secreta atual torna-se o único acesso para todos os relays conhecidos — um só código para guardar. As contas são criadas automaticamente onde ainda não existem.',
-        relayApplyKeyAllSuccess: 'Todos os relays usam agora esta chave.',
-        relayApplyKeyAllPartial: 'Não foi possível configurar:',
-        enterServerUrl: 'Por favor, insira uma URL do servidor',
         notValidJoyServer: 'Não é um servidor Joy válido',
-        changeServer: 'Alterar servidor',
-        continueWithServer: 'Continuar com este servidor?',
-        resetToDefault: 'Redefinir para padrão',
-        resetServerDefault: 'Redefinir servidor para padrão?',
         validating: 'Validando...',
-        validatingServer: 'Validando servidor...',
         serverReturnedError: 'O servidor retornou um erro',
         failedToConnectToServer: 'Falha ao conectar com o servidor',
-        currentlyUsingCustomServer: 'Atualmente usando servidor personalizado',
-        customServerUrlLabel: 'URL do servidor personalizado',
-        advancedFeatureFooter: 'Este é um recurso avançado. Altere o servidor apenas se souber o que está fazendo. Você precisará sair e entrar novamente após alterar servidores.',
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requer uma chave de acesso. Insira a chave deste relay.`,
     },
 
@@ -877,6 +860,11 @@ export const pt: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'Relay',
+        relayFooter: 'O relay com que este dispositivo se comunica. Toque para trocar de relay; toque no cadeado para definir a senha.',
+        relayPassword: 'Senha do relay',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} exige isso em toda conexão. Deixe em branco para removê-la.`,
+        relayPasswordSet: 'senha definida',
         // Account settings screen
         accountInformation: 'Informações da conta',
         status: 'Status',
@@ -1002,6 +990,12 @@ export const pt: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'Relay',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: 'O endereço do relay joy onde fica sua conta.',
+        relayContinue: 'Continuar',
+        relayRequired: 'Digite o endereço do relay',
+        relayCurrent: ({ relay }: { relay: string }) => `Relay: ${relay} · Alterar`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'Criptografado ponta a ponta e sua conta é armazenada apenas no seu dispositivo.',

@@ -19,7 +19,8 @@ vi.mock('react-native-mmkv', () => ({
     },
 }));
 
-import { getStoredRelayAccessKey, relayScopedMMKV, setRelayAccessKey, setServerUrl } from './serverConfig';
+import { getServerUrl, getStoredRelayAccessKey, hasServerUrl, relayNameForUrl, relayScopedMMKV, setRelayAccessKey, setServerUrl } from './serverConfig';
+import * as serverConfig from './serverConfig';
 
 const HTTPS = 'https://relay.example';
 const HTTP = 'http://relay.example';
@@ -80,5 +81,37 @@ describe('relay-scoped stores and access keys migrate only with established owne
         setServerUrl(HTTP);
         expect(getStoredRelayAccessKey(HTTP)).toBeNull();
         expect(getStoredRelayAccessKey(HTTPS)).toBe('https-secret');
+    });
+});
+
+describe('no built-in relay', () => {
+    beforeEach(() => {
+        for (const m of stores.values()) m.clear();
+    });
+
+    it('nothing saved → no relay, not a fallback', () => {
+        setServerUrl(null);
+        expect(getServerUrl()).toBe('');
+        expect(hasServerUrl()).toBe(false);
+        expect(serverConfig).not.toHaveProperty('DEFAULT_SERVER_URL');
+        expect(serverConfig).not.toHaveProperty('KNOWN_RELAYS');
+    });
+
+    it('before a relay is chosen the relay store is a scratch store, and per-relay values are inert', () => {
+        setServerUrl(null);
+        relayScopedMMKV().set('k', 'v');
+        expect(stores.get('relay.unpaired')?.get('k')).toBe('v');
+        expect(getStoredRelayAccessKey()).toBeNull();
+        setRelayAccessKey('ignored');
+        expect(Array.from(stores.get('server-config')?.keys() ?? []).some((k) => k.startsWith('relay-access-key:'))).toBe(false);
+        expect(relayNameForUrl('')).toBe('');
+    });
+
+    it('a chosen relay is the relay, and its store is keyed by it', () => {
+        setServerUrl('https://relay.example.test:4997');
+        expect(hasServerUrl()).toBe(true);
+        relayScopedMMKV().set('k', 'v');
+        expect(stores.get('relay.relay.example.test_4997')?.get('k')).toBe('v');
+        expect(relayNameForUrl(getServerUrl())).toBe('relay.example.test');
     });
 });

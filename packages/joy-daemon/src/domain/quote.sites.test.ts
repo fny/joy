@@ -63,7 +63,7 @@ describe("claude/optionsPrompt.ts (#472)", () => {
 describe("launchdPlist (#500)", () => {
   test("XML metacharacters in PATH and paths are escaped; the document has no bare & or <", () => {
     const plist = launchdPlist({
-      label: "vip.faraz.joy-daemon",
+      label: "joy-daemon",
       node: "/Users/A&B/.nvm/node",
       serverTs: "/Users/A&B/pkg/<src>/server.ts",
       pkgDir: "/Users/A&B/pkg",

@@ -478,37 +478,20 @@ export const es: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'Relé',
+        changeRelay: 'Cambiar de relé',
+        changeRelayMessage: ({ relay }: { relay: string }) => `Se cerrará la sesión en este dispositivo. Tu cuenta sigue en ${relay}: para volver, introdúcelo de nuevo y restaura con tu código de respaldo.`,
+        changeRelayFooter: 'Cambiar de relé cierra primero la sesión en este dispositivo.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Configuración del servidor',
-        knownRelays: 'Relés conocidos',
-        relayLogin: 'Iniciar sesión en el relé',
-        relayLoginMessage: 'Este dispositivo no tiene una cuenta guardada para este relé. Usa tu clave secreta actual, introduce otra o inicia sesión más tarde.',
-        relayUseCurrentKey: 'Usar mi clave actual',
-        relayEnterKey: 'Introducir clave secreta',
-        relayLoginLater: 'Iniciar sesión más tarde',
-        relayLoginFailed: 'No se pudo iniciar sesión en este relé. Comprueba la clave y vuelve a intentarlo.',
-        relayApplyKeyAll: 'Usar esta clave en todos los relés',
         relayAccessKeyLabel: 'Clave de acceso del relay',
         relayAccessKeyFooter: 'Clave perimetral para este relay (puerta joy-relay). Se envía con cada petición; déjala vacía para relays abiertos. Se reconecta al guardar.',
         relayAccessKeySaved: 'Clave del relay guardada',
         relayCopyDerivedKey: 'Copiar la clave derivada del relay',
-        relayApplyKeyAllMessage: '¿Iniciar sesión en todos los relés conocidos con la clave de la cuenta actual? Esto reemplaza cualquier otra cuenta guardada para esos relés en este dispositivo.',
-        relayApplyKeyAllFooter: 'Convierte tu clave secreta actual en el único acceso para todos los relés conocidos: un solo código que respaldar. Las cuentas se crean automáticamente donde aún no existen.',
-        relayApplyKeyAllSuccess: 'Todos los relés usan ahora esta clave.',
-        relayApplyKeyAllPartial: 'No se pudo configurar:',
-        enterServerUrl: 'Ingresa una URL de servidor',
         notValidJoyServer: 'No es un servidor Joy válido',
-        changeServer: 'Cambiar servidor',
-        continueWithServer: '¿Continuar con este servidor?',
-        resetToDefault: 'Restablecer por defecto',
-        resetServerDefault: '¿Restablecer servidor por defecto?',
         validating: 'Validando...',
-        validatingServer: 'Validando servidor...',
         serverReturnedError: 'El servidor devolvió un error',
         failedToConnectToServer: 'Falló al conectar con el servidor',
-        currentlyUsingCustomServer: 'Actualmente usando servidor personalizado',
-        customServerUrlLabel: 'URL del servidor personalizado',
-        advancedFeatureFooter: 'Esta es una característica avanzada. Solo cambia el servidor si sabes lo que haces. Necesitarás cerrar sesión e iniciarla nuevamente después de cambiar servidores.',
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requiere una clave de acceso. Introduce la clave de este relay.`,
     },
 
@@ -878,6 +861,11 @@ export const es: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'Relé',
+        relayFooter: 'El relé con el que se comunica este dispositivo. Tócalo para cambiar de relé; toca el candado para establecer su contraseña.',
+        relayPassword: 'Contraseña del relé',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} la requiere en cada conexión. Déjala vacía para borrarla.`,
+        relayPasswordSet: 'contraseña establecida',
         // Account settings screen
         accountInformation: 'Información de la cuenta',
         status: 'Estado',
@@ -1003,6 +991,12 @@ export const es: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'Relé',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: 'La dirección del relé de joy donde está tu cuenta.',
+        relayContinue: 'Continuar',
+        relayRequired: 'Introduce la dirección del relé',
+        relayCurrent: ({ relay }: { relay: string }) => `Relé: ${relay} · Cambiar`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'Cifrado de extremo a extremo y tu cuenta se guarda solo en tu dispositivo.',

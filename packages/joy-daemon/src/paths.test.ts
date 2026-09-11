@@ -16,8 +16,7 @@ beforeEach(() => {
     const root = mkdtempSync(join(tmpdir(), "joy-paths-"));
     joy = join(root, "joy");
     process.env.JOY_HOME_DIR = joy;
-    // The host shell may export a relay selection (per-relay daemon work);
-    // these tests assume the DEFAULT relay unless a test sets one itself.
+    // The host shell may export a relay selection; each test sets its own.
     delete process.env.JOY_RELAY_URL;
 });
 afterEach(() => {
@@ -27,50 +26,74 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-describe("per-relay layout", () => {
+const RELAY = "https://relay.example.test:4997";
+const RELAY_KEY = "relay.example.test_4997";
+
+/** A pairing as `joy auth` leaves it: access.key + settings.json {serverUrl}. */
+function pairAt(url: string) {
+    const key = new URL(url).port ? `${new URL(url).hostname}_${new URL(url).port}` : new URL(url).hostname;
+    const dir = join(joy, "relays", key);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "access.key"), "{}");
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ machineId: "m", serverUrl: url }));
+}
+
+describe("relay resolution: no default, one relay", () => {
     it("relay creds dir keys by host and port", async () => {
         const { joyRelayCredsDir } = await freshPaths();
-        expect(joyRelayCredsDir("https://joy.voltai.party")).toBe(join(joy, "relays", "joy.voltai.party"));
-        expect(joyRelayCredsDir("https://joy.voltai.party:1443")).toBe(join(joy, "relays", "joy.voltai.party_1443"));
+        expect(joyRelayCredsDir("https://relay.example.test")).toBe(join(joy, "relays", "relay.example.test"));
+        expect(joyRelayCredsDir(RELAY)).toBe(join(joy, "relays", RELAY_KEY));
     });
 
-    it("no configuration → the joy relay, scoped like any other relay", async () => {
+    it("nothing configured and nothing paired → no relay, and a sentence instead of a guess", async () => {
         const p = await freshPaths();
-        expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:4997");
-        expect(p.joyRelayUrl()).toBe(p.DEFAULT_RELAY_URL);
-        expect(p.isDefaultRelay()).toBe(true);
-        expect(p.tmuxSocketArgs()).toEqual(["-L", "joy-joy.voltai.party_4997"]);
+        expect(p.joyRelayUrlOrNull()).toBeNull();
+        expect(() => p.joyRelayUrl()).toThrow(p.NoRelayConfiguredError);
+        expect(() => p.joyRelayUrl()).toThrow(/joy auth <relay url>/);
+        expect(p).not.toHaveProperty("DEFAULT_RELAY_URL");
+        expect(p).not.toHaveProperty("RELAY_ALIASES");
+    });
+
+    it("JOY_RELAY_URL selects the relay and scopes state, tmux and creds together", async () => {
+        process.env.JOY_RELAY_URL = RELAY;
+        const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe(RELAY);
+        expect(p.joyRelayKey()).toBe(RELAY_KEY);
+        expect(p.tmuxSocketArgs()).toEqual(["-L", `joy-${RELAY_KEY}`]);
         expect(p.tmuxServerLabel("abc")).toBe("joy-abc");
         expect(p.tmuxNamesFor("joy-abc", "abc")).toEqual({ session: "joy-abc", target: "joy-abc:agent" });
-        expect(p.tmuxNamesFor("joy-joy.voltai.party_4997-s-abc", "abc")).toEqual({ session: "j-abc", target: "j-abc" });
-        expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_4997", "state"));
-    });
-
-    it("JOY_RELAY_URL alias resolves and scopes state + tmux + creds together", async () => {
-        process.env.JOY_RELAY_URL = "joy-dev";
-        const p = await freshPaths();
-        expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:14997");
-        expect(p.isDefaultRelay()).toBe(false);
-        expect(p.joyRelayKey()).toBe("joy.voltai.party_14997");
-        expect(p.tmuxSocketArgs()).toEqual(["-L", "joy-joy.voltai.party_14997"]);
-        // state sits beside that relay's credentials — nothing shared with the
-        // default daemon
-        expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_14997", "state"));
-        expect(p.joyRelayCredsDir()).toBe(join(joy, "relays", "joy.voltai.party_14997"));
-    });
-
-    it("a bare URL passes through resolveRelayAlias unchanged", async () => {
-        const p = await freshPaths();
-        expect(p.resolveRelayAlias("http://127.0.0.1:3105")).toBe("http://127.0.0.1:3105");
-        expect(p.resolveRelayAlias("joy")).toBe(p.DEFAULT_RELAY_URL);
+        expect(p.tmuxNamesFor(`joy-${RELAY_KEY}-s-abc`, "abc")).toEqual({ session: "j-abc", target: "j-abc" });
+        expect(p.joyStateDir()).toBe(join(joy, "relays", RELAY_KEY, "state"));
+        expect(p.joyRelayCredsDir()).toBe(join(joy, "relays", RELAY_KEY));
     });
 
     it("~/.joy/relay.json selects the relay when the env var is absent", async () => {
         mkdirSync(joy, { recursive: true });
-        writeFileSync(join(joy, "relay.json"), JSON.stringify({ serverUrl: "https://joy.voltai.party:14997" }));
+        writeFileSync(join(joy, "relay.json"), JSON.stringify({ serverUrl: RELAY }));
         const p = await freshPaths();
-        expect(p.joyRelayUrl()).toBe("https://joy.voltai.party:14997");
-        expect(p.joyStateDir()).toBe(join(joy, "relays", "joy.voltai.party_14997", "state"));
+        expect(p.joyRelayUrl()).toBe(RELAY);
+        expect(p.joyStateDir()).toBe(join(joy, "relays", RELAY_KEY, "state"));
+    });
+
+    it("a machine paired before relay.json existed resolves its one pairing", async () => {
+        pairAt(RELAY);
+        const p = await freshPaths();
+        expect(p.joyRelayUrl()).toBe(RELAY);
+    });
+
+    it("two pairings and no relay.json → ambiguous, so no relay rather than a pick", async () => {
+        pairAt(RELAY);
+        pairAt("https://other.example.test");
+        const p = await freshPaths();
+        expect(p.joyRelayUrlOrNull()).toBeNull();
+    });
+
+    it("normalizeRelayUrl gives a bare host its scheme and passes URLs through", async () => {
+        const p = await freshPaths();
+        expect(p.normalizeRelayUrl("relay.example.test:4997")).toBe(RELAY);
+        expect(p.normalizeRelayUrl("relay.example.test")).toBe("https://relay.example.test");
+        expect(p.normalizeRelayUrl("http://127.0.0.1:3105/")).toBe("http://127.0.0.1:3105");
+        expect(p.normalizeRelayUrl("joy")).toBe("joy"); // no dot, no scheme: not a relay, and not an alias any more
     });
 });
 
@@ -81,7 +104,8 @@ describe("isolation: JOY_HOME_DIR override", () => {
         const p = await freshPaths();
         expect(p.joyHomeDir()).toBe(join(homedir(), ".joy-test"));
         expect(p.joySessionDir("s1")).toBe(join(homedir(), ".joy-test", "sessions", "s1"));
-        expect(p.joyRelayCredsDir()).toBe(join(homedir(), ".joy-test", "relays", "joy.voltai.party_4997"));
+        process.env.JOY_RELAY_URL = RELAY;
+        expect(p.joyRelayCredsDir()).toBe(join(homedir(), ".joy-test", "relays", RELAY_KEY));
     });
 });
 
@@ -150,15 +174,4 @@ describe("canonicalCwd (#549 #564)", () => {
         expect(p.canonicalCwd("~/shortcut/../..")).toBe(root);
         expect(p.canonicalCwd("~")).toBe(root);
     });
-});
-
-describe("resolveRelayAlias", () => {
-  it("passes aliases and URLs through, and gives a bare host[:port] its scheme", async () => {
-    const { resolveRelayAlias } = await import("./paths");
-    expect(resolveRelayAlias("https://joy.voltai.party:4997")).toBe("https://joy.voltai.party:4997");
-    expect(resolveRelayAlias("http://localhost:3105")).toBe("http://localhost:3105");
-    expect(resolveRelayAlias("joy.voltai.party:4997")).toBe("https://joy.voltai.party:4997");
-    expect(resolveRelayAlias("joy.voltai.party")).toBe("https://joy.voltai.party");
-    expect(resolveRelayAlias("nonsense")).toBe("nonsense"); // no dot: still an unknown name
-  });
 });

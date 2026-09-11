@@ -476,37 +476,20 @@ export const it: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'Relay',
+        changeRelay: 'Cambia relay',
+        changeRelayMessage: ({ relay }: { relay: string }) => `Verrai disconnesso su questo dispositivo. Il tuo account resta su ${relay}: per tornare, inseriscilo di nuovo e ripristina con il codice di backup.`,
+        changeRelayFooter: 'Cambiare relay disconnette prima questo dispositivo.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Configurazione server',
-        knownRelays: 'Relay noti',
-        relayLogin: 'Accedi al relay',
-        relayLoginMessage: 'Su questo dispositivo non è salvato alcun account per questo relay. Usa la tua chiave segreta attuale, inseriscine un\'altra o accedi più tardi.',
-        relayUseCurrentKey: 'Usa la mia chiave attuale',
-        relayEnterKey: 'Inserisci chiave segreta',
-        relayLoginLater: 'Accedi più tardi',
-        relayLoginFailed: 'Accesso al relay non riuscito. Controlla la chiave e riprova.',
-        relayApplyKeyAll: 'Usa questa chiave su tutti i relay',
         relayAccessKeyLabel: 'Chiave di accesso del relay',
         relayAccessKeyFooter: 'Chiave perimetrale per questo relay (gate joy-relay). Inviata con ogni richiesta; lascia vuoto per relay aperti. Si riconnette dopo il salvataggio.',
         relayAccessKeySaved: 'Chiave del relay salvata',
         relayCopyDerivedKey: 'Copia la chiave derivata del relay',
-        relayApplyKeyAllMessage: 'Accedere a tutti i relay noti con la chiave dell\'account attuale? Questo sostituisce qualsiasi altro account salvato per quei relay su questo dispositivo.',
-        relayApplyKeyAllFooter: 'La tua chiave segreta attuale diventa l\'unico accesso per tutti i relay noti: un solo codice da conservare. Gli account vengono creati automaticamente dove non esistono ancora.',
-        relayApplyKeyAllSuccess: 'Tutti i relay ora usano questa chiave.',
-        relayApplyKeyAllPartial: 'Impossibile configurare:',
-        enterServerUrl: 'Inserisci un URL del server',
         notValidJoyServer: 'Non è un Joy Server valido',
-        changeServer: 'Cambia server',
-        continueWithServer: 'Continuare con questo server?',
-        resetToDefault: 'Ripristina predefinito',
-        resetServerDefault: 'Ripristinare il server predefinito?',
         validating: 'Verifica...',
-        validatingServer: 'Verifica del server...',
         serverReturnedError: 'Il server ha restituito un errore',
         failedToConnectToServer: 'Impossibile connettersi al server',
-        currentlyUsingCustomServer: 'Attualmente si usa un server personalizzato',
-        customServerUrlLabel: 'URL server personalizzato',
-        advancedFeatureFooter: 'Questa è una funzionalità avanzata. Cambia il server solo se sai cosa stai facendo. Dovrai disconnetterti e accedere di nuovo dopo aver cambiato server.',
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} richiede una chiave di accesso. Inserisci la chiave per questo relay.`,
     },
 
@@ -876,6 +859,11 @@ export const it: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'Relay',
+        relayFooter: 'Il relay con cui comunica questo dispositivo. Toccalo per cambiare relay; tocca il lucchetto per impostarne la password.',
+        relayPassword: 'Password del relay',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} la richiede a ogni connessione. Lascia vuoto per rimuoverla.`,
+        relayPasswordSet: 'password impostata',
         // Account settings screen
         accountInformation: 'Informazioni account',
         status: 'Stato',
@@ -1001,6 +989,12 @@ export const it: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'Relay',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: "L'indirizzo del relay joy su cui si trova il tuo account.",
+        relayContinue: 'Continua',
+        relayRequired: "Inserisci l'indirizzo del relay",
+        relayCurrent: ({ relay }: { relay: string }) => `Relay: ${relay} · Cambia`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'Crittografia end-to-end e account memorizzato solo sul tuo dispositivo.',

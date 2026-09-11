@@ -8,6 +8,7 @@ import { Typography } from '@/constants/Typography';
 import { encodeBase64 } from '@/encryption/base64';
 import { generateAuthKeyPair, authQRStart, QRAuthKeyPair } from '@/auth/authQRStart';
 import { authQRWait } from '@/auth/authQRWait';
+import { hasServerUrl } from '@/sync/serverConfig';
 import { layout } from '@/components/layout';
 import { Modal } from '@/modal';
 import { t } from '@/text';
@@ -92,6 +93,12 @@ export default function Restore() {
         // back here): nothing to pair, leave the screen.
         if (authRef.current.isAuthenticated) {
             routerRef.current.back();
+            return;
+        }
+        // No relay chosen yet (a deep link straight here): the welcome screen
+        // asks for one first — there is nothing to pair against.
+        if (!hasServerUrl()) {
+            routerRef.current.replace('/');
             return;
         }
 

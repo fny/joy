@@ -323,37 +323,20 @@ export const ru: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'Реле',
+        changeRelay: 'Сменить реле',
+        changeRelayMessage: ({ relay }: { relay: string }) => `Вы выйдете из аккаунта на этом устройстве. Аккаунт остаётся на ${relay}: чтобы вернуться, снова укажите его и восстановите доступ резервным кодом.`,
+        changeRelayFooter: 'Перед сменой реле устройство выходит из аккаунта.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Настройка сервера',
-        knownRelays: 'Известные реле',
-        relayLogin: 'Вход на реле',
-        relayLoginMessage: 'Для этого реле на устройстве нет сохранённого аккаунта. Используйте текущий секретный ключ, введите другой или войдите позже.',
-        relayUseCurrentKey: 'Использовать текущий ключ',
-        relayEnterKey: 'Ввести секретный ключ',
-        relayLoginLater: 'Войти позже',
-        relayLoginFailed: 'Не удалось войти на это реле. Проверьте ключ и попробуйте снова.',
-        relayApplyKeyAll: 'Использовать этот ключ на всех реле',
         relayAccessKeyLabel: 'Ключ доступа к релею',
         relayAccessKeyFooter: 'Периметровый ключ этого релея (шлюз joy-relay). Отправляется с каждым запросом; оставьте пустым для открытых релеев. Переподключение после сохранения.',
         relayAccessKeySaved: 'Ключ релея сохранён',
         relayCopyDerivedKey: 'Скопировать производный ключ релея',
-        relayApplyKeyAllMessage: 'Войти на все известные реле с текущим ключом аккаунта? Это заменит любые другие аккаунты, сохранённые для этих реле на устройстве.',
-        relayApplyKeyAllFooter: 'Текущий секретный ключ станет единым входом для всех известных реле — один код для резервной копии. Аккаунты создаются автоматически там, где их ещё нет.',
-        relayApplyKeyAllSuccess: 'Все реле теперь используют этот ключ.',
-        relayApplyKeyAllPartial: 'Не удалось настроить:',
-        enterServerUrl: 'Пожалуйста, введите URL сервера',
         notValidJoyServer: 'Это не валидный сервер Joy',
-        changeServer: 'Изменить сервер',
-        continueWithServer: 'Продолжить с этим сервером?',
-        resetToDefault: 'Сбросить по умолчанию',
-        resetServerDefault: 'Сбросить сервер по умолчанию?',
         validating: 'Проверка...',
-        validatingServer: 'Проверка сервера...',
         serverReturnedError: 'Сервер вернул ошибку',
         failedToConnectToServer: 'Не удалось подключиться к серверу',
-        currentlyUsingCustomServer: 'Сейчас используется пользовательский сервер',
-        customServerUrlLabel: 'URL пользовательского сервера',
-        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.',
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} требует ключ доступа. Введите ключ для этого релея.`,
     },
 
@@ -894,6 +877,11 @@ export const ru: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'Реле',
+        relayFooter: 'Реле, с которым работает это устройство. Нажмите, чтобы сменить реле; нажмите на замок, чтобы задать пароль.',
+        relayPassword: 'Пароль реле',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} требует его при каждом подключении. Оставьте пустым, чтобы удалить.`,
+        relayPasswordSet: 'пароль задан',
         // Account settings screen
         accountInformation: 'Информация об аккаунте',
         status: 'Статус',
@@ -1007,6 +995,12 @@ export const ru: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'Реле',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: 'Адрес реле joy, на котором находится ваш аккаунт.',
+        relayContinue: 'Продолжить',
+        relayRequired: 'Введите адрес реле',
+        relayCurrent: ({ relay }: { relay: string }) => `Реле: ${relay} · Изменить`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'Сквозное шифрование, аккаунт хранится только на вашем устройстве.',

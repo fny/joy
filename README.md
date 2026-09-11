@@ -24,7 +24,7 @@ The packages that make up joy are:
 - **[joy-relay](packages/joy-relay)** - the self-hosted relay and the only server:
   accounts, pairing, machines, push, and the `/joy/v2` durable-session protocol
   (server-owned queue, real cancellation, E2E tunnel) in one Node process on an embedded
-  PGlite store (see `https://joy.voltai.party:4997/docs`).
+  PGlite store (see `/docs` on your relay).
 
 ## How does it work?
 

@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 (6) — You choose the relay",
+      "summary": "",
+      "markdown": "- **There is no built-in relay any more.** A new install asks which relay to use on its first screen, checks that it is a joy relay (asking for its access key if it is gated), and only then offers to create or restore an account. Nothing about your account or your data is hard-wired to one server.\n- **If you are already signed in, nothing changes.** The app saves the relay you were already using the first time it starts, so you stay signed in with everything where it was.\n- **One relay per device.** The relay list, switching between relays, \"use this key on all relays\" and reset-to-default are gone. To move to another relay, open Settings → relay → **Change relay**: the device signs out first, then asks for the new relay. Your account stays on the old one, and your backup code restores it there.\n- From a terminal: `joy auth <relay url>` pairs a machine with one relay and remembers it. On a Mac the background service is now called `joy-daemon`; the next `joy update` moves it over. Needs the updated daemon."
+    },
+    {
       "title": "Sep 11 (5) — Settings that stay synced, and a queue that can be trusted",
       "summary": "",
       "markdown": "- **A setting changed while a sync was already in flight is no longer lost.** Pins, sort order and every other synced setting used to have a small window: if you toggled something while the app was in the middle of pushing an earlier change, the new one was marked as sent without ever leaving the device, and only showed up on your other devices after some later, unrelated change carried it along. That is the \"pins don't sync\" you may have seen. The sync now tracks a change made during a push as the next thing to push, and pushes it right after.\n- **The connection indicator means one thing now.** \"Connected\" is whether the relay answered a read recently, whichever transport made it; a lost stream reconnects with a backing-off delay instead of hammering every three seconds; and the indicator can finally say **error** when it keeps failing, instead of sitting on \"connecting\" forever.\n- **Retrying a failed message that had already started works again.** A message whose agent had begun answering before the machine died, retried after it came back, was refused on its second start and sat there. Needs the updated relay.\n- Under the hood, the relay's queue is now exercised by a simulator that drives the real server with crashes, lost answers and a clock it controls, checking a dozen invariants after every step. It found the retry bug above and two more that never reached a screen: the relay was answering some internal errors with a dropped connection instead of an error, and a retried message kept a trace of its first run that confused the machine picking it up. All three are fixed."
@@ -461,5 +466,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 11 (5) — Settings that stay synced, and a queue that can be trusted"
+  "latestTitle": "Sep 11 (6) — You choose the relay"
 }

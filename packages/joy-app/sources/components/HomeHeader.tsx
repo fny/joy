@@ -108,7 +108,7 @@ export const HomeHeaderNotAuth = React.memo(() => {
     const { theme } = useUnistyles();
     return (
         <Header
-            title={<HeaderTitleWithSubtitle subtitle={serverInfo.isCustom ? serverInfo.hostname + (serverInfo.port ? `:${serverInfo.port}` : '') : undefined} />}
+            title={<HeaderTitleWithSubtitle subtitle={serverInfo ? serverInfo.hostname + (serverInfo.port ? `:${serverInfo.port}` : '') : undefined} />}
             headerRight={() => <HeaderRightNotAuth />}
             headerLeft={() => <HeaderLeft />}
             headerShadowVisible={false}

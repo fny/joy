@@ -17,7 +17,8 @@ import { View, Platform, AppState } from 'react-native';
 import { ModalProvider } from '@/modal';
 import { RealtimeProvider } from '@/realtime/RealtimeProvider';
 import { AppLockGate } from '@/components/AppLockGate';
-import { installRelayKeyFetchInterceptor } from '@/sync/serverConfig';
+import { installRelayKeyFetchInterceptor, hasServerUrl } from '@/sync/serverConfig';
+import { pinRetiredBuiltinRelay } from '@/sync/relayPin';
 import { syncRestore } from '@/sync/sync';
 import { FaviconPermissionIndicator } from '@/components/web/FaviconPermissionIndicator';
 import { CommandPaletteProvider } from '@/components/CommandPalette/CommandPaletteProvider';
@@ -256,9 +257,13 @@ export default function RootLayout() {
                 await loadFonts();
                 await sodium.ready;
 
+                // One-time: an install that was on the retired built-in relay
+                // gets it saved before anything reads the relay (relayPin.ts).
+                await pinRetiredBuiltinRelay();
+
                 let credentials = await TokenStorage.getCredentials();
                 const queryCredentials = getDevWebQueryCredentials();
-                const devCredentials = queryCredentials ?? getDevEnvironmentCredentials();
+                const devCredentials = hasServerUrl() ? (queryCredentials ?? getDevEnvironmentCredentials()) : null;
 
                 if (devCredentials) {
                     const credentialsChanged = credentials?.token !== devCredentials.token

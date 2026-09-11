@@ -83,9 +83,9 @@ describe("joy stop under a supervisor (#502)", () => {
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "4242\n" }) })).toMatchObject({ kind: "unknown" }); // a bare number is not the property line
     expect(detectSupervisor(4242, { platform: "linux", run: () => ({ status: 0, stdout: "Id=joy-daemon.service\nMainPID=4242\n" }) })).toEqual({ kind: "systemd", unit: "joy-daemon.service" });
     const launchd = (out: string, status = 0) => ({ platform: "darwin", run: () => ({ status, stdout: out }) });
-    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))?.kind).toBe("launchd");
-    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // loaded, not running: a job dictionary without a PID
-    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 999;\n\t"Label" = "vip.faraz.joy-daemon";\n};'))).toBeNull(); // the job runs something else
+    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 4242;\n\t"Label" = "joy-daemon";\n};'))?.kind).toBe("launchd");
+    expect(detectSupervisor(4242, launchd('{\n\t"Label" = "joy-daemon";\n};'))).toBeNull(); // loaded, not running: a job dictionary without a PID
+    expect(detectSupervisor(4242, launchd('{\n\t"PID" = 999;\n\t"Label" = "joy-daemon";\n};'))).toBeNull(); // the job runs something else
     expect(detectSupervisor(4242, launchd("", 113))).toBeNull(); // not loaded: launchctl's own definitive answer
     expect(detectSupervisor(4242, launchd("", 1))).toMatchObject({ kind: "unknown" }); // launchctl itself failed
     // Exit 0 without the job's dictionary is malformed, not an inactive job (Astra F9).
@@ -191,7 +191,7 @@ describe("joy stop under a supervisor (#502)", () => {
     test("launcherFromEnv: what the daemon records", () => {
       expect(launcherFromEnv({ INVOCATION_ID: "abc" }, "linux")).toBe("systemd");
       expect(launcherFromEnv({}, "linux")).toBe("detached");
-      expect(launcherFromEnv({ XPC_SERVICE_NAME: "vip.faraz.joy-daemon" }, "darwin")).toBe("launchd");
+      expect(launcherFromEnv({ XPC_SERVICE_NAME: "joy-daemon" }, "darwin")).toBe("launchd");
       expect(launcherFromEnv({ XPC_SERVICE_NAME: "0" }, "darwin")).toBe("detached");
       expect(launcherFromEnv({ INVOCATION_ID: "abc" }, "darwin")).toBe("detached"); // a foreign marker means nothing on the other platform
     });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // joy-mcp — a remote MCP server that is a full client of one joy account.
 //
-//   joy-mcp pair --relay https://joy.voltai.party:4997 [--minutes 60]   approve from the joy app (QR / link)
+//   joy-mcp pair --relay https://<relay host>:4997 [--minutes 60]   approve from the joy app (QR / link)
 //   joy-mcp pair --relay … --secret <backup code>                  from the account backup code
 //   joy-mcp serve                                                   JOY_MCP_PORT (3107) · JOY_MCP_PUBLIC_URL
 //   joy-mcp token new <name>                                        a bearer for Claude Code / scripts
@@ -94,7 +94,7 @@ async function serve() {
   const acct = loadAccount();
   if (!acct) { console.error(`not paired — run: joy-mcp pair --relay <url>   (home: ${mcpHome()})`); return 1; }
   const publicUrl = process.env.JOY_MCP_PUBLIC_URL;
-  if (!publicUrl) { console.error('JOY_MCP_PUBLIC_URL is required (the origin Claude connects to, e.g. https://joy.voltai.party:4997)'); return 1; }
+  if (!publicUrl) { console.error('JOY_MCP_PUBLIC_URL is required (the origin Claude connects to, e.g. https://relay.example.com)'); return 1; }
   const port = Number(process.env.JOY_MCP_PORT ?? 3107);
   const relay = await clientFor(acct);
   const keys = keysFor(acct.secret);

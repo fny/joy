@@ -112,10 +112,9 @@ function libsodiumEncryptForPublicKey(data: Uint8Array, recipientPublicKey: Uint
 // ── Credentials ────────────────────────────────────────────────────────────────
 
 export function loadCredentials(): Credentials | null {
-  // Relay selection is shared with path scoping (paths.joyRelayUrl):
-  // JOY_RELAY_URL (alias or URL) / ~/.joy/relay.json override the default.
-  // Every relay reads its own pairing from ~/.joy/relays/<host_port>/, so
-  // moving the default never relocates a pairing.
+  // The relay comes from paths.joyRelayUrl: JOY_RELAY_URL, ~/.joy/relay.json,
+  // or the machine's one pairing. Its pairing lives in
+  // ~/.joy/relays/<host_port>/.
   const serverUrl = joyRelayUrl();
   const credsDir = joyRelayCredsDir(serverUrl);
 

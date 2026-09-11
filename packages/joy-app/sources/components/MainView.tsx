@@ -18,7 +18,6 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { Typography } from '@/constants/Typography';
 import { VoiceAssistantStatusBar } from './VoiceAssistantStatusBar';
 import { t } from '@/text';
-import { isUsingCustomServer } from '@/sync/serverConfig';
 import { useNewSessionRoute } from '@/hooks/useNewSessionRoute';
 
 interface MainViewProps {
@@ -173,7 +172,6 @@ const HeaderTitle = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
 const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => {
     const router = useRouter();
     const { theme } = useUnistyles();
-    const isCustomServer = isUsingCustomServer();
 
     if (activeTab === 'sessions') {
         return (
@@ -197,10 +195,7 @@ const HeaderRight = React.memo(({ activeTab }: { activeTab: ActiveTabType }) => 
     }
 
     if (activeTab === 'settings') {
-        if (!isCustomServer) {
-            // Empty view to maintain header centering
-            return <View style={styles.headerButton} />;
-        }
+        // The relay's settings (access key, which relay) — one tap from Settings.
         return (
             <Pressable
                 onPress={() => router.push('/server')}

@@ -1,6 +1,6 @@
 import { homedir } from "os";
 import { join, dirname, isAbsolute, sep } from "path";
-import { readFileSync, realpathSync } from "fs";
+import { readFileSync, realpathSync, readdirSync, existsSync } from "fs";
 
 /** Expand a leading ~ to the daemon user's home. tmux's -c does NOT expand
  *  tildes (it is not a shell) and the app may send paths with ~ unresolved.
@@ -56,7 +56,7 @@ export function canonicalCwd(p: string): string {
 }
 
 /** The Joy home — $JOY_HOME_DIR or ~/.joy. Daemon state, per-session dirs,
- *  and per-relay credentials all live here.
+ *  and the relay pairing all live here.
  *
  *  ISOLATION RULE: an overridden JOY_HOME_DIR (tests, e2e harnesses) means an
  *  isolated universe — nothing under the real ~/.joy is read or written. */
@@ -66,30 +66,27 @@ export function joyHomeDir(): string {
   return join(homedir(), ".joy");
 }
 
-/** The relay a daemon talks to when nothing is configured. Override with
- *  $JOY_RELAY_URL (alias or URL) or ~/.joy/relay.json {serverUrl}. */
-export const DEFAULT_RELAY_URL = "https://joy.voltai.party:4997";
-
-/** Shorthand names accepted by --relay / JOY_RELAY_URL — mirrors the app's
- *  KNOWN_RELAYS (joy-app sources/sync/serverConfig.ts). */
-export const RELAY_ALIASES: Record<string, string> = {
-  joy: DEFAULT_RELAY_URL,
-  "joy-dev": "https://joy.voltai.party:14997",
-};
-
-export function resolveRelayAlias(nameOrUrl: string): string {
-  const aliased = RELAY_ALIASES[nameOrUrl];
-  if (aliased) return aliased;
-  // A bare host[:port] is a relay too: `joy auth joy.voltai.party:4997` was
-  // refused as "unknown relay" for want of the scheme (2026-09-11).
-  if (/^[a-z0-9.-]+(:\d{1,5})?(\/.*)?$/i.test(nameOrUrl) && nameOrUrl.includes(".") && !/^https?:\/\//.test(nameOrUrl)) return `https://${nameOrUrl}`;
-  return nameOrUrl;
+/** A relay URL as typed: a bare host[:port] gets https:// (`joy auth
+ *  relay.example:4997`), a full http(s) URL passes through. There is no
+ *  built-in relay and no alias table — the relay is always one you chose. */
+export function normalizeRelayUrl(input: string): string {
+  const v = input.trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^[a-z0-9.-]+(:\d{1,5})?$/i.test(v) && v.includes(".")) return `https://${v}`;
+  return v;
 }
 
-// The relay THIS PROCESS is bound to. One daemon/CLI process serves exactly
-// one relay — running against another relay is a different process — so the
-// resolution is cached. Selection: $JOY_RELAY_URL (alias or URL) →
-// ~/.joy/relay.json {serverUrl} → the default relay.
+/** No relay configured on this machine: nothing in $JOY_RELAY_URL, no
+ *  ~/.joy/relay.json, and not exactly one paired relay to infer it from. */
+export class NoRelayConfiguredError extends Error {
+  constructor() { super("no relay configured — pair this machine first: joy auth <relay url>"); this.name = "NoRelayConfiguredError"; }
+}
+
+// The ONE relay this machine talks to. Resolution, cached per process:
+// $JOY_RELAY_URL (the installed service carries it) → ~/.joy/relay.json
+// {serverUrl} (`joy auth` writes it) → the single relay this machine is
+// paired with (~/.joy/relays/<key>/settings.json) — a machine paired before
+// relay.json existed has no relay.json, and its shell must keep working.
 let cachedRelayUrl: string | null = null;
 
 /** Relay perimeter key (joy-relay's gate). Priority: JOY_RELAY_ACCESS_KEY
@@ -109,34 +106,54 @@ export function joyRelayAccessKey(): string | null {
   return null;
 }
 
-export function joyRelayUrl(): string {
+export function joyRelayUrlOrNull(): string | null {
   if (cachedRelayUrl) return cachedRelayUrl;
-  let url = process.env.JOY_RELAY_URL ? resolveRelayAlias(process.env.JOY_RELAY_URL) : undefined;
+  let url = process.env.JOY_RELAY_URL?.trim() ? normalizeRelayUrl(process.env.JOY_RELAY_URL) : undefined;
   if (!url) {
     try {
       const rc = JSON.parse(readFileSync(join(joyHomeDir(), "relay.json"), "utf8")) as { serverUrl?: string };
-      if (rc.serverUrl) url = rc.serverUrl;
-    } catch { /* no override → default */ }
+      if (rc.serverUrl) url = normalizeRelayUrl(rc.serverUrl);
+    } catch { /* not written yet */ }
   }
-  cachedRelayUrl = url || DEFAULT_RELAY_URL;
-  return cachedRelayUrl;
+  if (!url) url = pairedRelayUrl() ?? undefined;
+  if (url) cachedRelayUrl = url;
+  return url ?? null;
 }
 
-/** Talking to the relay a fresh install would pick. Display only — it must
- *  never gate on-disk layout, or changing the default would move files. */
-export function isDefaultRelay(): boolean {
-  return joyRelayUrl() === DEFAULT_RELAY_URL;
+export function joyRelayUrl(): string {
+  const url = joyRelayUrlOrNull();
+  if (!url) throw new NoRelayConfiguredError();
+  return url;
 }
 
-/** Stable per-relay identifier: host, or host_port — same convention as the
+/** The relay of the ONE pairing under ~/.joy/relays/, from the serverUrl
+ *  pairing wrote into its settings.json. Null when there is none, or more
+ *  than one (then the machine must say which, in relay.json). */
+function pairedRelayUrl(): string | null {
+  let found: string[] = [];
+  try {
+    const root = join(joyHomeDir(), "relays");
+    for (const d of readdirSync(root)) {
+      try {
+        const s = JSON.parse(readFileSync(join(root, d, "settings.json"), "utf8")) as { serverUrl?: string };
+        if (s.serverUrl && existsSync(join(root, d, "access.key"))) found.push(normalizeRelayUrl(s.serverUrl));
+      } catch { /* not a pairing */ }
+    }
+  } catch { return null; }
+  found = [...new Set(found)];
+  return found.length === 1 ? found[0] : null;
+}
+
+/** Stable identifier of the relay: host, or host_port — same convention as the
  *  credential dirs and the app. */
 export function joyRelayKey(serverUrl: string = joyRelayUrl()): string {
   const u = new URL(serverUrl);
   return u.port ? `${u.hostname}_${u.port}` : u.hostname;
 }
 
-/** Per-relay tmux namespace: every relay gets its OWN tmux server via -L, so
- *  concurrent daemons never share a window registry or a control-mode client. */
+/** The daemon's tmux namespace, `-L joy-<relayKey>`. Derived from the relay
+ *  and kept that way: renaming it would orphan the live windows of every
+ *  installed daemon. */
 export function tmuxSocketArgs(): string[] {
   return ["-L", `joy-${joyRelayKey()}`];
 }
@@ -171,7 +188,7 @@ export function __resetRelaySelection(): void {
 
 /** Where the daemon keeps its state: daemon.json, windows, queues, receipts.
  *  Relay-scoped: everything lives beside that relay's credentials under
- *  ~/.joy/relays/<key>/state, so concurrent per-relay daemons never share. */
+ *  ~/.joy/relays/<key>/state — beside the pairing it belongs to. */
 export function joyStateDir(): string {
   return join(joyRelayCredsDir(), "state");
 }

@@ -170,7 +170,7 @@ export function handleDocs(req, res, { version, routeTable = null, trustProxy = 
     return true;
   }
   const scheme = requestScheme(req, trustProxy);
-  const host = `${scheme}://${req.headers.host ?? 'joy.voltai.party:4997'}`;
+  const host = `${scheme}://${req.headers.host ?? 'localhost'}`;
   const spec = buildRelaySpec({ version, host, routeTable });
   if (path === '/openapi.json') {
     res.writeHead(200, { 'content-type': 'application/json' });

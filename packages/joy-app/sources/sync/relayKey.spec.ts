@@ -5,10 +5,10 @@ const SECURE_STORE_KEY = /^[A-Za-z0-9._-]+$/;
 
 describe('relayKeyForUrl (#398, #192)', () => {
     it('keeps the legacy shape for https relays so existing users keep their keys', () => {
-        expect(relayKeyForUrl('https://joy.voltai.party:4997')).toBe('joy.voltai.party_4997');
+        expect(relayKeyForUrl('https://relay.example.test:4997')).toBe('relay.example.test_4997');
         expect(relayKeyForUrl('https://relay.example')).toBe('relay.example');
         expect(relayKeyForUrl('https://relay.example:443')).toBe('relay.example');
-        expect(relayKeyNeedsMigration('https://joy.voltai.party:4997')).toBe(false);
+        expect(relayKeyNeedsMigration('https://relay.example.test:4997')).toBe(false);
     });
 
     it('separates http and https relays on the same host (#398)', () => {
@@ -75,7 +75,7 @@ describe('resolveLegacySlotOwnership (#398 regression)', () => {
     it('an unmarked legacy slot belongs to http only when http is the persisted active relay', () => {
         expect(resolveLegacySlotOwnership(http, null, http)).toBe('mine');
         expect(resolveLegacySlotOwnership(http, null, https)).toBe('unknown');
-        expect(resolveLegacySlotOwnership(http, null, 'https://joy.voltai.party:4997')).toBe('unknown');
+        expect(resolveLegacySlotOwnership(http, null, 'https://relay.example.test:4997')).toBe('unknown');
     });
 
     it('a marker naming this origin (a completed migration) keeps ownership whatever is active', () => {
@@ -84,6 +84,6 @@ describe('resolveLegacySlotOwnership (#398 regression)', () => {
 
     it('origins whose identifier never changed own their slot outright', () => {
         expect(resolveLegacySlotOwnership(https, null, http)).toBe('mine');
-        expect(resolveLegacySlotOwnership('https://joy.voltai.party:4997', null, http)).toBe('mine');
+        expect(resolveLegacySlotOwnership('https://relay.example.test:4997', null, http)).toBe('mine');
     });
 });

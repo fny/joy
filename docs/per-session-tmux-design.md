@@ -18,7 +18,7 @@ A bloated session can be rotated (`joy restart`) without touching neighbors.
 
 |  | today | target |
 |---|---|---|
-| tmux server | one per DAEMON (default socket; `-L joy-<relayKey>` off-default relays) | one per AGENT SESSION |
+| tmux server | one per DAEMON (`-L joy-<relayKey>`) | one per AGENT SESSION |
 | tmux session/window | one session (`$TMUX_SESSION`), one window `j-<id>` per agent | one session `j-<id>`, one window, per server |
 | control client | ONE `tmux -C attach` multiplexing %output for all panes | one per agent session |
 | session end | `kill-window` (server keeps the leak) | `kill-server` (OS reclaims all) |

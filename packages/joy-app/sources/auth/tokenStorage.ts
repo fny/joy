@@ -7,8 +7,8 @@ import { parseToken } from '@/utils/parseToken';
 
 const AUTH_KEY = 'auth_credentials';
 
-/** Credentials are stored per relay: every relay (the default one included)
- *  gets its own key suffixed with the relay identifier (relayKey.ts — host
+/** Credentials are keyed by the relay: the key is suffixed with the relay
+ *  identifier (relayKey.ts — host
  *  or host_port for https, scheme-prefixed and escaped otherwise, so two
  *  relays never share a slot and the key is always SecureStore-safe; #398,
  *  #192). */
@@ -104,10 +104,12 @@ async function deleteRaw(key: string): Promise<boolean> {
     }
 }
 
-/** All operations default to the active relay; pass a URL to address another
- *  relay's account (e.g. the per-relay list on the account page). */
+/** All operations default to the relay; with none chosen yet there are no
+ *  credentials to read, and none can be written. A URL can still be passed
+ *  explicitly (the one-time relay pin reads the retired built-in's slot). */
 export const TokenStorage = {
     async getCredentials(serverUrl: string = getServerUrl()): Promise<AuthCredentials | null> {
+        if (!serverUrl) return null;
         const key = authKeyForUrl(serverUrl);
         const current = parseStoredCredentials(await readRaw(key));
         if (current) return current;
@@ -132,6 +134,7 @@ export const TokenStorage = {
     },
 
     async setCredentials(credentials: AuthCredentials, serverUrl: string = getServerUrl()): Promise<boolean> {
+        if (!serverUrl) return false;
         const saved = await writeRaw(authKeyForUrl(serverUrl), JSON.stringify(credentials));
         // The canonical slot now belongs to this origin: a later migration for
         // an origin whose LEGACY key is this slot must not take it (#398).
@@ -142,6 +145,7 @@ export const TokenStorage = {
     /** Resolves false when the store could not delete the value — the caller
      *  must NOT treat the account as logged out then (#188). */
     async removeCredentials(serverUrl: string = getServerUrl()): Promise<boolean> {
+        if (!serverUrl) return true;
         const removed = await deleteRaw(authKeyForUrl(serverUrl));
         // Clear a not-yet-migrated legacy slot too, or a later boot would
         // "restore" the account we just logged out of via the fallback read —

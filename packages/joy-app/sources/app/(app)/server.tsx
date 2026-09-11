@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { View, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
-import { Stack, useRouter } from 'expo-router';
+import { Stack } from 'expo-router';
 import { Text } from '@/components/StyledText';
 import { Typography } from '@/constants/Typography';
 import { ItemGroup } from '@/components/ItemGroup';
@@ -12,14 +12,16 @@ import { Modal } from '@/modal';
 import { sync } from '@/sync/sync';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
-import { getServerUrl, validateServerUrl, getServerInfo, KNOWN_RELAYS, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey, relayAccessKeyHeaders, relayNameForUrl } from '@/sync/serverConfig';
+import { getServerUrl, getRelayAccessKey, setRelayAccessKey, getDerivedRelayPerimeterKey, relayNameForUrl } from '@/sync/serverConfig';
 import { copyToClipboard } from '@/utils/clipboard';
-import { switchRelayAndReload, loginToRelay } from '@/sync/relaySwitch';
-import { TokenStorage } from '@/auth/tokenStorage';
-import { normalizeSecretKey } from '@/auth/secretKeyBackup';
+import { switchRelayAndReload } from '@/sync/relaySwitch';
 import { useAuth } from '@/auth/AuthContext';
-import type { AlertButton } from '@/modal';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+
+// The relay screen: which relay this device talks to, its perimeter key, and
+// the way to change relay. There is one relay — changing it signs this device
+// out first (the account stays on the old relay; the backup code restores it
+// there), then the welcome screen asks for the new one.
 
 const stylesheet = StyleSheet.create((theme) => ({
     keyboardAvoidingView: {
@@ -87,13 +89,12 @@ const stylesheet = StyleSheet.create((theme) => ({
 export default function ServerConfigScreen() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
-    const router = useRouter();
     const auth = useAuth();
-    const serverInfo = getServerInfo();
-    const [inputUrl, setInputUrl] = useState(serverInfo.isCustom ? getServerUrl() : '');
-    // Perimeter key for the ACTIVE relay (joy-relay gate). Saved per relay;
-    // socket reconnect picks it up (the fetch interceptor reads it live).
+    const url = getServerUrl();
+    // Perimeter key for the relay (joy-relay gate). The fetch interceptor
+    // reads it live; the v2 stream is bounced so it reconnects with it.
     const [relayKeyInput, setRelayKeyInput] = useState(getRelayAccessKey() ?? '');
+    const [changing, setChanging] = useState(false);
     // The derived key is what a gated relay box must carry in joy-relay.env —
     // every logged-in client presents it automatically; this copy exists to
     // provision the BOX (and any pre-derivation daemon via ~/.joy/env).
@@ -106,229 +107,30 @@ export default function ServerConfigScreen() {
     const handleSaveRelayKey = React.useCallback(() => {
         setRelayAccessKey(relayKeyInput.trim() || null);
         Modal.alert(t('server.relayAccessKeySaved'), undefined, [{ text: t('common.ok') }]);
-        // Bounce the socket so the handshake carries (or drops) the key now.
-        // Bounce the v2 live stream so the next connect carries the new key.
         sync.stopV2Live();
         sync.startV2Live();
     }, [relayKeyInput]);
-    const [error, setError] = useState<string | null>(null);
-    const [isValidating, setIsValidating] = useState(false);
-    const [applyingKey, setApplyingKey] = useState(false);
 
-    // One capabilities probe of `url` with the given perimeter key (or the
-    // key saved for THAT relay). 'gated' = the relay answered 401/403, i.e.
-    // it exists but wants a (different) access key.
-    const probeRelay = async (url: string, accessKey?: string): Promise<'ok' | 'gated' | 'error' | 'not_relay' | 'unreachable'> => {
-        try {
-            // joy-relay answers its unauthenticated capabilities probe with
-            // `relay: 'joy-relay'`; anything else is not a relay we can talk to.
-            // The fetch interceptor only adds the key for the ACTIVE relay's
-            // origin; the destination's saved key has to be attached here or a
-            // gated relay refused a switch despite having its correct key on
-            // this device (#160).
-            const keyHeaders = accessKey ? { 'X-Joy-Relay-Key': accessKey } : relayAccessKeyHeaders(url);
-            const response = await fetch(`${url.replace(/\/+$/, '')}/joy/v2/capabilities`, {
-                method: 'GET',
-                headers: {
-                    'Accept': 'application/json',
-                    ...keyHeaders,
-                }
-            });
-
-            if (response.status === 401 || response.status === 403) {
-                return 'gated';
-            }
-            if (!response.ok) {
-                return 'error';
-            }
-
-            const caps = await response.json().catch(() => null) as { relay?: string } | null;
-            if (caps?.relay !== 'joy-relay') {
-                return 'not_relay';
-            }
-            return 'ok';
-        } catch (err) {
-            return 'unreachable';
-        }
-    };
-
-    const validateServer = async (url: string): Promise<boolean> => {
-        setIsValidating(true);
-        setError(null);
-        try {
-            let result = await probeRelay(url);
-            if (result === 'gated') {
-                // No usable key saved for the destination: let the user supply
-                // one now (#160). It is saved for that relay only once it works.
-                const entered = await Modal.prompt(
-                    t('server.relayAccessKeyLabel'),
-                    t('server.relayAccessKeyRequired', { relay: relayNameForUrl(url) }),
-                    { placeholder: '—', inputType: 'secure-text' }
-                );
-                const key = entered?.trim();
-                if (!key) {
-                    setError(t('server.serverReturnedError'));
-                    return false;
-                }
-                result = await probeRelay(url, key);
-                if (result === 'ok') {
-                    setRelayAccessKey(key, url);
-                }
-            }
-            switch (result) {
-                case 'ok':
-                    return true;
-                case 'not_relay':
-                    setError(t('server.notValidJoyServer'));
-                    return false;
-                case 'unreachable':
-                    setError(t('server.failedToConnectToServer'));
-                    return false;
-                default:
-                    setError(t('server.serverReturnedError'));
-                    return false;
-            }
-        } finally {
-            setIsValidating(false);
-        }
-    };
-
-    const handleSave = async () => {
-        if (!inputUrl.trim()) {
-            Modal.alert(t('common.error'), t('server.enterServerUrl'));
+    const handleChangeRelay = React.useCallback(async () => {
+        if (!auth.isAuthenticated) {
+            await switchRelayAndReload(null);
             return;
         }
-
-        const validation = validateServerUrl(inputUrl);
-        if (!validation.valid) {
-            setError(validation.error || t('errors.invalidFormat'));
-            return;
-        }
-
-        // Validate the server
-        const isValid = await validateServer(inputUrl);
-        if (!isValid) {
-            return;
-        }
-
         const confirmed = await Modal.confirm(
-            t('server.changeServer'),
-            t('server.continueWithServer'),
-            { confirmText: t('common.continue'), destructive: true }
-        );
-
-        if (confirmed) {
-            await switchRelayAndReload(inputUrl);
-        }
-    };
-
-    // One key everywhere: log into every known relay with the CURRENT
-    // account's secret. Relays auto-create the account on first contact, so
-    // afterwards this one code restores every relay and switching never asks
-    // for a key. Replaces any other account previously saved for a relay on
-    // this device (deliberate — the point is converging on a single key).
-    const handleApplyKeyToAll = async () => {
-        const secret = auth.credentials?.secret;
-        if (!secret) return;
-        const confirmed = await Modal.confirm(
-            t('server.relayApplyKeyAll'),
-            t('server.relayApplyKeyAllMessage'),
-            { confirmText: t('common.continue') }
+            t('server.changeRelay'),
+            t('server.changeRelayMessage', { relay: relayNameForUrl(url) }),
+            { confirmText: t('server.changeRelay'), destructive: true },
         );
         if (!confirmed) return;
-        setApplyingKey(true);
-        const failed: string[] = [];
+        setChanging(true);
         try {
-            for (const relay of KNOWN_RELAYS) {
-                if (relay.url === getServerUrl()) continue; // the key's own account
-                try {
-                    await loginToRelay(relay.url, secret);
-                } catch (err) {
-                    console.error(`Apply key failed for ${relay.name}:`, err);
-                    failed.push(relay.name);
-                }
-            }
-        } finally {
-            setApplyingKey(false);
-        }
-        if (failed.length === 0) {
-            Modal.alert(t('server.relayApplyKeyAll'), t('server.relayApplyKeyAllSuccess'));
-        } else {
-            Modal.alert(t('common.error'), `${t('server.relayApplyKeyAllPartial')} ${failed.join(', ')}`);
-        }
-    };
-
-    // How to log into a relay that has no saved account on this device.
-    // Kept to three buttons per dialog (Android's native Alert caps at 3):
-    // when a current key exists it takes the "log in later" slot — a
-    // logged-out switch is still reachable via the custom-URL Save flow.
-    const askLoginChoice = (hasCurrentKey: boolean): Promise<'current' | 'enter' | 'later' | null> =>
-        new Promise((resolve) => {
-            const buttons: AlertButton[] = [
-                { text: t('common.cancel'), style: 'cancel', onPress: () => resolve(null) },
-                hasCurrentKey
-                    ? { text: t('server.relayUseCurrentKey'), onPress: () => resolve('current') }
-                    : { text: t('server.relayLoginLater'), onPress: () => resolve('later') },
-                { text: t('server.relayEnterKey'), onPress: () => resolve('enter') },
-            ];
-            Modal.alert(t('server.relayLogin'), t('server.relayLoginMessage'), buttons);
-        });
-
-    const handleSelectRelay = async (url: string, name: string) => {
-        if (getServerUrl() === url) return;
-        const isValid = await validateServer(url);
-        if (!isValid) return;
-
-        // Already have an account on that relay: plain switch, boots logged in.
-        const existing = await TokenStorage.getCredentials(url);
-        if (existing) {
-            const confirmed = await Modal.confirm(
-                t('server.changeServer'),
-                t('server.continueWithServer'),
-                { confirmText: t('common.continue'), destructive: true }
-            );
-            if (confirmed) {
-                setInputUrl('');
-                await switchRelayAndReload(url);
-            }
-            return;
-        }
-
-        const choice = await askLoginChoice(!!auth.credentials);
-        if (!choice) return;
-        try {
-            if (choice === 'current' && auth.credentials) {
-                await loginToRelay(url, auth.credentials.secret);
-            } else if (choice === 'enter') {
-                const entered = await Modal.prompt(
-                    t('server.relayEnterKey'),
-                    undefined,
-                    { placeholder: 'XXXXX-XXXXX-XXXXX...' }
-                );
-                if (!entered?.trim()) return;
-                await loginToRelay(url, normalizeSecretKey(entered));
-            }
+            await auth.logout({ forgetRelay: true });
         } catch (error) {
-            console.error('Relay login error:', error);
-            Modal.alert(t('common.error'), t('server.relayLoginFailed'));
-            return;
+            Modal.alert(t('common.error'), error instanceof Error ? error.message : String(error));
+        } finally {
+            setChanging(false);
         }
-        setInputUrl('');
-        await switchRelayAndReload(url);
-    };
-
-    const handleReset = async () => {
-        const confirmed = await Modal.confirm(
-            t('server.resetToDefault'),
-            t('server.resetServerDefault'),
-            { confirmText: t('common.reset'), destructive: true }
-        );
-
-        if (confirmed) {
-            setInputUrl('');
-            await switchRelayAndReload(null);
-        }
-    };
+    }, [auth, url]);
 
     return (
         <>
@@ -340,36 +142,27 @@ export default function ServerConfigScreen() {
                 }}
             />
 
-            <KeyboardAvoidingView 
+            <KeyboardAvoidingView
                 style={styles.keyboardAvoidingView}
                 behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
             >
                 <ItemList style={styles.itemListContainer}>
-                    <ItemGroup title={t('server.knownRelays')}>
-                        {KNOWN_RELAYS.map((r) => (
-                            <Item
-                                key={r.key}
-                                title={r.name}
-                                subtitle={r.url.replace('https://', '')}
-                                onPress={() => void handleSelectRelay(r.url, r.name)}
-                                rightElement={getServerUrl() === r.url ? (
-                                    <Ionicons name="checkmark-circle" size={22} color={theme.colors.textLink} />
-                                ) : undefined}
-                            />
-                        ))}
+                    <ItemGroup title={t('server.relayTitle')} footer={t('server.changeRelayFooter')}>
+                        <Item
+                            title={relayNameForUrl(url) || '—'}
+                            subtitle={url.replace(/^https?:\/\//, '')}
+                            icon={<Ionicons name="git-network-outline" size={29} color={theme.colors.accents.green} />}
+                            showChevron={false}
+                        />
+                        <Item
+                            title={t('server.changeRelay')}
+                            icon={<Ionicons name="swap-horizontal-outline" size={24} color={theme.colors.textDestructive} />}
+                            onPress={() => void handleChangeRelay()}
+                            loading={changing}
+                            disabled={changing}
+                            showChevron={false}
+                        />
                     </ItemGroup>
-                    {!!auth.credentials && (
-                        <ItemGroup footer={t('server.relayApplyKeyAllFooter')}>
-                            <Item
-                                title={t('server.relayApplyKeyAll')}
-                                icon={<Ionicons name="key-outline" size={24} color={theme.colors.textLink} />}
-                                onPress={() => void handleApplyKeyToAll()}
-                                loading={applyingKey}
-                                disabled={applyingKey}
-                                showChevron={false}
-                            />
-                        </ItemGroup>
-                    )}
                     <ItemGroup footer={t('server.relayAccessKeyFooter')}>
                         <View style={styles.contentContainer}>
                             <Text style={styles.labelText}>{t('server.relayAccessKeyLabel').toUpperCase()}</Text>
@@ -404,63 +197,7 @@ export default function ServerConfigScreen() {
                             </View>
                         </View>
                     </ItemGroup>
-                    <ItemGroup footer={t('server.advancedFeatureFooter')}>
-                        <View style={styles.contentContainer}>
-                            <Text style={styles.labelText}>{t('server.customServerUrlLabel').toUpperCase()}</Text>
-                            <TextInput
-                                style={[
-                                    styles.textInput,
-                                    isValidating && styles.textInputValidating
-                                ]}
-                                value={inputUrl}
-                                onChangeText={(text) => {
-                                    setInputUrl(text);
-                                    setError(null);
-                                }}
-                                placeholder={t('common.urlPlaceholder')}
-                                placeholderTextColor={theme.colors.input.placeholder}
-                                autoCapitalize="none"
-                                autoCorrect={false}
-                                keyboardType="url"
-                                editable={!isValidating}
-                            />
-                            {error && (
-                                <Text style={styles.errorText}>
-                                    {error}
-                                </Text>
-                            )}
-                            {isValidating && (
-                                <Text style={styles.validatingText}>
-                                    {t('server.validatingServer')}
-                                </Text>
-                            )}
-                            <View style={styles.buttonRow}>
-                                <View style={styles.buttonWrapper}>
-                                    <RoundButton
-                                        title={t('server.resetToDefault')}
-                                        size="normal"
-                                        display="inverted"
-                                        onPress={handleReset}
-                                    />
-                                </View>
-                                <View style={styles.buttonWrapper}>
-                                    <RoundButton
-                                        title={isValidating ? t('server.validating') : t('common.save')}
-                                        size="normal"
-                                        action={handleSave}
-                                        disabled={isValidating}
-                                    />
-                                </View>
-                            </View>
-                            {serverInfo.isCustom && (
-                                <Text style={styles.statusText}>
-                                    {t('server.currentlyUsingCustomServer')}
-                                </Text>
-                            )}
-                        </View>
-                    </ItemGroup>
-
-                    </ItemList>
+                </ItemList>
             </KeyboardAvoidingView>
         </>
     );

@@ -478,37 +478,20 @@ export const ca: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'Relé',
+        changeRelay: 'Canvia de relé',
+        changeRelayMessage: ({ relay }: { relay: string }) => `Es tancarà la sessió en aquest dispositiu. El teu compte continua a ${relay}: per tornar-hi, torna a introduir-lo i restaura amb el codi de còpia de seguretat.`,
+        changeRelayFooter: 'Canviar de relé tanca primer la sessió en aquest dispositiu.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Configuració del servidor',
-        knownRelays: 'Relés coneguts',
-        relayLogin: 'Inicia sessió al relé',
-        relayLoginMessage: 'Aquest dispositiu no té cap compte desat per a aquest relé. Fes servir la clau secreta actual, introdueix-ne una altra o inicia sessió més tard.',
-        relayUseCurrentKey: 'Fes servir la meva clau actual',
-        relayEnterKey: 'Introdueix la clau secreta',
-        relayLoginLater: 'Inicia sessió més tard',
-        relayLoginFailed: 'No s\'ha pogut iniciar sessió en aquest relé. Comprova la clau i torna-ho a provar.',
-        relayApplyKeyAll: 'Fes servir aquesta clau a tots els relés',
         relayAccessKeyLabel: 'Clau d\'accés del relay',
         relayAccessKeyFooter: 'Clau perimetral per a aquest relay (porta joy-relay). S\'envia amb cada petició; deixa-ho buit per a relays oberts. Es reconnecta en desar.',
         relayAccessKeySaved: 'Clau del relay desada',
         relayCopyDerivedKey: 'Copia la clau derivada del relay',
-        relayApplyKeyAllMessage: 'Vols iniciar sessió a tots els relés coneguts amb la clau del compte actual? Això substitueix qualsevol altre compte desat per a aquests relés en aquest dispositiu.',
-        relayApplyKeyAllFooter: 'La teva clau secreta actual esdevé l\'únic accés per a tots els relés coneguts: un sol codi per desar. Els comptes es creen automàticament on encara no existeixen.',
-        relayApplyKeyAllSuccess: 'Tots els relés fan servir ara aquesta clau.',
-        relayApplyKeyAllPartial: 'No s\'ha pogut configurar:',
-        enterServerUrl: 'Introdueix una URL del servidor',
         notValidJoyServer: 'No és un servidor Joy vàlid',
-        changeServer: 'Canvia el servidor',
-        continueWithServer: 'Continuar amb aquest servidor?',
-        resetToDefault: 'Reinicia per defecte',
-        resetServerDefault: 'Reiniciar el servidor per defecte?',
         validating: 'Validant...',
-        validatingServer: 'Validant el servidor...',
         serverReturnedError: 'El servidor ha retornat un error',
         failedToConnectToServer: 'Ha fallat la connexió amb el servidor',
-        currentlyUsingCustomServer: 'Actualment utilitzant un servidor personalitzat',
-        customServerUrlLabel: 'URL del servidor personalitzat',
-        advancedFeatureFooter: 'Aquesta és una funció avançada. Només canvia el servidor si saps el que fas. Hauràs de tancar la sessió i tornar-la a iniciar després de canviar els servidors.',
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requereix una clau d'accés. Introdueix la clau d'aquest relay.`,
     },
 
@@ -878,6 +861,11 @@ export const ca: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'Relé',
+        relayFooter: "El relé amb què es comunica aquest dispositiu. Toca'l per canviar de relé; toca el cadenat per definir-ne la contrasenya.",
+        relayPassword: 'Contrasenya del relé',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} la demana a cada connexió. Deixa-ho en blanc per esborrar-la.`,
+        relayPasswordSet: 'contrasenya definida',
         // Account settings screen
         accountInformation: 'Informació del compte',
         status: 'Estat',
@@ -1003,6 +991,12 @@ export const ca: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'Relé',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: "L'adreça del relé de joy on hi ha el teu compte.",
+        relayContinue: 'Continua',
+        relayRequired: "Introdueix l'adreça del relé",
+        relayCurrent: ({ relay }: { relay: string }) => `Relé: ${relay} · Canvia`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'Xifrat punt a punt i el teu compte s\'emmagatzema només al teu dispositiu.',

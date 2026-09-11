@@ -9,7 +9,7 @@ and `src/domain/fileOps.ts`); FEATURES.md is the companion feature map.
 ## Topology
 
 ```
-joy-app ⇄ joy-relay (e.g. joy.voltai.party:4997, /joy/v2 over HTTPS + SSE)
+joy-app ⇄ joy-relay (the one relay the device was set up with, /joy/v2 over HTTPS + SSE)
               ⇄ joy-daemon (one per machine per account/relay)
                     ⇄ tmux panes: claude | codex | opencode | pi | agy (headless)
 ```

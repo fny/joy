@@ -22,7 +22,7 @@ vi.mock('expo-secure-store', () => ({
     },
 }));
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
-let activeUrl = 'https://joy.voltai.party:4997';
+let activeUrl = 'https://relay.example.test:4997';
 // The owner markers serverConfig keeps for per-relay slots (#398), in memory.
 const owners = new Map<string, string>();
 vi.mock('@/sync/serverConfig', async () => {
@@ -44,13 +44,13 @@ describe('TokenStorage', () => {
         store.clear();
         owners.clear();
         failDelete = false;
-        activeUrl = 'https://joy.voltai.party:4997';
+        activeUrl = 'https://relay.example.test:4997';
         vi.spyOn(console, 'error').mockImplementation(() => {});
     });
 
     it('keeps the legacy key for the built-in relay', () => {
-        expect(authKeyForUrl('https://joy.voltai.party:4997')).toBe('auth_credentials.joy.voltai.party_4997');
-        expect(legacyAuthKeyForUrl('https://joy.voltai.party:4997')).toBeNull();
+        expect(authKeyForUrl('https://relay.example.test:4997')).toBe('auth_credentials.relay.example.test_4997');
+        expect(legacyAuthKeyForUrl('https://relay.example.test:4997')).toBeNull();
     });
 
     it('has no legacy slot to migrate for a key SecureStore never accepted (#192)', () => {
@@ -85,7 +85,7 @@ describe('TokenStorage', () => {
         expect(store.has(legacyKey)).toBe(false);
         // Ownership is recorded, so the migrated slot stays http's even after
         // the active relay changes.
-        activeUrl = 'https://joy.voltai.party:4997';
+        activeUrl = 'https://relay.example.test:4997';
         expect(await TokenStorage.getCredentials(url)).toEqual(creds);
     });
 

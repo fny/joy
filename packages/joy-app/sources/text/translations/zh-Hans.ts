@@ -479,37 +479,20 @@ export const zhHans: TranslationStructure = {
     },
 
     server: {
+        relayTitle: '中继',
+        changeRelay: '更换中继',
+        changeRelayMessage: ({ relay }: { relay: string }) => `此设备将退出登录。你的账户仍保留在 ${relay}：如需返回，请重新输入该中继并用备份码恢复。`,
+        changeRelayFooter: '更换中继前会先在此设备上退出登录。',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: '服务器配置',
-        knownRelays: '已知中继',
-        relayLogin: '登录中继',
-        relayLoginMessage: '此设备尚未保存该中继的账户。可以使用当前密钥、输入其他密钥，或稍后登录。',
-        relayUseCurrentKey: '使用当前密钥',
-        relayEnterKey: '输入密钥',
-        relayLoginLater: '稍后登录',
-        relayLoginFailed: '无法登录该中继，请检查密钥后重试。',
-        relayApplyKeyAll: '在所有中继上使用此密钥',
         relayAccessKeyLabel: '中继访问密钥',
         relayAccessKeyFooter: '此中继的边界密钥（joy-relay 网关）。每个请求都会附带；开放中继请留空。保存后会重新连接。',
         relayAccessKeySaved: '已保存中继密钥',
         relayCopyDerivedKey: '复制派生的中继密钥',
-        relayApplyKeyAllMessage: '使用当前账户密钥登录所有已知中继？这将替换此设备上为这些中继保存的其他账户。',
-        relayApplyKeyAllFooter: '将当前密钥设为所有已知中继的统一登录方式——只需备份一个代码。尚无账户的中继会自动创建账户。',
-        relayApplyKeyAllSuccess: '所有中继现在都使用此密钥。',
-        relayApplyKeyAllPartial: '无法设置：',
-        enterServerUrl: '请输入服务器 URL',
         notValidJoyServer: '不是有效的 Joy 服务器',
-        changeServer: '更改服务器',
-        continueWithServer: '继续使用此服务器？',
-        resetToDefault: '重置为默认',
-        resetServerDefault: '重置服务器为默认值？',
         validating: '验证中...',
-        validatingServer: '正在验证服务器...',
         serverReturnedError: '服务器返回错误',
         failedToConnectToServer: '连接服务器失败',
-        currentlyUsingCustomServer: '当前使用自定义服务器',
-        customServerUrlLabel: '自定义服务器 URL',
-        advancedFeatureFooter: "这是一个高级功能。只有在您知道自己在做什么时才更改服务器。更改服务器后您需要重新登录。",
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} 需要访问密钥。请输入此中继的密钥。`,
     },
 
@@ -879,6 +862,11 @@ export const zhHans: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: '中继',
+        relayFooter: '此设备连接的中继。点按以更换中继；点按锁图标以设置其密码。',
+        relayPassword: '中继密码',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} 每次连接都需要此密码。留空即可清除。`,
+        relayPasswordSet: '已设置密码',
         // Account settings screen
         accountInformation: '账户信息',
         status: '状态',
@@ -1004,6 +992,12 @@ export const zhHans: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: '中继',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: '你的账户所在的 joy 中继地址。',
+        relayContinue: '继续',
+        relayRequired: '请输入中继地址',
+        relayCurrent: ({ relay }: { relay: string }) => `中继：${relay} · 更改`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: '端到端加密，您的账户仅存储在您的设备上。',

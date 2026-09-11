@@ -478,37 +478,20 @@ export const zhHant: TranslationStructure = {
     },
 
     server: {
+        relayTitle: '中繼',
+        changeRelay: '變更中繼',
+        changeRelayMessage: ({ relay }: { relay: string }) => `此裝置將登出。你的帳號仍保留在 ${relay}：若要回來，請重新輸入該中繼並以備份碼還原。`,
+        changeRelayFooter: '變更中繼前會先在此裝置上登出。',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: '伺服器設定',
-        knownRelays: '已知中繼',
-        relayLogin: '登入中繼',
-        relayLoginMessage: '此裝置尚未儲存該中繼的帳戶。可以使用目前的金鑰、輸入其他金鑰，或稍後登入。',
-        relayUseCurrentKey: '使用目前的金鑰',
-        relayEnterKey: '輸入金鑰',
-        relayLoginLater: '稍後登入',
-        relayLoginFailed: '無法登入該中繼，請檢查金鑰後重試。',
-        relayApplyKeyAll: '在所有中繼上使用此金鑰',
         relayAccessKeyLabel: '中繼存取金鑰',
         relayAccessKeyFooter: '此中繼的邊界金鑰（joy-relay 閘道）。每個請求都會附帶；開放中繼請留空。儲存後會重新連線。',
         relayAccessKeySaved: '已儲存中繼金鑰',
         relayCopyDerivedKey: '複製衍生的中繼金鑰',
-        relayApplyKeyAllMessage: '使用目前帳戶金鑰登入所有已知中繼？這將取代此裝置上為這些中繼儲存的其他帳戶。',
-        relayApplyKeyAllFooter: '將目前的金鑰設為所有已知中繼的統一登入方式——只需備份一個代碼。尚無帳戶的中繼會自動建立帳戶。',
-        relayApplyKeyAllSuccess: '所有中繼現在都使用此金鑰。',
-        relayApplyKeyAllPartial: '無法設定：',
-        enterServerUrl: '請輸入伺服器 URL',
         notValidJoyServer: '不是有效的 Joy 伺服器',
-        changeServer: '更改伺服器',
-        continueWithServer: '繼續使用此伺服器？',
-        resetToDefault: '重設為預設',
-        resetServerDefault: '重設伺服器為預設值？',
         validating: '驗證中...',
-        validatingServer: '正在驗證伺服器...',
         serverReturnedError: '伺服器返回錯誤',
         failedToConnectToServer: '連線伺服器失敗',
-        currentlyUsingCustomServer: '目前使用自訂伺服器',
-        customServerUrlLabel: '自訂伺服器 URL',
-        advancedFeatureFooter: "這是一個進階功能。只有在您知道自己在做什麼時才更改伺服器。更改伺服器後您需要重新登入。",
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} 需要存取金鑰。請輸入此中繼的金鑰。`,
     },
 
@@ -878,6 +861,11 @@ export const zhHant: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: '中繼',
+        relayFooter: '此裝置連線的中繼。點一下以變更中繼；點一下鎖頭以設定其密碼。',
+        relayPassword: '中繼密碼',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} 每次連線都需要此密碼。留空即可清除。`,
+        relayPasswordSet: '已設定密碼',
         // Account settings screen
         accountInformation: '帳戶資訊',
         status: '狀態',
@@ -1003,6 +991,12 @@ export const zhHant: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: '中繼',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: '你的帳號所在的 joy 中繼位址。',
+        relayContinue: '繼續',
+        relayRequired: '請輸入中繼位址',
+        relayCurrent: ({ relay }: { relay: string }) => `中繼：${relay} · 變更`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: '端對端加密，您的帳戶僅儲存在您的裝置上。',

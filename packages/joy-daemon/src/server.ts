@@ -24,7 +24,7 @@ import { migrateLegacyEnvFile, applyEnvStore } from "./domain/envStore";
 import { startNucleusLane } from "./relay/nucleusLane.ts";
 import { startTunnelExecutor } from "./tunnel/executor.ts";
 import { acquireSingleton, SingletonError } from "./singleton";
-import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir } from "./paths";
+import { joyStateDir, joyRelayUrl, joyRelayKey, joyHomeDir, joyRelayCredsDir, joyRelayUrlOrNull, NoRelayConfiguredError } from "./paths";
 import { ledgerFor } from "./domain/ledger";
 import { mkdirSecure, writeSecretFileAtomic, tightenSecretDir } from "./domain/secretFile";
 import { launcherFromEnv, processStartId } from "./daemonLauncher";
@@ -52,11 +52,8 @@ process.on("unhandledRejection", (reason) => {
 });
 import { startResourceAlerts } from "./domain/resourceAlerts";
 
-// Control-server port: the DEFAULT relay keeps the historical 4997; any other
-// relay's daemon binds a DYNAMIC port (0) so N per-relay daemons coexist —
-// the CLI discovers the real port from daemon.json, written on listen below.
-// The daemon's local HTTP port. 4997 for every relay now that one machine
-// runs one daemon; $PORT still overrides (a second daemon must be told a
+// The daemon's local HTTP port: 4997 — one machine runs one daemon for its
+// one relay; $PORT still overrides (a second daemon must be told a
 // port explicitly rather than silently landing on a random one).
 const PORT = parseInt(process.env.PORT ?? "4997");
 const TMUX_SESSION = process.env.TMUX_SESSION ?? "joy";
@@ -75,6 +72,13 @@ process.stderr.write(`[server] control token written to daemon.json\n`);
 // Stable state file the `joy` CLI reads to locate + authenticate to this daemon
 // (the token only otherwise appears on stderr, whose destination depends on how
 // the daemon was launched). Written before listen so a racing CLI sees it.
+// No relay, no daemon: there is no built-in relay to fall back to. The
+// installed service carries JOY_RELAY_URL; a hand-started daemon needs
+// ~/.joy/relay.json or a pairing (`joy auth <relay>`).
+if (!joyRelayUrlOrNull()) {
+  process.stderr.write(`[server] ${new NoRelayConfiguredError().message}\n`);
+  process.exit(2);
+}
 const STATE_DIR = joyStateDir();
 
 // Single-instance guard: refuse to start a second daemon on this machine (two

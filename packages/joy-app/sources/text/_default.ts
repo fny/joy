@@ -527,37 +527,20 @@ export const en = {
     },
 
     server: {
+        relayTitle: 'Relay',
+        changeRelay: 'Change relay',
+        changeRelayMessage: ({ relay }: { relay: string }) => `You will be signed out on this device. Your account stays on ${relay}: to come back, enter it again and restore with your backup code.`,
+        changeRelayFooter: 'Changing relay signs this device out first.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Server Configuration',
-        knownRelays: 'Known relays',
-        relayLogin: 'Log in to relay',
-        relayLoginMessage: 'No account is saved for this relay on this device. Use your current secret key here, enter a different one, or log in later.',
-        relayUseCurrentKey: 'Use my current key',
-        relayEnterKey: 'Enter secret key',
-        relayLoginLater: 'Log in later',
-        relayLoginFailed: 'Could not log in to this relay. Check the key and try again.',
-        relayApplyKeyAll: 'Use this key on all relays',
         relayAccessKeyLabel: 'Relay access key',
         relayAccessKeyFooter: 'Perimeter key for this relay (joy-relay gate). Sent with every request; leave empty for open relays. Reconnects after saving.',
         relayAccessKeySaved: 'Relay key saved',
         relayCopyDerivedKey: 'Copy derived relay key',
-        relayApplyKeyAllMessage: 'Log in to every known relay with the current account key? This replaces any other account saved for those relays on this device.',
-        relayApplyKeyAllFooter: 'Makes your current secret key the single login for every known relay — one code to back up. Accounts are created automatically on relays where none exist yet.',
-        relayApplyKeyAllSuccess: 'All relays now use this key.',
-        relayApplyKeyAllPartial: 'Could not set up:',
-        enterServerUrl: 'Please enter a server URL',
         notValidJoyServer: 'Not a valid Joy Server',
-        changeServer: 'Change Server',
-        continueWithServer: 'Continue with this server?',
-        resetToDefault: 'Reset to Default',
-        resetServerDefault: 'Reset server to default?',
         validating: 'Validating...',
-        validatingServer: 'Validating server...',
         serverReturnedError: 'Server returned an error',
         failedToConnectToServer: 'Failed to connect to server',
-        currentlyUsingCustomServer: 'Currently using custom server',
-        customServerUrlLabel: 'Custom Server URL',
-        advancedFeatureFooter: "This is an advanced feature. Only change the server if you know what you're doing. You will need to log out and log in again after changing servers.",
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} requires an access key. Enter the key for this relay.`,
     },
 
@@ -927,6 +910,11 @@ export const en = {
 
 
     settingsAccount: {
+        relay: 'Relay',
+        relayFooter: 'The relay this device talks to. Tap it to change relay; tap the lock to set its password.',
+        relayPassword: 'Relay password',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} requires this on every connection. Leave blank to clear it.`,
+        relayPasswordSet: 'password set',
         // Account settings screen
         accountInformation: 'Account Information',
         status: 'Status',
@@ -1052,6 +1040,12 @@ export const en = {
     },
 
     welcome: {
+        relayLabel: 'Relay',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: 'The address of the joy relay your account lives on.',
+        relayContinue: 'Continue',
+        relayRequired: 'Enter a relay address',
+        relayCurrent: ({ relay }: { relay: string }) => `Relay: ${relay} · Change`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'End-to-end encrypted and your account is stored only on your device.',

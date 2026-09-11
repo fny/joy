@@ -479,37 +479,20 @@ export const ja: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'リレー',
+        changeRelay: 'リレーを変更',
+        changeRelayMessage: ({ relay }: { relay: string }) => `このデバイスからサインアウトします。アカウントは ${relay} に残ります。戻るには、もう一度入力してバックアップコードで復元してください。`,
+        changeRelayFooter: 'リレーを変更すると、先にこのデバイスからサインアウトします。',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'サーバー設定',
-        knownRelays: '既知のリレー',
-        relayLogin: 'リレーにログイン',
-        relayLoginMessage: 'このデバイスにはこのリレーのアカウントが保存されていません。現在のシークレットキーを使うか、別のキーを入力するか、後でログインできます。',
-        relayUseCurrentKey: '現在のキーを使う',
-        relayEnterKey: 'シークレットキーを入力',
-        relayLoginLater: '後でログイン',
-        relayLoginFailed: 'このリレーにログインできませんでした。キーを確認して再試行してください。',
-        relayApplyKeyAll: 'すべてのリレーでこのキーを使う',
         relayAccessKeyLabel: 'リレーアクセスキー',
         relayAccessKeyFooter: 'このリレーの境界キー（joy-relay ゲート）。全リクエストに付与されます。公開リレーでは空のままに。保存後に再接続します。',
         relayAccessKeySaved: 'リレーキーを保存しました',
         relayCopyDerivedKey: '導出リレーキーをコピー',
-        relayApplyKeyAllMessage: '現在のアカウントキーですべての既知のリレーにログインしますか？このデバイスに保存されている他のリレーアカウントは置き換えられます。',
-        relayApplyKeyAllFooter: '現在のシークレットキーがすべての既知のリレーの共通ログインになります — バックアップするコードは1つだけ。アカウントがないリレーでは自動的に作成されます。',
-        relayApplyKeyAllSuccess: 'すべてのリレーがこのキーを使うようになりました。',
-        relayApplyKeyAllPartial: '設定できませんでした：',
-        enterServerUrl: 'サーバーURLを入力してください',
         notValidJoyServer: '有効なJoy Serverではありません',
-        changeServer: 'サーバーを変更',
-        continueWithServer: 'このサーバーで続行しますか？',
-        resetToDefault: 'デフォルトにリセット',
-        resetServerDefault: 'サーバーをデフォルトにリセットしますか？',
         validating: '検証中...',
-        validatingServer: 'サーバーを検証中...',
         serverReturnedError: 'サーバーがエラーを返しました',
         failedToConnectToServer: 'サーバーへの接続に失敗しました',
-        currentlyUsingCustomServer: '現在カスタムサーバーを使用中',
-        customServerUrlLabel: 'カスタムサーバーURL',
-        advancedFeatureFooter: "これは高度な機能です。何をしているか理解している場合のみサーバーを変更してください。サーバー変更後は再度ログインが必要です。",
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} にはアクセスキーが必要です。このリレーのキーを入力してください。`,
     },
 
@@ -879,6 +862,11 @@ export const ja: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'リレー',
+        relayFooter: 'このデバイスが接続するリレーです。タップでリレーを変更、鍵アイコンでパスワードを設定します。',
+        relayPassword: 'リレーのパスワード',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} は接続のたびにこのパスワードを必要とします。空欄にすると削除されます。`,
+        relayPasswordSet: 'パスワード設定済み',
         // Account settings screen
         accountInformation: 'アカウント情報',
         status: 'ステータス',
@@ -1004,6 +992,12 @@ export const ja: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'リレー',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: 'あなたのアカウントがある joy リレーのアドレス。',
+        relayContinue: '続ける',
+        relayRequired: 'リレーのアドレスを入力してください',
+        relayCurrent: ({ relay }: { relay: string }) => `リレー: ${relay} · 変更`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'エンドツーエンド暗号化され、アカウントはデバイスにのみ保存されます。',

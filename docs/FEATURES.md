@@ -52,7 +52,7 @@ every relay; machines register per account.
   stamped (`set-environment -g JOY_OWNER_STATE_DIR`) with the owning daemon's
   state dir, and the boot-time orphan sweep (`domain/orphanSweep.ts`) retires
   only recordless, client-less servers stamped as OURS — another daemon
-  universe on the box (another `JOY_HOME_DIR`, a per-relay daemon) shares
+  universe on the box (another `JOY_HOME_DIR`, e.g. a test harness) shares
   the socket dir and label scheme and used to lose its live sessions to our
   boot (#55); unstamped (pre-stamp) servers are left alone. Working
   directories are canonicalised once (`paths.canonicalCwd`: `~`, `.`/`..`,
@@ -492,16 +492,32 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
 
 ## Identity & relays
 
-- One backup code pairs everything: app relay picker (Joy Relay + custom
-  URL), `joy auth <relay...>` CLI self-pairing, per-relay MMKV scoping so
-  accounts never bleed. The relay is the account authority (ed25519 login,
-  EdDSA bearer tokens, terminal + account pairing flows).
-- Relay perimeter password: settable per relay from Settings → Account (lock
-  on each relay row) as well as Server Configuration. Stored per relay and
-  sent as `X-Joy-Relay-Key`; a logged-in client also derives one from the
-  account secret, so the manual value is an override for relays gated on
-  something else. Setting it per relay matters because a gated relay refuses
-  the connection — the key must be in place BEFORE switching to it.
+- **One relay, no default** (2026-09-11). There is no built-in relay anywhere.
+  App: the welcome screen asks for the relay (`components/RelayStep.tsx`,
+  checked via `auth/relayCheck.ts` — capabilities probe, gated relays prompt
+  for their key), saves it and reloads; before that the relay-scoped store
+  is a scratch store (`relay.unpaired`). Changing relay = Settings → relay →
+  Change relay, which signs out first (`logout({ forgetRelay: true })`) and
+  lands back on the relay step; the account stays on the old relay and the
+  backup code restores it. No relay list, no switching, no "use this key on
+  all relays", no reset-to-default. `sync/relayPin.ts` is a one-time
+  migration: an install with no relay saved but credentials for the retired
+  built-in relay gets that relay saved at boot (the only place the old URL
+  is named; delete after the rollout). Per-relay KEYS (MMKV store ids,
+  credential keys, access keys) are unchanged, so no install's data moved.
+  Daemon/CLI: relay = `$JOY_RELAY_URL` (the installed service carries it) →
+  `~/.joy/relay.json` → the machine's single pairing under `~/.joy/relays/`;
+  otherwise `NoRelayConfiguredError` and the CLI refuses relay commands with
+  "run joy auth <relay url>". `joy auth <relay url>` pairs ONE relay and
+  writes `relay.json`; `joy install` pins it too. No `--relay`, no aliases.
+  The tmux label `-L joy-<relayKey>` and `~/.joy/relays/<key>/` are
+  unchanged. macOS launchd label is `joy-daemon` (was `vip.faraz.joy-daemon`,
+  now on the cleanup list — the next `joy update` migrates the Mac).
+- Relay perimeter password: set from Settings → Account (the lock on the
+  relay row) or the relay screen. Stored per relay and sent as
+  `X-Joy-Relay-Key`; a logged-in client also derives one from the account
+  secret, so the manual value is an override for relays gated on something
+  else. The welcome screen's relay step asks for it when the relay is gated.
 - Identicons drawn from the joy logotype palette (circles / squares).
 - Deploys: app via EAS OTA (desktop + mobile ALWAYS together); daemon via git
   release branch (`git push main:release` + `joy update` on each box).

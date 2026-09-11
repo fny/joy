@@ -6,15 +6,12 @@ const serverConfigStorage = new MMKV({ id: 'server-config' });
 
 const SERVER_KEY = 'custom-server-url';
 const LOG_SERVER_KEY = 'log-server-url';
-export const DEFAULT_SERVER_URL = 'https://joy.voltai.party:4997';
 
-/** The known relays, in preference order. joy.voltai.party's :14997 (dev
- *  joy-relay) door still exists on the box but was dropped from the picker
- *  2026-08-16 — it's the same universe as :4997 and only ever caused
- *  machine-list confusion. A custom URL can still reach it. */
-export const KNOWN_RELAYS = [
-    { key: 'joy', name: 'Joy Relay', url: DEFAULT_SERVER_URL },
-] as const;
+// There is no built-in relay. The app talks to exactly one relay — the one
+// entered at the welcome screen (or set by the build/desktop config) — and
+// changing it means signing out first. Per-relay KEYS (store ids, credential
+// keys, access keys) stay derived from the relay's URL, exactly as before, so
+// no install's data moves.
 
 /** Stable per-relay identifier — see relayKey.ts. For an https relay with an
  *  ordinary hostname it is `host` / `host_port`, mirroring the daemon's
@@ -51,12 +48,14 @@ export function legacySlotOwnership(url: string): LegacySlotOwnership {
     return resolveLegacySlotOwnership(url, marker, getServerUrl());
 }
 
-/** MMKV store scoped to the active relay. Every relay (the default one
- *  included) gets its own store, so switching relays never bleeds one
- *  account's caches (sessions, machines, drafts, push registration) into
- *  another. */
+/** MMKV store of the relay (sessions, machines, drafts, push registration),
+ *  keyed by the relay's identifier. Before a relay is chosen, a scratch
+ *  store: some modules open theirs at import, before the welcome screen has
+ *  asked for a relay — the app reloads once one is set, so nothing written
+ *  there outlives that first screen. */
 export function relayScopedMMKV(): MMKV {
     const url = getServerUrl();
+    if (!url) return new MMKV({ id: 'relay.unpaired' });
     const store = new MMKV({ id: `relay.${relayKeyForUrl(url)}` });
     migrateLegacyRelayStore(store, url);
     claimRelaySlot(url);
@@ -88,10 +87,9 @@ function migrateLegacyRelayStore(store: MMKV, url: string): void {
     }
 }
 
-/** Display name for a relay URL: the known-relay name, else the hostname. */
+/** Display name for a relay URL: its hostname. */
 export function relayNameForUrl(url: string): string {
-    const known = KNOWN_RELAYS.find(r => r.url === url);
-    if (known) return known.name;
+    if (!url) return '';
     try {
         return new URL(url).hostname;
     } catch {
@@ -99,11 +97,16 @@ export function relayNameForUrl(url: string): string {
     }
 }
 
+/** The relay, or '' when none has been chosen yet (the welcome screen asks). */
 export function getServerUrl(): string {
     return serverConfigStorage.getString(SERVER_KEY) ||
            (globalThis as any).__JOY_CONFIG__?.serverUrl ||
            process.env.EXPO_PUBLIC_JOY_SERVER_URL ||
-           DEFAULT_SERVER_URL;
+           '';
+}
+
+export function hasServerUrl(): boolean {
+    return getServerUrl() !== '';
 }
 
 export function setServerUrl(url: string | null): void {
@@ -135,6 +138,7 @@ export function getDerivedRelayPerimeterKey(): string | null {
 }
 
 export function getRelayAccessKey(url: string = getServerUrl()): string | null {
+    if (!url) return derivedPerimeterKey;
     return getStoredRelayAccessKey(url) || derivedPerimeterKey;
 }
 
@@ -143,6 +147,7 @@ export function getRelayAccessKey(url: string = getServerUrl()): string | null {
  *  logged-in client has a derived key, so getRelayAccessKey() would answer
  *  "yes" for every relay and the answer would be meaningless. */
 export function getStoredRelayAccessKey(url: string = getServerUrl()): string | null {
+    if (!url) return null;
     return serverConfigStorage.getString(RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url)) || migrateLegacyAccessKey(url);
 }
 
@@ -172,6 +177,7 @@ export function relayAccessKeyHeaders(url: string = getServerUrl()): Record<stri
 }
 
 export function setRelayAccessKey(key: string | null, url: string = getServerUrl()): void {
+    if (!url) return;
     const storageKey = RELAY_ACCESS_KEY_PREFIX + relayKeyForUrl(url);
     if (key && key.trim()) {
         serverConfigStorage.set(storageKey, key.trim());
@@ -227,29 +233,15 @@ export function setLogServerUrl(url: string | null): void {
     }
 }
 
-export function isUsingCustomServer(): boolean {
-    return getServerUrl() !== DEFAULT_SERVER_URL;
-}
-
-export function getServerInfo(): { hostname: string; port?: number; isCustom: boolean } {
+/** Host and port of the relay, for headers; null before one is chosen. */
+export function getServerInfo(): { hostname: string; port?: number } | null {
     const url = getServerUrl();
-    const isCustom = isUsingCustomServer();
-    
+    if (!url) return null;
     try {
         const parsed = new URL(url);
-        const port = parsed.port ? parseInt(parsed.port) : undefined;
-        return {
-            hostname: parsed.hostname,
-            port,
-            isCustom
-        };
+        return { hostname: parsed.hostname, port: parsed.port ? parseInt(parsed.port) : undefined };
     } catch {
-        // Fallback if URL parsing fails
-        return {
-            hostname: url,
-            port: undefined,
-            isCustom
-        };
+        return { hostname: url };
     }
 }
 

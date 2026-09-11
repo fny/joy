@@ -6,6 +6,7 @@ import { copyToClipboard } from '@/utils/clipboard';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { isLatest, nextGen, retire, useLatestKey } from '@/utils/latest';
 import { useFocusEffect } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import { Typography } from '@/constants/Typography';
 import { formatSecretKeyForBackup } from '@/auth/secretKeyBackup';
 import { Item } from '@/components/Item';
@@ -20,8 +21,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { Switch } from '@/components/Switch';
 import { useConnectAccount } from '@/hooks/useConnectAccount';
 import { TokenStorage } from '@/auth/tokenStorage';
-import { getServerUrl, relayNameForUrl, KNOWN_RELAYS, getStoredRelayAccessKey, setRelayAccessKey } from '@/sync/serverConfig';
-import { switchRelayAndReload } from '@/sync/relaySwitch';
+import { getServerUrl, relayNameForUrl, getStoredRelayAccessKey, setRelayAccessKey } from '@/sync/serverConfig';
 import { getDisplayName } from '@/sync/profile';
 import { fetchPushTokens, type PushToken } from '@/sync/apiPush';
 import {
@@ -117,6 +117,7 @@ export default React.memo(() => {
     const auth = useAuth();
     const [showSecret, setShowSecret] = useState(false);
     const [copiedRecently, setCopiedRecently] = useState(false);
+    const router = useRouter();
     const { connectAccount, isLoading: isConnecting } = useConnectAccount();
     const profile = useProfile();
     const currentPushDevice = useMemo(() => getCurrentPushDeviceMetadata(), []);
@@ -128,79 +129,30 @@ export default React.memo(() => {
     const [refreshingPushToken, setRefreshingPushToken] = useState(false);
     const [deletingPushToken, setDeletingPushToken] = useState<string | null>(null);
 
-    // One account per relay: the known relays, plus the active server when it's
-    // a custom one, each checked for stored credentials.
+    // The relay this device talks to, and its perimeter password (a gated
+    // relay refuses every connection without it). Changing relay lives on the
+    // relay screen, behind signing out.
     const activeServerUrl = getServerUrl();
-    const relayRows = useMemo(() => {
-        const rows: { key: string; name: string; url: string }[] = KNOWN_RELAYS.map(r => ({ ...r }));
-        if (!rows.some(r => r.url === activeServerUrl)) {
-            rows.unshift({ key: 'custom', name: relayNameForUrl(activeServerUrl), url: activeServerUrl });
-        }
-        return rows;
-    }, [activeServerUrl]);
-    const [relayAccounts, setRelayAccounts] = useState<Record<string, boolean> | null>(null);
-    // Which relays have a MANUAL perimeter password stored (never the derived
-    // key — see getStoredRelayAccessKey). Bumped after each edit so the rows
-    // re-read without a screen reload.
     const [relayKeyTick, setRelayKeyTick] = useState(0);
-
-    // Recomputed whenever a password is edited (relayKeyTick) — the values live
-    // in MMKV, not React state, so nothing else would trigger a re-read.
-    const relayPasswords = useMemo(
-        () => Object.fromEntries(relayRows.map((r) => [r.url, !!getStoredRelayAccessKey(r.url)])),
-        [relayRows, relayKeyTick],
-    );
-
-    // Set/clear a relay's perimeter password. Deliberately per-relay and not
-    // just "the active one": a gated relay REFUSES the connection without its
-    // key, so you must be able to set it BEFORE switching there — otherwise
-    // the only way in is the relay you can no longer reach.
-    const handleSetRelayPassword = useCallback(async (url: string, name: string) => {
+    const hasRelayPassword = useMemo(() => !!getStoredRelayAccessKey(activeServerUrl), [activeServerUrl, relayKeyTick]);
+    const handleSetRelayPassword = useCallback(async () => {
         const next = await Modal.prompt(
-            'Relay password',
-            `${name} requires this on every connection. Leave blank to clear it.`,
+            t('settingsAccount.relayPassword'),
+            t('settingsAccount.relayPasswordMessage', { relay: relayNameForUrl(activeServerUrl) }),
             {
-                defaultValue: getStoredRelayAccessKey(url) ?? '',
+                defaultValue: getStoredRelayAccessKey(activeServerUrl) ?? '',
                 placeholder: '—',
                 confirmText: t('common.save'),
                 inputType: 'secure-text',
             },
         );
         if (next === null) return; // cancelled
-        setRelayAccessKey(next.trim() || null, url);
+        setRelayAccessKey(next.trim() || null, activeServerUrl);
         setRelayKeyTick((n) => n + 1);
-        // The active relay's socket must re-handshake to carry (or drop) it.
-        if (url === activeServerUrl) {
-            // Bounce the v2 live stream so the next connect carries the new key.
-            sync.stopV2Live();
-            sync.startV2Live();
-        }
+        // Bounce the v2 live stream so the next connect carries (or drops) it.
+        sync.stopV2Live();
+        sync.startV2Live();
     }, [activeServerUrl]);
-    const [switchingRelay, setSwitchingRelay] = useState<string | null>(null);
-
-    const loadRelayAccounts = useCallback(async () => {
-        const entries = await Promise.all(relayRows.map(async (r) =>
-            [r.url, !!(await TokenStorage.getCredentials(r.url))] as const
-        ));
-        setRelayAccounts(Object.fromEntries(entries));
-    }, [relayRows]);
-
-    useEffect(() => {
-        void loadRelayAccounts();
-    }, [loadRelayAccounts]);
-
-    const handleSwitchRelay = async (url: string, name: string, hasAccount: boolean) => {
-        const confirmed = await Modal.confirm(
-            t('server.changeServer'),
-            hasAccount
-                ? `Switch to ${name}? The app will restart using the account paired with this relay.`
-                : `Switch to ${name}? No account is paired with this relay yet — the app will restart on its connect screen.`,
-            { confirmText: t('common.continue'), destructive: true }
-        );
-        if (!confirmed) return;
-        setSwitchingRelay(url);
-        await switchRelayAndReload(url);
-    };
 
     // Get the current secret key
     const currentSecret = auth.credentials?.secret || '';
@@ -422,48 +374,28 @@ export default React.memo(() => {
                     )}
                 </ItemGroup>
 
-                {/* Relay Accounts */}
-                <ItemGroup
-                    title="Relays"
-                    footer="Each relay keeps its own paired account. Tap a relay to switch — the app restarts and loads that relay's account. Tap the lock to set that relay's password (needed before switching to a gated relay)."
-                >
-                    {relayRows.map((r) => {
-                        const isActive = r.url === activeServerUrl;
-                        const hasAccount = relayAccounts?.[r.url] ?? false;
-                        const accountLabel = relayAccounts === null ? '' : hasAccount ? ' · account paired' : ' · no account';
-                        const hasPassword = relayPasswords[r.url] ?? false;
-                        return (
-                            <Item
-                                key={r.key}
-                                title={r.name}
-                                detail={isActive ? 'Active' : undefined}
-                                subtitle={`${r.url.replace('https://', '')}${accountLabel}${hasPassword ? ' · password set' : ''}`}
-                                icon={<Ionicons name="git-network-outline" size={29} color={isActive ? theme.colors.accents.green : theme.colors.textSecondary} />}
-                                rightElement={(
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                                        <Pressable
-                                            onPress={() => void handleSetRelayPassword(r.url, r.name)}
-                                            hitSlop={10}
-                                            accessibilityRole="button"
-                                            accessibilityLabel={`Set relay password for ${r.name}`}
-                                        >
-                                            <Ionicons
-                                                name={hasPassword ? 'lock-closed' : 'lock-open-outline'}
-                                                size={20}
-                                                color={hasPassword ? theme.colors.textLink : theme.colors.textSecondary}
-                                            />
-                                        </Pressable>
-                                        {isActive && (
-                                            <Ionicons name="checkmark-circle" size={22} color={theme.colors.textLink} />
-                                        )}
-                                    </View>
-                                )}
-                                onPress={isActive ? undefined : () => void handleSwitchRelay(r.url, r.name, hasAccount)}
-                                loading={switchingRelay === r.url}
-                                showChevron={false}
-                            />
-                        );
-                    })}
+                {/* Relay */}
+                <ItemGroup title={t('settingsAccount.relay')} footer={t('settingsAccount.relayFooter')}>
+                    <Item
+                        title={relayNameForUrl(activeServerUrl)}
+                        subtitle={activeServerUrl.replace(/^https?:\/\//, '') + (hasRelayPassword ? ` · ${t('settingsAccount.relayPasswordSet')}` : '')}
+                        icon={<Ionicons name="git-network-outline" size={29} color={theme.colors.accents.green} />}
+                        rightElement={(
+                            <Pressable
+                                onPress={() => void handleSetRelayPassword()}
+                                hitSlop={10}
+                                accessibilityRole="button"
+                                accessibilityLabel={t('settingsAccount.relayPassword')}
+                            >
+                                <Ionicons
+                                    name={hasRelayPassword ? 'lock-closed' : 'lock-open-outline'}
+                                    size={20}
+                                    color={hasRelayPassword ? theme.colors.textLink : theme.colors.textSecondary}
+                                />
+                            </Pressable>
+                        )}
+                        onPress={() => router.push('/server')}
+                    />
                 </ItemGroup>
 
                 {/* Profile Section */}

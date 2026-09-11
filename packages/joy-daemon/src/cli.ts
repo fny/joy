@@ -1,16 +1,16 @@
 #!/usr/bin/env -S node --import tsx
 // joy — CLI for the joy-daemon daemon (start/stop/restart/status/list/doctor/
 // install/auth/notify), driving the daemon over its localhost HTTP API. The daemon writes daemon.json
-// (token+pid+port) into its relay-scoped state dir on startup, which is how
-// this CLI finds and authenticates to it — one daemon (and one state dir,
-// tmux server, service unit) per relay; --relay picks which one.
+// (token+pid+port) into its state dir on startup, which is how this CLI
+// finds and authenticates to it. One machine, one relay, one daemon: the
+// relay is the one `joy auth <relay>` paired with — there is no default.
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, fchmodSync, rmSync, readlinkSync, realpathSync } from "fs";
 import { join, dirname, resolve, basename, sep, isAbsolute } from "path";
 import { homedir, platform as osPlatform } from "os";
 import { spawn, spawnSync } from "child_process";
 import { moduleDir } from "./esm";
-import { joyHomeDir, joyStateDir, joyRelayUrl, joyRelayKey, isDefaultRelay, joyRelayCredsDir, resolveRelayAlias } from "./paths";
+import { joyHomeDir, joyRelayUrl, joyRelayUrlOrNull, joyRelayKey, joyRelayCredsDir, normalizeRelayUrl, NoRelayConfiguredError } from "./paths";
 import { parseBackupCode, pairWithRelay, deriveRelayPerimeterKey } from "./relay/pairing";
 import { createInterface } from "node:readline/promises";
 import { tmuxArgv } from "./tmux/shell";
@@ -21,25 +21,14 @@ import { relayIdentity, relayCall, sealSpawnSpec } from "./relay/automationApi";
 import { mkdirSecure, SECRET_FILE_MODE } from "./domain/secretFile";
 import { SUPERVISOR_ENV, processStartId, type DaemonLauncher } from "./daemonLauncher";
 
-// --relay <alias|url> (also --relay=…) selects which relay's daemon this CLI
-// invocation addresses. Consumed HERE, before any relay-scoped const below is
-// computed, by bridging to JOY_RELAY_URL — which paths.ts and any daemon we
-// spawn both read. One process, one relay.
-for (let i = process.argv.length - 1; i >= 2; i--) {
-  const a = process.argv[i];
-  if (a === "--relay" && process.argv[i + 1]) {
-    process.env.JOY_RELAY_URL = resolveRelayAlias(process.argv[i + 1]);
-    process.argv.splice(i, 2);
-  } else if (a.startsWith("--relay=")) {
-    process.env.JOY_RELAY_URL = resolveRelayAlias(a.slice("--relay=".length));
-    process.argv.splice(i, 1);
-  }
-}
-
 const DEFAULT_PORT = 4997;
-// Credentials home for the SELECTED relay: ~/.joy/relays/<key>/.
-const CREDS_DIR = joyRelayCredsDir();
-const STATE_DIR = joyStateDir();
+// The pairing's home, ~/.joy/relays/<key>/. With no relay configured the
+// paths point at a directory that never exists, so the few commands that run
+// without one (help, auth, doctor, update, uninstall) read "not paired"
+// instead of throwing; main() refuses the rest with a sentence.
+const RELAY_URL = joyRelayUrlOrNull();
+const CREDS_DIR = RELAY_URL ? joyRelayCredsDir(RELAY_URL) : join(joyHomeDir(), "relays", "_unpaired");
+const STATE_DIR = join(CREDS_DIR, "state");
 const STATE_FILE = join(STATE_DIR, "daemon.json");
 const LOG_FILE = join(STATE_DIR, "daemon.log");
 // pnpm global installs resolve import.meta.url into pnpm's versioned content-addressed
@@ -164,7 +153,7 @@ async function cmdStatus(): Promise<number> {
   console.log(`  version  ${s.version ?? "?"}`);
   console.log(`  pid      ${s.pid ?? "?"}`);
   console.log(`  port     ${daemonPort() ?? "?"}`);
-  console.log(`  relay    ${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
+  console.log(`  relay    ${joyRelayUrl()}`);
   if (s.uptimeMs != null) console.log(`  uptime   ${fmtUptime(s.uptimeMs)}`);
   if (s.sessions != null) console.log(`  sessions ${s.sessions} active`);
   if (s.claude) console.log(`  claude   ${s.claude.available ? (s.claude.version ?? "available") : c.r("not found")}`);
@@ -630,9 +619,9 @@ async function cmdDoctor(): Promise<number> {
   const claudePath = which("claude");
   line(!!claudePath, "claude", claudePath ?? "not found on PATH");
 
-  line(true, "relay", `${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
+  line(!!RELAY_URL, "relay", RELAY_URL ?? "none — pair with `joy auth <relay url>`");
   const accessKey = join(CREDS_DIR, "access.key");
-  line(existsSync(accessKey), "auth", existsSync(accessKey) ? accessKey : `no ${accessKey} — run \`joy auth\``);
+  line(existsSync(accessKey), "auth", existsSync(accessKey) ? accessKey : RELAY_URL ? `no ${accessKey} — run \`joy auth ${RELAY_URL}\`` : "not paired — run `joy auth <relay url>`");
 
   line(existsSync(SERVER_TS), "daemon src", SERVER_TS);
 
@@ -646,10 +635,9 @@ async function cmdDoctor(): Promise<number> {
 
 function cmdAuth(): number {
   const accessKey = join(CREDS_DIR, "access.key");
-  if (!existsSync(accessKey)) {
-    console.log(`${bad} not authenticated (relay ${joyRelayUrl()})`);
-    console.log(`  This relay needs its own pairing in ${c.dim(CREDS_DIR)}`);
-    console.log(`  (access.key + settings.json) — run ${c.b("joy auth <relay>")} with your backup code.`);
+  if (!RELAY_URL || !existsSync(accessKey)) {
+    console.log(`${bad} not paired${RELAY_URL ? ` (relay ${RELAY_URL})` : ""}`);
+    console.log(`  run ${c.b("joy auth <relay url>")} with your account backup code.`);
     return 1;
   }
   let machineId = "?", server = "?";
@@ -661,23 +649,21 @@ function cmdAuth(): number {
   console.log(`${ok} authenticated`);
   console.log(`  credentials ${accessKey}`);
   console.log(`  machineId   ${machineId}`);
-  console.log(`  relay       ${joyRelayUrl()}${isDefaultRelay() ? " (default)" : ""}`);
+  console.log(`  relay       ${RELAY_URL}`);
   console.log(`  server      ${server}`);
   return 0;
 }
 
-// `joy auth <relay...>` — pair this machine with relays using the account's
+// `joy auth <relay>` — pair this machine with THE relay, using the account's
 // backup code (Settings → Account → Backup in the app). Both sides of the QR
-// flow run locally, so no browser approval; the relay auto-creates the account
-// on first contact, which is what lets ONE code cover every relay. The secret
-// is parsed, used, and dropped — never written to disk.
+// flow run locally, so no browser approval; the relay auto-creates the
+// account on first contact. The secret is parsed, used, and dropped — never
+// written to disk. The relay is recorded in ~/.joy/relay.json: this machine
+// talks to it and nothing else (there is no built-in relay).
 async function cmdAuthPair(relayArgs: string[]): Promise<number> {
-  const targets: { name: string; url: string }[] = [];
-  for (const arg of relayArgs) {
-    const url = resolveRelayAlias(arg);
-    if (!/^https?:\/\//.test(url)) { console.log(`${bad} unknown relay: ${arg}`); return 2; }
-    targets.push({ name: arg, url });
-  }
+  if (relayArgs.length !== 1) { console.log(`${bad} usage: joy auth <relay url>   (one relay: this machine talks to exactly one)`); return 2; }
+  const url = normalizeRelayUrl(relayArgs[0]);
+  if (!/^https?:\/\//.test(url)) { console.log(`${bad} not a relay URL: ${relayArgs[0]}`); return 2; }
 
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   const entered = await rl.question("Backup code (XXXXX-XXXXX-…): ");
@@ -690,25 +676,31 @@ async function cmdAuthPair(relayArgs: string[]): Promise<number> {
     return 1;
   }
 
-  let failures = 0;
-  for (const t of targets) {
-    try {
-      const machineId = await pairWithRelay(t.url, secret, joyRelayCredsDir(t.url));
-      console.log(`${ok} paired with ${t.name} (${t.url}) — machineId ${machineId}`);
-    } catch (e) {
-      failures++;
-      console.log(`${bad} ${t.name}: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  let machineId: string;
+  try {
+    machineId = await pairWithRelay(url, secret, joyRelayCredsDir(url));
+  } catch (e) {
+    secret.fill(0);
+    console.log(`${bad} ${url}: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
   }
-  // Perimeter key derived from the same secret (written per relay as
-  // perimeter.key): the value a GATED relay must carry in ~/joy-relay.env.
+  // Perimeter key derived from the same secret (written beside the pairing
+  // as perimeter.key): the value a GATED relay must carry in ~/joy-relay.env.
   const perimeter = deriveRelayPerimeterKey(secret);
   secret.fill(0);
-  if (failures === 0) {
-    console.log(c.dim(`relay perimeter key (JOY_RELAY_ACCESS_KEY on a gated relay box): ${perimeter}`));
-    console.log(c.dim(`start a daemon per relay: joy --relay <name> install`));
-  }
-  return failures === 0 ? 0 : 1;
+  const previous = RELAY_URL && RELAY_URL !== url ? RELAY_URL : null;
+  writeRelayJson(url);
+  console.log(`${ok} paired with ${url} — machineId ${machineId}`);
+  if (previous) console.log(c.y(`  this machine now talks to ${url}, not ${previous} — run \`joy install\` to move the service over`));
+  console.log(c.dim(`relay perimeter key (JOY_RELAY_ACCESS_KEY on a gated relay box): ${perimeter}`));
+  console.log(c.dim(`start the daemon: joy install`));
+  return 0;
+}
+
+/** ~/.joy/relay.json — the relay this machine talks to. */
+function writeRelayJson(url: string): void {
+  mkdirSync(joyHomeDir(), { recursive: true });
+  writeFileSync(join(joyHomeDir(), "relay.json"), JSON.stringify({ serverUrl: url }, null, 2) + "\n");
 }
 
 async function cmdNotify(args: string[]): Promise<number> {
@@ -738,7 +730,8 @@ async function cmdNotify(args: string[]): Promise<number> {
 // removes (two daemons, two accounts, one very long debugging session).
 function serviceName(): string { return "joy-daemon"; }
 function systemdUnitPath(): string { return join(homedir(), ".config", "systemd", "user", `${serviceName()}.service`); }
-const LAUNCHD_LABEL = "vip.faraz.joy-daemon";
+// The label matches the systemd unit: `joy-daemon` on every platform.
+const LAUNCHD_LABEL = "joy-daemon";
 function launchdLabel(): string { return LAUNCHD_LABEL; } // one agent per machine, as with systemd
 function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`); }
 // Historical service names (joy-tmux until 2026-08-13, joy-server for a few
@@ -746,7 +739,7 @@ function launchdPlistPath(): string { return join(homedir(), "Library", "LaunchA
 // removeService() tears these down too, so a re-install MIGRATES the old unit
 // away instead of leaving two daemons supervising the same tmux server.
 const LEGACY_SERVICE_BASES = ["joy-tmux", "joy-server", "joy-daemon"];
-const LEGACY_LAUNCHD_LABELS = ["vip.voltai.joy-tmux", "party.voltai.joy-tmux", "vip.voltai.joy-server", "vip.voltai.joy-daemon"];
+const LEGACY_LAUNCHD_LABELS = ["vip.voltai.joy-tmux", "party.voltai.joy-tmux", "vip.voltai.joy-server", "vip.voltai.joy-daemon", "vip.faraz.joy-daemon"];
 
 // Every systemd unit name that may exist on this machine: the current name,
 // plus each legacy base BOTH bare and with the per-relay suffix the old naming
@@ -754,14 +747,14 @@ const LEGACY_LAUNCHD_LABELS = ["vip.voltai.joy-tmux", "party.voltai.joy-tmux", "
 // is what this daemon shipped as until 2026-08-31, and leaving it enabled
 // beside the new unit means two daemons supervising one tmux server.
 function systemdUnitNamesForCleanup(): string[] {
-  const key = joyRelayKey();
-  const legacy = LEGACY_SERVICE_BASES.flatMap((b) => [b, `${b}-${key}`]);
+  const key = RELAY_URL ? joyRelayKey(RELAY_URL) : null;
+  const legacy = LEGACY_SERVICE_BASES.flatMap((b) => key ? [b, `${b}-${key}`] : [b]);
   return [...new Set([serviceName(), ...legacy])];
 }
 
 function launchdLabelsForCleanup(): string[] {
-  const key = joyRelayKey();
-  const legacy = [...LEGACY_LAUNCHD_LABELS, LAUNCHD_LABEL].flatMap((l) => [l, `${l}.${key}`]);
+  const key = RELAY_URL ? joyRelayKey(RELAY_URL) : null;
+  const legacy = [...LEGACY_LAUNCHD_LABELS, LAUNCHD_LABEL].flatMap((l) => key ? [l, `${l}.${key}`] : [l]);
   return [...new Set([launchdLabel(), ...legacy])];
 }
 
@@ -837,6 +830,10 @@ function cmdInstall(): number {
     console.log(`${bad} daemon source not found at ${SERVER_TS} — not installing a service that cannot start`);
     return 1;
   }
+  // The service carries the relay (JOY_RELAY_URL); relay.json records it for
+  // this machine's shells too — a machine paired before relay.json existed
+  // resolves it from its one pairing, and pins it here.
+  writeRelayJson(joyRelayUrl());
   removeService(); // idempotent: start from a clean slate so the new config takes effect
   if (plat === "linux") {
     const unit = systemdUnit({ node: NODE, serverTs: SERVER_TS, pkgDir: PKG_DIR, path: process.env.PATH ?? "", relayUrl: joyRelayUrl(), homeDir: joyHomeDir() });
@@ -972,7 +969,7 @@ async function cmdJump(rest: string[]): Promise<number> {
   // server you can't switch to a namespaced relay's server (and attaching
   // nested fails on $TMUX) — detach first.
   if (process.env.TMUX && sock.length > 0) {
-    console.log(`${bad} you're inside another tmux server — detach (C-b d), then: joy --relay ${joyRelayKey()} jump`);
+    console.log(`${bad} you're inside another tmux server — detach (C-b d), then: joy jump`);
     return 1;
   }
   const sub = process.env.TMUX
@@ -2170,11 +2167,9 @@ export async function cmdKill(rest: string[]): Promise<number> {
 function help(): void {
   console.log(`${c.b("joy")} — joy-daemon daemon control
 
-${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
+${c.b("Usage:")} joy <command>
 
-  ${c.dim("--relay selects which relay's daemon the command addresses (default:")}
-  ${c.dim("$JOY_RELAY_URL / ~/.joy/relay.json / the joy relay). Per-relay daemons run")}
-  ${c.dim("side by side — own state, own tmux server, own service unit.")}
+  ${c.dim("This machine talks to one relay: the one `joy auth <relay url>` paired it with.")}
 
   ${c.b("start")}        Start the daemon (detached)
   ${c.b("stop")}         Stop the daemon (tmux sessions stay alive; an installed service is stopped via systemctl/launchctl)
@@ -2216,10 +2211,9 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
                0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode · 6 needs input.
   ${c.b("env")}          Sealed provider keys every new session inherits:  joy env [ls] | set KEY=value | unset KEY
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
-  ${c.b("auth")}         Show authentication status for the selected relay
-               joy auth <relay...>: pair this machine with relays using your
-               account backup code (one code works on every relay) — e.g.
-               ${c.dim("joy auth joy joy-dev")}
+  ${c.b("auth")}         Show whether this machine is paired, and with which relay
+               joy auth <relay url>: pair this machine with a relay using your
+               account backup code — e.g. ${c.dim("joy auth relay.example.com:4997")}
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("restore")}      Bring back sessions a REBOOT took (a daemon crash loses none — tmux
                  outlives it). [--dry-run] [--json] [<id>…]; each resumes its conversation
@@ -2237,8 +2231,15 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
 `);
 }
 
+// Commands that make sense on a machine not yet paired with a relay.
+const RELAYLESS = new Set<string | undefined>([undefined, "help", "-h", "--help", "auth", "doctor", "update", "uninstall", "notify"]);
+
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
+  if (!RELAYLESS.has(cmd) && !RELAY_URL) {
+    console.error(`${bad} ${new NoRelayConfiguredError().message}`);
+    process.exit(2);
+  }
   let code = 0;
   switch (cmd) {
     case "status": code = await cmdStatus(); break;

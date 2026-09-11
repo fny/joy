@@ -1,4 +1,4 @@
-// Relay: the box joy.voltai.party runs on, as it reports itself — cpu, memory,
+// Relay: the box the relay runs on, as it reports itself — cpu, memory,
 // disk under / and under the data dir, the database's size and counts, leases
 // and SSE clients, uptime and version. The same rows the machine page shows
 // for every daemon, pointed at the relay. Read on open and every 15 s while

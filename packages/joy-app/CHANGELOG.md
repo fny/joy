@@ -1,3 +1,10 @@
+# Sep 11 (6) — You choose the relay
+
+- **There is no built-in relay any more.** A new install asks which relay to use on its first screen, checks that it is a joy relay (asking for its access key if it is gated), and only then offers to create or restore an account. Nothing about your account or your data is hard-wired to one server.
+- **If you are already signed in, nothing changes.** The app saves the relay you were already using the first time it starts, so you stay signed in with everything where it was.
+- **One relay per device.** The relay list, switching between relays, "use this key on all relays" and reset-to-default are gone. To move to another relay, open Settings → relay → **Change relay**: the device signs out first, then asks for the new relay. Your account stays on the old one, and your backup code restores it there.
+- From a terminal: `joy auth <relay url>` pairs a machine with one relay and remembers it. On a Mac the background service is now called `joy-daemon`; the next `joy update` moves it over. Needs the updated daemon.
+
 # Sep 11 (5) — Settings that stay synced, and a queue that can be trusted
 
 - **A setting changed while a sync was already in flight is no longer lost.** Pins, sort order and every other synced setting used to have a small window: if you toggled something while the app was in the middle of pushing an earlier change, the new one was marked as sent without ever leaving the device, and only showed up on your other devices after some later, unrelated change carried it along. That is the "pins don't sync" you may have seen. The sync now tracks a change made during a push as the next thing to push, and pushes it right after.

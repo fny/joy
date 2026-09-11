@@ -495,37 +495,20 @@ export const pl: TranslationStructure = {
     },
 
     server: {
+        relayTitle: 'Przekaźnik',
+        changeRelay: 'Zmień przekaźnik',
+        changeRelayMessage: ({ relay }: { relay: string }) => `Zostaniesz wylogowany na tym urządzeniu. Konto pozostaje na ${relay}: aby wrócić, wpisz go ponownie i przywróć konto kodem zapasowym.`,
+        changeRelayFooter: 'Zmiana przekaźnika najpierw wylogowuje to urządzenie.',
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Konfiguracja serwera',
-        knownRelays: 'Znane serwery',
-        relayLogin: 'Logowanie do serwera',
-        relayLoginMessage: 'Na tym urządzeniu nie ma zapisanego konta dla tego serwera. Użyj obecnego tajnego klucza, wpisz inny lub zaloguj się później.',
-        relayUseCurrentKey: 'Użyj mojego obecnego klucza',
-        relayEnterKey: 'Wpisz tajny klucz',
-        relayLoginLater: 'Zaloguj się później',
-        relayLoginFailed: 'Nie udało się zalogować do tego serwera. Sprawdź klucz i spróbuj ponownie.',
-        relayApplyKeyAll: 'Użyj tego klucza na wszystkich serwerach',
         relayAccessKeyLabel: 'Klucz dostępu do relay',
         relayAccessKeyFooter: 'Klucz obwodowy dla tego relay (brama joy-relay). Wysyłany z każdym żądaniem; zostaw puste dla otwartych relay. Ponowne połączenie po zapisaniu.',
         relayAccessKeySaved: 'Zapisano klucz relay',
         relayCopyDerivedKey: 'Kopiuj wyprowadzony klucz relay',
-        relayApplyKeyAllMessage: 'Zalogować się na wszystkie znane serwery obecnym kluczem konta? Zastąpi to inne konta zapisane dla tych serwerów na tym urządzeniu.',
-        relayApplyKeyAllFooter: 'Obecny tajny klucz stanie się jedynym loginem dla wszystkich znanych serwerów — jeden kod do zapisania. Konta są tworzone automatycznie tam, gdzie jeszcze nie istnieją.',
-        relayApplyKeyAllSuccess: 'Wszystkie serwery używają teraz tego klucza.',
-        relayApplyKeyAllPartial: 'Nie udało się skonfigurować:',
-        enterServerUrl: 'Proszę wprowadzić URL serwera',
         notValidJoyServer: 'To nie jest prawidłowy serwer Joy',
-        changeServer: 'Zmień serwer',
-        continueWithServer: 'Kontynuować z tym serwerem?',
-        resetToDefault: 'Resetuj do domyślnego',
-        resetServerDefault: 'Zresetować serwer do domyślnego?',
         validating: 'Sprawdzanie...',
-        validatingServer: 'Sprawdzanie serwera...',
         serverReturnedError: 'Serwer zwrócił błąd',
         failedToConnectToServer: 'Nie udało się połączyć z serwerem',
-        currentlyUsingCustomServer: 'Aktualnie używany jest niestandardowy serwer',
-        customServerUrlLabel: 'URL niestandardowego serwera',
-        advancedFeatureFooter: 'To jest zaawansowana funkcja. Zmieniaj serwer tylko jeśli wiesz, co robisz. Po zmianie serwera będziesz musiał się wylogować i zalogować ponownie.',
         relayAccessKeyRequired: ({ relay }: { relay: string }) => `${relay} wymaga klucza dostępu. Wprowadź klucz dla tego przekaźnika.`,
     },
 
@@ -894,6 +877,11 @@ export const pl: TranslationStructure = {
 
 
     settingsAccount: {
+        relay: 'Przekaźnik',
+        relayFooter: 'Przekaźnik, z którym łączy się to urządzenie. Stuknij, aby go zmienić; stuknij kłódkę, aby ustawić hasło.',
+        relayPassword: 'Hasło przekaźnika',
+        relayPasswordMessage: ({ relay }: { relay: string }) => `${relay} wymaga go przy każdym połączeniu. Zostaw puste, aby je usunąć.`,
+        relayPasswordSet: 'hasło ustawione',
         // Account settings screen
         accountInformation: 'Informacje o koncie',
         status: 'Status',
@@ -1019,6 +1007,12 @@ export const pl: TranslationStructure = {
     },
 
     welcome: {
+        relayLabel: 'Przekaźnik',
+        relayPlaceholder: 'relay.example.com',
+        relayHint: 'Adres przekaźnika joy, na którym jest Twoje konto.',
+        relayContinue: 'Dalej',
+        relayRequired: 'Wpisz adres przekaźnika',
+        relayCurrent: ({ relay }: { relay: string }) => `Przekaźnik: ${relay} · Zmień`,
         // Main welcome screen for unauthenticated users
         title: 'Vibe Happily',
         subtitle: 'Szyfrowanie end-to-end, a Twoje konto jest przechowywane tylko na Twoim urządzeniu.',

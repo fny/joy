@@ -16,6 +16,8 @@ import { JoyLogoTypeDynamic } from "@/components/JoyLogotype";
 import { t } from '@/text';
 import { createAccountOnce, isCreatingAccount } from '@/auth/createAccountFlow';
 import { guarded, alertError } from '@/utils/guardAsync';
+import { hasServerUrl } from '@/sync/serverConfig';
+import { RelayStep, RelayLine } from '@/components/RelayStep';
 
 export default function Home() {
     const auth = useAuth();
@@ -65,7 +67,7 @@ function NotAuthenticated() {
             <Text style={styles.subtitle}>
                 {t('welcome.subtitle')}
             </Text>
-            {Platform.OS !== 'android' && Platform.OS !== 'ios' ? (
+            {!hasServerUrl() ? <RelayStep /> : Platform.OS !== 'android' && Platform.OS !== 'ios' ? (
                 <>
                     <View style={styles.buttonContainer}>
                         <RoundButton
@@ -104,6 +106,7 @@ function NotAuthenticated() {
                     </View>
                 </>
             )}
+            {hasServerUrl() && <RelayLine />}
         </View>
     );
 
@@ -120,7 +123,7 @@ function NotAuthenticated() {
                     <Text style={styles.landscapeSubtitle}>
                         {t('welcome.subtitle')}
                     </Text>
-                    {Platform.OS !== 'android' && Platform.OS !== 'ios'
+                    {!hasServerUrl() ? <RelayStep /> : Platform.OS !== 'android' && Platform.OS !== 'ios'
                         ? (<>
                             <View style={styles.landscapeButtonContainer}>
                                 <RoundButton
@@ -158,6 +161,7 @@ function NotAuthenticated() {
                             </View>
                         </>)
                     }
+                    {hasServerUrl() && <RelayLine />}
                 </View>
             </View>
         </View>
