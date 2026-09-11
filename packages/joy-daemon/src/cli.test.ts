@@ -15,7 +15,7 @@ import type { ProcessIdentity } from "./cli";
 // Isolate every path the module computes at import time from the real ~/.joy.
 process.env.JOY_HOME_DIR = mkdtempSync(join(tmpdir(), "joy-cli-test-"));
 delete process.env.JOY_SESSION_ID;
-const { resolvePkgDir, verifyDaemonPid, serverEntryOf, execMatches, processIdentity, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn, openDaemonLog } = await import("./cli");
+const { resolvePkgDir, verifyDaemonPid, serverEntryOf, execMatches, processIdentity, systemdUnit, detectSupervisor, resolveOwnership, cmdStop, cmdNew, cmdAsk, cmdWaitIdle, waitTurn, openDaemonLog, TMUX_SCOPE_OOM_DROPIN, TMUX_SCOPE_OOM_DROPIN_PATH } = await import("./cli");
 const { launcherFromEnv, processStartId } = await import("./daemonLauncher");
 const { joyStateDir } = await import("./paths");
 
@@ -1204,5 +1204,15 @@ describe("joy start opens the state dir and daemon.log owner-only (#48 residual)
     expect(mode(state)).toBe(0o700);
     expect(mode(log)).toBe(0o600);
     expect(readFileSync(log, "utf8")).toBe("old lines\nnew line\n");
+  });
+});
+
+describe("OOM policy: one killed process never takes a pane or the daemon down", () => {
+  test("the service unit continues on an OOM kill, and joy install writes the tmux pane-scope drop-in", () => {
+    const unit = systemdUnit({ node: "/usr/bin/node", serverTs: "/x/server.ts", pkgDir: "/x", path: "/usr/bin", relayUrl: "https://relay.example.test", homeDir: "/h/.joy" });
+    expect(unit).toMatch(/^OOMPolicy=continue$/m);
+    expect(unit).toMatch(/^KillMode=process$/m);
+    expect(TMUX_SCOPE_OOM_DROPIN_PATH.join("/")).toBe(".config/systemd/user/tmux-spawn-.scope.d/10-oom-continue.conf");
+    expect(TMUX_SCOPE_OOM_DROPIN).toMatch(/^\[Scope\]\nOOMPolicy=continue$/m);
   });
 });

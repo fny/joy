@@ -789,6 +789,18 @@ function removeService(): void {
  *  using (#499). Values are quoted: systemd splits Environment= on
  *  whitespace. */
 export interface SystemdUnitValues { node: string; serverTs: string; pkgDir: string; path: string; relayUrl: string; homeDir: string }
+/** tmux 3.4 puts every pane in its own transient scope (tmux-spawn-<uuid>.scope),
+ *  and systemd's default OOMPolicy=stop meant the kernel OOM-killing ONE process
+ *  in a pane — a 3 GB test worker — made systemd stop the whole pane, agent
+ *  session included (three sessions lost on 2026-09-11). A prefix drop-in
+ *  applies to every tmux-spawn-*.scope, live ones included after a reload. */
+export const TMUX_SCOPE_OOM_DROPIN_PATH = [".config", "systemd", "user", "tmux-spawn-.scope.d", "10-oom-continue.conf"] as const;
+export const TMUX_SCOPE_OOM_DROPIN = `# Written by \`joy install\`: the kernel still kills a runaway process in a
+# tmux pane; systemd no longer stops the whole pane (and its agent) for it.
+[Scope]
+OOMPolicy=continue
+`;
+
 export function systemdUnit(v: SystemdUnitValues): string {
   const q = (s: string) => `"${s.replace(/(["\\])/g, "\\$1")}"`;
   return `[Unit]
@@ -817,6 +829,10 @@ RestartSec=3
 # SIGKILLs them all — a plain restart would nuke every live session with
 # nothing left to rebind. process kills only the daemon; recover() rebinds.
 KillMode=process
+# OOMPolicy=continue, NOT the default stop: when the kernel OOM-kills one
+# process in this cgroup (a tmux server, a runaway tool), stop would take the
+# whole daemon unit down with it. continue: that process dies, the daemon lives.
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
@@ -840,6 +856,9 @@ function cmdInstall(): number {
     const path = systemdUnitPath();
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
+    const dropIn = join(homedir(), ...TMUX_SCOPE_OOM_DROPIN_PATH);
+    mkdirSync(dirname(dropIn), { recursive: true });
+    writeFileSync(dropIn, TMUX_SCOPE_OOM_DROPIN);
     spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
     const r = spawnSync("systemctl", ["--user", "enable", "--now", `${serviceName()}.service`], { stdio: "inherit" });
     if (r.status !== 0) { console.log(`${bad} systemctl enable failed (is lingering enabled? \`loginctl enable-linger $USER\`)`); return 1; }
