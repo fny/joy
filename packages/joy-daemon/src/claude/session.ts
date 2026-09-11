@@ -222,6 +222,11 @@ const NON_GENERATING_COMMANDS = new Set([
  *  rotation, a restart replacement under the same id) — the pid probe keeps
  *  the last word. */
 export const HOOK_SESSION_END_GRACE_MS = 1_500;
+/** How long a turn-end waits before its automatic "Finished" push goes out;
+ *  a turn that opens (the next relay-queued message) or a dispatch inside the
+ *  hold cancels it, so a run of queued messages notifies once, at the end.
+ *  Long enough for claim → submit → prompt echo after a terminal fact. */
+export const DONE_PUSH_HOLD_MS = 6_000;
 /** The session's clock and timer, one seam (sessionPhase.ts owns the rules
  *  that read time). The defaults read the globals at CALL time, so vitest's
  *  fake timers drive them too; a test may also swap these directly. */
@@ -795,6 +800,18 @@ export class Session {
   // (a missed completion, a lost push) clears itself without a daemon restart.
   // Gated on an outstanding count, so idle sessions do zero work.
   #taskReconcileTimer: ReturnType<typeof setInterval> | null = null;
+  /** Turns whose agent already sent a <joy-notify>: the automatic "Finished"
+   *  for them is redundant and is not sent (the agent's words are the
+   *  notification). Bounded like #notifiedTurns. */
+  #customNotifiedTurns = new Set<string>();
+  /** A <joy-notify> seen before this entry's turn was opened (the tag rides
+   *  the FIRST assistant entry, which is also what opens the turn, and the
+   *  tag is read first): carried onto the turn the moment it opens. */
+  #pendingCustomNotify = false;
+  /** The pending automatic done push (DONE_PUSH_HOLD_MS): armed at turn end,
+   *  cancelled by anything that shows the session is not actually idle — a
+   *  turn opening, a dispatch — so a run of queued turns pushes once. */
+  #donePushTimer: ReturnType<typeof setTimeout> | null = null;
   // The agent's active /goal (null when none / met / cleared). Surfaced as
   // joy__goal so the app can show a goal bar.
   #goal: JoyGoalInfo | null = null;
@@ -1405,6 +1422,38 @@ export class Session {
    *    server-side (drops it from the active list), detach the relay and kill
    *    the window.
    */
+  /** The automatic done push, HELD for DONE_PUSH_HOLD_MS and re-checked when
+   *  the hold ends. The blockers at turn end see only what this process holds
+   *  (its own dispatch queue, in-flight dispatches, background tasks); the
+   *  turns the app queued while the session was busy sit on the RELAY, and
+   *  the daemon claims the next one right after this turn's terminal fact —
+   *  so five messages sent at once buzzed five times, one per turn end. The
+   *  hold outlasts that claim → submit → prompt-echo cycle: a turn that opens
+   *  or a dispatch that starts inside it cancels the push, and the last turn
+   *  of the run is the one that speaks. Also cancelled by a <joy-notify> in
+   *  the meantime (the agent spoke). */
+  #markCustomNotified(turnId: string): void {
+    this.#customNotifiedTurns.add(turnId);
+    if (this.#customNotifiedTurns.size > 200) { for (const t of this.#customNotifiedTurns) { this.#customNotifiedTurns.delete(t); if (this.#customNotifiedTurns.size <= 150) break; } }
+  }
+
+  #armDonePush(turnId: string, snippet: string | undefined): void {
+    if (this.#donePushTimer) clearTimeout(this.#donePushTimer);
+    this.#donePushTimer = sessionClock.schedule(() => {
+      this.#donePushTimer = null;
+      const stillBusy = [
+        this.#turn ? "turn-open" : null,
+        this.#dispatchInFlight ? "dispatch" : null,
+        this.#pendingCount() > 0 ? `queue=${this.#pendingCount()}` : null,
+        this.#bgTasks.size > 0 ? `bgTasks=${this.#bgTasks.size}` : null,
+        this.#customNotifiedTurns.has(turnId) ? "agent-notified" : null,
+        this.status === "ended" ? "ended" : null,
+      ].filter(Boolean);
+      if (stillBusy.length) { process.stderr.write(`[notify] ${this.id}: held done push dropped (${stillBusy.join(",")})\n`); return; }
+      this.#relay?.notify("done", snippet);
+    }, DONE_PUSH_HOLD_MS);
+  }
+
   end(reason: "killed" | "process_exited" | "restart"): boolean {
     if (this.status === "ended") return false;
 
@@ -1419,6 +1468,7 @@ export class Session {
     if (this.#taskReconcileTimer) { clearInterval(this.#taskReconcileTimer); this.#taskReconcileTimer = null; }
     this.#turn5xxStatus = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
+    if (this.#donePushTimer) { clearTimeout(this.#donePushTimer); this.#donePushTimer = null; }
     if (this.#hookSessionEndTimer) { clearTimeout(this.#hookSessionEndTimer); this.#hookSessionEndTimer = null; }
     // The machine ends: the wait is over and the dialog banner is cleared on
     // BOTH end paths while the relay is still attached — the pane poll stops
@@ -4769,7 +4819,13 @@ export class Session {
       // history can never re-fire old notifications (the forwardedUuids skip
       // above covers replayed entries, this covers never-forwarded old ones).
       if (this.#relay && entryTimeMs >= this.#tailBoundAt - 60_000) {
-        for (const ev of joyNotifyEvents(entry)) this.#relay.notifyCustom(ev.headline, ev.detail);
+        for (const ev of joyNotifyEvents(entry)) {
+          this.#relay.notifyCustom(ev.headline, ev.detail);
+          // The agent has spoken for this turn: no automatic "Finished" on top.
+          const tid = this.#turn?.turnId;
+          if (tid) this.#markCustomNotified(tid); else this.#pendingCustomNotify = true;
+          if (this.#donePushTimer) { clearTimeout(this.#donePushTimer); this.#donePushTimer = null; }
+        }
         const newTitle = joyTitleValue(entry);
         if (newTitle && !this.#titleLocked && newTitle !== this.summary) {
           this.#setTitle(newTitle); // agent re-title — never locks
@@ -4786,6 +4842,7 @@ export class Session {
         if (!this.#turn) {
           const openedNow = sessionClock.now();
           this.#turn = { turnId: crypto.randomUUID(), since: openedNow, openedAt: entryTimeMs, attribution: "unclaimed" };
+          if (this.#pendingCustomNotify) { this.#markCustomNotified(this.#turn.turnId); this.#pendingCustomNotify = false; }
           this.#observe({ type: "transcript_turn", at: openedNow, open: true });
           this.#turnUsage = null; // fresh turn → reset usage accumulator
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
@@ -4901,6 +4958,9 @@ export class Session {
             this.#dispatchInFlight ? "dispatch" : null,
             this.#pendingCount() > 0 ? `queue=${this.#pendingCount()}` : null,
             this.#bgTasks.size > 0 ? `bgTasks=${this.#bgTasks.size}` : null,
+            // The agent already announced this turn with <joy-notify>: its
+            // words ARE the notification; "Finished" on top is the double buzz.
+            this.#customNotifiedTurns.has(endedTurnId) ? "agent-notified" : null,
           ].filter(Boolean);
           if (notifyBlockers.length === 0) {
             // Body = the reply's first line — a glanceable "what happened",
@@ -4926,7 +4986,7 @@ export class Session {
               if (this.#notifiedTurns.size > 200) {
                 for (const t of this.#notifiedTurns) { this.#notifiedTurns.delete(t); if (this.#notifiedTurns.size <= 150) break; }
               }
-              this.#relay?.notify("done", snippet);
+              this.#armDonePush(endedTurnId, snippet);
             }
           } else {
             // Diagnosable, not silent: "why didn't I get a push" was previously

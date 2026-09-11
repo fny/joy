@@ -42,16 +42,23 @@ function ramUsedPercent(): number | null {
   return Math.round((1 - avail / total) * 100);
 }
 
-function diskUsedPercent(): number | null {
+/** The filesystem the daemon's home lives on — transcripts, the ledger and
+ *  every agent's caches land there. Percent used plus the human numbers for
+ *  the push body: "90% full" says less than "9.8 GB free of 466 GB". */
+export function diskUsage(): { percent: number; freeBytes: number; totalBytes: number } | null {
   try {
     const s = statfsSync(homedir());
-    const total = Number(s.blocks) * Number(s.bsize);
-    const free = Number(s.bavail) * Number(s.bsize);
-    if (!total) return null;
-    return Math.round((1 - free / total) * 100);
+    const totalBytes = Number(s.blocks) * Number(s.bsize);
+    const freeBytes = Number(s.bavail) * Number(s.bsize);
+    if (!totalBytes) return null;
+    return { percent: Math.round((1 - freeBytes / totalBytes) * 100), freeBytes, totalBytes };
   } catch {
     return null;
   }
+}
+export const gb = (bytes: number): string => `${(bytes / 1e9).toFixed(bytes < 10e9 ? 1 : 0)} GB`;
+export function diskAlertBody(u: { percent: number; freeBytes: number; totalBytes: number }): string {
+  return `${u.percent}% full — ${gb(u.freeBytes)} free of ${gb(u.totalBytes)}; transcripts and caches may start failing`;
 }
 
 /**
@@ -134,7 +141,8 @@ export function startResourceAlerts(pusher: Pusher): void {
 
   const hostCheck = () => {
     fire("ram", ramUsedPercent(), `RAM high on ${host}`, `${ramUsedPercent()}% used — sessions may queue or misbehave`);
-    fire("disk", diskUsedPercent(), `Disk high on ${host}`, `${diskUsedPercent()}% full — transcripts and caches may start failing`);
+    const disk = diskUsage();
+    fire("disk", disk?.percent ?? null, `Disk high on ${host}`, disk ? diskAlertBody(disk) : "");
   };
   const limitsCheck = () => runLimitsCheck(fire, { fetchClaudeLimits, readCodexLimits, host });
 

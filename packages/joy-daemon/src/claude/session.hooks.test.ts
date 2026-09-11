@@ -7,7 +7,7 @@ import { test, expect, vi, beforeAll, afterAll, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { Session, HOOK_SESSION_END_GRACE_MS, HOOK_NEEDS_INPUT_STALE_MS } from "./session";
+import { Session, HOOK_SESSION_END_GRACE_MS, HOOK_NEEDS_INPUT_STALE_MS, DONE_PUSH_HOLD_MS } from "./session";
 import { queueFor } from "../domain/queueFacade";
 import { loadWindowRecord, saveWindowRecord } from "../domain/windowRecord";
 import * as windowRecords from "../domain/windowRecord";
@@ -1094,4 +1094,64 @@ test("promptReadiness is the one decision the gates consume: it names the holdin
   expect(s.promptReadiness()).toEqual({ ready: false, reason: "turn running (hook)" });
   s.end("killed");
   expect(s.promptReadiness()).toEqual({ ready: false, reason: "session ended" });
+});
+
+// ── the automatic "Finished" push: held, cancelled by the next turn, and never on top of a <joy-notify> ──
+
+test("done push: held for DONE_PUSH_HOLD_MS after the turn ends, then sent once", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("done-hold"), driver, { claudeSessionId: "sid" });
+  const { rs, pushes } = relayStub("rs-done-hold");
+  s.attachRelay(rs, true);
+  const t0 = Date.now();
+  s.onTranscriptEntry(assistantAt("dh-1", t0, "working on it"));
+  s.onTranscriptEntry(assistantAt("dh-2", t0 + 500, "All done.", "end_turn"));
+  expect(pushes).toEqual([]);                          // not at the turn end itself
+  await vi.advanceTimersByTimeAsync(DONE_PUSH_HOLD_MS - 50);
+  expect(pushes).toEqual([]);                          // still held
+  await vi.advanceTimersByTimeAsync(100);
+  expect(pushes).toEqual(["done"]);                    // once
+  await vi.advanceTimersByTimeAsync(DONE_PUSH_HOLD_MS * 2);
+  expect(pushes).toEqual(["done"]);
+  s.end("killed");
+});
+
+test("done push: a turn that opens inside the hold cancels it — five queued messages buzz once, at the end of the last", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("done-run"), driver, { claudeSessionId: "sid" });
+  const { rs, pushes } = relayStub("rs-done-run");
+  s.attachRelay(rs, true);
+  let t = Date.now();
+  for (let i = 0; i < 5; i++) {
+    s.onTranscriptEntry(assistantAt(`run-${i}-a`, t, `answer ${i}`));
+    s.onTranscriptEntry(assistantAt(`run-${i}-e`, t + 300, `done ${i}`, "end_turn"));
+    // The relay-queued follow-up is claimed, submitted and echoed well inside the hold.
+    await vi.advanceTimersByTimeAsync(DONE_PUSH_HOLD_MS / 3);
+    t = Date.now();
+  }
+  expect(pushes).toEqual([]);                          // the intermediate ends never pushed
+  await vi.advanceTimersByTimeAsync(DONE_PUSH_HOLD_MS + 50);
+  expect(pushes).toEqual(["done"]);                    // the last one did, once
+  s.end("killed");
+});
+
+test("done push: a <joy-notify> in the turn is the notification — no automatic \"Finished\" on top of it", async () => {
+  vi.useFakeTimers();
+  const { driver } = fakeTmux({ pane: READY });
+  const s = mkSession(uid("done-notify"), driver, { claudeSessionId: "sid" });
+  const { rs, pushes } = relayStub("rs-done-notify");
+  const customs: string[] = []; rs.notifyCustom = (h: string) => { customs.push(h); };
+  s.attachRelay(rs, true);
+  const t0 = Date.now();
+  s.onTranscriptEntry(assistantAt("dn-1", t0, "Deployed everything.\n<joy-notify message=\"Deploy finished\" detail=\"relay and fleet live\" />", "end_turn"));
+  expect(customs).toEqual(["Deploy finished"]);
+  await vi.advanceTimersByTimeAsync(DONE_PUSH_HOLD_MS * 2);
+  expect(pushes).toEqual([]);
+  // The next, un-notified turn still gets its automatic push.
+  s.onTranscriptEntry(assistantAt("dn-2", Date.now(), "and a short follow-up", "end_turn"));
+  await vi.advanceTimersByTimeAsync(DONE_PUSH_HOLD_MS + 50);
+  expect(pushes).toEqual(["done"]);
+  s.end("killed");
 });
