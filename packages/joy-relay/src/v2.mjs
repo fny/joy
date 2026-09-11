@@ -49,7 +49,15 @@ function declaredLength(req) {
 /** A client that left mid-body: Node surfaces it as an ECONNRESET 'aborted'
  *  error from the request stream. Not a relay fault — no 500, no stack trace
  *  (one was logged per abort, a free log-spam vector). */
-const isClientAbort = (e, req) => !(e instanceof ApiError) && (e?.code === 'ECONNRESET' || e?.message === 'aborted' || req.destroyed === true);
+// The client left: the body read failed under it, or the socket we would
+// answer on is gone. NOT \`req.destroyed\` — Node destroys the request stream
+// once its body has been consumed, so that test was true for every error
+// thrown after readJson(), and every internal error in every JSON route was
+// answered with a socket reset and no log line: the daemon saw "fetch
+// failed" (transient, retried forever) and the relay saw nothing. Found by
+// the simulator (test/sim), which treats a reset as a fault.
+const isClientAbort = (e, req, res) => !(e instanceof ApiError)
+  && (e?.code === 'ECONNRESET' || e?.message === 'aborted' || req.aborted === true || res.destroyed === true || res.socket?.destroyed === true);
 const intent = (p) => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 /** Every native_sessions.state (db.mjs CHECK) — what a DELETE `ifStatus` may name. */
 const SESSION_STATES = new Set(['provisioning', 'starting', 'active', 'detached', 'failed', 'archived']);
@@ -329,8 +337,14 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       // control lane still offers the cancel and turn.start would refuse it
       // forever. The human resolves the cancellation first.
       if (r.cancel_requested) throw new ApiError(409, 'cancellation_pending');
+      // Every trace of the first run goes: a requeued turn that kept its
+      // started_at was later adopted by a restarted daemon (reconcile
+      // running on a dispatching turn) as "already started" — no start
+      // bookkeeping, the prompt command left delivered, no turn.started
+      // event for the second run. Found by the simulator (test/sim).
       await t.query(
-        `UPDATE turns SET state = 'queued', lease_epoch = NULL, run_token = NULL WHERE id = $1`, [r.turn_id]);
+        `UPDATE turns SET state = 'queued', lease_epoch = NULL, run_token = NULL,
+           started_at = NULL, last_progress_at = NULL, transcript_uuid = NULL WHERE id = $1`, [r.turn_id]);
       await t.query(`UPDATE commands SET state = 'queued' WHERE id = $1`, [m[2]]);
       await t.query(
         `UPDATE native_sessions SET recovery_required = FALSE,
@@ -655,7 +669,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       res.writeHead(isEnvelope ? out.status : 200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(isEnvelope ? out.body : out));
     } catch (e) {
-      if (isClientAbort(e, req)) { // the client left mid-body: nobody to answer, nothing to log
+      if (isClientAbort(e, req, res)) { // the client left: nobody to answer, nothing to log
         try { res.destroy(); } catch { /* already gone */ }
         return true;
       }

@@ -597,6 +597,20 @@ export function createCore(db, notify) {
     return eventCount + EVENT_BUDGET_LIFECYCLE_RESERVE * openTurns > MAX_EVENTS_PER_SESSION;
   }
 
+  /** The daemon stamps lifecycle posts with a runtime event id that is
+   *  per TURN (\`start:<turnId>\`), and session_events keeps one row per id.
+   *  A turn that ran, was orphaned and was requeued by the human starts a
+   *  second time under the same id: that start is a new event, not a
+   *  replay (a replay never reaches the insert — \`running\` answers first),
+   *  so it is recorded without the id rather than refused as a duplicate.
+   *  Found by the simulator (test/sim): the second life's /start answered
+   *  500 and the retried message could never start again. Caller is in tx. */
+  async function freshRuntimeEventId(t, sessionId, runtimeEventId) {
+    if (!runtimeEventId) return null;
+    const dupe = await one(t, `SELECT 1 FROM session_events WHERE session_id = $1 AND runtime_event_id = $2`, [sessionId, runtimeEventId]);
+    return dupe ? null : runtimeEventId;
+  }
+
   /** Definitive answer for a turn the relay can no longer record (#613):
    *  `failed` with a machine-readable reason (the app reads a failed message,
    *  not a hang), the outstanding delivery superseded so a daemon still
@@ -852,7 +866,7 @@ export function createCore(db, notify) {
       await t.query(`UPDATE native_sessions SET active_turn_id = $2, state = 'active', updated_at = now() WHERE id = $1`, [s.id, turnId]);
       await t.query(`UPDATE commands SET state = 'applied', disposition = 'started' WHERE id = $1`, [turn.prompt_command_id]);
       const { seq } = await nextSeq(t, s.id);
-      await appendEvent(t, s.id, seq, { kind: 'turn.started', turnId, runtimeEventId: body.runtimeEventId ?? null });
+      await appendEvent(t, s.id, seq, { kind: 'turn.started', turnId, runtimeEventId: await freshRuntimeEventId(t, s.id, body.runtimeEventId) });
       return { turnId, state: 'running', runToken };
     });
   }
@@ -1008,7 +1022,7 @@ export function createCore(db, notify) {
             [turnId, state, lease.epoch, runToken]);
           await t.query(`UPDATE commands SET state = 'applied', disposition = 'started' WHERE id = $1`, [turn.prompt_command_id]);
           const { seq } = await nextSeq(t, s.id);
-          await appendEvent(t, s.id, seq, { kind: 'turn.started', turnId, runtimeEventId: body.runtimeEventId ?? null });
+          await appendEvent(t, s.id, seq, { kind: 'turn.started', turnId, runtimeEventId: await freshRuntimeEventId(t, s.id, body.runtimeEventId) });
         }
         await t.query(`UPDATE native_sessions SET active_turn_id = $2, state = 'active', recovery_required = FALSE, updated_at = now() WHERE id = $1`,
           [s.id, turnId]);
