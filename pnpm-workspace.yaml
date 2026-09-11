@@ -4,3 +4,8 @@ packages:
   - "packages/joy-relay"
   - "packages/joy-mcp"
   - "packages/codium"
+
+# Expo / React Native need a flat node_modules (Metro and native autolinking
+# do not follow pnpm's isolated symlinks). The rest of what .npmrc used to set
+# is pnpm 10's default, so this is the only setting.
+nodeLinker: hoisted

@@ -19,6 +19,9 @@ import { createAttachments } from './src/attachments.mjs';
 import { handleDocs } from './src/docs.mjs';
 
 const LISTEN = Number(process.env.JOY_RELAY_PORT ?? 3105);
+// Loopback by default: on the relay box Caddy terminates TLS in front of it.
+// A container sets 0.0.0.0 (see Dockerfile) so its published port reaches it.
+const HOST = process.env.JOY_RELAY_HOST?.trim() || '127.0.0.1';
 // Data lives OUTSIDE the rsynced checkout so deploys never wipe it.
 const DATA_DIR = process.env.JOY_RELAY_DATA_DIR ?? '/home/ubuntu/joy-relay-data/dev';
 
@@ -98,6 +101,6 @@ server.on('upgrade', (req, socket) => {
   socket.destroy();
 });
 
-server.listen(LISTEN, '127.0.0.1', () => {
-  console.log(`[joy-relay] listening :${LISTEN} (data ${DATA_DIR}, token issuers ${ISSUERS.join(',')})`);
+server.listen(LISTEN, HOST, () => {
+  console.log(`[joy-relay] listening ${HOST}:${LISTEN} (data ${DATA_DIR}, token issuers ${ISSUERS.join(',')})`);
 });

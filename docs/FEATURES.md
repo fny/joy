@@ -519,6 +519,13 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
   secret, so the manual value is an override for relays gated on something
   else. The welcome screen's relay step asks for it when the relay is gated.
 - Identicons drawn from the joy logotype palette (circles / squares).
+- Relay in a container: `packages/joy-relay/Dockerfile` (Node 22, the one
+  dependency PGlite is WebAssembly — no native build). Plain HTTP on
+  `JOY_RELAY_PORT` (3105), bound via `JOY_RELAY_HOST` (0.0.0.0 in the image;
+  the box keeps the 127.0.0.1 default behind Caddy), state in the `/data`
+  volume at `/data/relay` (`JOY_RELAY_DATA_DIR` — one level in, because the
+  lock file sits BESIDE the data dir), the rest from `JOY_RELAY_*` env, runs
+  as `node`, has a health check. TLS stays in front of it.
 - Deploys: app via EAS OTA (desktop + mobile ALWAYS together); daemon via git
   release branch (`git push main:release` + `joy update` on each box).
 
