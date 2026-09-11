@@ -40,7 +40,7 @@ joy is open source under the MIT license and costs nothing. You pay for the agen
 
 ## Can I self-host everything?
 
-Yes, and you have to host the relay, because there is no default one. The relay is one small Node process, with a Docker image in the repository. The daemon runs on your own machines, and you can build the app yourself from source. See [Self-hosting](../getting-started/self-hosting.md).
+Yes, and you have to host the relay, because there is no default one. The relay is one small Node process, with a container image you can build with Podman or Docker from the repository. The daemon runs on your own machines, and you can build the app yourself from source. See [Self-hosting](../getting-started/self-hosting.md).
 
 ## Why tmux?
 

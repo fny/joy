@@ -63,6 +63,18 @@ launchctl kickstart -k gui/$(id -u)/joy-daemon
 
 `joy restart` also works. It asks the running daemon to replace itself, and running sessions survive.
 
+## My relay won't start: "refusing to start: JOY_RELAY_DOCS_TOKEN is not set"
+
+A relay must be given a password for its API docs page, or be told to serve none. It checks this before anything else and exits when it has neither.
+
+Set a password, or turn the page off, in the relay's environment and start it again:
+
+```bash
+JOY_RELAY_DOCS_TOKEN=$(openssl rand -base64 18)   # or: JOY_RELAY_DOCS=off
+```
+
+In a container, pass it with `-e` on `podman run`, in the Quadlet unit's environment file, or in the Compose `.env` file. See [Self-hosting a relay](../getting-started/self-hosting.md#choose-a-docs-password).
+
 ## Sessions show "offline" or "last seen"
 
 The app shows a session as offline when its machine's daemon has stopped talking to the relay. The daemon is not running, the machine is asleep or off, or the machine lost its network.

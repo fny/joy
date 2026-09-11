@@ -8,7 +8,7 @@ These pages are for people using joy. If you want to work on joy itself, start w
 
 1. [Overview](getting-started/overview.md): the three parts of joy, and how a message gets from your phone to an agent and back.
 2. [Install](getting-started/install.md): pick a relay, create your account, install the daemon on a machine, and start your first session.
-3. [Self-hosting a relay](getting-started/self-hosting.md): run the one server joy needs, with Docker or plain Node, behind TLS.
+3. [Self-hosting a relay](getting-started/self-hosting.md): run the one server joy needs, with Podman or plain Node, behind TLS.
 
 ## Guides
 

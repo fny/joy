@@ -17,7 +17,7 @@ Every machine's daemon serves an HTTP API on the loopback interface only.
 
 - **Address:** `http://127.0.0.1:<port>`. The port is 4997 unless the `PORT` environment variable says otherwise. The running daemon's actual port is in `daemon.json` (see below).
 - **Host check:** the daemon answers only requests addressed to `localhost`, `127.0.0.1` or `::1`. This blocks web pages that try to reach it through DNS rebinding.
-- **Token:** requests that change something (`POST`, `PUT`, `PATCH`, `DELETE`) must carry the header `X-Joy-Token: <token>`. The token is created fresh each time the daemon starts and written to `~/.joy/relays/<host>_<port>/state/daemon.json`, a file only your user can read. Read requests are not token-checked; they rely on the loopback binding and the host check.
+- **Token:** requests that change something (`POST`, `PUT`, `PATCH`, `DELETE`) must carry the header `X-Joy-Token: <token>`. The token is created fresh each time the daemon starts and written to `~/.joy/relays/<host>_<port>/state/daemon.json`, a file only your user can read. Read requests are not token-checked; they rely on the loopback binding and the host check, so on a machine shared with other users, any of them can read your sessions. See [Known risks](security.md#anyone-logged-in-to-the-same-machine-can-read-your-sessions).
 - **Docs:** open `http://127.0.0.1:4997/docs?token=<token>` in a browser for the rendered reference, or fetch `GET /openapi.json` for the document itself. Both accept the token as the `X-Joy-Token` header, a bearer token, or the `?token=` query parameter.
 
 Read the token and port from `daemon.json`:

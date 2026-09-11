@@ -107,6 +107,26 @@ In these modes the agent runs commands and edits files without asking first, wit
 
 Anyone who can sign in to your account can start sessions and send commands to every paired machine. Protecting your backup code protects your machines.
 
+## Known risks in this version
+
+These are gaps you should know about before you rely on joy for sensitive work. Each is a deliberate trade-off or a known limitation of the current release, not a hidden behaviour.
+
+### Anyone logged in to the same machine can read your sessions
+
+The daemon's local API takes no key for reads. That is safe only because it is reachable from the machine itself and nowhere else, and that part is guaranteed: the daemon binds `127.0.0.1` alone, refuses any request not addressed to `localhost`, and has no setting that widens either. Nothing on your network, and no web page you visit, can read it.
+
+The loopback interface is shared by every user account on a computer, though. On a machine where other people have logins, any of them can read your session list, transcripts, and chat history from `http://127.0.0.1:4997`. They cannot change anything: sending, stopping, and every other change needs the daemon's token, which lives in a file only your user can read.
+
+Run the daemon only on machines where you are the only user, or where you trust everyone who can log in.
+
+### Push notifications are plaintext
+
+Titles and bodies pass through the relay, Expo, and Apple or Google unencrypted. By default they carry only the machine and folder name and a fixed word such as "Finished". An agent's own notification carries the headline and detail it wrote. See [What push notifications expose](#what-push-notifications-expose).
+
+### The relay's API docs page is password-protected, not secret
+
+A relay serves a description of its API at `/docs`, behind the password in `JOY_RELAY_DOCS_TOKEN`. The relay will not start without that password or an explicit `JOY_RELAY_DOCS=off`. The page describes routes, not your data, and the [relay access key](#the-relay-access-key) is what keeps strangers off the relay itself.
+
 ## Related
 
 - [How joy works](../getting-started/overview.md)
