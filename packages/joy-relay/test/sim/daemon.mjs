@@ -32,6 +32,7 @@ export class SimDaemon {
     this.ledger = new Map();   // turnId -> row
     this.records = new Map();  // relaySessionId -> { localSessionId, archived }
     this.nextLocal = 1;
+    this.pendingAnnounce = null; // an announce whose answer never came
     // memory
     this.alive = true;
     this.lease = null;         // { leaseId, token, epoch }
@@ -78,10 +79,14 @@ export class SimDaemon {
 
   /** A session that already runs on this machine, announced to the relay. */
   async announce() {
-    const localSessionId = `local-${this.id}-${this.nextLocal++}`;
+    // The same intent until it is answered: a lost answer means the relay
+    // may already hold the session, and the retry must replay, not double.
+    const localSessionId = this.pendingAnnounce ?? `local-${this.id}-${this.nextLocal++}`;
+    this.pendingAnnounce = localSessionId;
     const r = await this.call('POST', '/joy/v2/sessions', {
       body: { mode: 'announce_existing', creationIntentId: `announce:${localSessionId}`, daemonId: this.id, localSessionId, sessionKeyEnvelope: 'wrapped-key' },
     });
+    this.pendingAnnounce = null;
     if (r.status === 200) this.records.set(r.json.sessionId, { localSessionId, archived: false });
     return r;
   }
@@ -175,7 +180,7 @@ export class SimDaemon {
     if (row.state === 'received') { row.state = 'submitted'; this.runtime.set(turnId, 'executing'); }
     const r = await this.call('POST', `/joy/v2/daemon/turns/${turnId}/submitted`, { headers: this.headers() });
     if (r.status === 200) { row.submittedAcked = true; return r; }
-    if (r.status === 409) { this.drop(row, r.code); return r; }
+    if (r.status === 409) { this.refused(row, r.code); return r; }
     this.leaseDied(r);
     return r;
   }
@@ -186,12 +191,22 @@ export class SimDaemon {
     });
     if (r.status === 200) { row.state = 'started'; return r; }
     if (r.status === 409) {
-      if (CANCEL_CLASS.has(r.code)) this.drop(row, r.code);
+      if (CANCEL_CLASS.has(r.code)) this.refused(row, r.code);
       // not_queue_head / another_turn_active / turn_orphaned_reconcile_first: try again later.
       return r;
     }
     this.leaseDied(r);
     return r;
+  }
+  /** A cancel-class refusal: the agent is interrupted. When the refusal is
+   *  a CANCEL (turn_cancelled — the relay has the turn cancelling and waits
+   *  for the owner's word), the daemon still owes the terminal fact: the
+   *  real coordinator interrupts and posts \`cancelled\` (R10). For a closed
+   *  turn or a closed session there is nothing left to say. */
+  refused(row, code) {
+    this.runtime.delete(row.turnId);
+    if (code === 'turn_cancelled') { row.state = 'cancel_owed'; row.cancelRequested = true; row.terminalState = 'cancelled'; }
+    else this.drop(row, code);
   }
   async output(turnId) {
     const r = await this.call('POST', `/joy/v2/daemon/turns/${turnId}/facts`, {
@@ -205,7 +220,7 @@ export class SimDaemon {
     const row = this.ledger.get(turnId);
     const terminalState = row.cancelRequested ? 'cancelled' : (row.terminalState ?? 'completed');
     row.terminalState = terminalState;
-    this.runtime.set(turnId, 'done');
+    if (this.runtime.has(turnId)) this.runtime.set(turnId, 'done');
     const r = await this.call('POST', `/joy/v2/daemon/turns/${turnId}/facts`, {
       body: { type: 'terminal', terminalState, runtimeEventId: `end:${turnId}` }, headers: this.headers(),
     });
@@ -228,7 +243,11 @@ export class SimDaemon {
     const r = await this.call('POST', `/joy/v2/daemon/turns/${turnId}/reconcile`, { body, headers: this.headers() });
     if (r.status === 200) {
       row.epoch = this.lease.epoch;
+      // The answer names the turn's state: adopted (running/cancelling), or
+      // a replay of whatever it is under this very lease — which may still
+      // be dispatching, and then /start is still owed.
       if (r.json.state === 'terminal') { row.state = 'terminal'; row.terminalState = r.json.terminalState; this.runtime.delete(turnId); }
+      else if (r.json.state === 'dispatching') { row.state = 'submitted'; row.submittedAcked = true; }
       else { row.state = 'started'; row.submittedAcked = true; if (r.json.state === 'cancelling') row.cancelRequested = true; }
       return r;
     }
@@ -247,13 +266,13 @@ export class SimDaemon {
   inherited() {
     const out = [];
     for (const row of this.ledger.values()) {
-      if ((row.state === 'submitted' || row.state === 'started') && row.epoch !== this.lease?.epoch) out.push(row);
+      if (['submitted', 'started', 'cancel_owed'].includes(row.state) && row.epoch !== this.lease?.epoch) out.push(row);
     }
     return out;
   }
   sessionsIdle() {
     const busy = new Set();
-    for (const row of this.ledger.values()) if (row.state === 'submitted' || row.state === 'started') busy.add(row.sessionId);
+    for (const row of this.ledger.values()) if (['submitted', 'started', 'cancel_owed'].includes(row.state)) busy.add(row.sessionId);
     return [...this.records].filter(([id, rec]) => !rec.archived && !busy.has(id)).map(([id]) => id);
   }
 
@@ -293,7 +312,7 @@ export class SimDaemon {
       else if (row.state === 'started') {
         A.push({ name: 'output', detail: row.turnId, run: () => this.output(row.turnId) });
         A.push({ name: 'finish', detail: row.turnId, run: () => this.finish(row.turnId) });
-      }
+      } else if (row.state === 'cancel_owed') A.push({ name: 'finish', detail: row.turnId, run: () => this.finish(row.turnId) });
     }
     for (const sid of this.sessionsIdle()) A.push({ name: 'archive', detail: sid, run: () => this.archive(sid) });
     return A;

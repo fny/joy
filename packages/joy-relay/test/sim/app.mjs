@@ -17,7 +17,7 @@ export class SimApp {
 
   /** Another actor created a session on the account; this device learns of it. */
   see(sessionId, daemonId, state = 'active') {
-    if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, { daemonId, state, messages: new Map() });
+    if (!this.sessions.has(sessionId)) this.sessions.set(sessionId, { daemonId, state, messages: new Map(), pendingIntent: null });
   }
 
   async spawn(daemonId) {
@@ -29,9 +29,15 @@ export class SimApp {
   }
   async send(sessionId) {
     const s = this.sessions.get(sessionId);
+    // A send whose answer was lost is retried under the SAME intent (the
+    // app's sendKey): the relay replays the accepted message instead of
+    // queueing a second one.
+    const clientIntentId = s.pendingIntent ?? this.intent('m');
+    s.pendingIntent = clientIntentId;
     const r = await this.call('POST', `/joy/v2/sessions/${sessionId}/messages`, {
-      body: { ciphertext: 'm', clientIntentId: this.intent('m') },
+      body: { ciphertext: 'm', clientIntentId },
     });
+    s.pendingIntent = null;
     if (r.status === 202) s.messages.set(r.json.messageId, { turnId: r.json.turnId, status: 'queued' });
     return r;
   }

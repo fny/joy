@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Campaign runner: node test/sim/run.mjs --seed 1 --steps 2000 [--seeds 20] [--crashes] [--daemons 2] [--apps 2] [--hist]
+// Campaign runner: node test/sim/run.mjs --seed 1 --steps 2000 [--seeds 20] [--crashes] [--lost 0.05] [--drop 0.02] [--crash-on-loss 0.3] [--check-every 1] [--daemons 2] [--apps 2] [--hist]
 // Runs each seed to completion or to the first fault, and prints the
 // trace tail of a failing seed. `--hist` prints what each seed did: a
 // histogram of action → answer, and the turns by final state. Exit 1 on
@@ -20,6 +20,10 @@ const nDaemons = Number(opt('daemons', 2));
 const nApps = Number(opt('apps', 2));
 const crashes = flag('crashes');
 const hist = flag('hist');
+const lostResponse = Number(opt('lost', 0));
+const lostRequest = Number(opt('drop', 0));
+const crashOnLoss = Number(opt('crash-on-loss', 0));
+const checkEvery = Number(opt('check-every', 1));
 
 function printHistogram(sim, snap) {
   const h = new Map();
@@ -36,7 +40,7 @@ for (let seed = seed0; seed < seed0 + seeds; seed++) {
   const world = await createWorld({ clock });
   const daemons = Array.from({ length: nDaemons }, (_, k) => new SimDaemon(world, `m${k + 1}`));
   const apps = Array.from({ length: nApps }, (_, k) => new SimApp(world, `d${k + 1}`));
-  const sim = createSim({ seed, world, clock, daemons, apps, crashes });
+  const sim = createSim({ seed, world, clock, daemons, apps, crashes, lostResponse, lostRequest, crashOnLoss, checkEvery });
   const t0 = process.hrtime.bigint();
   try {
     await sim.run(stepsN);
@@ -48,6 +52,7 @@ for (let seed = seed0; seed < seed0 + seeds; seed++) {
   } catch (e) {
     failed++;
     console.log(`seed ${seed}: FAULT at step ${sim.steps.length - 1}: ${e.message}`);
+    console.log(`  reproduce: node test/sim/run.mjs --seed ${seed} --steps ${sim.steps.length} --daemons ${nDaemons} --apps ${nApps}${crashes ? ' --crashes' : ''}${lostResponse ? ` --lost ${lostResponse}` : ''}${lostRequest ? ` --drop ${lostRequest}` : ''}${crashOnLoss ? ` --crash-on-loss ${crashOnLoss}` : ''}`);
     console.log(sim.formatTrace(60));
     if (e.entry) console.log('request:', JSON.stringify(e.entry, null, 1).slice(0, 2000));
   } finally {

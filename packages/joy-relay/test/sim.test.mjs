@@ -11,6 +11,8 @@ import { createWorld } from './sim/world.mjs';
 import { SimDaemon } from './sim/daemon.mjs';
 import { SimApp } from './sim/app.mjs';
 import { createSim } from './sim/sim.mjs';
+import { checkInvariants } from './sim/invariants.mjs';
+import { checkContract } from './sim/conformance.mjs';
 
 // A PGlite boot is ~1.5 s alone and several seconds under the full suite's
 // parallel load; every scenario boots its own relay.
@@ -200,5 +202,139 @@ describe('seeded random runs', () => {
     }
     expect(spines[0]).toEqual(spines[1]);
     expect(spines[0].length).toBe(250);
+  });
+});
+
+describe('invariants and faults', () => {
+  it('the checker is live: a row edited behind the relay\'s back trips the invariant that names it', async () => {
+    const { world, sim, d, app } = await boot(3);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId } = (await app.send(sid)).json;
+      await sim.step(); // one normal step passes the checks
+      await world.db.query(`UPDATE turns SET state = 'terminal' WHERE id = $1`, [turnId]); // terminal without a terminal_state
+      await expect(checkInvariants(world, { daemons: [d], apps: [app] })).rejects.toThrow(/terminal_iff_terminal_state/);
+    } finally { await world.close(); }
+  });
+
+  it('the contract is live: an answer outside an endpoint\'s set is a violation', () => {
+    expect(() => checkContract({ method: 'POST', path: '/joy/v2/daemon/turns/x/start', status: 409, json: { error: 'turn_cancelled' } })).not.toThrow();
+    expect(() => checkContract({ method: 'POST', path: '/joy/v2/daemon/turns/x/start', status: 409, json: { error: 'something_new' } })).toThrow(/contract violation/);
+    expect(() => checkContract({ method: 'POST', path: '/joy/v2/daemon/turns/x/start', status: 418, json: {} })).toThrow(/status 418/);
+  });
+
+  it('a lost answer to the terminal fact is retried and replays; the ledger and the relay agree at the end', async () => {
+    const { world, d, app } = await boot(5);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId } = (await app.send(sid)).json;
+      await d.claim('work'); await d.ack([...d.offers.values()][0]);
+      await d.submit(turnId); await d.start(turnId);
+      world.faults.after = (e) => e.path.endsWith('/facts');   // this one answer is lost
+      await expect(d.finish(turnId)).rejects.toThrow(/response lost/);
+      world.faults.after = null;
+      expect(d.ledger.get(turnId).state).toBe('started');       // the daemon does not know
+      expect((await turnRow(world, turnId)).state).toBe('terminal'); // the relay does
+      await checkInvariants(world, { daemons: [d], apps: [app] }); // and that is a legal state
+      const again = await d.finish(turnId);                      // the retry replays
+      expect(again.status).toBe(200);
+      expect(again.json.replay).toBe(true);
+      expect(d.ledger.get(turnId).state).toBe('terminal');
+    } finally { await world.close(); }
+  });
+
+  it('a lost answer to a send is retried under the same intent and the relay replays the one message', async () => {
+    const { world, d, app } = await boot(6);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      world.faults.after = () => true;
+      await expect(app.send(sid)).rejects.toThrow(/response lost/);
+      world.faults.after = null;
+      const r = await app.send(sid);
+      expect(r.status).toBe(202);
+      const { rows } = await world.db.query(`SELECT count(*)::int AS n FROM turns WHERE session_id = $1`, [sid]);
+      expect(rows[0].n).toBe(1);
+    } finally { await world.close(); }
+  });
+
+  for (const seed of [21, 22, 23]) {
+    it(`seed ${seed}: 500 steps with crashes, lost answers, dropped requests and crash-on-loss — every invariant holds after every step and every answer is in the contract`, async () => {
+      const { world, sim } = await boot(seed, { daemons: 2, apps: 2, crashes: true });
+      const faulty = createSim({ seed, world, clock, daemons: sim.daemons, apps: sim.apps, crashes: true, lostResponse: 0.05, lostRequest: 0.02, crashOnLoss: 0.3 });
+      try {
+        await faulty.run(500);
+        expect(faulty.steps.some((s) => s.status === 'lost')).toBe(true);
+      } catch (e) {
+        throw new Error(`${e.message}\n${faulty.formatTrace(40)}`);
+      } finally { await world.close(); }
+    });
+  }
+});
+
+describe('found by the simulator', () => {
+  it('a requeued orphan adopted after a daemon restart gets its start bookkeeping: command applied, a second turn.started event, a run token', async () => {
+    const { world, d, app } = await boot(9);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId, messageId } = (await app.send(sid)).json;
+      await d.claim('work'); await d.ack([...d.offers.values()][0]);
+      await d.submit(turnId); await d.start(turnId);
+      // First life ends: the machine reboots, the lease lapses, the sweep orphans.
+      d.reboot(); clock.advance(21_000); await world.sweep();
+      // The human retries the message: the same turn is queued again.
+      expect((await app.retry(sid, messageId)).status).toBe(202);
+      expect((await turnRow(world, turnId))).toMatchObject({ state: 'queued', started_at: null, run_token: null });
+      // Second life: claimed, acked, submitted under epoch 2 — then the daemon
+      // dies again before /start, the lease lapses, and a third incarnation
+      // adopts the dispatching turn.
+      await d.restart(); await d.claim('work'); await d.ack([...d.offers.values()][0]); await d.submit(turnId);
+      expect((await turnRow(world, turnId)).state).toBe('dispatching');
+      d.crash(); clock.advance(21_000); await world.sweep();
+      await d.restart();
+      const r = await d.reconcile(turnId);
+      expect(r.json).toMatchObject({ state: 'running', adopted: true });
+      const t = await turnRow(world, turnId);
+      expect(t.run_token).toBeTruthy();
+      expect(t.started_at).toBeTruthy();
+      const { rows: [cmd] } = await world.db.query(`SELECT state, disposition FROM commands WHERE id = $1`, [messageId]);
+      expect(cmd).toMatchObject({ state: 'applied', disposition: 'started' });
+      const { rows: [{ n }] } = await world.db.query(`SELECT count(*)::int AS n FROM session_events WHERE turn_id = $1 AND kind = 'turn.started'`, [turnId]);
+      expect(n).toBe(2);
+      await checkInvariants(world, { daemons: [d], apps: [app] });
+    } finally { await world.close(); }
+  });
+});
+
+describe('found by the simulator: the second life of a requeued turn', () => {
+  it('a retried message whose first run had started can start again — the daemon posts /start under the same runtime event id and the relay records a second turn.started instead of failing on the unique index', async () => {
+    const { world, d, app } = await boot(10);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId, messageId } = (await app.send(sid)).json;
+      await d.claim('work'); await d.ack([...d.offers.values()][0]);
+      await d.submit(turnId); await d.start(turnId);
+      d.reboot(); clock.advance(21_000); await world.sweep();
+      expect((await app.retry(sid, messageId)).status).toBe(202);
+      await d.restart(); await d.claim('work'); await d.ack([...d.offers.values()][0]); await d.submit(turnId);
+      const r = await d.start(turnId);          // the real daemon sends runtimeEventId start:<turnId> here too
+      expect(r.status).toBe(200);
+      expect(r.json.state).toBe('running');
+      const { rows } = await world.db.query(`SELECT runtime_event_id FROM session_events WHERE turn_id = $1 AND kind = 'turn.started' ORDER BY seq`, [turnId]);
+      expect(rows.map((x) => x.runtime_event_id)).toEqual([`start:${turnId}`, null]);
+      expect((await d.finish(turnId)).status).toBe(200);
+      await app.refresh(sid);
+      expect(app.sessions.get(sid).messages.get(messageId).status).toBe('delivered');
+      await checkInvariants(world, { daemons: [d], apps: [app] });
+    } finally { await world.close(); }
   });
 });

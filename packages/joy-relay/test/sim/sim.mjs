@@ -9,7 +9,9 @@
 // dead socket) and on any exception an actor lets out; the trace up to that
 // point is the reproduction, and the seed regenerates it.
 import { createRng } from './prng.mjs';
-import { RelayFault } from './world.mjs';
+import { RelayFault, LostResponse } from './world.mjs';
+import { checkInvariants } from './invariants.mjs';
+import { checkContract } from './conformance.mjs';
 
 /** Relative frequencies by action name. Crashes are opt-in (see `crashes`)
  *  — they are a fault model, not the baseline. */
@@ -25,11 +27,30 @@ export const DEFAULT_WEIGHTS = {
 /** How far one `advance` step moves the clock. 21 s is past the lease TTL. */
 export const ADVANCE_STEPS_MS = [100, 1000, 4000, 21_000];
 
-export function createSim({ seed, world, clock, daemons, apps, weights = {}, crashes = false }) {
+/** Fault model, all opt-in and all off by default:
+ *  - `crashes`      crash/reboot actions in the generator
+ *  - `lostResponse` probability a relay answer never reaches the actor
+ *  - `lostRequest`  probability a request never reaches the relay
+ *  - `crashOnLoss`  probability that a daemon whose answer was lost died
+ *                   in the same instant (the request-in-flight crash window)
+ *  - `invariants`   check the invariants after every step (default on);
+ *                   `checkEvery` thins it for long campaigns */
+export function createSim({
+  seed, world, clock, daemons, apps, weights = {},
+  crashes = false, lostResponse = 0, lostRequest = 0, crashOnLoss = 0,
+  invariants = true, checkEvery = 1,
+}) {
   const rng = createRng(seed);
   const W = { ...DEFAULT_WEIGHTS, ...weights };
   const steps = [];
   let i = 0;
+  const daemonByLabel = new Map(daemons.map((d) => [d.label, d]));
+
+  // Faults are decided by the seed, one draw per request, so a run with the
+  // same seed loses the same answers.
+  const faultRng = createRng(seed ^ 0x5f3759df);
+  world.faults.before = lostRequest > 0 ? () => faultRng.chance(lostRequest) : null;
+  world.faults.after = lostResponse > 0 ? () => faultRng.chance(lostResponse) : null;
 
   function envActions() {
     const A = [
@@ -79,18 +100,37 @@ export function createSim({ seed, world, clock, daemons, apps, weights = {}, cra
   async function step() {
     const a = choose();
     world.beginStep(i);
+    const traceStart = world.trace.length;
     const rec = { i, actor: a.actor, name: a.name, detail: a.detail ?? null, at: clock.now() };
     try {
       const r = await a.run(rng);
       rec.status = r?.status ?? 0;
       rec.code = r?.code ?? null;
     } catch (e) {
-      rec.error = e instanceof RelayFault ? e.message : `${e?.stack ?? e}`;
-      steps.push(rec);
-      throw Object.assign(e instanceof Error ? e : new Error(String(e)), { sim: api });
+      if (e instanceof LostResponse) {
+        // The actor is left exactly as the call found it (its methods only
+        // move state on an answer — except where the real daemon commits
+        // first, and that is modelled the same way). A daemon may also have
+        // died in the same instant.
+        rec.status = 'lost';
+        rec.code = e.phase;
+        const d = daemonByLabel.get(a.actor);
+        if (d && e.phase === 'after' && crashOnLoss > 0 && faultRng.chance(crashOnLoss)) { d.crash(); rec.code = 'after+crash'; }
+      } else {
+        rec.error = e instanceof RelayFault ? e.message : `${e?.stack ?? e}`;
+        steps.push(rec);
+        throw Object.assign(e instanceof Error ? e : new Error(String(e)), { sim: api });
+      }
     }
     steps.push(rec);
     syncDevices();
+    try {
+      for (const entry of world.trace.slice(traceStart)) if (!entry.lost) checkContract(entry);
+      if (invariants && (i % checkEvery === 0 || a.name === 'sweep')) await checkInvariants(world, { daemons, apps }, { afterAction: a.name });
+    } catch (e) {
+      rec.error = e.message;
+      throw Object.assign(e, { sim: api });
+    }
     i++;
     return rec;
   }

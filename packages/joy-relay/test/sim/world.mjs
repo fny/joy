@@ -24,6 +24,13 @@ export class RelayFault extends Error {
   constructor(message, entry) { super(message); this.entry = entry; }
 }
 
+/** The network ate it. `phase` says whether the relay ever saw the request
+ *  ('after': it did and committed; the answer was lost) or not ('before').
+ *  The actor learns nothing either way — that is the point. */
+export class LostResponse extends Error {
+  constructor(entry, phase) { super(`${phase === 'before' ? 'request lost' : 'response lost'}: ${entry.method} ${entry.path}`); this.entry = entry; this.phase = phase; }
+}
+
 export async function createWorld({ clock }) {
   const db = await openDb(':memory:');
   const notify = createNotify();
@@ -41,14 +48,16 @@ export async function createWorld({ clock }) {
 
   const trace = [];
   let step = 0;
-  /** Where a fault-injection hook will sit (step 3): a function that sees the
-   *  request before it goes out and the response before the actor does. */
+  /** Fault seams: `before(entry)` returning true drops the request on the
+   *  way out (the relay never sees it); `after(entry)` returning true drops
+   *  the answer on the way back (the relay committed, the actor never
+   *  learns). The engine decides, from its seed. */
   const faults = { before: null, after: null };
 
   async function call(actor, method, path, { body, token = 'app-token', headers = {} } = {}) {
     clock.advance(1);
     const entry = { step, actor, method, path, body: body ?? null, at: clock.now() };
-    if (faults.before) await faults.before(entry);
+    if (faults.before && faults.before(entry)) { entry.lost = 'before'; trace.push(entry); throw new LostResponse(entry, 'before'); }
     let r;
     try {
       r = await fetch(base + path, {
@@ -60,7 +69,7 @@ export async function createWorld({ clock }) {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (e) {
-      entry.error = String(e?.message ?? e);
+      entry.error = `${e?.message ?? e}${e?.cause ? ` (${e.cause.code ?? ''} ${e.cause.message ?? e.cause})` : ''}`;
       trace.push(entry);
       throw new RelayFault(`transport failure on ${method} ${path}: ${entry.error}`, entry);
     }
@@ -71,7 +80,7 @@ export async function createWorld({ clock }) {
     entry.json = json;
     trace.push(entry);
     if (r.status >= 500) throw new RelayFault(`relay answered ${r.status} on ${method} ${path}: ${text.slice(0, 300)}`, entry);
-    if (faults.after) await faults.after(entry);
+    if (faults.after && faults.after(entry)) { entry.lost = 'after'; throw new LostResponse(entry, 'after'); }
     return { status: r.status, json, code: typeof json?.error === 'string' ? json.error : json?.error?.error ?? null };
   }
 
