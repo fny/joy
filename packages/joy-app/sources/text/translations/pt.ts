@@ -692,6 +692,8 @@ export const pt: TranslationStructure = {
         pinned: 'Fixadas',
         automations: 'Automações',
         automationFailures: 'Falhas de automação',
+        showAutomations: 'Mostrar automações',
+        hideAutomations: 'Ocultar automações',
         showHeadless: 'Mostrar headless',
         hideHeadless: 'Ocultar headless',
         sortByProject: 'por projeto',

@@ -709,6 +709,8 @@ export const ru: TranslationStructure = {
         pinned: 'Закреплённые',
         automations: 'Автоматизации',
         automationFailures: 'Сбои автоматизаций',
+        showAutomations: 'Показать автоматизации',
+        hideAutomations: 'Скрыть автоматизации',
         showHeadless: 'Показать фоновые',
         hideHeadless: 'Скрыть фоновые',
         sortByProject: 'по проекту',

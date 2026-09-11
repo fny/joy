@@ -140,94 +140,112 @@ describe('partitionForList — the two ways pinning silently did nothing', () =>
         expect(ids(p.active)).toEqual(['b']); // and it is not in both
     });
 
-    it('pins with "hide archived" on, where there is nothing inactive to pin from', () => {
-        const p = part({
-            sessions: [s({ id: 'a', active: true }), s({ id: 'old' })],
-            pinned: ['a'],
-            hideInactive: true,
-        });
+    it('pins a RUNNING session even when everything else is archived', () => {
+        const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'old' })], pinned: ['a'] });
         expect(ids(p.pins)).toEqual(['a']);
-        expect(ids(p.rest)).toEqual([]); // the archived one is still hidden
+        expect(ids(p.archived)).toEqual(['old']);
     });
 
-    it('keeps a pinned session even when it is archived and archived are hidden', () => {
-        const p = part({ sessions: [s({ id: 'old' })], pinned: ['old'], hideInactive: true });
+    it('a pin outranks being archived — it is still a pin', () => {
+        const p = part({ sessions: [s({ id: 'old' })], pinned: ['old'] });
         expect(ids(p.pins)).toEqual(['old']);
+        expect(ids(p.archived)).toEqual([]);
     });
 
     it('places every session exactly once', () => {
         const sessions = [s({ id: 'a', active: true }), s({ id: 'b' }), s({ id: 'c', active: true })];
         const p = part({ sessions, pinned: ['c'] });
-        const seen = [...ids(p.pins), ...ids(p.active), ...ids(p.rest)];
+        const seen = [...ids(p.pins), ...ids(p.active), ...ids(p.archived), ...ids(p.rest)];
         expect(seen.slice().sort()).toEqual(['a', 'b', 'c']);
         expect(new Set(seen).size).toBe(seen.length);
     });
 
-    it('counts what "hide archived" is hiding, so the toggle can be offered', () => {
+    it('collects what the archived toggle reveals, whether or not it is showing', () => {
+        // The partition no longer hides anything: what is DRAWN is the
+        // caller's decision, because each kind now has its own divider and
+        // its rows belong under it.
         const sessions = [s({ id: 'a', active: true }), s({ id: 'b' }), s({ id: 'c' })];
-        expect(part({ sessions, hideInactive: true }).archived).toBe(2);
-        expect(part({ sessions, hideInactive: false }).archived).toBe(2);
-        expect(part({ sessions: [s({ id: 'a', active: true })] }).archived).toBe(0);
+        expect(ids(part({ sessions }).archived)).toEqual(['b', 'c']);
+        expect(part({ sessions: [s({ id: 'a', active: true })] }).archived).toEqual([]);
     });
 
     it('changes nothing when nothing is pinned', () => {
         const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'b' })] });
         expect(ids(p.pins)).toEqual([]);
         expect(ids(p.active)).toEqual(['a']);
-        expect(ids(p.rest)).toEqual(['b']);
+        expect(ids(p.archived)).toEqual(['b']);
     });
 });
 
-describe('automation runs are placed before everything else', () => {
+describe('the toggled kinds are partitioned out BEFORE the active block', () => {
     const part = (over: Partial<Parameters<typeof partitionForList>[0]>) =>
-        partitionForList({ sessions: [], pinned: [], hideInactive: false, ...over });
+        partitionForList({ sessions: [], pinned: [], ...over });
     const ids = (xs: ListSession[]) => xs.map((x) => x.id);
 
-    it('a running run goes to its own bucket, not the active block', () => {
+    /**
+     * The rule this function exists for. Archived, automation and headless
+     * sessions each have a divider of their own near the BOTTOM of the list,
+     * and their rows belong under it. Before this they were filters: flipping
+     * one let its sessions appear wherever they would normally have gone —
+     * including inside the active block — so a control at the bottom of the
+     * list changed what was at the top of it.
+     */
+    it('an ACTIVE automation run never reaches the active block', () => {
         const p = part({ sessions: [s({ id: 'run', active: true, automation: 'running' }), s({ id: 'ordinary', active: true })] });
         expect(ids(p.automationsRunning)).toEqual(['run']);
         expect(ids(p.active)).toEqual(['ordinary']);
     });
 
-    it('a failed run goes to the failures bucket', () => {
-        const p = part({ sessions: [s({ id: 'broke', automation: 'failed' })] });
+    it('an ACTIVE headless session never reaches the active block', () => {
+        const p = part({ sessions: [s({ id: 'quiet', active: true, headless: true }), s({ id: 'ordinary', active: true })] });
+        expect(ids(p.headless)).toEqual(['quiet']);
+        expect(ids(p.active)).toEqual(['ordinary']);
+    });
+
+    it('archived rows are their own bucket, not machine history mixed in above', () => {
+        const p = part({ sessions: [s({ id: 'old' }), s({ id: 'live', active: true })] });
+        expect(ids(p.archived)).toEqual(['old']);
+        expect(ids(p.active)).toEqual(['live']);
+    });
+
+    it('a failed run outranks a pin and does not sit in the active block either', () => {
+        const p = part({ sessions: [s({ id: 'broke', active: true, automation: 'failed' })], pinned: ['broke'] });
         expect(ids(p.automationsFailed)).toEqual(['broke']);
-        expect(ids(p.rest)).toEqual([]);
-    });
-
-    it('outranks a pin — a run appears ONCE, and its section is above Pinned', () => {
-        const p = part({ sessions: [s({ id: 'run', automation: 'running' })], pinned: ['run'] });
-        expect(ids(p.automationsRunning)).toEqual(['run']);
         expect(ids(p.pins)).toEqual([]);
+        expect(ids(p.active)).toEqual([]);
     });
 
-    it('survives hide-archived: an idle run is still a run, not archived history', () => {
-        const p = part({
-            sessions: [s({ id: 'run', automation: 'running' }), s({ id: 'old' })],
-            hideInactive: true,
-        });
+    it('a headless run that is ALSO an automation is an automation — one bucket, not two', () => {
+        const p = part({ sessions: [s({ id: 'run', active: true, automation: 'running', headless: true })] });
         expect(ids(p.automationsRunning)).toEqual(['run']);
-        expect(ids(p.rest)).toEqual([]);
+        expect(ids(p.headless)).toEqual([]);
     });
 
-    it('places every session exactly once across all five buckets', () => {
+    it('places every session exactly once across all six buckets', () => {
         const sessions = [
             s({ id: 'failed', automation: 'failed' }),
             s({ id: 'running', automation: 'running' }),
+            s({ id: 'quiet', headless: true }),
             s({ id: 'pinned' }),
             s({ id: 'active', active: true }),
             s({ id: 'history' }),
         ];
         const p = part({ sessions, pinned: ['pinned'] });
-        const seen = [...ids(p.automationsFailed), ...ids(p.automationsRunning), ...ids(p.pins), ...ids(p.active), ...ids(p.rest)];
-        expect(seen.slice().sort()).toEqual(['active', 'failed', 'history', 'pinned', 'running']);
+        const seen = [
+            ...ids(p.automationsFailed), ...ids(p.automationsRunning), ...ids(p.headless),
+            ...ids(p.pins), ...ids(p.active), ...ids(p.archived), ...ids(p.rest),
+        ];
+        expect(seen.slice().sort()).toEqual(['active', 'failed', 'history', 'pinned', 'quiet', 'running']);
         expect(new Set(seen).size).toBe(seen.length);
     });
 
-    it('changes nothing when no session is an automation run', () => {
+    it('an ordinary list is unchanged — nothing is diverted that should not be', () => {
         const p = part({ sessions: [s({ id: 'a', active: true }), s({ id: 'b' })] });
         expect(p.automationsRunning).toEqual([]);
         expect(p.automationsFailed).toEqual([]);
+        expect(p.headless).toEqual([]);
+        expect(ids(p.active)).toEqual(['a']);
+        expect(ids(p.archived)).toEqual(['b']);
     });
 });
 

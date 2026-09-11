@@ -37,6 +37,8 @@ export interface ListSession {
     hasUnread?: boolean;
     /** An automation run: 'running' while it works, 'failed' until dismissed. */
     automation?: 'failed' | 'running' | null;
+    /** `joy new --headless` and currently keeping quiet. */
+    headless?: boolean;
 }
 
 /** How the pinned section is ordered. */
@@ -105,31 +107,40 @@ export function pinnedStateRank(state: string): number {
 export function partitionForList<T extends ListSession>(input: {
     sessions: T[];
     pinned: string[];
-    /** "Hide archived": drop everything that is not in the active block. */
-    hideInactive: boolean;
-}): { pins: T[]; active: T[]; rest: T[]; archived: number; automationsRunning: T[]; automationsFailed: T[] } {
+    /** Kept for the caller's convenience; the partition no longer drops
+     *  anything. What is SHOWN is the caller's business now — each kind has
+     *  its own toggle and its own place, so hiding is a rendering decision
+     *  rather than a partitioning one. */
+    hideInactive?: boolean;
+}): {
+    pins: T[]; active: T[]; rest: T[];
+    archived: T[]; automationsRunning: T[]; automationsFailed: T[]; headless: T[];
+} {
     const isPinned = new Set(input.pinned);
     const pins: T[] = [];
     const active: T[] = [];
     const rest: T[] = [];
+    const archived: T[] = [];
     const automationsRunning: T[] = [];
     const automationsFailed: T[] = [];
-    let archived = 0;
+    const headless: T[] = [];
     for (const s of input.sessions) {
-        // Automation runs are placed FIRST, ahead of pins and the active
-        // block, because a run appears in exactly ONE place: one that also
-        // sat in the active block would be in the list twice while working,
-        // which is the thing the pinned rule already refuses.
+        // Order matters, and it is the ONE rule this function exists for:
+        // every kind that has a section of its own is taken out BEFORE the
+        // active block is filled. Revealing archived, automation or headless
+        // sessions must never make rows appear in the block at the top — a
+        // toggle near the bottom of the list that changes what is at the top
+        // of it is the behaviour this replaced.
         if (s.automation === 'failed') { automationsFailed.push(s); continue; }
         if (s.automation === 'running') { automationsRunning.push(s); continue; }
+        if (s.headless) { headless.push(s); continue; }
         if (isPinned.has(s.id)) { pins.push(s); continue; }
-        if (s.active) { active.push(s); continue; }
-        archived++;
-        if (!input.hideInactive) rest.push(s);
+        if (!s.active) { archived.push(s); continue; }
+        active.push(s);
     }
-    // `archived` is counted whether or not they were kept: the caller needs to
-    // know they exist in order to offer the toggle that brings them back.
-    return { pins, active, rest, archived, automationsRunning, automationsFailed };
+    // `rest` is what the machine sections hold: the active block's own rows
+    // stay where they are, and everything inactive belongs under its toggle.
+    return { pins, active, rest, archived, automationsRunning, automationsFailed, headless };
 }
 
 export interface ListSection<T extends ListSession = ListSession> {

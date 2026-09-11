@@ -31,6 +31,7 @@ export function useSessionListV2(): SessionListViewItem[] | null {
     const hideInactive = useSetting('hideInactiveSessions');
     const pinnedSort = useLocalSetting('pinnedSort');
     const showHeadless = useLocalSetting('showHeadlessSessions');
+    const showAutomations = useLocalSetting('showAutomationSessions');
 
     const sessions = storage(useShallow((state) => (state.isDataReady ? state.sessions : null)));
     const unread = storage(useShallow((state) => state.unreadSessionIds));
@@ -39,34 +40,28 @@ export function useSessionListV2(): SessionListViewItem[] | null {
     return React.useMemo(() => {
         if (!enabled || !sessions) return null;
 
-        // `joy new --headless`: out of the list until it needs a human, or
-        // until you ask to see them (the toggle below the archive one).
-        let headlessHidden = 0;
-        const all = Object.values(sessions).filter((s) => {
-            if (!hiddenFromList(liveFacts(s))) return true;
-            headlessHidden++;
-            return showHeadless;
+        const all = Object.values(sessions);
+        const rows: Array<Row & { session: (typeof all)[number] }> = all.map((s) => {
+            const facts = liveFacts(s);
+            return {
+                id: s.id,
+                state: sessionRowDataFor(s, unread).state,
+                machineId: s.metadata?.machineId ?? null,
+                activeAt: s.activeAt,
+                createdAt: s.createdAt,
+                active: isSessionInActiveGroup(s),
+                automation: automationPlacement(facts),
+                headless: hiddenFromList(facts),
+                // The project as the row shows it — the pinned sort key, so
+                // the order matches what you are reading rather than a hidden
+                // field.
+                project: projectLabel(s.metadata?.path ?? null),
+                hasUnread: unread.has(s.id),
+                session: s,
+            };
         });
-
-        // A pin outranks the active block, so a pinned session sits in Pinned
-        // whatever it is doing — see partitionForList, which exists because
-        // getting this wrong made pinning silently do nothing.
-        const rows: Array<Row & { session: (typeof all)[number] }> = all.map((s) => ({
-            id: s.id,
-            state: sessionRowDataFor(s, unread).state,
-            machineId: s.metadata?.machineId ?? null,
-            activeAt: s.activeAt,
-            createdAt: s.createdAt,
-            active: isSessionInActiveGroup(s),
-            automation: automationPlacement(liveFacts(s)),
-            // The project as the row shows it — the pinned sort key, so the
-            // order matches what you are reading rather than a hidden field.
-            project: projectLabel(s.metadata?.path ?? null),
-            hasUnread: unread.has(s.id),
-            session: s,
-        }));
-        const { pins, active, rest, archived, automationsRunning, automationsFailed } =
-            partitionForList({ sessions: rows, pinned, hideInactive });
+        const { pins, active, archived, automationsRunning, automationsFailed, headless } =
+            partitionForList({ sessions: rows, pinned });
 
         const machineName = (id: string | null): string => {
             if (!id) return t('sidebar.noMachine');
@@ -75,40 +70,16 @@ export function useSessionListV2(): SessionListViewItem[] | null {
         };
 
         const items: SessionListViewItem[] = [];
-        const emitRows = (rowsIn: Array<Row & { session: (typeof all)[number] }>) => {
+        const emitRows = (rowsIn: typeof rows, compact = false) => {
             for (const row of rowsIn) {
                 const session = sessions[row.id];
-                if (session) items.push({ type: 'session', session: sessionRowDataFor(session, unread) });
-            }
-        };
-        const emit = (section: ListSection<Row>) => {
-            items.push({
-                type: 'header',
-                title: section.kind === 'pinned' ? t('sidebar.pinned') : machineName(section.machineId),
-                // Pinned is a label, not a control: no key means no chevron.
-                sectionKey: section.kind === 'pinned' ? undefined : section.key,
-                sortMode: section.kind === 'pinned' ? pinnedSort : undefined,
-                count: section.sessions.length,
-                collapsed: section.collapsed,
-                worstState: section.collapsed ? section.worstState : null,
-            });
-            if (section.collapsed) return;
-            for (const row of section.sessions) {
-                const session = sessions[row.id];
-                if (!session) continue;
-                items.push({
-                    type: 'session',
-                    session: sessionRowDataFor(session, unread),
-                    // Pins are one-liners: see the note on SessionListViewItem.
-                    compact: section.kind === 'pinned',
-                });
+                if (session) items.push({ type: 'session', session: sessionRowDataFor(session, unread), compact });
             }
         };
 
         // A failed automation outranks even the section you built by hand.
-        // Like Pinned it gets no chevron: it is a statement, not a control,
-        // and it stays until dismissed or headless hiding would reclaim it
-        // unseen — which is the one thing unattended work must never do.
+        // Not a toggle and not collapsible: it is a statement, and it stays
+        // until dismissed rather than until something reclaims it unseen.
         if (automationsFailed.length > 0) {
             items.push({
                 type: 'header',
@@ -117,16 +88,23 @@ export function useSessionListV2(): SessionListViewItem[] | null {
                 collapsed: false,
                 worstState: null,
             });
-            emitRows(automationsFailed as Array<Row & { session: (typeof all)[number] }>);
+            emitRows(automationsFailed);
         }
 
-        // Pinned goes ABOVE the active block, not below it. A pin is the one
-        // thing in this list whose position you chose yourself; anything that
-        // can push it down — and the active block grows and shrinks on its
-        // own — means the pin no longer answers "where is it".
-        const sections = buildListLayout({ sessions: [...pins, ...rest], pinned, collapsed, pinnedSort });
-        for (const section of sections) {
-            if (section.kind === 'pinned') emit(section);
+        // Pinned, above the active block: a pin is the one row whose position
+        // you chose yourself, and the active block grows and shrinks on its own.
+        if (pins.length > 0) {
+            const sorted = buildListLayout({ sessions: pins, pinned, collapsed, pinnedSort })
+                .find((x) => x.kind === 'pinned');
+            items.push({
+                type: 'header',
+                title: t('sidebar.pinned'),
+                sortMode: pinnedSort,
+                count: pins.length,
+                collapsed: false,
+                worstState: null,
+            });
+            emitRows((sorted?.sessions ?? pins) as typeof rows, true);
         }
 
         if (active.length > 0) {
@@ -138,36 +116,46 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             });
         }
 
-        // Running automations: ambient, so collapsed by default. The header
-        // still carries a count and a worst-state dot, which is how a run that
-        // hit blocked:login is visible without opening anything.
-        if (automationsRunning.length > 0) {
-            const collapsedHere = collapsed.indexOf('automations') !== -1;
-            let worst: string | null = null;
-            for (const r of automationsRunning) {
-                if (worst === null || stateUrgency(r.state) > stateUrgency(worst)) worst = r.state;
+        // ── the three toggles, each ABOVE the rows it reveals ────────────────
+        //
+        // Every one of these is a divider whose contents sit directly beneath
+        // it. They used to be filters: flipping one let its sessions appear
+        // wherever they would normally have gone — including inside the active
+        // block at the top — so a control near the bottom of the list changed
+        // what was at the top of it. Now each kind is partitioned out before
+        // the active block is filled, and a toggle only decides whether the
+        // rows under its own header are drawn.
+        const toggle = (
+            key: 'archived' | 'automations' | 'headless',
+            showing: boolean,
+            title: string,
+            rowsIn: typeof rows,
+            byMachine = false,
+        ) => {
+            if (rowsIn.length === 0) return;
+            items.push({ type: 'section-toggle', key, hidden: !showing, title, count: rowsIn.length });
+            if (!showing) return;
+            if (!byMachine) { emitRows(rowsIn); return; }
+            // Grouped by machine UNDER the divider — the collapsible machine
+            // sections, kept, but now inside the thing that reveals them
+            // rather than sitting above it.
+            for (const section of buildListLayout({ sessions: rowsIn, pinned: [], collapsed })) {
+                items.push({
+                    type: 'header',
+                    title: machineName(section.machineId),
+                    sectionKey: section.key,
+                    count: section.sessions.length,
+                    collapsed: section.collapsed,
+                    worstState: section.collapsed ? section.worstState : null,
+                });
+                if (!section.collapsed) emitRows(section.sessions as typeof rows);
             }
-            items.push({
-                type: 'header',
-                title: t('sidebar.automations'),
-                sectionKey: 'automations',
-                count: automationsRunning.length,
-                collapsed: collapsedHere,
-                worstState: collapsedHere ? worst : null,
-            });
-            if (!collapsedHere) emitRows(automationsRunning as Array<Row & { session: (typeof all)[number] }>);
-        }
+        };
 
-        // The archive toggle, exactly where the old list puts it. Without it
-        // "hide archived" is a one-way door: it empties every machine section,
-        // and nothing in the list can bring them back.
-        if (archived > 0) items.push({ type: 'archive-toggle', hidden: hideInactive });
-        // Emitted while they are shown too, or there is no way back.
-        if (headlessHidden > 0) items.push({ type: 'headless-toggle', hidden: !showHeadless });
+        toggle('archived', !hideInactive, hideInactive ? t('sidebar.showArchived') : t('sidebar.hideArchived'), archived, true);
+        toggle('automations', showAutomations, showAutomations ? t('sidebar.hideAutomations') : t('sidebar.showAutomations'), automationsRunning);
+        toggle('headless', showHeadless, showHeadless ? t('sidebar.hideHeadless') : t('sidebar.showHeadless'), headless);
 
-        for (const section of sections) {
-            if (section.kind !== 'pinned') emit(section);
-        }
         return items;
-    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive, pinnedSort, showHeadless]);
+    }, [enabled, sessions, unread, machines, pinned, collapsed, hideInactive, pinnedSort, showHeadless, showAutomations]);
 }

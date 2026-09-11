@@ -187,6 +187,14 @@ export type SessionListViewItem =
     /** Shown only when there is at least one headless session to reveal —
      *  the same rule the archive toggle follows. */
     | { type: 'headless-toggle'; hidden: boolean }
+    /**
+     * A divider that reveals its OWN rows directly beneath it: archived,
+     * automations, headless. These used to be filters, and flipping one let
+     * its sessions appear wherever they would normally have gone — including
+     * inside the active block — so a control near the bottom of the list
+     * changed what was at the top of it.
+     */
+    | { type: 'section-toggle'; key: 'archived' | 'automations' | 'headless'; hidden: boolean; title: string; count: number }
     | { type: 'project-group'; displayPath: string; machine: Machine }
     /**
      * A session row. `compact` is the one-line form used for pins: a pinned

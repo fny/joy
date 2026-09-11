@@ -742,6 +742,8 @@ export const en = {
         pinned: 'Pinned',
         automations: 'Automations',
         automationFailures: 'Automation failures',
+        showAutomations: 'Show automations',
+        hideAutomations: 'Hide automations',
         showHeadless: 'Show headless',
         hideHeadless: 'Hide headless',
         sortByProject: 'by project',

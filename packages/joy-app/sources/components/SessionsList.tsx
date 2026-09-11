@@ -284,6 +284,10 @@ export function SessionsList() {
     const toggleHeadless = React.useCallback(() => {
         setShowHeadless(!showHeadless);
     }, [showHeadless, setShowHeadless]);
+    const [showAutomations, setShowAutomations] = useLocalSettingMutable('showAutomationSessions');
+    const toggleAutomations = React.useCallback(() => {
+        setShowAutomations(!showAutomations);
+    }, [showAutomations, setShowAutomations]);
     const [pinnedSort, setPinnedSort] = useLocalSettingMutable('pinnedSort');
     const togglePinnedSort = React.useCallback(() => {
         setPinnedSort(pinnedSort === 'project' ? 'state' : 'project');
@@ -316,6 +320,7 @@ export function SessionsList() {
             case 'active-sessions': return 'active-sessions';
             case 'archive-toggle': return 'archive-toggle';
             case 'headless-toggle': return 'headless-toggle';
+            case 'section-toggle': return `section-toggle-${item.key}`;
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
         }
@@ -379,6 +384,24 @@ export function SessionsList() {
                 );
             }
 
+            case 'section-toggle': {
+                // A divider with its OWN rows beneath it. The count is on the
+                // header because a group that does not say how much is inside
+                // is concealing rather than compressing.
+                const onPress = item.key === 'archived' ? toggleArchived
+                    : item.key === 'automations' ? toggleAutomations
+                        : toggleHeadless;
+                return (
+                    <Pressable style={styles.archiveToggle} onPress={onPress}>
+                        <View style={styles.archiveToggleLine} />
+                        <Text style={styles.archiveToggleText}>
+                            {item.title}{item.count > 0 ? `  ${item.count}` : ''}
+                        </Text>
+                        <View style={styles.archiveToggleLine} />
+                    </Pressable>
+                );
+            }
+
             case 'headless-toggle':
                 // Same control as the archive toggle, and it appears on the
                 // same rule: only when there is something to reveal. Headless
@@ -432,7 +455,7 @@ export function SessionsList() {
                 const nextItem = data && index < data.length - 1 ? data[index + 1] : null;
 
                 const isFirst = prevItem?.type === 'header';
-                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle' || nextItem?.type === 'headless-toggle';
+                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle' || nextItem?.type === 'headless-toggle' || nextItem?.type === 'section-toggle';
                 const isSingle = isFirst && isLast;
                 const selected = item.session.id === selectedSessionId;
 
@@ -450,7 +473,7 @@ export function SessionsList() {
         // toggleSection and togglePinnedSort close over the CURRENT setting
         // value, so leaving them out froze the first closure: the first press
         // worked and every one after it wrote a stale list back.
-    }, [selectedSessionId, data, toggleArchived, toggleHeadless, toggleSection, togglePinnedSort]);
+    }, [selectedSessionId, data, toggleArchived, toggleHeadless, toggleAutomations, toggleSection, togglePinnedSort]);
 
 
     // Remove this section as we'll use FlatList for all items now

@@ -43,6 +43,7 @@ export const LocalSettingsSchema = z.object({
     pinnedAvatarSize: z.number().describe('Pinned-row identicon size in px, clamped to [8, 24]'),
     pinnedAvatarShape: z.enum(['match', 'circles', 'squares']).catch('match').describe("Pinned-row identicon shape; 'match' follows Appearance → Identicons"),
     showHeadlessSessions: z.boolean().describe('Show `joy new --headless` sessions in the list, the way Show archived reveals archived ones'),
+    showAutomationSessions: z.boolean().describe('Show running automation sessions under their own divider in the list'),
 });
 
 //
@@ -89,6 +90,7 @@ export const localSettingsDefaults: LocalSettings = {
     pinnedAvatarSize: 16,
     pinnedAvatarShape: 'match' as const,
     showHeadlessSessions: false,
+    showAutomationSessions: false,
 };
 Object.freeze(localSettingsDefaults);
 
