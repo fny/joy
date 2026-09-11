@@ -324,6 +324,7 @@ export const zhHant: TranslationStructure = {
         logoutFailed: '無法從此裝置移除已儲存的登入資訊。請重試。',
         syncStartFailedReload: '應用程式無法開始同步。請重新載入應用程式後重試。',
         answerKeptAsDraft: '無法傳送回答。已在下方保留為草稿。',
+        spawnAlreadyOpen: '該對話已在這台機器的另一個工作階段中開啟。',
         spawnDidNotStart: '工作階段已被接受，但未能及時啟動。請檢查該機器上的守護程式。',
         historyPageFailed: '無法載入更早的訊息。',
     },
@@ -807,6 +808,13 @@ export const zhHant: TranslationStructure = {
     },
 
     files: {
+        newFile: '新增檔案',
+        newFileInProject: '取個名字——也可以用 src/notes.md 這樣的路徑。',
+        newFileInSession: '取個名字。它會放在此工作階段自己的資料夾中。',
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} 已存在。`,
+        discardEdits: '捨棄變更？',
+        discardEditsMessage: '你對此檔案的修改將會遺失。',
         sessionFiles: '工作階段檔案',
         noSessionFiles: '尚無上傳或圖片。附加到訊息的檔案會放在這裡，不在專案中。',
         sessionFilesFooter: '你傳送的檔案與代理顯示的圖片——保存在專案之外，位於該工作階段所在機器上的資料夾中。',

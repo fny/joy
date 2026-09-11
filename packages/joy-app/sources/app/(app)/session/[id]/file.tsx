@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { decodePathParam } from '@/utils/pathParam';
-import { View, ScrollView, ActivityIndicator, Platform, Pressable } from 'react-native';
+import { View, ScrollView, ActivityIndicator, Platform, Pressable, TextInput
+} from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { isDemoSession } from '@/sync/demoSession';
 import { Text } from '@/components/StyledText';
@@ -27,6 +28,8 @@ import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
 import { downloadFile } from '@/utils/downloadFile';
 import { stripUploadPrefix } from '@/sync/attachmentNames';
+import { encodeStringToBase64, computeSHA256 } from '@/utils/fileEdit';
+import { sessionWriteFile } from '@/sync/ops';
 
 type DisplayMode = 'file' | 'diff' | 'rendered';
 
@@ -212,6 +215,74 @@ export default React.memo(function FileScreen() {
         }
     }, [router]);
     const [deleting, setDeleting] = React.useState(false);
+
+    // Editing, the same contract as the desktop panel: the editor is seeded
+    // from the version on screen (the baseline), the save carries that
+    // version's hash, and a disk that moved under us asks before overwriting.
+    const [editing, setEditing] = React.useState(false);
+    const [editText, setEditText] = React.useState('');
+    const [baseline, setBaseline] = React.useState<string | null>(null);
+    const [saving, setSaving] = React.useState(false);
+    const canEdit = canRead && !isBinary && !imageBase64 && fileText !== null;
+    const dirty = editing && baseline !== null && editText !== baseline;
+
+    const startEdit = React.useCallback(() => {
+        setEditText(fileText ?? '');
+        setBaseline(fileText ?? '');
+        setEditing(true);
+    }, [fileText]);
+
+    // A file created from the files screen opens straight in the editor.
+    const autoEditedRef = React.useRef(false);
+    React.useEffect(() => {
+        if (autoEditedRef.current || searchParams.edit !== '1' || !canEdit || editing) return;
+        autoEditedRef.current = true;
+        startEdit();
+    }, [searchParams.edit, canEdit, editing, startEdit]);
+
+    const cancelEdit = React.useCallback(async () => {
+        if (dirty && !(await Modal.confirm(t('files.discardEdits'), t('files.discardEditsMessage'), { confirmText: t('common.ok'), destructive: true }))) return;
+        setEditing(false);
+    }, [dirty]);
+
+    const writeEdit = React.useCallback(async (expectedHash: string | undefined) => {
+        const content = editText;
+        const res = await sessionWriteFile(sessionId!, filePath, encodeStringToBase64(content), expectedHash, 'base64');
+        if (res.success && fileSpec) {
+            // The saved version is authoritative: it supersedes any read that
+            // began before the write (#325).
+            const ticket = resources.beginMutation(fileSpec.key);
+            resources.setData<FileContents>(fileSpec.key, { base64: encodeStringToBase64(content), content, isBinary: false }, { ticket, version: res.hash });
+            setBaseline(content);
+            setEditing(false);
+        }
+        return res;
+    }, [editText, sessionId, filePath, fileSpec]);
+
+    const saveEdit = React.useCallback(async () => {
+        if (saving || baseline === null) return;
+        setSaving(true);
+        try {
+            const res = await writeEdit(await computeSHA256(baseline));
+            if (res.success) return;
+            if (/hash|mismatch/i.test(res.error ?? '')) {
+                // Someone (the agent) changed the file since it was opened.
+                const overwrite = await Modal.confirm(t('files.fileConflict'), t('files.fileConflictDescription'), { confirmText: t('files.overwrite'), destructive: true });
+                if (!overwrite) {
+                    if (fileSpec) void resources.refresh(fileSpec);
+                    return;
+                }
+                const entry = fileSpec ? await resources.refresh(fileSpec) : null;
+                const current = entry?.data && !entry.data.isBinary ? entry.data.content ?? '' : null;
+                const forced = await writeEdit(current !== null ? await computeSHA256(current) : undefined);
+                if (!forced.success) Modal.alert(t('common.error'), forced.error || t('files.failedToSave'));
+                return;
+            }
+            Modal.alert(t('common.error'), res.error || t('files.failedToSave'));
+        } finally {
+            setSaving(false);
+        }
+    }, [saving, baseline, writeEdit, fileSpec]);
 
     // Delete the file on the machine. Irreversible (the daemon unlinks it — no
     // trash), so it always confirms first and names the file in the prompt.
@@ -480,6 +551,21 @@ export default React.memo(function FileScreen() {
                 <Pressable onPress={() => setWrap(!wrap)} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="switch" accessibilityState={{ checked: wrap }} accessibilityLabel="Toggle word wrap">
                     <Ionicons name={wrap ? 'return-down-forward' : 'arrow-forward'} size={18} color={wrap ? theme.colors.textLink : theme.colors.textSecondary} />
                 </Pressable>
+                {canEdit && !editing && (
+                    <Pressable onPress={startEdit} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="button" accessibilityLabel={t('files.editFile')}>
+                        <Ionicons name="create-outline" size={17} color={theme.colors.textSecondary} />
+                    </Pressable>
+                )}
+                {editing && (
+                    <>
+                        <Pressable onPress={() => { void cancelEdit(); }} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="button" accessibilityLabel={t('common.cancel')}>
+                            <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
+                        </Pressable>
+                        <Pressable onPress={() => { void saveEdit(); }} disabled={!dirty || saving} hitSlop={8} style={styles.ctrlBtn} accessibilityRole="button" accessibilityLabel={t('files.saveFile')}>
+                            <Ionicons name="checkmark" size={19} color={!dirty || saving ? theme.colors.textSecondary : theme.colors.textLink} />
+                        </Pressable>
+                    </>
+                )}
                 <Pressable
                     onPress={() => copyContent(displayMode === 'diff' && diffContent ? diffContent : fileText)}
                     onLongPress={() => openTextSelection(displayMode === 'diff' && diffContent ? diffContent : fileText)}
@@ -594,7 +680,18 @@ export default React.memo(function FileScreen() {
             )}
 
             {/* Content display */}
-            {displayMode === 'rendered' ? (
+            {editing ? (
+                <TextInput
+                    value={editText}
+                    onChangeText={setEditText}
+                    multiline
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    spellCheck={false}
+                    editable={!saving}
+                    style={[styles.editor, { color: theme.colors.text, backgroundColor: theme.colors.surface, fontSize: fontSize ?? 14 }]}
+                />
+            ) : displayMode === 'rendered' ? (
                 <View style={{ flex: 1 }}>
                     <FileRenderedView filePath={filePath} content={fileText ?? undefined} base64={imageBase64} />
                 </View>
@@ -647,6 +744,12 @@ export default React.memo(function FileScreen() {
 });
 
 const styles = StyleSheet.create((theme) => ({
+    editor: {
+        flex: 1,
+        padding: 16,
+        textAlignVertical: 'top',
+        ...Typography.mono(),
+    },
     ctrlBtn: {
         paddingHorizontal: 6,
         paddingVertical: 2,

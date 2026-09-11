@@ -19,6 +19,9 @@ import { Shaker, ShakeInstance } from '@/components/Shaker';
 import { usePrefetchFileContents } from '@/hooks/usePrefetchFileContents';
 import { AllFilesTab } from '@/components/FilesSidebar';
 import { SessionFilesTab } from '@/components/SessionFilesTab';
+import { sessionWriteFile } from '@/sync/ops';
+import { Modal } from '@/modal';
+import Ionicons from '@expo/vector-icons/Ionicons';
 
 /** Shared addressability boundary for every row kind on this screen: a git
  *  identity key for a non-UTF-8 name carries a NUL (gitPathIdentity) and is
@@ -45,6 +48,11 @@ export default React.memo(function FilesScreen() {
     // Changes (git status, the default) vs All files (the same browsable tree
     // the desktop sidebar shows — AllFilesTab brings its own search + cache).
     const [mode, setMode] = React.useState<'changes' | 'allFiles' | 'session'>('changes');
+    // Session files: the directory it lists (for New file) and a token that
+    // re-lists it once a file has been created there.
+    const [sessionRoot, setSessionRoot] = React.useState<string | null>(null);
+    const [sessionReload, setSessionReload] = React.useState(0);
+    const [creating, setCreating] = React.useState(false);
     const [searchQuery, setSearchQuery] = React.useState('');
     const [searchResults, setSearchResults] = React.useState<FileItem[]>([]);
     const [isSearching, setIsSearching] = React.useState(false);
@@ -102,6 +110,38 @@ export default React.memo(function FilesScreen() {
         if (!isAddressablePath(filePath)) return;
         router.push(`/session/${sessionId}/file?path=${encodePathParam(filePath)}`);
     }, [router, sessionId]);
+
+    // New file: named by the user, created EMPTY and create-only (the daemon
+    // refuses rather than overwriting), then opened straight in the editor.
+    // In Session files it lands in the session's own directory; elsewhere in
+    // the project, where a relative path like `src/notes.md` works too.
+    const handleNewFile = React.useCallback(async () => {
+        if (creating) return;
+        const inSession = mode === 'session';
+        if (inSession && !sessionRoot) return;
+        const entered = await Modal.prompt(
+            t('files.newFile'),
+            inSession ? t('files.newFileInSession') : t('files.newFileInProject'),
+            { placeholder: t('files.newFilePlaceholder'), confirmText: t('common.create') },
+        );
+        const name = entered?.trim();
+        if (!name) return;
+        const path = inSession ? `${sessionRoot}/${name}` : name;
+        setCreating(true);
+        try {
+            const res = await sessionWriteFile(sessionId!, path, '', undefined, 'utf8', true);
+            if (!res.success) {
+                Modal.alert(t('common.error'), res.error === 'file_exists' || /exists/i.test(res.error ?? '')
+                    ? t('files.fileExists', { name })
+                    : res.error || t('files.failedToSave'));
+                return;
+            }
+            if (inSession) setSessionReload((n) => n + 1);
+            router.push(`/session/${sessionId}/file?path=${encodePathParam(path)}&edit=1`);
+        } finally {
+            setCreating(false);
+        }
+    }, [creating, mode, sessionRoot, sessionId, router]);
 
     const renderFileIcon = (file: GitFileStatus) => {
         return <FileIcon fileName={file.fileName} size={32} />;
@@ -225,10 +265,10 @@ export default React.memo(function FilesScreen() {
     };
 
     const modeToggle = (
+        <View style={{ flexDirection: 'row', alignItems: 'center', marginHorizontal: 16, marginTop: 12, gap: 8 }}>
         <View style={{
             flexDirection: 'row',
-            marginHorizontal: 16,
-            marginTop: 12,
+            flex: 1,
             backgroundColor: theme.colors.surfaceHighest,
             borderRadius: 9,
             padding: 2,
@@ -255,13 +295,24 @@ export default React.memo(function FilesScreen() {
                 </Pressable>
             ))}
         </View>
+        <Pressable
+            onPress={() => { void handleNewFile(); }}
+            disabled={creating || (mode === 'session' && !sessionRoot)}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={t('files.newFile')}
+            style={(p) => ({ padding: 6, opacity: p.pressed || creating ? 0.6 : 1 })}
+        >
+            <Ionicons name="add" size={22} color={theme.colors.textLink} />
+        </Pressable>
+        </View>
     );
 
     if (mode === 'session') {
         return (
             <View style={[styles.container, { backgroundColor: theme.colors.surface }]}>
                 {modeToggle}
-                <SessionFilesTab sessionId={sessionId!} onFilePress={handleProjectFilePress} />
+                <SessionFilesTab sessionId={sessionId!} onFilePress={handleProjectFilePress} onRoot={setSessionRoot} reloadToken={sessionReload} />
             </View>
         );
     }

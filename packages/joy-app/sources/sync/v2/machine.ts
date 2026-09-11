@@ -229,9 +229,11 @@ export const machineReadFile = (ctx: MachineCtx, path: string) =>
 /** `encoding` MUST match how `content` is encoded: the daemon decodes as utf8
  *  unless told 'base64'. The editor sent base64 without saying so and files
  *  were overwritten with their own base64 text (issue #93). */
-export const machineWriteFile = (ctx: MachineCtx, path: string, content: string, expectedHash?: string, encoding: 'utf8' | 'base64' = 'utf8') =>
+/** `mustNotExist` is create-only (New file): the daemon refuses with
+ *  `file_exists` rather than overwriting whatever is already there. */
+export const machineWriteFile = (ctx: MachineCtx, path: string, content: string, expectedHash?: string, encoding: 'utf8' | 'base64' = 'utf8', mustNotExist?: boolean) =>
     j<{ success: boolean; hash?: string; error?: string }>(ctx, 'PUT',
-        `/v2/sessions/${ctx.localSessionId}/files/content`, { path, content, encoding, ...(expectedHash ? { expectedHash } : {}) });
+        `/v2/sessions/${ctx.localSessionId}/files/content`, { path, content, encoding, ...(expectedHash ? { expectedHash } : {}), ...(mustNotExist ? { mustNotExist: true } : {}) });
 
 export const machineDeleteFile = (ctx: MachineCtx, path: string) =>
     j<{ success: boolean; error?: string }>(ctx, 'DELETE',

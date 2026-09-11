@@ -324,6 +324,7 @@ export const ca: TranslationStructure = {
         logoutFailed: 'No s\'ha pogut eliminar l\'inici de sessió desat d\'aquest dispositiu. Torna-ho a provar.',
         syncStartFailedReload: 'L\'aplicació no ha pogut iniciar la sincronització. Torna a carregar l\'aplicació i torna-ho a provar.',
         answerKeptAsDraft: 'No s\'ha pogut enviar la resposta. S\'ha desat com a esborrany a sota.',
+        spawnAlreadyOpen: 'Aquesta conversa ja està oberta en una altra sessió d\'aquesta màquina.',
         spawnDidNotStart: 'La sessió s\'ha acceptat però no s\'ha iniciat a temps. Comprova el dimoni d\'aquella màquina.',
         historyPageFailed: 'No s\'han pogut carregar els missatges anteriors.',
     },
@@ -807,6 +808,13 @@ export const ca: TranslationStructure = {
     },
 
     files: {
+        newFile: 'Fitxer nou',
+        newFileInProject: 'Posa-li nom — també va bé una ruta com src/notes.md.',
+        newFileInSession: 'Posa-li nom. Anirà a la carpeta d’aquesta sessió.',
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} ja existeix.`,
+        discardEdits: 'Vols descartar els canvis?',
+        discardEditsMessage: 'Es perdran els teus canvis en aquest fitxer.',
         sessionFiles: 'Fitxers de la sessió',
         noSessionFiles: 'Encara no hi ha pujades ni imatges. Els fitxers adjunts a un missatge arriben aquí, fora del projecte.',
         sessionFilesFooter: "Fitxers que has enviat i imatges que ha mostrat l'agent, desats fora del projecte, a la carpeta de la sessió a la seva màquina.",

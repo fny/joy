@@ -324,6 +324,7 @@ export const es: TranslationStructure = {
         logoutFailed: 'No se pudo eliminar el inicio de sesión guardado de este dispositivo. Inténtalo de nuevo.',
         syncStartFailedReload: 'La aplicación no pudo iniciar la sincronización. Recarga la aplicación e inténtalo de nuevo.',
         answerKeptAsDraft: 'No se pudo enviar la respuesta. Se ha guardado como borrador abajo.',
+        spawnAlreadyOpen: 'Esa conversación ya está abierta en otra sesión de esta máquina.',
         spawnDidNotStart: 'La sesión fue aceptada pero no se inició a tiempo. Comprueba el daemon de esa máquina.',
         historyPageFailed: 'No se pudieron cargar los mensajes anteriores.',
     },
@@ -807,6 +808,13 @@ export const es: TranslationStructure = {
     },
 
     files: {
+        newFile: 'Nuevo archivo',
+        newFileInProject: 'Ponle nombre — también sirve una ruta como src/notes.md.',
+        newFileInSession: 'Ponle nombre. Irá a la carpeta de esta sesión.',
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} ya existe.`,
+        discardEdits: '¿Descartar los cambios?',
+        discardEditsMessage: 'Se perderán tus cambios en este archivo.',
         sessionFiles: 'Archivos de la sesión',
         noSessionFiles: 'Todavía no hay archivos subidos ni imágenes. Lo que adjuntes a un mensaje llega aquí, fuera del proyecto.',
         sessionFilesFooter: 'Archivos que enviaste e imágenes que mostró el agente, guardados fuera del proyecto, en la carpeta de la sesión en su máquina.',

@@ -298,6 +298,7 @@ export const ru: TranslationStructure = {
         logoutFailed: 'Не удалось удалить сохранённый вход с этого устройства. Попробуйте ещё раз.',
         syncStartFailedReload: 'Приложение не смогло запустить синхронизацию. Перезагрузите приложение и попробуйте ещё раз.',
         answerKeptAsDraft: 'Не удалось отправить ответ. Он сохранён как черновик ниже.',
+        spawnAlreadyOpen: 'Этот разговор уже открыт в другой сессии на этой машине.',
         spawnDidNotStart: 'Сессия принята, но не запустилась вовремя. Проверьте демон на этой машине.',
         historyPageFailed: 'Не удалось загрузить более ранние сообщения.',
     },
@@ -823,6 +824,13 @@ export const ru: TranslationStructure = {
     },
 
     files: {
+        newFile: 'Новый файл',
+        newFileInProject: 'Введите имя — подойдёт и путь вида src/notes.md.',
+        newFileInSession: 'Введите имя. Файл попадёт в папку этой сессии.',
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} уже существует.`,
+        discardEdits: 'Отменить изменения?',
+        discardEditsMessage: 'Ваши правки этого файла будут потеряны.',
         sessionFiles: 'Файлы сессии',
         noSessionFiles: 'Пока нет загрузок и изображений. Файлы, прикреплённые к сообщению, попадают сюда, вне проекта.',
         sessionFilesFooter: 'Отправленные вами файлы и изображения агента — хранятся вне проекта, в папке сессии на её машине.',

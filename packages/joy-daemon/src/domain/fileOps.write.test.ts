@@ -1,12 +1,12 @@
 // handleWriteFile durability + serialization (#539, #63), the tool argv jail
 // (#537) and the filesystem-root containment fix (#536).
-import { test, expect, beforeEach, afterEach, vi } from "vitest";
+import { test, describe, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { handleWriteFile, validatePath, jailToolArgs, handleRipgrep, handleDifftastic, withPathLock, jailedToolEnv } from "./fileOps";
+import { handleWriteFile, handleDeleteFile, validatePath, jailToolArgs, handleRipgrep, handleDifftastic, withPathLock, jailedToolEnv } from "./fileOps";
 
 let cwd: string;
 beforeEach(() => { cwd = realpathSync(mkdtempSync(join(tmpdir(), "fileops-write-"))); });
@@ -164,4 +164,62 @@ test("handleRipgrep: an inherited rg config with --follow cannot read through a 
   } finally {
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+// ── the roots a write may touch, and create-only (2026-09-11) ───────────────
+// The session's own directory (its uploads and the agent's media) is editable
+// from the app, so write and delete honour the extra roots the caller allows
+// — and nothing beyond them. New file is create-only: never a silent clobber.
+describe("write / delete: allowed roots and create-only", () => {
+  let project: string;
+  let sessionHome: string;
+
+  beforeEach(() => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fileops-roots-")));
+    project = join(root, "project");
+    mkdirSync(project);
+    sessionHome = join(root, "session");
+    mkdirSync(join(sessionHome, "uploads"), { recursive: true });
+  });
+
+  test("writes inside the cwd, and inside an allowed extra root", async () => {
+    expect(await handleWriteFile(project, { path: "notes.txt", content: b64("in project") })).toMatchObject({ success: true });
+    expect(readFileSync(join(project, "notes.txt"), "utf8")).toBe("in project");
+
+    const upload = join(sessionHome, "uploads", "20260911-162140-0000.notes.txt");
+    expect(await handleWriteFile(project, { path: upload, content: b64("edited") }, [sessionHome])).toMatchObject({ success: true });
+    expect(readFileSync(upload, "utf8")).toBe("edited");
+  });
+
+  test("refuses a path outside the cwd and the allowed roots", async () => {
+    const outside = join(tmpdir(), `joy-outside-${Date.now()}.txt`);
+    const r = await handleWriteFile(project, { path: outside, content: b64("nope") }, [sessionHome]);
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/outside the working directory/);
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  test("mustNotExist is create-only: it never overwrites what is already there", async () => {
+    expect(await handleWriteFile(project, { path: "new.txt", content: b64(""), mustNotExist: true })).toMatchObject({ success: true });
+    writeFileSync(join(project, "taken.txt"), "mine");
+    const r = await handleWriteFile(project, { path: "taken.txt", content: b64("theirs"), mustNotExist: true });
+    expect(r).toMatchObject({ success: false, error: "File already exists" });
+    expect(readFileSync(join(project, "taken.txt"), "utf8")).toBe("mine");
+  });
+
+  test("delete: inside the cwd, inside an allowed root, and nowhere else", async () => {
+    writeFileSync(join(project, "gone.txt"), "x");
+    expect(await handleDeleteFile(project, { path: "gone.txt" })).toMatchObject({ success: true });
+    expect(existsSync(join(project, "gone.txt"))).toBe(false);
+
+    const upload = join(sessionHome, "uploads", "shot.png");
+    writeFileSync(upload, "x");
+    expect(await handleDeleteFile(project, { path: upload }, [sessionHome])).toMatchObject({ success: true });
+    expect(existsSync(upload)).toBe(false);
+
+    const other = join(tmpdir(), `joy-keep-${Date.now()}.txt`);
+    writeFileSync(other, "keep");
+    expect((await handleDeleteFile(project, { path: other }, [sessionHome])).success).toBe(false);
+    expect(readFileSync(other, "utf8")).toBe("keep");
+  });
 });

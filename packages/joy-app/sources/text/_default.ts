@@ -369,6 +369,7 @@ export const en = {
         logoutFailed: 'Could not remove the saved login from this device. Try again.',
         syncStartFailedReload: 'The app could not start syncing. Reload the app and try again.',
         answerKeptAsDraft: 'The answer could not be sent. It was kept as a draft below.',
+        spawnAlreadyOpen: 'That conversation is already open in another session on this machine.',
         spawnDidNotStart: 'The session was accepted but did not start in time. Check the daemon on that machine.',
         historyPageFailed: 'Older messages could not be loaded.',
     },
@@ -856,6 +857,13 @@ export const en = {
     },
 
     files: {
+        newFile: 'New file',
+        newFileInProject: 'Name it — a path like src/notes.md works too.',
+        newFileInSession: "Name it. It goes in this session's own folder.",
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} already exists.`,
+        discardEdits: 'Discard changes?',
+        discardEditsMessage: 'Your edits to this file will be lost.',
         sessionFiles: 'Session files',
         noSessionFiles: 'No uploads or images yet. Files you attach to a message land here, outside the project.',
         sessionFilesFooter: 'Uploads you sent and images the agent showed — kept outside the project, in the session’s own folder on its machine.',

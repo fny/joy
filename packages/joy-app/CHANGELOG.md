@@ -1,3 +1,11 @@
+# Sep 11 (11) — Edit any file, and make new ones
+
+- **Editing works on the phone.** Open a text file and tap the pencil: the file becomes editable, and the tick saves it. It was web and desktop only before.
+- **Saving never silently overwrites the agent.** If the file changed on the machine while you were typing, joy says so and asks before replacing that version.
+- **Session files are editable too.** The files a session keeps outside your project — your uploads, the images an agent showed — can now be opened, edited, and deleted, not just viewed.
+- **New file.** The + button beside Changes / All Files / Session files asks for a name and opens the empty file ready to type. In the project a path like `src/notes.md` works; in Session files it lands in the session's own folder. An existing file is never overwritten.
+- Needs the updated daemon.
+
 # Sep 11 (10) — Machine rows line up
 
 - **The numbers on machine rows sit in columns.** Each machine's session count, CPU and memory used to be exactly as wide as their text, so a machine at "6%" had its numbers, and the end of its rule, further right than one at "11%". They now sit in fixed columns that line up from row to row, and machine rows start and end at the same inset as Pinned and the dividers.

@@ -325,6 +325,7 @@ export const ja: TranslationStructure = {
         logoutFailed: 'このデバイスから保存済みのログイン情報を削除できませんでした。もう一度お試しください。',
         syncStartFailedReload: 'アプリが同期を開始できませんでした。アプリを再読み込みしてもう一度お試しください。',
         answerKeptAsDraft: '回答を送信できませんでした。下に下書きとして保存しました。',
+        spawnAlreadyOpen: 'その会話はこのマシンの別のセッションですでに開いています。',
         spawnDidNotStart: 'セッションは受け付けられましたが、時間内に開始しませんでした。そのマシンのデーモンを確認してください。',
         historyPageFailed: '以前のメッセージを読み込めませんでした。',
     },
@@ -808,6 +809,13 @@ export const ja: TranslationStructure = {
     },
 
     files: {
+        newFile: '新規ファイル',
+        newFileInProject: '名前を付けてください。src/notes.md のようなパスも使えます。',
+        newFileInSession: '名前を付けてください。このセッション専用のフォルダに作成されます。',
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} はすでに存在します。`,
+        discardEdits: '変更を破棄しますか？',
+        discardEditsMessage: 'このファイルへの変更は失われます。',
         sessionFiles: 'セッションファイル',
         noSessionFiles: 'アップロードや画像はまだありません。メッセージに添付したファイルはプロジェクト外のここに保存されます。',
         sessionFilesFooter: '送信したファイルとエージェントが表示した画像——プロジェクト外、セッションのマシン上のフォルダに保存されます。',

@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 (11) — Edit any file, and make new ones",
+      "summary": "",
+      "markdown": "- **Editing works on the phone.** Open a text file and tap the pencil: the file becomes editable, and the tick saves it. It was web and desktop only before.\n- **Saving never silently overwrites the agent.** If the file changed on the machine while you were typing, joy says so and asks before replacing that version.\n- **Session files are editable too.** The files a session keeps outside your project — your uploads, the images an agent showed — can now be opened, edited, and deleted, not just viewed.\n- **New file.** The + button beside Changes / All Files / Session files asks for a name and opens the empty file ready to type. In the project a path like `src/notes.md` works; in Session files it lands in the session's own folder. An existing file is never overwritten.\n- Needs the updated daemon."
+    },
+    {
       "title": "Sep 11 (10) — Machine rows line up",
       "summary": "",
       "markdown": "- **The numbers on machine rows sit in columns.** Each machine's session count, CPU and memory used to be exactly as wide as their text, so a machine at \"6%\" had its numbers, and the end of its rule, further right than one at \"11%\". They now sit in fixed columns that line up from row to row, and machine rows start and end at the same inset as Pinned and the dividers.\n- **Archived sessions use the same machine rows as live ones.** Show archived groups them under the same chevron rows, with the same count and waiting dot when folded, instead of a smaller header of their own. Folding a machine's archived group no longer folds its live sessions, and the reverse."
@@ -486,5 +491,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 11 (10) — Machine rows line up"
+  "latestTitle": "Sep 11 (11) — Edit any file, and make new ones"
 }

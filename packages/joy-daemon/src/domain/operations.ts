@@ -2087,9 +2087,12 @@ export const sessionOps: SessionOp[] = [
     name: "writeFile",
     scope: "session",
     rpcName: "writeFile",
-    summary: "Write a file in the session cwd",
+    summary: "Write a file in the session cwd or the session's own directory",
     http: { method: "POST", path: "/sessions/:id/writeFile" },
-    handler: (session, params) => handleWriteFile(session.cwd, params as unknown as Parameters<typeof handleWriteFile>[1]),
+    // The session's own dir (uploads, media) is writable too — but NOT the
+    // temp roots readRoots() adds: reading /tmp is one thing, writing it is
+    // another.
+    handler: (session, params) => handleWriteFile(session.cwd, params as unknown as Parameters<typeof handleWriteFile>[1], [joySessionDir(session.id)]),
   },
   {
     name: "deleteFile",
@@ -2097,7 +2100,7 @@ export const sessionOps: SessionOp[] = [
     rpcName: "deleteFile",
     summary: "Delete a file in the session cwd",
     http: { method: "POST", path: "/sessions/:id/deleteFile" },
-    handler: (session, params) => handleDeleteFile(session.cwd, params as unknown as Parameters<typeof handleDeleteFile>[1]),
+    handler: (session, params) => handleDeleteFile(session.cwd, params as unknown as Parameters<typeof handleDeleteFile>[1], [joySessionDir(session.id)]),
   },
   {
     name: "listDirectory",

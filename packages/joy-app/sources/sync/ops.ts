@@ -343,9 +343,11 @@ export async function sessionWriteFile(
     content: string,
     expectedHash?: string | null,
     encoding: 'utf8' | 'base64' = 'utf8',
+    /** Create-only (New file): fails with `file_exists` instead of overwriting. */
+    mustNotExist?: boolean,
 ): Promise<SessionWriteFileResponse> {
     try {
-        const { data } = await machineWriteFile(requireCtx(sessionId, 'write file'), path, content, expectedHash ?? undefined, encoding);
+        const { data } = await machineWriteFile(requireCtx(sessionId, 'write file'), path, content, expectedHash ?? undefined, encoding, mustNotExist);
         return (data ?? { success: false, error: 'no response' }) as SessionWriteFileResponse;
     } catch (error) {
         return { success: false, error: errorMessage(error) };

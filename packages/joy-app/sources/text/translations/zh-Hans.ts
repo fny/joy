@@ -325,6 +325,7 @@ export const zhHans: TranslationStructure = {
         logoutFailed: '无法从此设备移除已保存的登录信息。请重试。',
         syncStartFailedReload: '应用无法开始同步。请重新加载应用后重试。',
         answerKeptAsDraft: '无法发送回答。已在下方保留为草稿。',
+        spawnAlreadyOpen: '该对话已在这台机器的另一个会话中打开。',
         spawnDidNotStart: '会话已被接受，但未能及时启动。请检查该机器上的守护进程。',
         historyPageFailed: '无法加载更早的消息。',
     },
@@ -808,6 +809,13 @@ export const zhHans: TranslationStructure = {
     },
 
     files: {
+        newFile: '新建文件',
+        newFileInProject: '起个名字——也可以用 src/notes.md 这样的路径。',
+        newFileInSession: '起个名字。它会放在此会话自己的文件夹中。',
+        newFilePlaceholder: 'notes.md',
+        fileExists: ({ name }: { name: string }) => `${name} 已存在。`,
+        discardEdits: '放弃更改？',
+        discardEditsMessage: '你对该文件的修改将会丢失。',
         sessionFiles: '会话文件',
         noSessionFiles: '还没有上传或图片。附加到消息的文件会放在这里，不在项目中。',
         sessionFilesFooter: '你发送的文件和代理展示的图片——保存在项目之外，位于该会话所在机器上的会话文件夹中。',

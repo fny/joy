@@ -39,7 +39,7 @@ export interface BashResponse { success: boolean; stdout?: string; stderr?: stri
 export interface ReadFileRequest { path: string; }
 export interface ReadFileResponse { success: boolean; content?: string; error?: string; }
 
-export interface WriteFileRequest { path: string; content: string; expectedHash?: string | null; }
+export interface WriteFileRequest { path: string; content: string; expectedHash?: string | null; /** Create-only: refuse if anything is already there (the app's New file). */ mustNotExist?: boolean; }
 export interface WriteFileResponse { success: boolean; hash?: string; error?: string; }
 
 export interface DeleteFileRequest { path: string; }
@@ -222,13 +222,23 @@ export async function withPathLock<T>(realPath: string, fn: () => Promise<T>): P
   }
 }
 
-export async function handleWriteFile(workingDirectory: string, data: WriteFileRequest): Promise<WriteFileResponse> {
-  const validation = validatePath(data.path, workingDirectory);
+export async function handleWriteFile(workingDirectory: string, data: WriteFileRequest, extraRoots: string[] = []): Promise<WriteFileResponse> {
+  const validation = validatePath(data.path, workingDirectory, extraRoots);
   if (!validation.valid) return { success: false, error: validation.error };
   const targetPath = validation.resolvedPath!;
   return withPathLock(targetPath, async () => {
     try {
-      if (data.expectedHash !== null && data.expectedHash !== undefined) {
+      if (data.mustNotExist === true) {
+        // Create-only (New file): anything already at the path is a refusal,
+        // so a mistyped name can never overwrite an existing file.
+        try {
+          await stat(targetPath);
+          return { success: false, error: "File already exists" };
+        } catch (error) {
+          const nodeError = error as NodeJS.ErrnoException;
+          if (nodeError.code !== "ENOENT") throw error;
+        }
+      } else if (data.expectedHash !== null && data.expectedHash !== undefined) {
         // Must match existing file's hash.
         try {
           const existingBuffer = await readFile(targetPath);
@@ -268,17 +278,18 @@ export async function handleWriteFile(workingDirectory: string, data: WriteFileR
 }
 
 /**
- * Delete a single FILE inside the session cwd. Same jail as every other file op
- * (validatePath — no traversal, no extra roots: unlike readFile there is no
- * reason to reach the session media dir).
+ * Delete a single FILE inside the session cwd, or in the roots the caller
+ * allows (the session's own directory — its uploads and media are editable
+ * from the app, 2026-09-11). Same jail as every other file op (validatePath —
+ * no traversal).
  *
  * Deliberately refuses directories: rmdir/recursive removal is a categorically
  * bigger blast radius than "delete the file I am looking at", which is the only
  * thing the app exposes. A missing file reports failure rather than succeeding
  * silently, so the UI can tell "already gone" from "deleted".
  */
-export async function handleDeleteFile(workingDirectory: string, data: DeleteFileRequest): Promise<DeleteFileResponse> {
-  const validation = validatePath(data.path, workingDirectory);
+export async function handleDeleteFile(workingDirectory: string, data: DeleteFileRequest, extraRoots: string[] = []): Promise<DeleteFileResponse> {
+  const validation = validatePath(data.path, workingDirectory, extraRoots);
   if (!validation.valid) return { success: false, error: validation.error };
   // Unlink the path the user NAMED (the link), never the canonical target —
   // validatePath already proved the real target is inside the jail.

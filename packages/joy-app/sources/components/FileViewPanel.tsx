@@ -28,6 +28,7 @@ import { resources } from '@/sync/resource';
 import { fileContentsSpec, type FileContents } from '@/sync/fileContents';
 import { useResource } from '@/hooks/useResource';
 import { stripUploadPrefix } from '@/sync/attachmentNames';
+import { encodeStringToBase64, computeSHA256 } from '@/utils/fileEdit';
 
 interface FileViewPanelProps {
     sessionId: string;
@@ -73,24 +74,6 @@ function getFileLanguage(path: string): string | null {
         svelte: 'markup',
     };
     return ext ? (map[ext] ?? null) : null;
-}
-
-function encodeStringToBase64(str: string): string {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(str);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-}
-
-/** Compute SHA-256 hash of a UTF-8 string (matches server's crypto.createHash('sha256').update(str).digest('hex')) */
-async function computeSHA256(content: string): Promise<string> {
-    const data = new TextEncoder().encode(content);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 /** Text of a loaded resource, or null when it is binary (an empty file is ''). */

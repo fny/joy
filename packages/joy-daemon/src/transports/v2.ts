@@ -501,7 +501,9 @@ route("PUT", "/v2/sessions/:id/files/content", withSession(async (_ctx, session,
   if (typeof body.path !== "string" || typeof body.content !== "string") {
     return ok({ success: false, error: "path and content required" }, 400);
   }
-  const v = validatePath(body.path, session.cwd);
+  // The session's own directory (uploads, media) is writable through this
+  // route as well, so Session files can be edited and created.
+  const v = validatePath(body.path, session.cwd, [joySessionDir(session.id)]);
   if (!v.valid || !v.resolvedPath) return ok({ success: false, error: v.error ?? "invalid path" }, 400);
   // Decode BEFORE touching the filesystem: an undecodable payload is a 400
   // and the existing file stays exactly as it was (#605).
@@ -521,6 +523,11 @@ route("PUT", "/v2/sessions/:id/files/content", withSession(async (_ctx, session,
     // (#539). Same contract as domain/fileOps handleWriteFile.
     const target = v.resolvedPath; // narrowed once: the closure cannot see the guard above
     return await withPathLock(target, async () => {
+      if (body.mustNotExist === true) {
+        // Create-only (the app's New file): never overwrite what is there.
+        const existing = await fs.stat(target).catch(() => null);
+        if (existing) return ok({ success: false, error: "file_exists" }, 409);
+      }
       if (typeof body.expectedHash === "string") {
         const existing = await fs.readFile(target).catch(() => null);
         if (!existing) return ok({ success: false, error: "expectedHash given but file does not exist" }, 409);

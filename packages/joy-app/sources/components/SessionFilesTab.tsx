@@ -18,9 +18,13 @@ import { t } from '@/text';
  * ordinary file viewer (the daemon's file read allows that directory).
  * Never shows a load error: it retries until the machine answers.
  */
-export const SessionFilesTab = React.memo(function SessionFilesTab({ sessionId, onFilePress }: {
+export const SessionFilesTab = React.memo(function SessionFilesTab({ sessionId, onFilePress, onRoot, reloadToken }: {
     sessionId: string;
     onFilePress: (absolutePath: string) => void;
+    /** The directory being listed, so the screen can create a file in it. */
+    onRoot?: (root: string) => void;
+    /** Bump to re-list (a file was just created). */
+    reloadToken?: number;
 }) {
     const { theme } = useUnistyles();
     const [files, setFiles] = React.useState<SessionFileEntry[] | null>(null);
@@ -34,13 +38,17 @@ export const SessionFilesTab = React.memo(function SessionFilesTab({ sessionId, 
                     if (!ctx) throw new Error('machine not reachable yet');
                     const { data } = await machineSessionFiles(ctx);
                     if (cancelled) return;
-                    if (data?.ok) { setFiles(data.files ?? []); return; }
+                    if (data?.ok) {
+                        setFiles(data.files ?? []);
+                        if (data.root) onRoot?.(data.root);
+                        return;
+                    }
                 } catch { /* retried below */ }
                 await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 10_000)));
             }
         })();
         return () => { cancelled = true; };
-    }, [sessionId]);
+    }, [sessionId, reloadToken, onRoot]);
 
     if (files === null) {
         return (
