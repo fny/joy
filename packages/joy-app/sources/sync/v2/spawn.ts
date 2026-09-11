@@ -390,6 +390,27 @@ export async function v2SpawnAndWait(machineId: string, spec: V2SpawnSpec, overr
             }
             continue;
         }
+        // The conversation is already open in a session on that machine: the
+        // daemon names it, so this is not a failure to report but a session to
+        // open. The provisional row is cancelled and the running session's id
+        // is what the caller navigates to.
+        if (st?.spawnFailure?.startsWith('already_open:')) {
+            const holder = st.spawnFailure.slice('already_open:'.length);
+            const cleanup = await cancelSpawn(deps, v2id);
+            if (cleanup !== 'done') console.warn(`[spawn] ${v2id} is already open as ${holder || 'an unbound session'}, but cancelling the new row was not acknowledged`);
+            if (holder) {
+                for (const [sid, s] of Object.entries(deps.getSessions())) {
+                    if (s.metadata?.v2?.sessionId === holder) return sid;
+                }
+                await bounded(deps, deps.refreshSessions(), STEP_CAP_MS);
+                for (const [sid, s] of Object.entries(deps.getSessions())) {
+                    if (s.metadata?.v2?.sessionId === holder) return sid;
+                }
+            }
+            // Named a session this device cannot see (or none at all): say so
+            // rather than return an id that opens nothing.
+            throw new SpawnAbandonedError(t('errors.spawnAlreadyOpen'), v2id, cleanup);
+        }
         // Any other spawn failure (clone_failed, agent missing, …) is final:
         // surfacing it now instead of after the 2-minute deadline (#151).
         if (st?.spawnFailure) {

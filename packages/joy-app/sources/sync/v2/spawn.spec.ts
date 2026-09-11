@@ -435,6 +435,22 @@ describe('v2SpawnAndWait', () => {
         expect(h.calls.retry).toBe(0);
     });
 
+    it('a resume whose conversation is already open returns THAT session and drops the new row', async () => {
+        // The daemon refuses to resume a conversation it already has open and
+        // names the session holding it; the spawn is not a failure to report
+        // but a session to open.
+        const h = harness({ sessions: () => ({ app9: { metadata: { v2: { sessionId: 'v2-9', localSessionId: 'local-9', keyEnvelope: 'env' } } } }) });
+        h.api.sessionState = vi.fn(async () => ({ spawnFailure: 'already_open:v2-9' }) as never);
+        await expect(v2SpawnAndWait('m', { cwd: '/x', resume_id: 'conv-1' } as never, h.deps)).resolves.toBe('app9');
+        expect(h.calls.deleted).toBe(1);   // the provisional row is cancelled
+        expect(h.calls.retry).toBe(0);
+    });
+    it('already open, but this device cannot see the session it names: a clear error, not a dead id', async () => {
+        const h = harness({ sessions: () => ({}) });
+        h.api.sessionState = vi.fn(async () => ({ spawnFailure: 'already_open:v2-missing' }) as never);
+        await expect(v2SpawnAndWait('m', { cwd: '/x' }, h.deps)).rejects.toThrow(/spawnAlreadyOpen/);
+        expect(h.calls.deleted).toBe(1);
+    });
     it('a non-directory spawn failure is final', async () => {
         const h = harness();
         h.api.sessionState = vi.fn(async () => ({ spawnFailure: 'clone_failed:boom' }) as never);

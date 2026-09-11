@@ -135,6 +135,18 @@ export class DirectoryCreationApprovalRequired extends Error {
   }
 }
 
+/** A resume whose conversation is ALREADY open in a live session here.
+ *  Typed so the caller can say WHICH session holds it: the relay lane reports
+ *  it to the app (`already_open:<relay session id>`), which opens that session
+ *  instead of leaving the spawn to be re-offered every five seconds with the
+ *  refusal only ever reaching this machine's log. */
+export class SessionAlreadyLiveError extends Error {
+  constructor(public readonly localId: string, public readonly resumeId: string, public readonly cwd: string) {
+    super(`Session "${resumeId}" is already running in ${cwd} (window ${localId})`);
+    this.name = "SessionAlreadyLiveError";
+  }
+}
+
 // `expandHome` / `canonicalCwd` live in paths.ts (operations.ts needs them
 // without importing the registry); re-exported for the existing callers.
 export { expandHome, canonicalCwd };
@@ -617,7 +629,7 @@ export class SessionRegistry {
     if (opts.resume_id && !opts.forkSession) {
       for (const s of this.#sessions.values()) {
         if ((s.status === "active" || s.status === "starting") && s.claudeSessionId === opts.resume_id) {
-          throw new Error(`Session "${opts.resume_id}" is already running in ${s.cwd} (window ${s.id})`);
+          throw new SessionAlreadyLiveError(s.id, opts.resume_id, s.cwd);
         }
       }
     }

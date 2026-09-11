@@ -1,3 +1,7 @@
+# Sep 11 (12) — Resuming a conversation that is already open
+
+- **Picking a past conversation that is already running now opens it.** Starting a session from the app and choosing a conversation another session already has open used to hang: the machine refused it, nothing told you, and the app waited two minutes before saying only that the session did not start. The refusal now names the session holding that conversation, and the app opens it instead of starting a second one. If the conversation is open on a machine this device cannot see, you get a clear message rather than a wait. Needs the updated daemon.
+
 # Sep 11 (11) — Edit any file, and make new ones
 
 - **Editing works on the phone.** Open a text file and tap the pencil: the file becomes editable, and the tick saves it. It was web and desktop only before.

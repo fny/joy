@@ -27,7 +27,7 @@ import tweetnacl from "tweetnacl";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
-import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
+import { DirectoryCreationApprovalRequired, type SessionRegistry, SessionAlreadyLiveError } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { joyRelayAccessKey, canonicalCwd, joySessionUploadsDir } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, relaySessionFor, type WireRecord } from "./relay";
@@ -1704,6 +1704,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // Abandoned only once the report is acknowledged (#581).
         if (await reportSpawnFailed(offer, `dir_missing:${spec.cwd}`, leaseRef)) abandonedSpawns.add(offer.commandId);
         log(`spawn ${offer.sessionId.slice(0, 8)}: directory does not exist — reported for client retry (${spec.cwd})`);
+        return;
+      }
+      if (e instanceof SessionAlreadyLiveError) {
+        // The conversation this spawn asked to resume is open in a session
+        // that already runs here. Retrying can never help — Claude locks a
+        // session id while it is live — and the refusal used to reach nobody:
+        // the command stayed queued and was re-offered every five seconds
+        // while the app waited out its two-minute deadline and said only that
+        // the session did not start. Report it with the session that holds the
+        // conversation, so the app opens THAT instead.
+        const holder = boundByLocal.get(e.localId) ?? "";
+        if (await reportSpawnFailed(offer, `already_open:${holder}`, leaseRef)) abandonedSpawns.add(offer.commandId);
+        log(`spawn ${offer.sessionId.slice(0, 8)}: ${spec.resume_id} is already open in ${e.localId}${holder ? ` (v2 ${holder.slice(0, 8)})` : " (not bound to the relay)"} — reported`);
         return;
       }
       // Other failures (missing binary, transient) — the command stays queued
