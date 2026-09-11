@@ -366,11 +366,18 @@ every relay; machines register per account.
   fails the moment it needs a human — `blocked:login` (its own code: one
   expired sign-in fails every automation on a machine), `blocked:trust`,
   `blocked:permission`, `agent_died`, `stalled` — because unattended work that
-  quietly waits is worse than work that never ran. Triggers replace cron
-  entirely (`manual`, `turn_done`, `session_state`, `machine_online`,
-  `automation_done`), so there is no clock, no timezone and no catch-up
-  policy; a session an automation produced fires no triggers, which closes the
-  loop both `turn_done` and `automation_done` make easy to write. The spec is
+  quietly waits is worse than work that never ran. Triggers are
+  `manual`, `turn_done`, `session_state`, `machine_online`, `automation_done`
+  and `schedule` — cron, in a time zone you name, parsed by the relay's own
+  five-field parser (no dependency). A schedule's expression IS the trigger's
+  filter, so it needed no new shape. DST is handled by walking a calendar
+  rather than adding 86,400,000: an hour that does not exist is skipped, and
+  the hour that happens twice fires once. Catch-up is decided out loud — a
+  machine offline for a week owes 2,016 five-minute firings, and joy runs ONCE
+  and records the rest as a `cancelled` run with `missed_schedule` and a
+  count, because a firing that did nothing still happened. A session an
+  automation produced fires no triggers, which closes the loop both
+  `turn_done` and `automation_done` make easy to write. The spec is
   sealed under the target machine's key, so the CLI authors only for its own
   machine and `run --wait` exits with the outcome — which is how a script, CI,
   or another agent uses one.
