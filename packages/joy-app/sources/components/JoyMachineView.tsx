@@ -29,7 +29,8 @@ import { t } from '@/text';
 import { copyToClipboard } from '@/utils/clipboard';
 import { joyKillAllSessions, joyRestartDaemon, sessionDelete, machineUpdateMetadata } from '@/sync/ops';
 import { sync } from '@/sync/sync';
-import { machineSlashCommandsAll } from '@/sync/v2/machine';
+import { machineSlashCommandsAll, machineRestorable, machineRestore, type RestorableSession } from '@/sync/v2/machine';
+import { JoyError } from '@/utils/errors';
 import { useDaemonStatus } from '@/hooks/useDaemonStatus';
 import { resolveEnvErrorRow } from './joyMachineDaemonState';
 
@@ -142,6 +143,39 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
         Modal.alert('Purged', `Deleted ${deleted} session record${deleted === 1 ? '' : 's'} for this machine.`, [{ text: 'OK' }]);
     }, [machineId]));
 
+    // What a reboot took. Asked once per view: the answer only changes when a
+    // session is restored or a machine restarts, neither of which happens
+    // while you are looking at this screen.
+    const [restorable, setRestorable] = React.useState<RestorableSession[]>([]);
+    React.useEffect(() => {
+        let live = true;
+        void (async () => {
+            const ctx = sync.machineOnlyCtx(machineId);
+            if (!ctx) return;
+            try {
+                const r = await machineRestorable(ctx);
+                if (live && r.data?.sessions) setRestorable(r.data.sessions);
+            } catch { /* an older daemon has no such route; the row stays away */ }
+        })();
+        return () => { live = false; };
+    }, [machineId]);
+
+    const [restoring, doRestore] = useJoyAction(React.useCallback(async () => {
+        const ctx = sync.machineOnlyCtx(machineId);
+        if (!ctx) throw new Error('no machine context');
+        const r = await machineRestore(ctx);
+        const failed = (r.data?.restored ?? []).filter((x) => !x.ok);
+        setRestorable([]);
+        if (failed.length > 0) {
+            // Named, not counted: which folder did not come back is the thing
+            // you need, and a bare "3 failed" sends you hunting for it.
+            throw new JoyError(
+                `${failed.length} did not come back:\n${failed.map((f) => `${f.cwd} — ${f.error ?? 'unknown'}`).join('\n')}`,
+                false,
+            );
+        }
+    }, [machineId]));
+
     // Force the daemon to re-scan commands/skills/plugins now. It pushes the
     // refreshed list into machine metadata, so machine.metadata.slashCommands
     // updates without a separate fetch.
@@ -201,6 +235,19 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
                 )}
                 {status?.sessions != null && (
                     <Item title="Active Sessions" detail={String(status.sessions)} icon={<Ionicons name="layers-outline" size={29} color="#007AFF" />} showChevron={false} />
+                )}
+                {/* Only when there is something to bring back. A daemon crash
+                    loses nothing — tmux outlives it and every window is
+                    re-adopted on start — so this row appears after a REBOOT,
+                    which is the case that leaves records with no tmux. */}
+                {restorable.length > 0 && (
+                    <Item
+                        title={restoring ? 'Restoring…' : `Restore ${restorable.length} session${restorable.length === 1 ? '' : 's'}`}
+                        subtitle={`Lost when this machine restarted · ${restorable.filter((r) => r.resumeId).length} resume their conversation`}
+                        icon={<Ionicons name="refresh-circle-outline" size={29} color="#34C759" />}
+                        onPress={() => void doRestore()}
+                        showChevron={false}
+                    />
                 )}
             </ItemGroup>
 

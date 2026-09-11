@@ -26,6 +26,7 @@ import { defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
 import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript } from "./windowRecord";
+import { restorableFrom, type Restorable } from "./restorable";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
 import { stampTmuxServerOwner, sweepOrphanTmuxServers } from "./orphanSweep";
@@ -1281,6 +1282,58 @@ export class SessionRegistry {
    *  the whole tmux session so nothing lingers (the base shell window and any
    *  orphaned windows the registry didn't track). The tmux session is recreated
    *  lazily on the next create(). Returns how many sessions were torn down. */
+  /**
+   * Sessions this machine lost to a reboot. Probed the same way recover()
+   * probes — a record whose per-session tmux server still answers is not
+   * lost, it is adopted — and a session already in the registry is running,
+   * whatever its record says.
+   */
+  restorable(): Restorable[] {
+    return restorableFrom(listWindowRecords(), (rec) => {
+      if (this.#sessions.has(rec.id)) return true;
+      if (!rec.socket) return true; // unprobeable; restorableFrom drops it anyway
+      const names = tmuxNamesFor(rec.socket, rec.id);
+      return run("tmux", "-L", rec.socket, "has-session", "-t", names.session).ok;
+    });
+  }
+
+  /**
+   * Bring them back, one at a time.
+   *
+   * Sequential on purpose: twelve agents launching at once on a machine that
+   * has just booted is the worst moment to ask it for twelve node processes,
+   * and a failure part-way should leave a legible half-restored state rather
+   * than an unknown one. Each result says what happened to that session, so
+   * the caller can report the ones that did not come back instead of a bare
+   * count.
+   */
+  async restore(ids?: string[]): Promise<{ ok: boolean; restored: Array<{ id: string; cwd: string; ok: boolean; error?: string }> }> {
+    const wanted = ids && ids.length > 0 ? new Set(ids) : null;
+    const targets = this.restorable().filter((r) => !wanted || wanted.has(r.id));
+    const restored: Array<{ id: string; cwd: string; ok: boolean; error?: string }> = [];
+    for (const target of targets) {
+      try {
+        await this.create({
+          id: target.id,
+          cwd: target.cwd,
+          agent: target.agent,
+          // The conversation, not just the folder: a restore that reopened an
+          // empty session in the right directory would be worse than useless,
+          // because it looks like the work came back.
+          resume_id: target.resumeId,
+          model: target.model,
+          effort: target.effort,
+          permissionMode: target.permissionMode,
+          extraArgs: target.extraArgs,
+        });
+        restored.push({ id: target.id, cwd: target.cwd, ok: true });
+      } catch (e) {
+        restored.push({ id: target.id, cwd: target.cwd, ok: false, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    return { ok: restored.every((r) => r.ok), restored };
+  }
+
   killAll(): number {
     let n = 0;
     for (const session of [...this.#sessions.values()]) {

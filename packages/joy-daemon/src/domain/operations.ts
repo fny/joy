@@ -1118,6 +1118,41 @@ export const machineOps: MachineOp[] = [
     },
   },
   {
+    name: "restorable",
+    scope: "machine",
+    rpcName: "joy-restorable-sessions",
+    summary: "Sessions this machine lost to a reboot and could bring back",
+    // NOT /sessions/restorable: `GET /sessions/:id` is declared earlier and
+    // routes are matched in declaration order, so the literal path lost to
+    // the id pattern and the request became a lookup for a session called
+    // "restorable" — a 404 that read like the route did not exist.
+    http: { method: "GET", path: "/restorable" },
+    // A daemon crash loses nothing — tmux outlives it and recover() re-adopts
+    // every window. A machine REBOOT is the gap: tmux dies, and only the
+    // window records survive. These are those records.
+    handler: (registry) => ({ ok: true, sessions: registry.restorable() }),
+  },
+  {
+    name: "restore",
+    scope: "machine",
+    rpcName: "joy-restore-sessions",
+    summary: "Relaunch sessions lost to a reboot, resuming each conversation",
+    params: {
+      type: "object",
+      properties: {
+        ids: { type: "array", items: { type: "string" }, description: "Which to restore; omitted means all of them" },
+      },
+    },
+    http: { method: "POST", path: "/restore" },
+    // Deliberately not automatic on daemon start: a reboot would otherwise
+    // launch a dozen agents that immediately start doing work nobody asked
+    // for at that moment, and one mid-destructive-task would do it twice.
+    handler: async (registry, params) => {
+      const ids = Array.isArray(params.ids) ? params.ids.map(String) : undefined;
+      return registry.restore(ids);
+    },
+  },
+  {
     name: "killAll",
     scope: "machine",
     rpcName: "joy-kill-all-sessions",

@@ -188,6 +188,23 @@ export const machineGitStatus = async (ctx: MachineCtx): Promise<{ status: numbe
     return { status: r.status, data: legacyToStructured(r.data as LegacyGitStatus, '') }; // REMOVE with the legacy block
 };
 
+/**
+ * Sessions this machine lost to a reboot, and the call that brings them back.
+ *
+ * A daemon crash loses nothing — tmux outlives it and the daemon re-adopts
+ * every window on start. A machine REBOOT is the gap: tmux dies with it and
+ * only the window records survive. One session at a time already has Resume
+ * in the long-press menu; these are the bulk case.
+ */
+export interface RestorableSession {
+    id: string;
+    cwd: string;
+    agent: string;
+    /** Absent means the folder can be reopened but the conversation cannot. */
+    resumeId?: string;
+    model?: string;
+}
+
 export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; head?: boolean; path?: string; numstat?: boolean }) =>
     j<{ ok: boolean; diff?: string; error?: string }>(ctx, 'GET',
         `/v2/sessions/${ctx.localSessionId}/git/diff?staged=${opts?.staged ? 1 : 0}${opts?.head ? '&head=1' : ''}${opts?.numstat ? '&numstat=1' : ''}${opts?.path ? `&path=${encodeURIComponent(opts.path)}` : ''}`);
@@ -306,6 +323,15 @@ const jm = <T>(ctx: MachineOnlyCtx, method: string, path: string, body?: unknown
     }));
 
 /** Every harness the daemon knows, with its capability table (older daemons: without). */
+/** Machine-scoped, not session-scoped: a restore is about the machine, and
+ *  the sessions it names do not exist any more. */
+export const machineRestorable = (ctx: MachineOnlyCtx) =>
+    jm<{ ok: boolean; sessions?: RestorableSession[] }>(ctx, 'GET', '/restorable');
+
+export const machineRestore = (ctx: MachineOnlyCtx, ids?: string[]) =>
+    jm<{ ok: boolean; restored?: Array<{ id: string; cwd: string; ok: boolean; error?: string }> }>(
+        ctx, 'POST', '/restore', ids && ids.length > 0 ? { ids } : {});
+
 export const machineHarnesses = (ctx: MachineOnlyCtx) =>
     jm<{ harnesses?: Array<Record<string, unknown>> }>(ctx, 'GET', '/v2/harnesses');
 /** Resumable past conversations of one harness in a directory (title + id). */

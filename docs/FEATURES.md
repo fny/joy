@@ -363,6 +363,16 @@ every relay; machines register per account.
   Reveal them from the app with **Show headless**, a toggle below Show
   archived on the same rule: it appears only when there is something to
   reveal, and stays while they are shown so there is a way back.
+- **Restore after a reboot** (`joy restore`, machine page → Restore N sessions):
+  a daemon crash loses nothing — tmux outlives the daemon and every window is
+  re-adopted on start — but a machine REBOOT kills tmux and leaves only the
+  window records. `joy restore` relaunches them, each resuming its own
+  conversation rather than just reopening the folder; `--dry-run` lists what
+  it would bring back and flags the ones with no conversation to resume. A
+  session whose tmux server still answers is never offered (relaunching a live
+  one would put two agents in one folder), and neither is a record too old to
+  probe. NOT automatic on daemon start: a reboot would otherwise launch a
+  dozen agents that immediately start work nobody asked for at that moment.
 - **Automations** (`joy automation …`, Settings → Automations): a folder, a
   prompt and a trigger, and the runs they produce. A run IS a headless joy
   session, which is what makes the visibility rules fall out: while it runs it

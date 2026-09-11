@@ -1544,6 +1544,60 @@ export async function cmdAbout(rest: string[]): Promise<number> {
  * SEALING — see relay/automationApi.ts for why this can only author for its
  * own machine.
  */
+/**
+ * `joy restore` — bring back what a reboot took.
+ *
+ * A daemon crash loses nothing: tmux outlives the daemon and recover()
+ * re-adopts every window. A machine reboot is the gap — tmux dies with it and
+ * only the window records survive. One session at a time already has Resume
+ * in the app; this is the bulk case.
+ */
+export async function cmdRestore(rest: string[]): Promise<number> {
+  const json = takeBool(rest, "--json");
+  const dry = takeBool(rest, "--dry-run") || takeBool(rest, "-n");
+  const ids = rest.filter((a) => !a.startsWith("-"));
+
+  const list = await api("GET", "/restorable").catch(() => null);
+  if (!list) { console.error(`${bad} daemon not running (joy start)`); return 1; }
+  // A 404 here is a daemon that is RUNNING and too old — saying "not running"
+  // sends you to restart something that is already up.
+  if (list.status === 404) { console.error(`${bad} this daemon predates restore — ${c.b("joy update")}`); return 1; }
+  if (!list.ok) { console.error(`${bad} could not list restorable sessions (HTTP ${list.status})`); return 1; }
+  const body = await list.json().catch(() => ({})) as { sessions?: any[] };
+  let sessions = body.sessions ?? [];
+  if (ids.length > 0) sessions = sessions.filter((s) => ids.some((want) => s.id === want || s.id.startsWith(want)));
+
+  if (sessions.length === 0) {
+    if (json) console.log("[]");
+    else console.log("nothing to restore — every session this machine knows about is running");
+    return 0;
+  }
+
+  if (dry || json) {
+    if (json) { console.log(JSON.stringify(sessions)); return 0; }
+    console.log(`${sessions.length} session${sessions.length === 1 ? "" : "s"} could be restored:`);
+    for (const s of sessions) {
+      // An empty resume is worth flagging: the folder comes back but the
+      // conversation does not, and that is a different thing to get back.
+      const how = s.resumeId ? c.dim("resumes its conversation") : c.dim("fresh — no conversation to resume");
+      console.log(`  ${c.b(s.id)}  ${s.agent.padEnd(8)} ${s.cwd}  ${how}`);
+    }
+    console.log(`\nrun ${c.b("joy restore")} to bring them back`);
+    return 0;
+  }
+
+  const r = await api("POST", "/restore", ids.length > 0 ? { ids: sessions.map((s) => s.id) } : {}).catch(() => null);
+  const out = r ? await r.json().catch(() => ({})) as any : null;
+  if (!r || !r.ok || !out) { console.error(`${bad} restore failed`); return 1; }
+  for (const one of out.restored ?? []) {
+    if (one.ok) console.log(`${ok} ${one.id}  ${one.cwd}`);
+    else console.error(`${bad} ${one.id}  ${one.cwd} — ${one.error}`);
+  }
+  const failed = (out.restored ?? []).filter((x: any) => !x.ok).length;
+  if (failed > 0) console.error(`\n${failed} of ${out.restored.length} did not come back`);
+  return failed > 0 ? 1 : 0;
+}
+
 export async function cmdAutomation(rest: string[]): Promise<number> {
   const sub = rest[0];
   const args = rest.slice(1);
@@ -2167,6 +2221,8 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
                account backup code (one code works on every relay) — e.g.
                ${c.dim("joy auth joy joy-dev")}
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
+  ${c.b("restore")}      Bring back sessions a REBOOT took (a daemon crash loses none — tmux
+                 outlives it). [--dry-run] [--json] [<id>…]; each resumes its conversation
   ${c.b("automation")}   Saved work: a folder, a prompt and a trigger — and the runs it produces
                  create [--dir p] -m "prompt" [--on manual|automation_done]
                  [--cron "0 2 * * *" [--tz zone]] · ls · show · run <id> [--wait] ·
@@ -2202,6 +2258,7 @@ async function main(): Promise<void> {
     case "run": code = await cmdRun(rest); break;
     case "new": code = await cmdNew(rest); break;
     case "automation": case "auto": code = await cmdAutomation(rest); break;
+    case "restore": code = await cmdRestore(rest); break;
     case "ask": code = await cmdAsk(rest); break;
     case "send": code = await cmdSend(rest); break;
     case "wait": code = await cmdWaitIdle(rest); break;
