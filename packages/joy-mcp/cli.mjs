@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // joy-mcp — a remote MCP server that is a full client of one joy account.
 //
-//   joy-mcp pair --relay https://joy.voltai.party:4997            approve from the joy app (QR / link)
+//   joy-mcp pair --relay https://joy.voltai.party:4997 [--minutes 60]   approve from the joy app (QR / link)
 //   joy-mcp pair --relay … --secret <backup code>                  from the account backup code
 //   joy-mcp serve                                                   JOY_MCP_PORT (3107) · JOY_MCP_PUBLIC_URL
 //   joy-mcp token new <name>                                        a bearer for Claude Code / scripts
-//   joy-mcp token ls
+//   joy-mcp token ls · token rm <hash>
 //   joy-mcp status
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
@@ -35,7 +35,9 @@ async function main() {
       console.log(`paired to ${acct.relayUrl} as ${acct.accountPublicKey.slice(0, 12)}… (creds in ${dir})`);
       return 0;
     }
+    const minutes = Number(flag('--minutes') ?? 60);
     const acct = await pairWithApp(relay, {
+      timeoutMs: minutes * 60_000,
       onCode: async (link) => {
         console.log('\nApprove this device in the joy app — Settings → Connect a device — by scanning:\n');
         try { const qr = (await import('qrcode-terminal')).default; qr.generate(link, { small: true }, (s) => console.log(s)); } catch { /* no QR lib */ }
@@ -56,7 +58,13 @@ async function main() {
       return 0;
     }
     if (sub === 'ls') { for (const t of provider.listTokens()) console.log(`${t.hash}  ${t.type.padEnd(8)} ${String(t.client).padEnd(28)} ${new Date(t.issuedAt).toISOString()}${t.expiresAt ? `  until ${new Date(t.expiresAt).toISOString()}` : ''}`); return 0; }
-    console.error('usage: joy-mcp token new <name> | ls'); return 2;
+    if (sub === 'rm') {
+      const prefix = argv[2];
+      if (!prefix || prefix.length < 4) { console.error('usage: joy-mcp token rm <hash prefix from token ls, 4+ chars>'); return 2; }
+      console.log(`revoked ${provider.removeTokens(prefix)}`);
+      return 0;
+    }
+    console.error('usage: joy-mcp token new <name> | ls | rm <hash>'); return 2;
   }
   if (cmd === 'status') {
     const acct = loadAccount();

@@ -21,12 +21,24 @@ const fresh = () => randomBytes(32).toString('base64url');
 export class FileStore {
   constructor(dir) {
     this.path = join(dir, 'oauth.json');
-    this.data = existsSync(this.path) ? JSON.parse(readFileSync(this.path, 'utf8')) : { clients: {}, tokens: {} };
-    this.data.clients ??= {}; this.data.tokens ??= {};
+    this.data = { clients: {}, tokens: {} };
+    this.reload();
   }
+  /** Two writers share the file — the server and `joy-mcp token new` from a
+   *  shell — so reads re-open it and writes merge with what is on disk. */
+  reload() {
+    const disk = existsSync(this.path) ? JSON.parse(readFileSync(this.path, 'utf8')) : {};
+    this.data = { clients: { ...(disk.clients ?? {}), ...this.data.clients }, tokens: { ...(disk.tokens ?? {}), ...this.data.tokens } };
+    for (const k of this.#deleted) { delete this.data.tokens[k]; delete this.data.clients[k]; }
+    return this.data;
+  }
+  #deleted = new Set();
+  forget(kind, key) { delete this.data[kind][key]; this.#deleted.add(key); }
   save() {
+    this.reload();
     writeFileSync(this.path, JSON.stringify(this.data, null, 2), { mode: 0o600 });
     try { chmodSync(this.path, 0o600); } catch { /* umask */ }
+    this.#deleted.clear();
   }
 }
 
@@ -91,8 +103,8 @@ export class JoyOAuthProvider {
     const rec = this.store.data.tokens[sha(refreshToken)];
     if (!rec || rec.type !== 'refresh' || rec.clientId !== client.client_id) throw new InvalidGrantError('Invalid refresh token');
     if (rec.expiresAt && rec.expiresAt < Date.now()) throw new InvalidGrantError('Refresh token expired');
-    delete this.store.data.tokens[sha(refreshToken)];
-    if (rec.access) delete this.store.data.tokens[rec.access];
+    this.store.forget('tokens', sha(refreshToken));
+    if (rec.access) this.store.forget('tokens', rec.access);
     return this.#issue(client.client_id, scopes?.length ? scopes : rec.scopes, rec.resource);
   }
 
@@ -106,7 +118,8 @@ export class JoyOAuthProvider {
   }
 
   async verifyAccessToken(token) {
-    const rec = this.store.data.tokens[sha(token)];
+    let rec = this.store.data.tokens[sha(token)];
+    if (!rec) { this.store.reload(); rec = this.store.data.tokens[sha(token)]; } // minted from the CLI since we loaded
     if (!rec || (rec.type !== 'access' && rec.type !== 'bearer')) throw new InvalidTokenError('Invalid token');
     if (rec.expiresAt && rec.expiresAt < Date.now()) throw new InvalidTokenError('Token expired');
     // The SDK's bearer middleware insists on an expiry: a CLI-minted bearer
@@ -116,7 +129,7 @@ export class JoyOAuthProvider {
   }
 
   async revokeToken(_client, { token }) {
-    delete this.store.data.tokens[sha(token)];
+    this.store.forget('tokens', sha(token));
     this.store.save();
   }
 
@@ -126,6 +139,13 @@ export class JoyOAuthProvider {
     this.store.data.tokens[sha(token)] = { type: 'bearer', clientId: `bearer:${name}`, name, scopes: [], issuedAt: Date.now(), expiresAt: null };
     this.store.save();
     return token;
+  }
+  /** Revoke every token whose hash starts with `prefix` (from `token ls`). */
+  removeTokens(prefix) {
+    const hit = Object.keys(this.store.data.tokens).filter((h) => h.startsWith(prefix));
+    for (const h of hit) this.store.forget('tokens', h);
+    if (hit.length) this.store.save();
+    return hit.length;
   }
   listTokens() {
     return Object.entries(this.store.data.tokens).map(([h, t]) => ({ hash: h.slice(0, 8), type: t.type, client: t.name ?? t.clientId, issuedAt: t.issuedAt, expiresAt: t.expiresAt }));
