@@ -42,15 +42,22 @@
 // acknowledged is orthogonal to whether the turn is running, cancelling or
 // parked — a resumed turn arrives with it already true.
 //
-// The stage A / stage C asymmetry, transcribed rather than reconciled:
-//   A: a /start refusal of the cancel class (START_CANCEL_CLASS) cancels
-//      locally; any other 409 asks the relay to adopt the turn, and a SECOND
-//      refusal after that adoption cancels locally whatever its code.
-//   C: (after an adoption was answered) a cancel-class refusal cancels
-//      locally only while no local cancel is in progress (phase `running`,
-//      not `cancelling`); every other refusal waives the /start — "the relay
-//      has its answer; the outcome posts as the terminal fact" (F28).
-// Both are the code's behaviour on 2026-09-11; the second is the newer rule.
+// A /start refusal means ONE thing in every live phase (reconciled
+// 2026-09-11; until then stage A — before the terminal wait — and stage C
+// answered it differently, and stage A's rule was the older one):
+//   - the cancel class (START_CANCEL_CLASS) stops the prompt: cancel
+//     locally, unless a local cancel is already in progress (`cancelling`),
+//     which is the same answer already being honoured — then the /start is
+//     waived and the runtime's confirm closes the turn;
+//   - any other 409 is a recovery question (not_queue_head,
+//     another_turn_active, turn_orphaned_reconcile_first, no_current_
+//     delivery): ask the relay to adopt the turn once; if it has nothing to
+//     adopt, or refuses the start again, the /start is waived — the relay
+//     has its answer and the outcome posts as the terminal fact (F28). A
+//     working agent is never cancelled over an ordering or recovery answer;
+//     only a cancel-class refusal or a cancel/refused adoption cancels it.
+// `stage` is kept as information (where in the drive loop the turn is); it
+// decides nothing.
 //
 // Adoption arbitration (F30/F31) is here too, as a pure mailbox: the orphan
 // sweep and the turn's own loop can have reconciles in flight for the same
@@ -240,8 +247,8 @@ export function nextTurnState(s: TurnState, ev: TurnEvent): TurnTransition | nul
   return null;
 }
 
-/** running / cancelling share everything but what a cancel-class /start
- *  refusal means in stage C. */
+/** running / cancelling: one rule set (a cancel in progress only changes
+ *  what a cancel-class refusal means — already honoured, waive the start). */
 function live(s: Extract<TurnState, { phase: "running" | "cancelling" }>, ev: TurnEvent): TurnTransition | null {
   switch (ev.type) {
     case "command_lost": return { to: T("failed", "command_lost") };
@@ -252,27 +259,27 @@ function live(s: Extract<TurnState, { phase: "running" | "cancelling" }>, ev: Tu
     case "cancel_requested": return { to: { ...s, phase: "cancelling" } };
     case "start_ok": return { to: { ...s, startPosted: true } };
     case "start_refused": {
-      if (s.stage === "a") {
-        // First refusal: the cancel class stops the prompt; any other 409 is
-        // a recovery question — ask the relay to adopt. After that adoption,
-        // a second refusal stops it whatever its code.
-        if (s.refusals === 0 && !START_CANCEL_CLASS.has(ev.code)) return { to: { ...s, refusals: 1 }, effects: ["adopt"] };
-        return { to: T("cancelled", startRefusalReason(ev.code)), effects: ["cancel_locally"] };
+      if (START_CANCEL_CLASS.has(ev.code)) {
+        // The relay's authoritative no while NOTHING has cancelled the command
+        // here was the F28 wedge — cancel now. A cancel already in progress
+        // locally is the same answer, already honoured: waive the /start.
+        return s.phase === "running" ? { to: T("cancelled", ev.code), effects: ["cancel_locally"] } : { to: { ...s, startPosted: true } };
       }
-      // Stage C: the relay's authoritative no while NOTHING has cancelled the
-      // command here was the F28 wedge — cancel now. A cancel already in
-      // progress locally is the same answer, already honoured; and a refusal
-      // outside the cancel class means the relay has its answer already.
-      if (START_CANCEL_CLASS.has(ev.code) && s.phase === "running") return { to: T("cancelled", ev.code), effects: ["cancel_locally"] };
+      // A recovery question: ask the relay to adopt the turn once. Refused
+      // again after that, the relay has its answer — the /start is waived
+      // and the outcome posts as the terminal fact. Never a cancel.
+      if (s.refusals === 0) return { to: { ...s, refusals: 1 }, effects: ["adopt"] };
       return { to: { ...s, startPosted: true } };
     }
     case "adoption": {
       const a = ev.answer;
       switch (a.kind) {
         case "running": return { to: s };
-        // Stage A after a refused /start: nothing to adopt is the plain "no"
-        // (cancel). On a resume, or in stage C, it is a question answered.
-        case "none": return s.stage === "a" && s.refusals > 0 ? { to: T("cancelled", "start_rejected"), effects: ["cancel_locally"] } : { to: s };
+        // Nothing to adopt. After a refused /start that is the relay's answer
+        // (the turn is ours and dispatching; a re-posted /start would be
+        // refused the same way): the /start is waived. Otherwise (a resume,
+        // a sweep's question) it changes nothing.
+        case "none": return s.refusals > 0 ? { to: { ...s, startPosted: true } } : { to: s };
         case "terminal": return a.terminalState === "cancelled" ? { to: T("cancelled", "relay_cancelled"), effects: ["cancel_locally"] } : { to: { ...s, startPosted: true } };
         case "refused": return { to: T("cancelled", a.code), effects: ["cancel_locally"] };
         case "cancelling": return { to: { ...s, phase: "cancelling" }, effects: ["cancel_command"] };

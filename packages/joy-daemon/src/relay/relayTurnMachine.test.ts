@@ -85,30 +85,25 @@ const liveAdoption = (self: TurnState["phase"], none: Answer): Record<string, An
   "adoption(refused)": term("cancelled", "session_event_budget_exhausted", ["cancel_locally"]),
   "adoption(unavailable)": { phase: "adoption_pending", attempts: 1, lastError: "503", since: NOW, cancelling: self === "cancelling" },
 });
-const stageA = (self: "running" | "cancelling"): Record<string, Answer> => ({
+/** The live phases answer every event the same way whatever the stage;
+ *  only whether a /start was refused before (`refusals`) and whether a
+ *  local cancel is in progress (`self`) change an answer. */
+const live = (self: "running" | "cancelling", refusals = 0): Record<string, Answer> => ({
   ...NEVER, ...OPEN, ...ENDED,
   terminal_wait: { phase: self, stage: "c" },
   stalled: { phase: self, stalled: true },
   output_resumed: { phase: self, stalled: false },
   cancel_requested: { phase: "cancelling" },
   start_ok: { phase: self, startPosted: true },
-  "start_refused(cancel)": term("cancelled", "start_rejected", ["cancel_locally"]),
-  "start_refused(gone)": term("cancelled", "session_archived", ["cancel_locally"]),
-  "start_refused(other)": { phase: self, refusals: 1, effects: ["adopt"] },
-  ...liveAdoption(self, { phase: self }),
-});
-const stageAAfterRefusal = (self: "running" | "cancelling"): Record<string, Answer> => ({
-  ...stageA(self),
-  "start_refused(cancel)": term("cancelled", "start_rejected", ["cancel_locally"]),
-  "start_refused(other)": term("cancelled", "start_rejected", ["cancel_locally"]),
-  "adoption(none)": term("cancelled", "start_rejected", ["cancel_locally"]),
-});
-const stageC = (self: "running" | "cancelling"): Record<string, Answer> => ({
-  ...stageA(self),
-  terminal_wait: { phase: self, stage: "c" },
+  // The cancel class stops the prompt — unless a cancel is already in
+  // progress here, which is the same answer already honoured.
   "start_refused(cancel)": self === "running" ? term("cancelled", "turn_cancelled", ["cancel_locally"]) : { phase: self, startPosted: true },
   "start_refused(gone)": self === "running" ? term("cancelled", "session_archived", ["cancel_locally"]) : { phase: self, startPosted: true },
-  "start_refused(other)": { phase: self, startPosted: true },
+  // A recovery question: adopt once; refused again, the start is waived.
+  "start_refused(other)": refusals === 0 ? { phase: self, refusals: 1, effects: ["adopt"] } : { phase: self, startPosted: true },
+  ...liveAdoption(self, { phase: self }),
+  // Nothing to adopt after a refused /start: the relay's answer; waived.
+  "adoption(none)": refusals === 0 ? { phase: self } : { phase: self, startPosted: true },
 });
 
 const CASES: Array<{ name: string; state: TurnState; expected: Record<string, Answer> }> = [
@@ -144,16 +139,17 @@ const CASES: Array<{ name: string; state: TurnState; expected: Record<string, An
     "start_refused(gone)": term("cancelled", "session_archived"),
     "start_refused(other)": term("cancelled", "start_rejected"),
   } },
-  { name: "running (stage A)", state: running(), expected: stageA("running") },
-  { name: "running (stage A, one refusal behind it)", state: running({ refusals: 1 }), expected: stageAAfterRefusal("running") },
-  { name: "running (stage C, /start owed)", state: running({ stage: "c" }), expected: stageC("running") },
+  { name: "running (stage A)", state: running(), expected: live("running") },
+  { name: "running (stage A, one refusal behind it)", state: running({ refusals: 1 }), expected: live("running", 1) },
+  { name: "running (stage C, /start owed)", state: running({ stage: "c" }), expected: live("running") },
+  { name: "running (stage C, one refusal behind it)", state: running({ stage: "c", refusals: 1 }), expected: live("running", 1) },
   { name: "running (stage C, /start acknowledged)", state: running({ stage: "c", startPosted: true }), expected: {
-    ...stageC("running"), start_ok: { phase: "running", startPosted: true },
+    ...live("running"), start_ok: { phase: "running", startPosted: true },
     "adoption(unavailable)": { phase: "adoption_pending", attempts: 1, startPosted: true, cancelling: false },
   } },
-  { name: "cancelling (stage A)", state: cancelling(), expected: stageA("cancelling") },
-  { name: "cancelling (stage A, one refusal behind it)", state: cancelling({ refusals: 1 }), expected: stageAAfterRefusal("cancelling") },
-  { name: "cancelling (stage C)", state: cancelling({ stage: "c" }), expected: stageC("cancelling") },
+  { name: "cancelling (stage A)", state: cancelling(), expected: live("cancelling") },
+  { name: "cancelling (stage A, one refusal behind it)", state: cancelling({ refusals: 1 }), expected: live("cancelling", 1) },
+  { name: "cancelling (stage C)", state: cancelling({ stage: "c" }), expected: live("cancelling") },
   { name: "adoption_pending", state: pending(), expected: {
     ...NEVER, ...OPEN, ...ENDED,
     stalled: { phase: "adoption_pending", stalled: true },
