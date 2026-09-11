@@ -52,6 +52,10 @@ setInterval(() => { core.sweepExpiredLeases().catch((e) => console.error('[joy-r
 setInterval(() => { attachments.sweepOrphans().catch((e) => console.error('[joy-relay] attachment sweep failed:', e)); }, 60 * 60 * 1000).unref();
 // Pairing requests that were never (or long ago) answered age out.
 setInterval(() => { accounts.sweepPairings().catch((e) => console.error('[joy-relay] pairing sweep failed:', e)); }, 60 * 60 * 1000).unref();
+// Schedule triggers. 30s is finer than the one-minute resolution cron has, so
+// a due occurrence waits at most half a minute; the tick is a single indexed
+// scan and does nothing at all when no schedule is due.
+setInterval(() => { automations.tick().catch((e) => console.error('[joy-relay] automation tick failed:', e)); }, 30_000).unref();
 
 const gate = createGate();
 

@@ -21,7 +21,10 @@ export interface AutomationDraft {
     agent?: string;
     model?: string;
     trigger: string;
+    /** For `schedule` this IS the cron expression — a trigger is an event
+     *  source plus a filter, and for a schedule the filter is the expression. */
     triggerFilter?: string;
+    timezone?: string;
 }
 
 /** What an automation actually runs, once opened. */
@@ -64,7 +67,11 @@ export async function createAutomation(draft: AutomationDraft): Promise<V2Automa
         machineId: draft.machineId,
         directory: draft.directory,
         spec,
-        triggers: [{ kind: draft.trigger, ...(draft.triggerFilter ? { filter: draft.triggerFilter } : {}) }],
+        triggers: [{
+            kind: draft.trigger,
+            ...(draft.triggerFilter ? { filter: draft.triggerFilter } : {}),
+            ...(draft.timezone ? { timezone: draft.timezone } : {}),
+        }],
     });
     return automation;
 }

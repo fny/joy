@@ -756,6 +756,78 @@ describe('automations', () => {
       });
     });
 
+    it('a schedule expression is checked when it is WRITTEN, not when it fires', async () => {
+      // A bad expression accepted at authoring is an automation that silently
+      // never runs, and nothing later would say why.
+      const bad = await call('POST', '/joy/v2/automations', {
+        body: { ...draft(), triggers: [{ kind: 'schedule', filter: 'every night' }] },
+      });
+      expect(bad.status).toBe(400);
+      expect(bad.json.error).toBe('bad_cron');
+
+      const badZone = await call('POST', '/joy/v2/automations', {
+        body: { ...draft(), triggers: [{ kind: 'schedule', filter: '0 2 * * *', timezone: 'Mars/Olympus' }] },
+      });
+      expect(badZone.status).toBe(400);
+      expect(badZone.json.error).toBe('bad_timezone');
+    });
+
+    it('a schedule knows when it next fires the moment it is created', async () => {
+      const a = await create({ triggers: [{ kind: 'schedule', filter: '*/5 * * * *', timezone: 'UTC' }] });
+      const trig = a.triggers.find((t) => t.kind === 'schedule');
+      expect(trig.filter).toBe('*/5 * * * *');
+      expect(trig.timezone).toBe('UTC');
+      expect(trig.nextRunAt).toBeGreaterThan(Date.now() - 1000);
+      expect(trig.nextRunAt).toBeLessThan(Date.now() + 6 * 60_000);
+    });
+
+    it('the tick fires what is due and advances the clock past it', async () => {
+      await inIsolation(async ({ machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const a = await create({ machineId, triggers: [{ kind: 'schedule', filter: '*/5 * * * *', timezone: 'UTC' }] });
+
+        // Nothing is due yet. (The tick is global, so assert on THIS
+        // automation's runs rather than the fleet-wide count.)
+        await automations.tick();
+        expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(0);
+
+        // An hour later it is — and it fires ONCE, not twelve times.
+        const later = Date.now() + 60 * 60_000;
+        await automations.tick(later);
+
+        const runs = (await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs;
+        expect(runs.filter((r) => r.state === 'running' || r.state === 'succeeded')).toHaveLength(1);
+        // And the ones that passed are RECORDED, not forgotten.
+        const missed = runs.find((r) => r.errorCode === 'missed_schedule');
+        expect(missed).toBeTruthy();
+        expect(missed.errorMessage).toMatch(/occurrences? passed while nothing was listening/);
+
+        // The clock moved: ticking again at the same instant runs nothing more.
+        await automations.tick(later);
+        const after = (await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs;
+        expect(after).toHaveLength(runs.length);
+      });
+    });
+
+    it('a disabled schedule advances its clock but runs nothing', async () => {
+      await inIsolation(async ({ machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const a = await create({ machineId, triggers: [{ kind: 'schedule', filter: '*/5 * * * *', timezone: 'UTC' }] });
+        await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { enabled: false } });
+
+        const later = Date.now() + 60 * 60_000;
+        await automations.tick(later);
+        expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(0);
+        // Re-enabling must not then replay the hour it was off for: the clock
+        // advanced while it was disabled, so there is nothing owed.
+        await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { enabled: true } });
+        await automations.tick(later);
+        expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(0);
+      });
+    });
+
     it('an unknown kind, or no account, fires nothing rather than throwing', async () => {
       expect((await automations.onEvent('full_moon', { accountId: 'x' })).fired).toBe(0);
       expect((await automations.onEvent('machine_online', {})).fired).toBe(0);

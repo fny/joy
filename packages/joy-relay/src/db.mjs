@@ -310,6 +310,22 @@ const MIGRATIONS = [
   CREATE INDEX automation_runs_live ON automation_runs (account_id, state, created_at DESC);
   CREATE INDEX automation_runs_by_automation ON automation_runs (automation_id, created_at DESC);
   `,
+  // 011 — `schedule` triggers: cron, after all. The expression lives in the
+  // trigger's existing `filter` column (a trigger is an event source plus a
+  // filter, and for a schedule the filter IS the expression), so only the
+  // clock bookkeeping is new: the zone to read it in, and when it next fires.
+  //
+  // `next_run_at` is what the ticker scans, and it is also what makes the
+  // catch-up question answerable: the gap between it and now is exactly what
+  // was missed while nobody was listening.
+  `
+  ALTER TABLE automation_triggers DROP CONSTRAINT automation_triggers_kind_check;
+  ALTER TABLE automation_triggers ADD CONSTRAINT automation_triggers_kind_check
+    CHECK (kind IN ('manual','turn_done','session_state','machine_online','automation_done','schedule'));
+  ALTER TABLE automation_triggers ADD COLUMN timezone TEXT;
+  ALTER TABLE automation_triggers ADD COLUMN next_run_at TIMESTAMPTZ;
+  CREATE INDEX automation_triggers_due ON automation_triggers (kind, next_run_at);
+  `,
 ];
 
 /** Exclusive ownership of a data directory. Two relay processes opening the

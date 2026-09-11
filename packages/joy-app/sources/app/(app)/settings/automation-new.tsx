@@ -28,6 +28,7 @@ import { HARNESS_IDS, type HarnessId } from '@/sync/harnessCapabilities';
  */
 const TRIGGERS: Array<{ kind: string; title: string; subtitle: string }> = [
     { kind: 'manual', title: 'Only when I ask', subtitle: 'From here, or `joy automation run` on any machine' },
+    { kind: 'schedule', title: 'On a schedule', subtitle: 'A cron expression, in a time zone you name' },
     { kind: 'turn_done', title: 'When a session finishes a turn', subtitle: 'On this machine. A run never fires itself.' },
     { kind: 'machine_online', title: 'When the machine comes back', subtitle: 'On a fresh daemon start — not on every heartbeat' },
     { kind: 'automation_done', title: 'After another automation', subtitle: 'Chain one behind another' },
@@ -44,6 +45,12 @@ export default React.memo(function NewAutomationScreen() {
     const [name, setName] = React.useState('');
     const [agent, setAgent] = React.useState<HarnessId>('claude');
     const [trigger, setTrigger] = React.useState('manual');
+    // A schedule's expression lives in the trigger's filter — a trigger is an
+    // event source plus a filter, and for a schedule the filter IS the cron.
+    const [cron, setCron] = React.useState('0 2 * * *');
+    const [timezone, setTimezone] = React.useState(
+        (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } })(),
+    );
     const [saving, setSaving] = React.useState(false);
 
     React.useEffect(() => {
@@ -60,7 +67,8 @@ export default React.memo(function NewAutomationScreen() {
         ...Typography.default(),
     } as const;
 
-    const ready = !!machineId && directory.trim().length > 0 && prompt.trim().length > 0;
+    const ready = !!machineId && directory.trim().length > 0 && prompt.trim().length > 0
+        && (trigger !== 'schedule' || cron.trim().split(/\s+/).length === 5);
 
     const save = React.useCallback(async () => {
         if (!ready || !machineId) return;
@@ -73,6 +81,9 @@ export default React.memo(function NewAutomationScreen() {
                 prompt: prompt.trim(),
                 agent,
                 trigger,
+                ...(trigger === 'schedule'
+                    ? { triggerFilter: cron.trim(), timezone: timezone.trim() || 'UTC' }
+                    : {}),
             });
             router.back();
         } catch (e) {
@@ -80,7 +91,7 @@ export default React.memo(function NewAutomationScreen() {
         } finally {
             setSaving(false);
         }
-    }, [ready, machineId, directory, name, prompt, agent, trigger, router]);
+    }, [ready, machineId, directory, name, prompt, agent, trigger, cron, timezone, router]);
 
     return (
         <ItemList style={{ paddingTop: 0 }}>
@@ -149,6 +160,36 @@ export default React.memo(function NewAutomationScreen() {
                     />
                 ))}
             </ItemGroup>
+
+            {trigger === 'schedule' && (
+                <ItemGroup
+                    title="Schedule"
+                    footer={'Five fields: minute hour day-of-month month day-of-week.\n\n  0 2 * * *      every day at 2am\n  */15 * * * *   every fifteen minutes\n  0 9 * * 1-5    weekdays at 9am\n\nThe time zone is yours, not the machine\'s — 2am means 2am where you are, across daylight saving.'}
+                >
+                    <View style={{ paddingHorizontal: 16, paddingVertical: 10 }}>
+                        <TextInput
+                            value={cron}
+                            onChangeText={setCron}
+                            placeholder="0 2 * * *"
+                            placeholderTextColor={theme.colors.textSecondary}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            style={input}
+                        />
+                    </View>
+                    <View style={{ paddingHorizontal: 16, paddingBottom: 10 }}>
+                        <TextInput
+                            value={timezone}
+                            onChangeText={setTimezone}
+                            placeholder="UTC"
+                            placeholderTextColor={theme.colors.textSecondary}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            style={input}
+                        />
+                    </View>
+                </ItemGroup>
+            )}
 
             <ItemGroup title="Agent">
                 {HARNESS_IDS.map((h) => (

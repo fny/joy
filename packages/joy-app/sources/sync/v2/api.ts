@@ -115,7 +115,7 @@ export interface V2Automation {
     lastRunAt: number | null;
     createdAt: number;
     updatedAt: number;
-    triggers: Array<{ kind: string; filter: string }>;
+    triggers: Array<{ kind: string; filter: string; timezone?: string; nextRunAt?: number }>;
     latestRun?: V2AutomationRun | null;
 }
 
@@ -195,11 +195,11 @@ export const v2 = {
     getAutomation: (id: string): Promise<{ automation: V2Automation }> => v2fetch('GET', `/automations/${id}`),
     createAutomation: (body: {
         name: string; machineId: string; directory: string; spec: string;
-        triggers: Array<{ kind: string; filter?: string }>; enabled?: boolean;
+        triggers: Array<{ kind: string; filter?: string; timezone?: string }>; enabled?: boolean;
     }): Promise<{ automation: V2Automation }> => v2fetch('POST', '/automations', body),
     patchAutomation: (id: string, body: Partial<{
         name: string; directory: string; machineId: string; enabled: boolean;
-        spec: string; expectedSpecVersion: number; triggers: Array<{ kind: string; filter?: string }>;
+        spec: string; expectedSpecVersion: number; triggers: Array<{ kind: string; filter?: string; timezone?: string }>;
     }>): Promise<{ automation: V2Automation }> => v2fetch('PATCH', `/automations/${id}`, body),
     deleteAutomation: (id: string) => v2fetch('DELETE', `/automations/${id}`),
     runAutomation: (id: string): Promise<{ run: V2AutomationRun; skipped?: boolean }> =>

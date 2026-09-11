@@ -87,4 +87,14 @@ describe('createAutomation', () => {
         await createAutomation(draft({ trigger: 'machine_online' }));
         expect(created[0].triggers).toEqual([{ kind: 'machine_online' }]);
     });
+
+    it('a schedule carries its expression as the FILTER, plus a zone', async () => {
+        // A trigger is an event source plus a filter, and for a schedule the
+        // filter IS the cron expression — no separate column, no new shape.
+        created.length = 0;
+        await createAutomation(draft({ trigger: 'schedule', triggerFilter: '0 2 * * *', timezone: 'America/New_York' }));
+        expect(created[0].triggers).toEqual([
+            { kind: 'schedule', filter: '0 2 * * *', timezone: 'America/New_York' },
+        ]);
+    });
 });

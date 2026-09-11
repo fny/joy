@@ -1558,9 +1558,17 @@ export async function cmdAutomation(rest: string[]): Promise<number> {
     const agent = takeFlag(args, "--agent") || "claude";
     const model = takeFlag(args, "--model");
     const effort = takeFlag(args, "--effort");
-    const on = takeFlag(args, "--on") || "manual";
+    // `--cron` is sugar for `--on schedule --filter "<expr>"`: a schedule IS a
+    // trigger whose filter is the expression, but nobody wants to type that.
+    const cron = takeFlag(args, "--cron");
+    const tz = takeFlag(args, "--tz") || takeFlag(args, "--timezone");
+    const on = cron ? "schedule" : (takeFlag(args, "--on") || "manual");
+    const filter = cron || takeFlag(args, "--filter");
     if (!prompt || !prompt.trim()) {
-      console.error('usage: joy automation create [--dir <path>] -m "<prompt>" [--on manual|turn_done|session_state|machine_online|automation_done] [--name n] [--agent a] [--model m] [--effort e] [--json]');
+      console.error('usage: joy automation create [--dir <path>] -m "<prompt>"');
+      console.error('         [--on manual|turn_done|session_state|machine_online|automation_done]');
+      console.error('         [--cron "0 2 * * *" [--tz America/New_York]]');
+      console.error('         [--name n] [--agent a] [--model m] [--effort e] [--json]');
       return 2;
     }
     const cwd = resolve(expandTilde(dir || process.cwd()));
@@ -1577,7 +1585,7 @@ export async function cmdAutomation(rest: string[]): Promise<number> {
       machineId: id.machineId,
       directory: cwd,
       spec,
-      triggers: [{ kind: on }],
+      triggers: [{ kind: on, ...(filter ? { filter } : {}), ...(tz ? { timezone: tz } : {}) }],
     });
     if (r.status !== 201) return fail(r, "create failed");
     const a = r.body.automation;
@@ -1586,7 +1594,9 @@ export async function cmdAutomation(rest: string[]): Promise<number> {
       console.log(`${ok} ${a.name}`);
       console.log(`  id       ${a.id}`);
       console.log(`  folder   ${a.directory}`);
-      console.log(`  trigger  ${a.triggers.map((t: any) => t.kind).join(", ")}`);
+      console.log(`  trigger  ${a.triggers.map((t: any) => (t.kind === "schedule" ? `${t.filter} (${t.timezone ?? "UTC"})` : t.kind)).join(", ")}`);
+      const sched = a.triggers.find((t: any) => t.kind === "schedule" && t.nextRunAt);
+      if (sched) console.log(`  next     ${new Date(sched.nextRunAt).toLocaleString()}`);
       console.log(`  run it   ${c.b(`joy automation run ${a.id} --wait`)}`);
     }
     return 0;
@@ -1602,7 +1612,8 @@ export async function cmdAutomation(rest: string[]): Promise<number> {
     for (const a of rows) {
       const last = a.latestRun ? `${a.latestRun.state}${a.latestRun.errorCode ? ` (${a.latestRun.errorCode})` : ""}` : "never run";
       console.log(`  ${c.b(a.id.slice(0, 8))}  ${a.enabled ? " " : c.dim("off")} ${a.name}`);
-      console.log(`  ${" ".repeat(8)}  ${c.dim(`${a.directory} · ${a.triggers.map((t: any) => t.kind).join(",")} · ${last}`)}`);
+      const how = a.triggers.map((t: any) => (t.kind === "schedule" ? `cron ${t.filter}` : t.kind)).join(",");
+      console.log(`  ${" ".repeat(8)}  ${c.dim(`${a.directory} · ${how} · ${last}`)}`);
     }
     return 0;
   }
@@ -2143,8 +2154,8 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("automation")}   Saved work: a folder, a prompt and a trigger — and the runs it produces
                  create [--dir p] -m "prompt" [--on manual|turn_done|session_state|
-                 machine_online|automation_done] · ls · show · run <id> [--wait] ·
-                 runs <id> · enable/disable <id> · rm <id>
+                 machine_online|automation_done] [--cron "0 2 * * *" [--tz zone]] ·
+                 ls · show · run <id> [--wait] · runs <id> · enable/disable <id> · rm <id>
                  (a run is a headless session; it FAILS the moment it needs a human —
                   blocked:login, blocked:trust, blocked:permission, agent_died, stalled.
                   run --wait exits with the outcome, so scripts and agents can use it.

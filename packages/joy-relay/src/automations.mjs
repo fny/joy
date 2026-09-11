@@ -13,6 +13,7 @@
 // retried trigger incapable of spawning twice.
 import { randomUUID } from 'node:crypto';
 import { ApiError } from './core.mjs';
+import { parseCron, nextCronAfter, cronOccurrencesBetween, CronError } from './cron.mjs';
 
 /** Bounds. The spec is a sealed blob; the rest is metadata a human typed. */
 const MAX_SPEC_CHARS = 256 * 1024;
@@ -25,7 +26,11 @@ const RUN_HISTORY_MAX = 200;
 /** Shared with the daemon (domain/automationRun.ts) — a wire constant. */
 export const AUTOMATION_INTENT_PREFIX = 'automation-run:';
 
-const TRIGGER_KINDS = new Set(['manual', 'turn_done', 'session_state', 'machine_online', 'automation_done']);
+const TRIGGER_KINDS = new Set(['manual', 'turn_done', 'session_state', 'machine_online', 'automation_done', 'schedule']);
+/** How many missed occurrences a single catch-up will record before it stops
+ *  counting. A machine offline for a month on a one-minute schedule owes
+ *  43,200 of them; the number stops being informative long before that. */
+const CATCH_UP_CAP = 200;
 /** A run that has not reached a terminal state yet. */
 const LIVE_RUN_STATES = ['queued', 'running'];
 
@@ -43,7 +48,12 @@ export function createAutomations(db, core, notify) {
     lastRunAt: a.last_run_at ? new Date(a.last_run_at).getTime() : null,
     createdAt: new Date(a.created_at).getTime(),
     updatedAt: new Date(a.updated_at).getTime(),
-    triggers: triggers.map((t) => ({ kind: t.kind, filter: t.filter })),
+    triggers: triggers.map((t) => ({
+      kind: t.kind,
+      filter: t.filter,
+      ...(t.timezone ? { timezone: t.timezone } : {}),
+      ...(t.next_run_at ? { nextRunAt: new Date(t.next_run_at).getTime() } : {}),
+    })),
   });
 
   const runOut = (r) => ({
@@ -77,6 +87,20 @@ export function createAutomations(db, core, notify) {
       if (t.filter !== undefined && t.filter !== null && typeof t.filter !== 'string') {
         throw new ApiError(400, 'bad_trigger_filter');
       }
+      // A schedule is checked HERE, at authoring time, where the person who
+      // typed it is still looking. A bad expression accepted now is an
+      // automation that silently never runs, and nothing later would say why.
+      if (t.kind === 'schedule') {
+        try { parseCron(t.filter); } catch (e) {
+          throw new ApiError(400, { error: 'bad_cron', message: String(e?.message ?? e) });
+        }
+        if (t.timezone !== undefined && t.timezone !== null) {
+          if (typeof t.timezone !== 'string') throw new ApiError(400, 'bad_timezone');
+          try { new Intl.DateTimeFormat('en', { timeZone: t.timezone }); } catch {
+            throw new ApiError(400, { error: 'bad_timezone', message: `unknown time zone "${t.timezone}"` });
+          }
+        }
+      }
     }
   }
 
@@ -89,17 +113,22 @@ export function createAutomations(db, core, notify) {
 
   async function triggersOf(t, id) {
     const { rows } = await t.query(
-      `SELECT kind, filter FROM automation_triggers WHERE automation_id = $1 ORDER BY kind, filter`, [id]);
+      `SELECT kind, filter, timezone, next_run_at FROM automation_triggers WHERE automation_id = $1 ORDER BY kind, filter`, [id]);
     return rows;
   }
 
   async function writeTriggers(t, id, triggers) {
     await t.query(`DELETE FROM automation_triggers WHERE automation_id = $1`, [id]);
     for (const trig of triggers) {
+      // A schedule's first `next_run_at` is computed on write, so the ticker
+      // has something to scan from the moment it exists rather than needing a
+      // separate "seed" pass.
+      const tz = trig.kind === 'schedule' ? (str(trig.timezone) || 'UTC') : null;
+      const next = trig.kind === 'schedule' ? nextCronAfter(str(trig.filter), tz, Date.now()) : null;
       await t.query(
-        `INSERT INTO automation_triggers (automation_id, kind, filter) VALUES ($1,$2,$3)
-         ON CONFLICT DO NOTHING`,
-        [id, trig.kind, str(trig.filter)]);
+        `INSERT INTO automation_triggers (automation_id, kind, filter, timezone, next_run_at)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+        [id, trig.kind, str(trig.filter), tz, next === null ? null : new Date(next).toISOString()]);
     }
   }
 
@@ -332,6 +361,77 @@ export function createAutomations(db, core, notify) {
     return { run: runOut(r) };
   }
 
+  // ── the clock ─────────────────────────────────────────────────────────────
+
+  /**
+   * Fire every schedule that is due, and decide what to do about the ones
+   * that came due while nobody was listening.
+   *
+   * The catch-up question is the whole reason a scheduler is more awkward
+   * than a trigger. A machine offline for a week on a five-minute schedule
+   * owes 2,016 firings when it comes back, and there are three answers:
+   * replay them all (a stampede), forget them (a silent hole), or fire once
+   * and SAY what was skipped.
+   *
+   * Joy does the third, the same way an overlapping firing is handled: the
+   * run that happens is a real run, and the ones that did not are recorded
+   * as `cancelled` with `missed_schedule` and a count. A firing that did
+   * nothing still happened, and a history with holes in it cannot be
+   * debugged.
+   */
+  async function tick(nowMs = Date.now()) {
+    const now = new Date(nowMs).toISOString();
+    const { rows: due } = await db.query(
+      `SELECT t.automation_id, t.filter, t.timezone, t.next_run_at, a.account_id, a.enabled
+       FROM automation_triggers t
+       JOIN automations a ON a.id = t.automation_id
+       WHERE t.kind = 'schedule' AND t.next_run_at IS NOT NULL AND t.next_run_at <= $1
+       ORDER BY t.next_run_at`, [now]);
+
+    let fired = 0;
+    let skipped = 0;
+    for (const row of due) {
+      const tz = row.timezone || 'UTC';
+      const wasDueAt = new Date(row.next_run_at).getTime();
+      // Advance the clock FIRST. A schedule whose run throws must not be
+      // retried every tick forever — the next occurrence is the next
+      // occurrence whatever happened to this one.
+      let next = null;
+      try { next = nextCronAfter(row.filter, tz, nowMs); } catch { next = null; }
+      await db.query(
+        `UPDATE automation_triggers SET next_run_at = $4
+         WHERE automation_id = $1 AND kind = 'schedule' AND filter = $2 AND next_run_at = $3`,
+        [row.automation_id, row.filter, row.next_run_at, next === null ? null : new Date(next).toISOString()]);
+
+      if (!row.enabled) continue;
+
+      // Everything between the occurrence that was due and now, minus the one
+      // we are about to run.
+      let missed = 0;
+      try {
+        missed = Math.max(0, cronOccurrencesBetween(row.filter, tz, wasDueAt, nowMs, CATCH_UP_CAP).length);
+      } catch { missed = 0; }
+
+      try {
+        await trigger(row.account_id, 'schedule', row.automation_id, { triggerKind: 'schedule' });
+        fired++;
+      } catch { /* disabled or vanished between the scan and here */ }
+
+      if (missed > 0) {
+        skipped += missed;
+        // Recorded, not replayed. The count is the honest thing to keep: what
+        // matters is that the schedule was not running, not 2,016 identical
+        // rows saying so.
+        await db.query(
+          `INSERT INTO automation_runs (id, automation_id, account_id, state, trigger_kind, error_code, error_message, finished_at)
+           VALUES ($1,$2,$3,'cancelled','schedule','missed_schedule',$4, now())`,
+          [randomUUID(), row.automation_id, row.account_id,
+           `${missed}${missed >= CATCH_UP_CAP ? '+' : ''} occurrence${missed === 1 ? '' : 's'} passed while nothing was listening; ran once instead`]);
+      }
+    }
+    return { fired, skipped };
+  }
+
   // ── triggers ──────────────────────────────────────────────────────────────
 
   /**
@@ -385,5 +485,5 @@ export function createAutomations(db, core, notify) {
     }
   }
 
-  return { list, get, create, patch, remove, trigger, report, listRuns, unacknowledgedFailures, acknowledge, onEvent };
+  return { list, get, create, patch, remove, trigger, report, listRuns, unacknowledgedFailures, acknowledge, onEvent, tick };
 }

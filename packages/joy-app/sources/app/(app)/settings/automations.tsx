@@ -160,7 +160,7 @@ export default React.memo(function AutomationsScreen() {
                     <ItemGroup key={a.id} title={a.name} footer={isOpen ? undefined : 'Tap to see its runs.'}>
                         <Item
                             title={formatPathRelativeToHome(a.directory, undefined)}
-                            subtitle={`${a.triggers.map((t) => t.kind).join(', ')} · ${runSummary(a.latestRun)}`}
+                            subtitle={`${a.triggers.map((t) => (t.kind === 'schedule' ? `cron ${t.filter}` : t.kind)).join(', ')} · ${runSummary(a.latestRun)}`}
                             icon={<View style={{ width: 29, alignItems: 'center' }}>
                                 <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: runTint(a.latestRun) }} />
                             </View>}
