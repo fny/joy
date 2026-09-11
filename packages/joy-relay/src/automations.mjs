@@ -26,10 +26,12 @@ const RUN_HISTORY_MAX = 200;
 /** Shared with the daemon (domain/automationRun.ts) — a wire constant. */
 export const AUTOMATION_INTENT_PREFIX = 'automation-run:';
 
-// `turn_done` and `machine_online` were built and removed (migration 012):
-// nobody wanted "after any turn here" or "whenever the daemon restarts", and
-// a trigger nobody uses is a live code path that rots.
-const TRIGGER_KINDS = new Set(['manual', 'session_state', 'automation_done', 'schedule']);
+// What is left after three were removed. `turn_done` and `machine_online`
+// (012) were built, offered and wanted by nobody. `session_state` (013) went
+// for a better reason: it could not have worked here — the states worth
+// triggering on are computed by the app from SEALED card metadata the relay
+// cannot read, so the component evaluating triggers never knew them.
+const TRIGGER_KINDS = new Set(['manual', 'automation_done', 'schedule']);
 /** How many missed occurrences a single catch-up will record before it stops
  *  counting. A machine offline for a month on a one-minute schedule owes
  *  43,200 of them; the number stops being informative long before that. */

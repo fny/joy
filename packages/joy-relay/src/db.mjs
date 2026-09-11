@@ -337,6 +337,20 @@ const MIGRATIONS = [
   ALTER TABLE automation_triggers ADD CONSTRAINT automation_triggers_kind_check
     CHECK (kind IN ('manual','session_state','automation_done','schedule'));
   `,
+  // 013 — `session_state` goes too, and for a better reason than the other
+  // two: it could not have worked where it was being evaluated. The states
+  // worth triggering on (blocked, permission_required) are computed by the
+  // APP from the session card's SEALED metadata, which the relay stores and
+  // cannot read — so the component that evaluates triggers has no idea what
+  // state a session is in. The relay's own lifecycle column is a different,
+  // coarser thing; if "the agent died, run this" is ever wanted it should be
+  // a `session_detached` trigger named for what the relay can actually see.
+  `
+  DELETE FROM automation_triggers WHERE kind = 'session_state';
+  ALTER TABLE automation_triggers DROP CONSTRAINT automation_triggers_kind_check;
+  ALTER TABLE automation_triggers ADD CONSTRAINT automation_triggers_kind_check
+    CHECK (kind IN ('manual','automation_done','schedule'));
+  `,
 ];
 
 /** Exclusive ownership of a data directory. Two relay processes opening the

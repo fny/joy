@@ -373,9 +373,9 @@ every relay; machines register per account.
   expired sign-in fails every automation on a machine), `blocked:trust`,
   `blocked:permission`, `agent_died`, `stalled` — because unattended work that
   quietly waits is worse than work that never ran. Triggers are
-  `manual`, `automation_done` and `schedule` (`turn_done` and `machine_online`
-  were built and removed for want of anyone using them; `session_state` is
-  accepted and not yet emitted) — cron, in a time zone you name, parsed by the relay's own
+  `manual`, `automation_done` and `schedule` (`turn_done`, `machine_online`
+  and `session_state` were each built and then removed rather than left dead)
+  — cron, in a time zone you name, parsed by the relay's own
   five-field parser (no dependency). A schedule's expression IS the trigger's
   filter, so it needed no new shape. DST is handled by walking a calendar
   rather than adding 86,400,000: an hour that does not exist is skipped, and

@@ -691,11 +691,12 @@ describe('automations', () => {
     };
 
     it('refuses the two kinds that were removed, rather than storing a dead trigger', async () => {
-      // `turn_done` and `machine_online` were built, offered and wanted by
-      // nobody (migration 012). Accepting one now would store a trigger that
-      // can never fire, which is the failure mode the whole validate-on-write
-      // rule exists to prevent.
-      for (const kind of ['turn_done', 'machine_online']) {
+      // `turn_done` and `machine_online` (012) were built, offered and wanted
+      // by nobody; `session_state` (013) could never have worked where
+      // triggers are evaluated. Accepting any of them now would store a
+      // trigger that can never fire, which is the failure mode the whole
+      // validate-on-write rule exists to prevent.
+      for (const kind of ['turn_done', 'machine_online', 'session_state']) {
         const r = await call('POST', '/joy/v2/automations', { body: { ...draft(), triggers: [{ kind }] } });
         expect(r.status, kind).toBe(400);
         expect(r.json.error).toBe('bad_trigger_kind');
