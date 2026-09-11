@@ -60,9 +60,13 @@ or it ends; `notifications/message` carries a one-line log of the same.
 
 Outcomes are the CLI's — `answered · needs_input · timeout · gone · error` —
 and the state × action contract is the CLI's table
-(`packages/joy-daemon/src/cli.matrix.oracle.ts`). Sends arrive at the agent
-wrapped as `<joy-message from="mcp:<client>" reply-to="mcp:<client>">`, a peer,
-never its human; `no_reply` drops the reply-to.
+(`packages/joy-daemon/src/cli.matrix.oracle.ts`). A client speaks for the
+account's owner: sends go in as the human's own message (unwrapped). With
+`reply_to: joy:<id>` the text is delivered as a peer message
+(`<joy-message from="mcp:<client>" reply-to="joy:<id>">`) the agent answers
+to that session. Waits (`ask`, `wait_for_turns`) default to 45 s and return
+a resumable `timeout`; chain `wait_for_turns` calls with `since` = the
+previous `cursor`.
 
 ## Tests
 

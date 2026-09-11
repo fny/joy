@@ -219,7 +219,7 @@ describe('joy-mcp over a real relay', () => {
     const roles = full.messages.map((m) => [m.role, m.text]);
     expect(roles).toEqual(expect.arrayContaining([['assistant', 're: ping']]));
     const user = full.messages.find((m) => m.role === 'user');
-    expect(user.text).toMatch(/^<joy-message from="mcp:[^"]+">\nping\n<\/joy-message>$/); // no reply-to by default: mcp:* is not routable
+    expect(user.text).toBe('ping'); // unwrapped: a client speaks for the account's owner
     expect(full.check.state).toBe('idle');
   }, 20_000);
 

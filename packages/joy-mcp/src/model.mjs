@@ -218,7 +218,7 @@ export class SessionIndex extends EventEmitter {
       queue: q ? { depth: q.queue?.length ?? 0, in_flight: q.inFlight != null, paused: !!q.paused, ...(q.pauseReason ? { pause_reason: q.pauseReason } : {}) } : null,
       model: meta?.currentModelCode ?? meta?.model ?? null,
       effort: meta?.currentEffortCode ?? null,
-      mode: meta?.currentOperatingModeCode ?? meta?.permissionMode ?? null,
+      mode: meta?.currentOperatingModeCode ?? meta?.permission_mode ?? meta?.permissionMode ?? null,
       headless: meta?.joy__headless === true,
       muted: meta?.joy__muted === true,
       active_at: row.online ? Date.now() : (row.lastTurnAt ?? row.updatedAt),

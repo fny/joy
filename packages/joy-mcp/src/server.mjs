@@ -123,10 +123,14 @@ export class Hub {
  *  is the sender, so it stamps the same shape with an mcp:* identity. */
 function wrap(text, from, replyTo) {
   const body = text.trim().replace(/^<joy-message\b[^>]*>\s*/i, '').replace(/\s*<\/joy-message>\s*$/i, '');
-  // No reply-to unless asked: an agent cannot route a reply to mcp:* — the
-  // reply a connected client wants is the session's next turn, which ask and
-  // wait_for_turns return. reply_to names a joy session that should answer.
-  const attrs = `from="${from}"${replyTo ? ` reply-to="${replyTo}"` : ''}`;
+  // A connected client speaks FOR the account's owner, so by default the
+  // text goes in as the human's — unwrapped, like the app's own sends. The
+  // peer wrapper is stamped only when reply_to names a joy session that
+  // should answer: the agents' instruction line reads a wrapper with no
+  // reply-to as "read it and move on", and Codex did exactly that — empty
+  // replies to every ask (lab, 2026-09-11).
+  if (!replyTo) return body;
+  const attrs = `from="${from}" reply-to="${replyTo}"`;
   const cmd = /^\/(steer|btw)\s+([\s\S]+)$/.exec(body);
   if (cmd) return `/${cmd[1]} <joy-message ${attrs}>\n${cmd[2].trim()}\n</joy-message>`;
   if (/^\/(title|login-code|joy-prompt)\b/.test(body)) return body;
@@ -144,7 +148,7 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
       'Sessions are addressed by their joy id (eight hex characters). Start with list_sessions or session.',
       'send queues behind a running turn and returns at once; ask sends and waits for that turn\'s reply; wait_for_turns watches sessions until one finishes or needs a human.',
       'A session that needs input (an approval, a login, a dialog in the terminal, or a question with offered answers) is waiting on a human: approve/deny answers approvals, send answers a question, the rest is answered in the app or terminal.',
-      'What you send arrives at the agent as a message from a peer, not from its human.',
+      'What you send arrives at the agent as its human\'s message (you act for the account\'s owner); with reply_to it arrives as a peer message the agent answers to that joy session.',
     ].join(' '),
   });
   const conn = { server, subs: new Set(), logging: false };
@@ -215,7 +219,7 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
   server.registerTool('send', {
     title: 'Send text',
     description: `Deliver text through the durable queue. If a turn is running the text waits behind it and runs when it ends — the result then carries check so you see what it is behind. no_queue refuses instead (busy) and drives only yolo/read-only sessions. No reply-to is stamped unless reply_to names a joy session. Daemon-owned slash commands (/steer, /title, /joy-prompt) are intercepted daemon-side; /steer mid-turn lands in the running turn. Answer a question with offered options by sending the option's text or number.`,
-    inputSchema: { session: SESSION, text: z.string().min(1), no_queue: z.boolean().optional(), reply_to: z.string().regex(/^joy:[0-9a-f]{8}$/).optional().describe('A joy session (joy:<id>) the agent should answer; by default no reply is expected — read the session\'s next turn with ask or wait_for_turns instead.') },
+    inputSchema: { session: SESSION, text: z.string().min(1), no_queue: z.boolean().optional(), reply_to: z.string().regex(/^joy:[0-9a-f]{8}$/).optional().describe('Deliver as a PEER message the agent answers to this joy session (joy:<id>). Without it the text goes in as the human\'s own, and the reply is the session\'s next turn (ask / wait_for_turns).') },
   }, guard(async (a) => {
     await hub.index.refresh();
     return hub.send(hub.row(a.session), a.text, { exclusive: !!a.no_queue, replyTo: a.reply_to ?? null, from });
