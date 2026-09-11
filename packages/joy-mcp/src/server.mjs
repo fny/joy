@@ -15,6 +15,13 @@ import { TunnelError } from './daemon.mjs';
 import { RelayError } from './relay.mjs';
 
 const OUTCOMES = 'Outcomes: answered · needs_input · timeout · gone · error.';
+// A tool call is one HTTP request; MCP clients cut long ones (the SDK at 60 s,
+// the Claude app around there). So the waits default well under that and a
+// timeout is a normal outcome: the caller calls again with the cursor / the
+// turn, it is not an error.
+const WAIT_DEFAULT_S = 45;
+const WAIT_MAX_S = 300;
+const WAIT_NOTE = 'Defaults to 45 s and returns outcome "timeout" when the deadline passes — call again to keep waiting (a tool call cannot outlive the client\'s request timeout).';
 
 export class ToolError extends Error {
   constructor(code, message, next) { super(message); this.code = code; this.next = next; }
@@ -216,15 +223,15 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
 
   server.registerTool('ask', {
     title: 'Send and wait for the reply',
-    description: `Send, wait for that turn, return what it said. The reply is the text of the turn the daemon ran for this send, never the tail of a turn already running. A session that needs a human ends the wait at once with needs_input; the sent text stays queued. ${OUTCOMES}`,
-    inputSchema: { session: SESSION, text: z.string().min(1), timeout_s: z.number().min(1).max(3600).optional().describe('Default 600.'), no_queue: z.boolean().optional() },
+    description: `Send, wait for that turn, return what it said. The reply is the text of the turn the daemon ran for this send, never the tail of a turn already running. A session that needs a human ends the wait at once with needs_input; the sent text stays queued. On timeout the result carries the turn id: wait_for_turns on the session picks it up. ${WAIT_NOTE} ${OUTCOMES}`,
+    inputSchema: { session: SESSION, text: z.string().min(1), timeout_s: z.number().min(1).max(WAIT_MAX_S).optional().describe(`Seconds to wait; default ${WAIT_DEFAULT_S}, max ${WAIT_MAX_S}.`), no_queue: z.boolean().optional() },
   }, guard(async (a) => {
     await hub.index.refresh();
     const row = hub.row(a.session);
     const since = hub.index.cursor;
     const sent = await hub.send(row, a.text, { exclusive: !!a.no_queue, from });
     if (!sent.turn) return { outcome: 'answered', text: '', turn: null, reason: 'handled by the daemon itself, no turn' };
-    const deadline = Date.now() + (a.timeout_s ?? 600) * 1000;
+    const deadline = Date.now() + (a.timeout_s ?? WAIT_DEFAULT_S) * 1000;
     let cursor = since;
     for (;;) {
       const left = deadline - Date.now();
@@ -249,12 +256,12 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
 
   server.registerTool('wait_for_turns', {
     title: 'Wait until a session finishes or needs a human',
-    description: `Block until any watched session finishes a turn, comes to need input, or ends — the long-poll that makes "tell me when it's done" work in every client. No sessions means every session on the account. Returns the events and a cursor for updates_since. ${OUTCOMES}`,
-    inputSchema: { sessions: z.array(z.string()).optional(), timeout_s: z.number().min(1).max(3600).optional().describe('Default 600.') },
+    description: `Block until any watched session finishes a turn, comes to need input, or ends — the long-poll that makes "tell me when it's done" work in every client. No sessions means every session on the account. Returns the events and a cursor for updates_since. ${WAIT_NOTE} ${OUTCOMES}`,
+    inputSchema: { sessions: z.array(z.string()).optional(), timeout_s: z.number().min(1).max(WAIT_MAX_S).optional().describe(`Seconds to wait; default ${WAIT_DEFAULT_S}, max ${WAIT_MAX_S}.`), since: z.number().int().min(0).optional().describe('A cursor from a previous call: events after it are returned even if they happened before this call.') },
   }, guard(async (a) => {
     await hub.index.refresh();
     const ids = a.sessions?.length ? a.sessions.map((s) => hub.row(s).sessionId) : null;
-    const r = await hub.index.waitFor(ids, (a.timeout_s ?? 600) * 1000);
+    const r = await hub.index.waitFor(ids, (a.timeout_s ?? WAIT_DEFAULT_S) * 1000, a.since ?? hub.index.cursor);
     return { outcome: r.outcome, events: r.events.map(publicEvent), cursor: r.cursor };
   }));
 

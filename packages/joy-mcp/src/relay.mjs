@@ -42,15 +42,16 @@ export class RelayClient {
     return h;
   }
 
-  async call(method, path, body, { raw, retryAuth = true } = {}) {
+  async call(method, path, body, { raw, retryAuth = true, timeoutMs } = {}) {
     const res = await this.fetchImpl(`${this.relayUrl}/joy/v2${path}`, {
       method,
       headers: this.headers(raw !== undefined ? { 'content-type': 'application/octet-stream' } : body !== undefined ? { 'content-type': 'application/json' } : {}),
       body: raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     if (res.status === 401 && retryAuth && this.renew) {
       this.token = await this.renew();
-      return this.call(method, path, body, { raw, retryAuth: false });
+      return this.call(method, path, body, { raw, retryAuth: false, timeoutMs });
     }
     if (res.headers.get('content-type')?.includes('application/octet-stream')) {
       if (!res.ok) throw new RelayError(res.status, 'relay_error', null);
@@ -94,8 +95,10 @@ export class RelayClient {
     return this.call('DELETE', `/sessions/${encodeURIComponent(id)}${ifStatus ? `?ifStatus=${encodeURIComponent(ifStatus)}` : ''}`);
   }
   /** One sealed frame to a machine's daemon; the reply is a sealed frame. */
-  tunnel(machineId, wire) {
-    return this.call('POST', `/machines/${encodeURIComponent(machineId)}/http`, undefined, { raw: wire });
+  tunnel(machineId, wire, { timeoutMs = 25_000 } = {}) {
+    // Bounded: the relay holds a tunnel request up to 60 s for a daemon that
+    // never answers, longer than an MCP client waits for a tool call.
+    return this.call('POST', `/machines/${encodeURIComponent(machineId)}/http`, undefined, { raw: wire, timeoutMs });
   }
 
   // ── the doorbell ─────────────────────────────────────────────────────────

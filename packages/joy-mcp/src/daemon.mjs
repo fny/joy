@@ -32,6 +32,7 @@ export class DaemonTunnel {
       let res;
       try { res = await this.relay.tunnel(machineId, wire); }
       catch (e) {
+        if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw new TunnelError(504, 'machine_unreachable', `the daemon on ${machineId.slice(0, 8)} did not answer within 25 s`);
         if (e instanceof RelayError && e.status === 503 && RETRYABLE.has(e.code) && attempt < 3) { await new Promise((r) => setTimeout(r, 1000 * attempt)); continue; }
         if (e instanceof RelayError && e.code === 'daemon_offline') throw new TunnelError(503, 'machine_unreachable', `the daemon on ${machineId.slice(0, 8)} is not answering`);
         throw e;
