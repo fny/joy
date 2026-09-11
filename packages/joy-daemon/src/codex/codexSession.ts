@@ -32,14 +32,18 @@ import type { DeliverySource } from "../domain/agentSession";
 import type { AgentSession } from "../domain/agentSession";
 import { codexJoyInstructions, joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { spawnCodexAppServer, CodexAppServerClient, JsonRpcError, JsonRpcResponseError } from "./appServerClient";
-import { CodexNormalizer, itemSignature, isPositionalHistoryId, type CodexNotification } from "./normalize";
+import { CodexNormalizer, itemSignature, type CodexNotification } from "./normalize";
 import type { WireRecord } from "../relay/relay";
 import { buildCodexAttachCommand } from "./attach";
 import { ledgerFor, AWAITING_ATTEMPT_STATES, NON_TERMINAL_STATES, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
 import { CodexDriver, codexTurnStatus, type CodexRuntimePort } from "./codexDriver";
 import { toTmuxSegments, ParseError, TmuxKeyError } from "../tmux/keyTokens";
-import { isTurnDelivered, advanceTurnHighWater } from "./codexTurnCheckpoint";
+import {
+  nextStartState, initialStartState, isRejoined, bindBufferedItems,
+  nextDeliveredState, initialDeliveredState, isDelivered, markRef,
+  type StartState, type StartEvent, type DeliveredState, type HistoryItem,
+} from "./codexStartMachine";
 
 import { codexPaneAuth } from "./codexPane";
 import type { JoyLoginInfo, JoyDialogInfo } from "../relay/relay";
@@ -132,12 +136,15 @@ export class CodexSession implements AgentSession {
   #activeTurnId: string | null = null;
   #started = false;
   #archivePromise: Promise<boolean> | null = null;
-  // True when we REJOINED a live app-server (vs spawned a fresh one). On a
-  // rejoin we must NOT resend 'sentUnknown' items — the live turn may still be
-  // in flight and not yet in thread/read (finding #3c) — so we hold them
-  // (at-most-once). On a fresh spawn the old server (and its in-flight turn)
-  // died, so unconfirmed sends are requeued (at-least-once).
-  #rejoined = false;
+  // The start lifecycle — rejoin or fresh spawn, the thread/read snapshot,
+  // the notification buffer and its barrier, the history replay — is one
+  // explicit machine (codexStartMachine.ts). Whether we REJOINED a live
+  // app-server (vs spawned a fresh one) is a variant of its bound phases:
+  // on a rejoin we must NOT resend 'sentUnknown' items — the live turn may
+  // still be in flight and not yet in thread/read (finding #3c) — so we
+  // hold them (at-most-once). On a fresh spawn the old server (and its
+  // in-flight turn) died, so unconfirmed sends are requeued (at-least-once).
+  #startState: StartState = initialStartState();
   // /title lock (parity with claude/opencode): a user-set title beats agent
   // <joy-title> emissions. Loaded from the window record.
   #titleLocked = false;
@@ -152,35 +159,10 @@ export class CodexSession implements AgentSession {
   #driver: CodexDriver;
   #unsubscribeQueue: () => void = () => {};
   // Delivered-turn high-water — `checkpoints(kind='codex_turn')`, committed
-  // only once the turn's outbox rows are acked (finding #2, #67).
-  #deliveredThrough: string | null = null;
-  // Notifications are BUFFERED from connect until reconcile finishes (finding
-  // #10): the thread filter is inactive until #threadId is known, and live
-  // traffic must not interleave with synthetic history replay.
-  #buffering = true;
-  // Each entry carries the client's dispatch sequence of its notification —
-  // the coordinate the snapshot boundary is expressed in.
-  #notifBuffer: Array<{ n: CodexNotification; seq: number }> = [];
-  // The items history replay emitted per turn — id, type, ordinal and whole
-  // content — so a live item buffered while thread/read was pending, the
-  // SAME item under a different transient id, binds to the ordinal replay
-  // allocated instead of a second one (#519). Consumed by the flush.
-  #historyItems = new Map<string, Array<{ id: string; type: string; ordinal: number; sig: string; matched: boolean }>>();
-  // The snapshot boundary: the client's notification barrier of the
-  // thread/read RESPONSE FRAME — how many notifications it had dispatched
-  // when that frame was handled. The socket is ordered, so a notification
-  // past the barrier describes something the snapshot cannot contain — it
-  // is new by construction and never bound to a replayed item, however
-  // equal its content (#519). Sampled in the client's frame handler, NOT
-  // after `await threadRead` resolves: when the response and a new answer
-  // arrive in one socket write, both frames are dispatched before the
-  // await continuation runs, and a buffer length sampled there counted the
-  // new answer as inside the snapshot — aliased, and deduped away.
-  #snapshotBoundary = 0;
-  // The oldest turn whose history could NOT be replayed (itemsView != full):
-  // the delivered high-water must never pass it, or the next recovery skips
-  // its output for good once the full items become available (#518).
-  #deferredFloor: string | null = null;
+  // only once the turn's outbox rows are acked (finding #2, #67) — and the
+  // oldest turn whose history could NOT be replayed, which the mark never
+  // passes (#518). Stepped by the delivered machine (codexStartMachine.ts).
+  #delivered: DeliveredState = initialDeliveredState();
   // Codex emits turn/started BEFORE the turn's userMessage item, so a prompt
   // typed in the attached TUI mirrored on that item landed AFTER the turn-
   // start record and the app bracketed it inside the turn (#131). The
@@ -221,13 +203,15 @@ export class CodexSession implements AgentSession {
     this.#generation = this.#ledger.openGeneration(init.id, "codex");
     this.#coordinator = deps.coordinator ?? coordinatorFor(this.#ledger);
     if (init.codexThreadId) {
-      this.#deliveredThrough = this.#ledger.getCheckpoint(init.id, "codex_turn")?.ref || null; // "" = a pending mark, nothing committed yet
+      // null = no mark, "" = a pending mark (nothing committed yet), else the turn.
+      this.#deliveredSend({ type: "loaded", ref: this.#ledger.getCheckpoint(init.id, "codex_turn")?.ref ?? null });
       // Do NOT seed pendingEffort on resume/recover (finding #8).
     } else {
       // A fresh thread under this id: nothing queued for an earlier thread can
       // run here, and its delivered-turn mark is meaningless.
       for (const r of this.#ledger.listPending(init.id)) this.#ledger.transition(r.id, ["queued", "submitting", "accepted", "unknown", "running", "cancelling"], "interrupted", { terminalReason: "fresh_session", generation: this.#generation });
       this.#ledger.clearCheckpoint(init.id, "codex_turn");
+      this.#deliveredSend({ type: "cleared" });
       this.#pendingEffort = init.effort ?? null; // fresh session: apply on turn 1
     }
     // The driver is adopted BEFORE the relay pull can start (attachRelay):
@@ -254,7 +238,7 @@ export class CodexSession implements AgentSession {
       pendingModel: () => this.#pendingModel ?? undefined,
       modelApplied: () => { this.#pendingModel = null; },
       activeTurnId: () => this.#activeTurnId,
-      rejoined: () => this.#rejoined,
+      rejoined: () => isRejoined(this.#startState),
       handleCommand: (text, opts) => this.#handleCommand(text, opts),
       mirrorAccepted: (cmd) => this.#mirrorAccepted(cmd),
       log: (line) => process.stderr.write(`[codex ${this.id}] ${line}\n`),
@@ -298,41 +282,64 @@ export class CodexSession implements AgentSession {
     void this.#start();
   }
 
-  async #start(): Promise<void> {
-    this.#buffering = true;
-    try {
-      // Transactional rejoin (finding #7): only trust a live orphan server after
-      // connect + resume + read + validate all succeed. Any failure → fresh spawn.
-      let client: CodexAppServerClient | null = null;
-      if (this.#resumeThreadId && existsSync(this.#socketPath)) {
-        client = await this.#tryRejoin();
+  /** One step of the start machine; its effects are performed here. The
+   *  phase checks in #start read the machine, and end() feeds it `killed`,
+   *  so "the session ended while this step was in flight" is one fact. */
+  #startSend(ev: StartEvent): StartState {
+    const t = nextStartState(this.#startState, ev);
+    if (!t) return this.#startState;
+    this.#startState = t.to;
+    for (const eff of t.effects ?? []) {
+      switch (eff.type) {
+        case "dispatch": this.#dispatchNotification(eff.n); break;
+        case "flush":
+          // Bind the live items buffered during the read to the identities
+          // the replay allocated (#519), then apply the buffer in order.
+          bindBufferedItems(eff.buffered, eff.barrier, eff.history, (turnId, type, id, ordinal) => this.#norm.bindTransient(turnId, type, id, ordinal));
+          for (const { n } of eff.buffered) this.#dispatchNotification(n);
+          break;
+        case "ready":
+          // The runtime is up and its history replayed: the coordinator now
+          // reconciles anything still unknown (thread/read — a fresh spawn
+          // resends what never landed, at least once; a rejoin holds it, at
+          // most once) and pumps the queued rows.
+          this.#driver.emit({ kind: "ready" });
+          this.#persistWindowRecord();
+          if (this.status === "starting") this.status = "active";
+          this.#deps.broadcast("session_update", this.toJSON());
+          this.#launchAttach();
+          break;
+        case "end": this.end(eff.reason); break;
+        case "spawn": case "abandon": break; // the start sequence acts on the phase
       }
+    }
+    return this.#startState;
+  }
+
+  async #start(): Promise<void> {
+    // Transactional rejoin (finding #7): only trust a live orphan server after
+    // connect + resume + read + validate all succeed. Any failure → fresh spawn.
+    const canRejoin = !!this.#resumeThreadId && existsSync(this.#socketPath);
+    this.#startSend({ type: "start", canRejoin });
+    try {
+      let client: CodexAppServerClient | null = null;
+      if (canRejoin) client = await this.#tryRejoin();
       if (!client) {
-        if (this.status === "ended") return; // killed while the rejoin was pending: do not spawn (Astra on d4fc9336)
+        if (this.#startState.phase === "ended") return; // killed while the rejoin was pending: do not spawn (Astra on d4fc9336)
         client = await this.#spawnFresh();
       }
-      if (this.status === "ended") { // killed while starting: this generation owns nothing (Astra on d6b84547)
+      if (this.#startState.phase === "ended") { // killed while starting: this generation owns nothing (Astra on d6b84547)
         try { client.close(); } catch { /* best effort */ }
         return;
       }
       this.#client = client;
-
-      // Reconcile done → resume live notification flow (flush buffered).
-      this.#buffering = false;
-      this.#flushNotifBuffer();
-
-      // The runtime is up and its history replayed: the coordinator now
-      // reconciles anything still unknown (thread/read — a fresh spawn
-      // resends what never landed, at least once; a rejoin holds it, at
-      // most once) and pumps the queued rows.
-      this.#driver.emit({ kind: "ready" });
-      this.#persistWindowRecord();
-      if (this.status === "starting") this.status = "active";
-      this.#deps.broadcast("session_update", this.toJSON());
-      this.#launchAttach();
+      // Reconcile done → live: the machine flushes the buffer (bound to the
+      // replay under the response frame's barrier) and readies the driver.
+      this.#startSend({ type: "reconcile_done" });
     } catch (e) {
       process.stderr.write(`[codex ${this.id}] start failed: ${e}\n`);
-      this.end("process_exited");
+      this.#startSend({ type: "start_failed", error: String(e) }); // → end("process_exited")
+      if (this.status !== "ended") this.end("process_exited");
     }
   }
 
@@ -352,10 +359,10 @@ export class CodexSession implements AgentSession {
       this.#threadId = r.threadId;
       this.#norm.setThreadId(r.threadId);
       this.#applyResumeSettings(r);
-      // Mark rejoined BEFORE reconcile so it leaves any in-progress turn OPEN
-      // (a live orphan whose real notifications will arrive) rather than closing
-      // it (finding #5).
-      this.#rejoined = true;
+      // Bound on the REJOIN path before reconcile, so it leaves any in-progress
+      // turn OPEN (a live orphan whose real notifications will arrive) rather
+      // than closing it (finding #5).
+      this.#startSend({ type: "thread_resumed", threadId: r.threadId });
       await this.#reconcileHistory(client); // proves the thread is readable
       if (rec?.codexServerPid) this.pid = rec.codexServerPid; // so end() can kill it
       // Persist the (unchanged) thread binding + recovered pid immediately.
@@ -367,7 +374,7 @@ export class CodexSession implements AgentSession {
       try { client.close(); } catch { /* ignore */ }
       // Reset any partial state so the fresh path starts clean.
       this.#threadId = null;
-      this.#rejoined = false;
+      this.#startSend({ type: "rejoin_failed", error: String(e) });
       return null;
     }
   }
@@ -418,6 +425,7 @@ export class CodexSession implements AgentSession {
       this.#norm.setThreadId(r.threadId);
       this.#persistWindowRecord(); // bind thread id immediately after the response
       this.#applyResumeSettings(r);
+      this.#startSend({ type: "thread_resumed", threadId: r.threadId });
       await this.#reconcileHistory(client);
     } else {
       const r = await client.threadStart({ cwd: this.cwd, permissionMode: this.#permissionMode, model: this.model, developerInstructions: this.#developerInstructions });
@@ -426,6 +434,7 @@ export class CodexSession implements AgentSession {
       this.transcriptPath = r.rolloutPath ?? undefined;
       this.#persistWindowRecord();
       if (r.model) { this.currentModel = r.model; void this.#relay?.updateModelCode(r.model); }
+      this.#startSend({ type: "thread_started", threadId: r.threadId });
     }
     return client;
   }
@@ -527,19 +536,26 @@ export class CodexSession implements AgentSession {
    *  replays from the previous mark, receipt-deduped. Held outright while
    *  the outbox cannot persist (rows exist only in RAM). */
   #markTurnDelivered(turnId: string): void {
-    if (!turnId) return;
-    // Never past a turn whose history replay was deferred (#518): the mark
-    // is a delivered PREFIX, and that turn is a hole in it.
-    if (this.#deferredFloor && turnId >= this.#deferredFloor) return;
-    const next = advanceTurnHighWater(this.#deliveredThrough, turnId);
-    if (next === this.#deliveredThrough || next === null) return;
+    // The machine refuses a mark behind the current one or past a deferred
+    // turn (#518: the mark is a delivered PREFIX, and that turn is a hole
+    // in it); the ledger write is the commit, and the state moves only once
+    // it has landed.
+    const t = nextDeliveredState(this.#delivered, { type: "acked", turnId });
+    if (!t || !t.commit) return;
     if (this.#relay?.outboundPersistDegraded) return;
     try {
-      this.#ledger.setCheckpoint(this.id, "codex_turn", next, 0, { throughSeq: "latest", generation: this.#generation });
-      this.#deliveredThrough = next;
+      this.#ledger.setCheckpoint(this.id, "codex_turn", t.commit, 0, { throughSeq: "latest", generation: this.#generation });
+      this.#delivered = t.to;
     } catch (e) {
-      process.stderr.write(`[codex ${this.id}] checkpoint ${next} failed: ${e instanceof Error ? e.message : e}\n`);
+      process.stderr.write(`[codex ${this.id}] checkpoint ${t.commit} failed: ${e instanceof Error ? e.message : e}\n`);
     }
+  }
+
+  /** One step of the delivered-mark machine (the ledger call, when one is
+   *  owed, is the caller's — a rewind clears it, an ack commits it). */
+  #deliveredSend(ev: Parameters<typeof nextDeliveredState>[1]): void {
+    const t = nextDeliveredState(this.#delivered, ev);
+    if (t) this.#delivered = t.to;
   }
 
   // ── server→client requests (approvals / elicitations) ───────────────────────
@@ -622,87 +638,12 @@ export class CodexSession implements AgentSession {
   // ── output (codex notifications → relay wire) ────────────────────────────────
 
   #onNotification(n: CodexNotification, seq: number): void {
-    // Buffer during resume/reconcile so live traffic can't interleave with the
-    // synthetic history replay and the thread filter is active before we apply
-    // anything (finding #10).
-    if (this.#buffering) { this.#notifBuffer.push({ n, seq }); return; }
-    this.#dispatchNotification(n);
-  }
-
-  #flushNotifBuffer(): void {
-    const buffered = this.#notifBuffer;
-    this.#notifBuffer = [];
-    this.#bindBufferedToHistory(buffered);
-    for (const { n } of buffered) this.#dispatchNotification(n);
-  }
-
-  /** A live item that completed while thread/read was pending may ALSO be in
-   *  the history just replayed, under a positional id. Bind its live id to
-   *  the ordinal replay allocated — its flush then re-emits the replayed
-   *  localIds (relay-deduped) instead of minting a second identity for the
-   *  same answer (#519) — but ONLY on proof it is the same occurrence:
-   *   - the completion was on the wire before the thread/read response (its
-   *     seq is within the snapshot boundary; anything past it is new by
-   *     construction), AND
-   *   - the runtime gave the same item id, or — for a history item under a
-   *     POSITIONAL id only — the whole content, input and outcome, equals an
-   *     unclaimed replayed item of the same turn+type.
-   *  Exact ids are reserved FIRST, in their own pass: a content match made
-   *  earlier in the buffer used to consume the replayed slot a later
-   *  notification named by id, crossing the two identities. A history item
-   *  that carries a runtime id (call_…/msg_…, not item-N) is that occurrence
-   *  and no other: a live item under a DIFFERENT runtime id is a different
-   *  execution however equal its content — call_old/call_new never alias.
-   *  Equality of a command alone is not proof either: a NEW `date` buffered
-   *  after the snapshot aliased the old `date` and the relay deduped its
-   *  result away. An ambiguous occurrence keeps its own identity.
-   *  One candidate per (turn, type, live id): a REPEATED completion of the
-   *  same live item is the same occurrence, not another — it is coalesced
-   *  before either pass, so it can neither consume a second history slot
-   *  nor enter the content fallback. Uncoalesced, the repeat of msg-a
-   *  claimed the slot of an equal second answer and the real msg-b was
-   *  pushed to a third ordinal: three relay identities for two occurrences.
-   *  And a slot is consumed only when the normalizer actually binds — an id
-   *  it already knows keeps the identity it has and leaves the slot free. */
-  #bindBufferedToHistory(buffered: Array<{ n: CodexNotification; seq: number }>): void {
-    const history = this.#historyItems;
-    this.#historyItems = new Map();
-    const boundary = this.#snapshotBoundary;
-    this.#snapshotBoundary = 0;
-    if (!history.size) return;
-    type Candidate = { turnId: string; type: string; id: string; item: Record<string, unknown> };
-    // Coalesced by occurrence identity, in first-seen order; a repeat's
-    // payload (the latest word on the item) replaces the earlier one.
-    const inside = new Map<string, Candidate>();
-    for (const { n, seq } of buffered) {
-      if (seq > boundary || n.method !== "item/completed") continue;
-      const p = n.params ?? {};
-      const turnId = typeof p.turnId === "string" ? p.turnId : "";
-      const item = (p.item ?? {}) as Record<string, unknown>;
-      const id = typeof item.id === "string" ? item.id : "";
-      const type = typeof item.type === "string" ? item.type : "";
-      if (!history.has(turnId) || !id || !type) continue;
-      const key = `${turnId}|${type}|${id}`;
-      const seen = inside.get(key);
-      if (seen) seen.item = item; else inside.set(key, { turnId, type, id, item });
-    }
-    // Pass 1 — exact runtime ids: each binds its own twin, nothing else may.
-    // A live id the normalizer already knows keeps that identity: no slot.
-    const unbound: Candidate[] = [];
-    for (const c of inside.values()) {
-      const hit = history.get(c.turnId)!.find((h) => !h.matched && h.type === c.type && h.id === c.id);
-      if (!hit) { unbound.push(c); continue; }
-      if (this.#norm.bindTransient(c.turnId, c.type, c.id, hit.ordinal)) hit.matched = true;
-    }
-    // Pass 2 — whole-content twins among the still-unclaimed POSITIONAL
-    // history items, for the live ids no history id named.
-    for (const c of unbound) {
-      const sig = itemSignature(c.item);
-      if (!sig) continue;
-      const hit = history.get(c.turnId)!.find((h) => !h.matched && h.type === c.type && isPositionalHistoryId(h.id) && h.sig === sig);
-      if (!hit) continue;
-      if (this.#norm.bindTransient(c.turnId, c.type, c.id, hit.ordinal)) hit.matched = true;
-    }
+    // Buffered while the start machine is not yet live (the thread filter is
+    // inactive until #threadId is known, and live traffic must not
+    // interleave with the synthetic history replay — finding #10);
+    // dispatched at once when it is. `seq` is the client's dispatch
+    // sequence — the coordinate the snapshot barrier is expressed in.
+    this.#startSend({ type: "notification", n, seq });
   }
 
   #dispatchNotification(n: CodexNotification): void {
@@ -841,16 +782,16 @@ export class CodexSession implements AgentSession {
     // the snapshot; nothing after it can be (#519). The client's barrier,
     // not the buffer length here: by the time this continuation runs the
     // socket may already have dispatched frames that FOLLOWED the response.
-    this.#snapshotBoundary = notifBarrier;
+    this.#startSend({ type: "read_response", barrier: notifBarrier });
     const turns = Array.isArray(thread.turns) ? thread.turns as Record<string, unknown>[] : [];
 
     // Rewind detection (finding #5): if our delivered high-water turn is no
     // longer in history, the TUI rolled back the tail. Surface it rather than
     // silently skipping turns the app still shows.
-    const high = this.#deliveredThrough;
+    const high = markRef(this.#delivered.mark);
     if (high && !turns.some((t) => String(t.id ?? "") === high)) {
       process.stderr.write(`[codex ${this.id}] history rewound past ${high} — resetting checkpoint\n`);
-      this.#deliveredThrough = null;
+      this.#deliveredSend({ type: "rewound" });
       try { this.#ledger.clearCheckpoint(this.id, "codex_turn"); } catch { /* the next mark rewrites it */ }
     }
 
@@ -858,7 +799,7 @@ export class CodexSession implements AgentSession {
       const tid = String(turn.id ?? "");
       if (!tid) continue;
       // Already delivered before the restart — skip wholesale.
-      if (isTurnDelivered(this.#deliveredThrough, tid)) continue;
+      if (isDelivered(this.#delivered.mark, tid)) continue;
       const status = String(turn.status ?? "completed");
       const view = String(turn.itemsView ?? "full");
       // A turn whose items history did NOT fully return can't be faithfully
@@ -875,7 +816,7 @@ export class CodexSession implements AgentSession {
       const deferred = !!view && view !== "full";
       if (deferred) {
         process.stderr.write(`[codex ${this.id}] turn ${tid} itemsView=${view} — deferring replay; the delivered mark holds below it\n`);
-        if (!this.#deferredFloor || tid < this.#deferredFloor) this.#deferredFloor = tid;
+        this.#deliveredSend({ type: "deferred", turnId: tid });
         if (status !== "inProgress") continue;
       }
       let items = deferred ? [] : (Array.isArray(turn.items) ? turn.items as Record<string, unknown>[] : []);
@@ -890,7 +831,7 @@ export class CodexSession implements AgentSession {
       // turn closes `interrupted` below — dropping it lost history. One that
       // visibly ran is replayed whole and closed below, and its row ends
       // `interrupted` so the prompt is never run twice.
-      const dead = status === "inProgress" && !this.#rejoined;
+      const dead = status === "inProgress" && !isRejoined(this.#startState);
       const ran = items.some((item) => String((item as { type?: unknown }).type ?? "") !== "userMessage");
       if (dead && !ran) {
         const kept = items.filter((item) => !this.#pendingOwnPrompt(item));
@@ -901,12 +842,13 @@ export class CodexSession implements AgentSession {
       // What replay is about to emit — id, ordinal, whole content — for the
       // live-buffer flush (#519).
       const ordinals = new Map<string, number>();
-      this.#historyItems.set(tid, items.map((item) => {
+      const replayed: HistoryItem[] = items.map((item) => {
         const type = String((item as { type?: unknown }).type ?? "");
         const ordinal = ordinals.get(type) ?? 0;
         ordinals.set(type, ordinal + 1);
         return { id: String((item as { id?: unknown }).id ?? ""), type, ordinal, sig: itemSignature(item), matched: false };
-      }));
+      });
+      this.#startSend({ type: "history_replayed", turnId: tid, items: replayed });
       // FRESH CARD (restart / resume-by-id / continue): the new relay session
       // has no prior rows, so replay the user prompts too — BEFORE the turn
       // bracket, matching live ordering (user row, then turn-start; the app's
@@ -949,7 +891,7 @@ export class CodexSession implements AgentSession {
       if (status !== "inProgress") {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status } } }));
         this.#emitReplayedTurnEnd(tid, codexTurnStatus(status), "replayed from thread/read");
-      } else if (!this.#rejoined) {
+      } else if (!isRejoined(this.#startState)) {
         this.#applyEffects(this.#norm.handle({ method: "turn/completed", params: { turn: { id: tid, status: "interrupted" } } }));
         // Only a dead turn that visibly RAN is the coordinator's to end here
         // (its rows settle `interrupted` rather than run twice). One that
@@ -1139,6 +1081,9 @@ export class CodexSession implements AgentSession {
     if (this.status === "ended") return false;
     this.status = "ended";
     this.endReason = reason;
+    // A start step still in flight finds the machine ended and abandons
+    // what it made (Astra on d4fc9336, d6b84547).
+    this.#startSend({ type: "killed", reason });
     // Decline any pending approvals so codex isn't left waiting, and clear the bar.
     for (const p of this.#pendingApprovals.values()) { try { p.answer(false); } catch { /* ignore */ } }
     this.#pendingApprovals.clear();
