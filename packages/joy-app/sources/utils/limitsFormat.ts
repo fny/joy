@@ -28,13 +28,35 @@ export function tightestLimit(rows: LimitRow[] | undefined): LimitRow | null {
     }, null as LimitRow | null);
 }
 
-/** "5-hour window", "Weekly window", "Fable · weekly" — what the row covers. */
+/**
+ * The windows that can stop THIS session: every shared window (the 5-hour and
+ * weekly allowances apply to every model) plus the scoped window of the model
+ * the session is on. Another model's scoped window cannot run this session out,
+ * so it never drives the "% left" — Sonnet at 95% is not Fable's problem. With
+ * no model known (a fresh session before its first turn) every row counts.
+ * `model` is the family alias the status row shows ("fable", "opus").
+ */
+export function relevantLimitRows(rows: LimitRow[] | undefined, model: string | null | undefined): LimitRow[] {
+    if (!rows) return [];
+    const m = model?.trim().toLowerCase();
+    if (!m) return rows;
+    return rows.filter((row) => {
+        if (!row.scope || row.scope === 'account') return true;
+        const scope = row.scope.toLowerCase();
+        return scope === m || scope.split(/[^a-z0-9]+/).includes(m) || row.id.toLowerCase().includes(m);
+    });
+}
+
+/** "5-hour window", "Weekly window", "Fable · Weekly window" — what the row
+ *  covers. A row with no duration is shown by its key alone: the key already
+ *  says what it is ("weekly_scoped:fable"), and "Fable · weekly_scoped:fable"
+ *  said it twice. */
 export function limitWindowName(row: LimitRow): string {
     const minutes = row.windowMinutes;
-    const base = minutes == null ? (row.id || 'window')
-        : minutes <= 360 ? '5-hour window'
-            : minutes <= 20_000 ? 'Weekly window'
-                : `${Math.round(minutes / 1440)}-day window`;
+    if (minutes == null) return row.id || 'window';
+    const base = minutes <= 360 ? '5-hour window'
+        : minutes <= 20_000 ? 'Weekly window'
+            : `${Math.round(minutes / 1440)}-day window`;
     // A model-scoped row is about that model's own allowance, not the account's.
     return row.scope && row.scope !== 'account' ? `${row.scope} · ${base}` : base;
 }

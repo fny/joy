@@ -35,7 +35,7 @@ import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
 import { contextWindowFor, formatTokens } from './contextWindow';
 import { useMachineLimits } from '@/hooks/useMachineLimits';
-import { tightestLimit, limitWindowName, limitResetLabel } from '@/utils/limitsFormat';
+import { tightestLimit, limitWindowName, limitResetLabel, relevantLimitRows } from '@/utils/limitsFormat';
 
 interface AgentInputProps {
     // `initialValue` seeds the uncontrolled textarea once; keystrokes never
@@ -722,7 +722,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     // against a window the app had to guess. Quota wins when we have it; the
     // context reading stays as the fallback.
     const limits = useMachineLimits(props.machineId);
-    const tightest = tightestLimit(limits?.rows);
+    // Only the windows that can stop THIS model: the shared ones plus its own
+    // scoped window. Another model's exhausted weekly used to drive the figure.
+    const tightest = tightestLimit(relevantLimitRows(limits?.rows, modelLabel));
     const quotaWarning = tightest
         ? {
             text: t('agentInput.context.remaining', { percent: Math.max(0, Math.round(100 - tightest.usedPercent)) }),

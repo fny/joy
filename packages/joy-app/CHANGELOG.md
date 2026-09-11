@@ -1,3 +1,9 @@
+# Sep 11 (8) — Usage left, for the model you're on
+
+- **"% left" now means this model's quota.** The corner of the composer showed the single worst window across every model on the account, so a Sonnet session could read "4% left" because Fable's weekly allowance was nearly spent. It now counts only what can stop the session you're in: the shared 5-hour and weekly windows plus the selected model's own window.
+- In the usage breakdown, a model's window is labelled by its key alone ("weekly_scoped:fable") instead of "Fable · weekly_scoped:fable".
+- Fewer duplicate "Finished" pushes: a run of queued messages notifies once, when the last one ends, and a turn the agent already announced with its own notification no longer adds a plain "Finished" on top. Needs the updated daemon.
+
 # Sep 11 (7) — Stop is always within reach
 
 - **A stop button beside send while you type during a turn.** The send button turns into a stop button while the agent is working, but only while the box is empty: the moment you started typing a follow-up it turned back into send, and there was no way to stop the turn without clearing what you had written (Escape worked on web, nothing did on a phone). Now a smaller stop button sits next to send whenever a turn is running and the box has text or an attachment.
