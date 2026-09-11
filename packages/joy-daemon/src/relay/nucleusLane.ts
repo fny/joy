@@ -40,8 +40,19 @@ import { writeAttachmentToCwd } from "../domain/attachments";
 import { queueFor, isTerminal } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
+import {
+  nextLeaseState, initialLeaseState, isLeaseDeath, reacquireBackoffMs, LEASE_RENEW_MS, LEASE_DEATH_RE, CONTROL_LANE_RETRY_MS,
+  type Lease, type LeaseEvent,
+} from "./leaseMachine";
+import {
+  nextTurnState, initialTurnState, resumedTurnState, projectTurnState, startOwed, isTurnClosed, emptyMailbox,
+  settleAdoption as settleAdoptionBox, parkAdoptionAnswer as parkAdoptionBox, isCancelAnswer, fateOf, START_CANCEL_CLASS, SESSION_GONE,
+  type Adoption, type TurnState, type TurnEvent, type TurnTransition, type TurnTerminal, type AdoptionMailbox, type Fate,
+} from "./relayTurnMachine";
 
-const RENEW_MS = 8_000;           // lease TTL is 20s server-side
+// The lease and the per-turn state are explicit machines (leaseMachine.ts,
+// relayTurnMachine.ts); this file wires them to the relay and the runtime.
+const RENEW_MS = LEASE_RENEW_MS;  // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
 /** How long a running turn may go with NO output before it is surfaced as
  *  stalled. It was a hard 30-minute cap on the turn's total age that ended it
@@ -100,6 +111,10 @@ export interface NucleusLaneOpts {
    *  stalled on its card: 30 min by default. Surfaced only — never
    *  interrupted. A test seam, like `adoptionRetryMs`. */
   turnStallMs?: number;
+  /** The lane's clock: every `Date.now()` and every wait between relay
+   *  requests goes through it, so a test can run the turn and lease machines
+   *  against a manual clock. Real time by default. */
+  clock?: { now(): number; sleep(ms: number): Promise<void> };
 }
 
 /** One relay turn this lane is driving, as the handle reports it. `state`
@@ -127,8 +142,6 @@ export interface NucleusLaneHandle {
    *  readable without one. */
   eventBudgetDrops(): Array<{ v2SessionId: string; localSessionId: string; since: number; dropped: number }>;
 }
-
-interface Lease { leaseId: string; leaseToken: string; epoch: string }
 
 interface WorkOffer {
   deliveryId: string; commandId: string; sessionId: string;
@@ -318,7 +331,20 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // sent anywhere — both ends compute it from the machine key they share.
   const spawnSpecKey = opts.machineKey ? deriveSpawnSpecKey(opts.machineKey, machineId) : null;
   let stopped = false;
-  let lease: Lease | null = null;
+  const now = (): number => opts.clock?.now() ?? Date.now();
+  const sleep = (ms: number): Promise<void> => (opts.clock ? opts.clock.sleep(ms) : new Promise((r) => setTimeout(r, ms)));
+  // The lease, as the machine in leaseMachine.ts holds it: `lease()` is the
+  // current Lease or null, `leaseState.phase === "ready"` is "the boot pass
+  // has run — the outbox may send". Every change is an event.
+  let leaseState = initialLeaseState();
+  const lease = (): Lease | null => leaseState.lease;
+  const leaseEvent = (ev: LeaseEvent): void => {
+    const t = nextLeaseState(leaseState, ev);
+    if (!t) return;
+    leaseState = t.to;
+    if (t.clearFreshTerminals) freshTerminals.clear();
+  };
+  const leaseDeathCode = (e: unknown): string => LEASE_DEATH_RE.exec(String(e))?.[0] ?? "lease_unknown";
   // Chat-log ids are an in-memory counter reset on every boot — a bare
   // chat:<id> runtimeEventId from THIS boot could replay-collide with one
   // from the last boot and get silently dropped by the relay. Scope them.
@@ -347,20 +373,17 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   const inFlight = new Set<string>();
   // Executing turns → the local session + the command that carries them:
   // output rows are tagged with their turn.
-  // `adoptionPending`: the relay could not answer the adoption of a resumed
-  // turn (unavailable, not refused) — the loop keeps the runtime running and
-  // retries; the sweep may adopt it meanwhile and clear the marker.
-  // `adoptionAnswer`: the RESOLVED answer the sweep got for that turn, left
-  // for the loop to act on (it runs it through honourAdoption and clears it).
-  // `adoptionEpoch`: which RESOLVED answer has been applied to this turn's
-  // adoption. The sweep and the loop can have reconciles in flight for the
-  // same turn at the same moment; the epoch de-duplicates answers of the SAME
-  // class (two `running`s, the same terminal twice) — it never outranks a
-  // cancellation (see settleAdoption / parkAdoptionAnswer).
+  // `turn`: where the turn is, as relayTurnMachine.ts holds it — delivery
+  // confirmed, /start owed, adoption pending, cancelling, closed. Read at
+  // every decision, advanced by events, never carried across an await.
+  // `box`: the adoption mailbox the sweep and the loop arbitrate through
+  // (relayTurnMachine.settleAdoption / parkAdoptionAnswer): the RESOLVED
+  // answer the sweep got for the turn, and which answer has been applied.
   // `wake`: the loop's terminal wait, interruptible. A verdict parked while
   // the loop waits out a 30-minute turn needs a consumer NOW, not at the cap.
-  type AdoptionPending = { since: number; attempts: number; lastError: string };
-  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; started: boolean; adoptionPending?: AdoptionPending | null; adoptionAnswer?: Adoption | null; adoptionEpoch?: number; wake?: (() => void) | null }>();
+  const activeTurns = new Map<string, { localId: string; commandId: string | null; lease: Lease; turn: TurnState; box: AdoptionMailbox; wake?: (() => void) | null }>();
+  /** Delivery confirmed here (running, cancelling, or parked after either). */
+  const startedOf = (s: TurnState): boolean => s.phase === "running" || s.phase === "cancelling" || s.phase === "adoption_pending";
   const ADOPTION_RETRY_MS: readonly number[] = opts.adoptionRetryMs ?? [1_000, 2_000, 4_000, 8_000];
   const ADOPTION_PENDING_RETRY_MS = opts.adoptionPendingRetryMs ?? 30_000;
   // Turns whose attachments are still being materialized: the one window
@@ -446,15 +469,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // acknowledged-by-nobody data (Astra's review of 6ebea947). The relay's
   // per-session event budget (429 session_event_budget_exhausted) never
   // clears by retrying: that is a permanent refusal of THIS record.
-  type Fate = "transient" | "permanent" | "budget";
-  const fateOf = (e: unknown): Fate => {
-    const st = (e as { status?: number })?.status;
-    const code = (e as { relayError?: string })?.relayError ?? "";
-    if (st === 429) return code === "session_event_budget_exhausted" ? "budget" : "transient";
-    if (typeof st !== "number") return "transient"; // network, timeout
-    if (st === 401 || st === 408 || st === 412 || st >= 500) return "transient";
-    return st >= 400 ? "permanent" : "transient";
-  };
+  // fateOf (transient / permanent / budget) lives in relayTurnMachine.ts.
   const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 300);
   // Sessions whose relay event budget is exhausted: logged once, outputs dropped.
   const budgetExhausted = new Set<string>();
@@ -619,7 +634,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       settle: () => {
         const prev = readPersistedBudget(v2);
         const st: BudgetState = {
-          localId, since: prev?.since ?? budgetDropped.get(v2)?.since ?? Date.now(), dropped: (prev?.dropped ?? 0) + 1,
+          localId, since: prev?.since ?? budgetDropped.get(v2)?.since ?? now(), dropped: (prev?.dropped ?? 0) + 1,
           cardDropped: prev?.cardDropped ?? budgetDropped.get(v2)?.cardDropped ?? 0,
         };
         ledger.putJob({ id: budgetJobId(v2), sessionId: localId, kind: EVENT_BUDGET_JOB_KIND, payload: { v2SessionId: v2, localId, since: st.since, dropped: st.dropped, cardDropped: st.cardDropped } });
@@ -659,8 +674,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // Nothing is sent until the boot pass (refreshBindings) has loaded the
   // bindings and the sessions' content keys: a row committed before that,
   // for a sealed session, must be sealed with the key the pass loads — never
-  // sent in the clear because the key was not in memory yet (#582).
-  let bootReady = false;
+  // sent in the clear because the key was not in memory yet (#582). That is
+  // the lease machine's `ready` phase (boot_done under a held lease).
   /** The content key a row was committed under, if it carries one (#582). */
   const rowKey = (row: OutboxRow): Uint8Array | undefined => {
     if (!row.keyB64) return undefined;
@@ -683,11 +698,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // session) or it has waited a day.
       const known = boundByLocal.get(row.sessionId);
       if (known) { ledger.bindOutbound(row.sessionId, known, sealFor(known)); v2 = known; }
-      else if (!registry.get(row.sessionId) || Date.now() - row.createdAt > 24 * 3_600_000) return { ok: false, fate: "permanent", error: "unbound_abandoned" };
+      else if (!registry.get(row.sessionId) || now() - row.createdAt > 24 * 3_600_000) return { ok: false, fate: "permanent", error: "unbound_abandoned" };
       else return { ok: false, fate: "unbound", error: "session not bound yet" };
     }
     if (budgetExhausted.has(v2)) return budgetRefused(row.sessionId, v2);
-    const l = lease;
+    const l = lease();
     if (!l) return { ok: false, fate: "transient", error: "lease_lost" };
     // The key the record was committed under rides the row (#582): a session
     // killed and un-recorded before its output drained used to lose its key,
@@ -748,7 +763,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  the current lease; otherwise resolve the turn with the RECORDED outcome
    *  via reconcile (a previous lease's or daemon's terminal). */
   async function postTerminalRow(row: OutboxRow): Promise<PostResult> {
-    const l = lease;
+    const l = lease();
     if (!l) return { ok: false, fate: "transient", error: "lease_lost" };
     const turnId = row.relayTurnId ?? "";
     if (!turnId) return { ok: false, fate: "permanent", error: "terminal without a turn id" };
@@ -782,7 +797,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   const sender = new OutboxSender({
-    ledger, ready: () => !!lease && bootReady, log,
+    ledger, ready: () => leaseState.phase === "ready", log,
     post: (row) => (row.kind === "terminal" ? postTerminalRow(row) : postOutput(row)),
     maxBackoffMs: RETRY_MAX_MS,
   });
@@ -929,9 +944,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  falls through to a /start whose refusal would (Astra, F14: a 503 on
    *  reconcile{running} twice cancelled a working agent). Lease death is
    *  rethrown — nothing under this lease can resolve anything any more. */
-  type Adoption =
-    | { kind: "running" } | { kind: "cancelling" } | { kind: "terminal"; terminalState: string }
-    | { kind: "none"; detail?: string } | { kind: "refused"; code: string } | { kind: "unavailable"; detail: string };
   async function adoptRelayTurn(turnId: string, leaseRef: Lease, reason: string): Promise<Adoption> {
     let r: { state?: string; terminalState?: string } | null;
     try {
@@ -963,104 +975,49 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     }
     return a;
   }
-  /** Record (or extend) a turn's `adoption_pending` wait on its loop entry. */
-  function noteAdoptionPending(turnId: string, detail: string): void {
+  /** Advance a turn's machine on its loop entry (relayTurnMachine.ts). No
+   *  entry — the turn is between offer and accept, or already closed and
+   *  removed — answers null, as a closed turn does. */
+  function advanceTurn(turnId: string, ev: TurnEvent): TurnTransition | null {
     const t = activeTurns.get(turnId);
-    if (!t) return;
-    const prev = t.adoptionPending;
-    t.adoptionPending = { since: prev?.since ?? Date.now(), attempts: (prev?.attempts ?? 0) + 1, lastError: detail };
+    if (!t) return null;
+    const tr = nextTurnState(t.turn, ev);
+    if (tr) t.turn = tr.to;
+    return tr;
   }
-  /** ── one adoption answer per turn (Astra, F30) ──
-   *  The orphan sweep and a turn's OWN loop (its resume adoption, or a Phase
-   *  C retry) can have reconciles in flight for the same turn at the same
-   *  moment: the ordinary eight-second sweep against a loop parked
-   *  `adoption_pending`. Whichever RESOLVED answer completes FIRST is the one
-   *  that is applied; the loser drops its own answer and observes the
-   *  winner's. Without that, the sweep stored its answer and cleared
-   *  `adoptionPending` while the loop's retry was awaiting its reconcile, and
-   *  the retry then read `entry.adoptionPending.attempts` across that await
-   *  — TypeError, a synthetic `failed` terminal from resumeTurn's catch, and
-   *  the sweep's cancellation never honoured (the command still running,
-   *  cancelRequestedAt null, zero interrupts).
-   *
-   *  Nothing may be read off the entry across an await: re-read it, and
-   *  arbitrate through these two.
-   *
-   *  ── …but cancellation is MONOTONE (Astra, F31) ──
-   *  "First complete answer wins" is right only for answers of the same
-   *  class. In the REVERSE interleaving — both reconciles begin while the
-   *  turn is orphaned, the loop's retry adopts it `running` and takes its
-   *  /start ack, and the delayed sweep then observes a REAL terminal/cancelled
-   *  close through the relay API — dropping the sweep's answer "because the
-   *  loop advanced the epoch" threw away the NEWER authoritative fact: the
-   *  relay turn cancelled, the local command still running with
-   *  cancelRequestedAt null and zero interrupts, and the loop already inside
-   *  its 30-minute terminal wait, so nothing was left to consume it.
-   *  The relay never un-says a cancellation, so an answer of that class is
-   *  applied by whichever side observes it, whenever it observes it —
-   *  through the same cancel path, once. */
-  const adoptionEpoch = (turnId: string): number => activeTurns.get(turnId)?.adoptionEpoch ?? 0;
-  /** The answers that MEAN "this turn must stop": the relay closed it
-   *  cancelled, it holds a cancel request for it, or it authoritatively
-   *  refused the adoption (session closed, budget failed). Monotone — the
-   *  relay only ever moves further into them — so they outrank the epoch. */
-  const isCancelAnswer = (a: Adoption): boolean =>
-    a.kind === "refused" || a.kind === "cancelling" || (a.kind === "terminal" && a.terminalState === "cancelled");
-  /** The LOOP's side. Given the answer its own reconcile returned and the
-   *  epoch it started from, it returns the answer to honour: the sweep's
-   *  parked one when the sweep got there first (`via` names it), otherwise
-   *  its own — claiming the epoch, so a sweep still in flight defers to it.
-   *  An `unavailable` answer resolves nothing and claims nothing. A parked
-   *  CANCELLATION is honoured whatever this pass got, and a cancellation
-   *  this pass got is honoured even when it lost the epoch. */
+  /** Record (or extend) a turn's `adoption_pending` wait: the relay could not
+   *  answer its adoption — the sweep's reconcile or the loop's. */
+  function noteAdoptionPending(turnId: string, detail: string): void {
+    advanceTurn(turnId, { type: "adoption", answer: { kind: "unavailable", detail }, now: now() });
+  }
+  /** One adoption answer per turn (Astra, F30), cancellation monotone (F31):
+   *  the sweep and a turn's own loop can have reconciles in flight for the
+   *  same turn; the mailbox on the loop entry arbitrates — the pure rules and
+   *  the forensics are in relayTurnMachine.ts. Nothing may be read off the
+   *  entry across an await: re-read it, and arbitrate through these two. */
+  const adoptionEpoch = (turnId: string): number => activeTurns.get(turnId)?.box.epoch ?? 0;
+  /** The LOOP's side: the answer to honour, and who got it. */
   function settleAdoption(turnId: string, mine: Adoption, epochBefore: number): { answer: Adoption; via: string | null } {
     const t = activeTurns.get(turnId);
     if (!t) return { answer: mine, via: null };
-    const swept = t.adoptionAnswer ?? null;
-    // A cancellation the sweep carried is THE answer — including when ours
-    // says the same thing (the relay closed the turn under both of us): it
-    // is consumed here, so the cancellation is applied exactly once.
-    if (swept && isCancelAnswer(swept)) {
-      t.adoptionAnswer = null;
-      t.adoptionEpoch = (t.adoptionEpoch ?? 0) + 1;
-      return { answer: swept, via: "orphan sweep, which answered first" };
-    }
-    if ((t.adoptionEpoch ?? 0) !== epochBefore) {
-      // Monotone: a cancellation we learned LATER than the epoch's winner is
-      // still the authoritative fact, and it is what we act on.
-      if (isCancelAnswer(mine)) { t.adoptionEpoch = (t.adoptionEpoch ?? 0) + 1; return { answer: mine, via: null }; }
-      if (!swept) return { answer: mine, via: null };
-      t.adoptionAnswer = null;
-      return { answer: swept, via: "orphan sweep, which answered first" };
-    }
-    if (mine.kind !== "unavailable") t.adoptionEpoch = epochBefore + 1;
-    return { answer: mine, via: null };
+    const r = settleAdoptionBox(t.box, mine, epochBefore);
+    t.box = r.box;
+    return { answer: r.answer, via: r.via };
   }
-  /** The SWEEP's side: park a RESOLVED answer for the loop to act on and wake
-   *  its wait. `dropped` when the loop answered its own adoption while this
-   *  reconcile was in flight and this pass adds nothing to it; `carried-late`
-   *  when it lost that race but holds a CANCELLATION, which is carried
-   *  anyway — the loop's `running` never outranks a later cancelled close. */
+  /** The SWEEP's side: park a RESOLVED answer for the loop and wake its wait. */
   function parkAdoptionAnswer(turnId: string, a: Adoption, epochBefore: number): "parked" | "carried-late" | "dropped" {
     const t = activeTurns.get(turnId);
     if (!t) return "dropped";
-    const late = (t.adoptionEpoch ?? 0) !== epochBefore;
-    // A cancellation already parked and not yet consumed says everything this
-    // one would: never carry the same stop twice.
-    if (late && !(isCancelAnswer(a) && !(t.adoptionAnswer && isCancelAnswer(t.adoptionAnswer)))) return "dropped";
-    t.adoptionEpoch = (t.adoptionEpoch ?? 0) + 1;
-    t.adoptionAnswer = a;
-    t.adoptionPending = null;
+    const r = parkAdoptionBox(t.box, a, epochBefore);
+    if (r.outcome === "dropped") return "dropped";
+    t.box = r.box;
     // The loop may be waiting out the turn itself: give this verdict a
     // consumer now instead of leaving it to expire at the cap (F31).
     t.wake?.();
-    return late ? "carried-late" : "parked";
+    return r.outcome;
   }
-  /** /start refusals that MEAN "stop the prompt": a cancellation that beat
-   *  the control offer here, a session closed under the turn (#614), a
-   *  budget the relay failed the turn on (#613). Every other 409 is a
-   *  recovery question the relay's reconcile answers — never a cancel. */
-  const START_CANCEL_CLASS = new Set(["turn_cancelled", "session_archived", "session_failed", "session_event_budget_exhausted"]);
+  // START_CANCEL_CLASS — the /start refusals that MEAN "stop the prompt" —
+  // is relayTurnMachine's, as is SESSION_GONE.
 
   /** Raw attachment bytes from the relay store (sealed by the sender). */
   async function fetchAttachment(attachmentId: string): Promise<Uint8Array> {
@@ -1071,11 +1028,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
   async function acquire(): Promise<void> {
     const r = await api("POST", "/daemon/leases", { machineId, capabilities: { transport: "nucleus-lane" } });
-    lease = { leaseId: r.leaseId, leaseToken: r.leaseToken, epoch: String(r.epoch) };
+    leaseEvent({ type: "acquired", lease: { leaseId: r.leaseId, leaseToken: r.leaseToken, epoch: String(r.epoch) } });
     log(`lease ${r.leaseId.slice(0, 8)} epoch ${r.epoch}`);
   }
 
@@ -1144,9 +1099,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // so it re-stamps every bound session once per boot — idempotent, and
       // the only thing that keeps existing sessions readable after the
       // account content key rotates.
-      if (envelope.startsWith("v2sk1:") && lease) {
+      if (envelope.startsWith("v2sk1:") && lease()) {
         try {
-          await api("PATCH", `/daemon/sessions/${s.sessionId}`, { sessionKeyEnvelope: envelope }, lease);
+          await api("PATCH", `/daemon/sessions/${s.sessionId}`, { sessionKeyEnvelope: envelope }, lease());
         } catch (e) {
           log(`re-envelope ${s.sessionId.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`);
         }
@@ -1175,7 +1130,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function repairArchivedBudgetCards(
     rows: Array<{ sessionId: string; daemonId: string; state: string; localSessionId?: string | null; encryptedMetadata?: string | null }>,
   ): Promise<void> {
-    const l = lease;
+    const l = lease();
     if (!l) return;
     let jobs: JobRow[];
     try { jobs = ledger.listJobs(EVENT_BUDGET_JOB_KIND); repairUnreadableNoted = false; }
@@ -1239,7 +1194,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   async function reconcileOrphanedTurns(
     rows: Array<{ sessionId: string; daemonId: string; localSessionId?: string | null }>,
   ): Promise<void> {
-    const l = lease;
+    const l = lease();
     if (!l) return;
     for (const s of rows) {
       if (s.daemonId !== machineId || !s.localSessionId) continue;
@@ -1288,7 +1243,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // that already passed that point, is adopted here.
         if (owner) {
           const loop = activeTurns.get(ex.turnId);
-          if (loop?.started && (owner.state === "running" || owner.state === "cancelling")) {
+          if (loop && startedOf(loop.turn) && (owner.state === "running" || owner.state === "cancelling")) {
             const epochBefore = adoptionEpoch(ex.turnId);
             const a = await adoptRelayTurn(ex.turnId, l, "orphan_sweep");
             if (a.kind === "unavailable") {
@@ -1357,7 +1312,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // survives so the row still reads as "that project, on this machine".
   // Rows with no localSessionId are pre-bind spawns we may yet claim — skip.
   async function reconcileOrphans(rows: Array<{ sessionId: string; daemonId: string; state: string; localSessionId?: string | null }>): Promise<void> {
-    const l = lease;
+    const l = lease();
     if (!l) return;
     // Replacement rows whose archive is still owed (#120): the persisted
     // intents go first, on every boot pass and refresh, and keep their own
@@ -1455,7 +1410,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     flushUnbound(localId, v2SessionId);
     registerV2CardPublisher(localId, async (metadata) => {
       const key = sessionKeys.get(v2SessionId) ?? null;
-      const l = lease;
+      const l = lease();
       if (!l) throw new Error("lane down"); // rebind republishes
       try {
         // An unreadable budget record throws here: the holder keeps the card
@@ -1478,7 +1433,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   async function claim(lane: "work" | "control", asLease?: Lease | null): Promise<Array<WorkOffer & ControlOffer>> {
-    const l = asLease ?? lease;
+    const l = asLease ?? lease();
     if (!l) return [];
     const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${l.leaseId}/claims/${lane}`, {
       method: "POST",
@@ -1760,7 +1715,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  prompt must not run, nothing is retried, and no `failed` terminal is
    *  posted — the relay already resolved the queue (queued turns cancelled)
    *  and an in-flight turn is closed with a `cancelled` terminal below. */
-  const SESSION_GONE = new Set(["session_archived", "session_failed"]);
   const sessionGone = (e: unknown): string | null => {
     const x = e as { status?: number; relayError?: string } | null;
     return x?.status === 409 && x.relayError && SESSION_GONE.has(x.relayError) ? x.relayError : null;
@@ -1771,12 +1725,19 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     if (inFlight.has(turnId)) return;
     inFlight.add(turnId);
     let turnLocalId = bound.get(offer.sessionId) ?? ""; // for the catch below, which runs outside the session's scope
+    // The turn's machine before it has a loop entry (offer → accept); the
+    // entry inherits it at accept. relayTurnMachine.ts decides the same
+    // answers this flow does — the flow is the wiring, the machine the record.
+    let pre: TurnState = initialTurnState();
+    const preStep = (ev: TurnEvent): void => { const t = activeTurns.has(turnId) ? advanceTurn(turnId, ev) : nextTurnState(pre, ev); if (t && !activeTurns.has(turnId)) pre = t.to; };
     try {
       try {
         await api("POST", `/daemon/deliveries/${offer.deliveryId}/received`, {}, leaseRef);
+        preStep({ type: "received_ok" });
       } catch (e) {
         const st = (e as { status?: number }).status;
         if (st === 404 || st === 409 || st === 412) {
+          preStep({ type: "received_refused", status: st });
           // The delivery was superseded (the user edited the queued message
           // after we fetched it — #57) or belongs to a dead epoch: the next
           // claim brings a fresh delivery with the current payload.
@@ -1793,8 +1754,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // every claim, and a full refreshBindings per offer (GET /sessions +
         // a PATCH per bound row + two orphan scans) ran as fast as the relay
         // answered, for as long as the message sat there (issue #114).
-        if (Date.now() - lastBindingsRefresh > 30_000) {
-          lastBindingsRefresh = Date.now();
+        if (now() - lastBindingsRefresh > 30_000) {
+          lastBindingsRefresh = now();
           try { await refreshBindings(); } catch { /* transient */ }
         }
         session = localSession(offer.sessionId);
@@ -1807,7 +1768,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           notedSkips.add(turnId);
           log(`turn ${turnId.slice(0, 8)}: no local session for v2 ${offer.sessionId.slice(0, 8)} — left queued, rechecking every ${SKIP_RECHECK_MS / 1000}s`);
         }
-        skipUntil.set(turnId, Date.now() + SKIP_RECHECK_MS);
+        preStep({ type: "no_local_session" });
+        skipUntil.set(turnId, now() + SKIP_RECHECK_MS);
         return;
       }
       // `sess` is re-resolved by local id at every poll below: a restart
@@ -1831,11 +1793,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         const reason = promptRejectReason(offer.ciphertext, promptKey);
         try {
           await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+          preStep({ type: "submitted_ok" });
         } catch (e) {
           const gone = sessionGone(e);
-          if (gone) { log(`turn ${turnId.slice(0, 8)}: /submitted refused (${gone}) — dropped`); return; }
+          if (gone) { preStep({ type: "submitted_refused", code: gone }); log(`turn ${turnId.slice(0, 8)}: /submitted refused (${gone}) — dropped`); return; }
           throw e;
         }
+        preStep({ type: "undecodable", reason });
         await postTerminal(turnId, sess.id, {
           type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(),
           meta: { reason },
@@ -1845,11 +1809,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }
       try {
         await api("POST", `/daemon/turns/${turnId}/submitted`, {}, leaseRef);
+        preStep({ type: "submitted_ok" });
       } catch (e) {
         // The session was archived/failed under us: the relay cancelled the
         // queued turn itself; the prompt never reaches the agent (#614).
         const gone = sessionGone(e);
-        if (gone) { log(`turn ${turnId.slice(0, 8)}: /submitted refused (${gone}) — dropped, nothing dispatched`); return; }
+        if (gone) { preStep({ type: "submitted_refused", code: gone }); log(`turn ${turnId.slice(0, 8)}: /submitted refused (${gone}) — dropped, nothing dispatched`); return; }
         throw e;
       }
 
@@ -1877,6 +1842,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         // Half-materialized prompts are worse than none — a failed turn must
         // not leave files the agent never heard about in the cwd.
         const fail = async (reason: string, a: PromptAttachment) => {
+          preStep({ type: "prepare_failed", reason });
           dropFiles();
           await postTerminal(turnId, sess.id, {
             type: "terminal", terminalState: "failed", runtimeEventId: randomUUID(), meta: { reason, attachmentId: a.id },
@@ -1906,6 +1872,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (cancelledWhilePreparing) {
           // Cancelled while we were preparing it: never accepted, and the
           // files we materialized for it come back out.
+          preStep({ type: "prepare_cancelled" });
           dropFiles();
           await postTerminal(turnId, sess.id, { type: "terminal", terminalState: "cancelled", runtimeEventId: randomUUID(), meta: { reason: "cancelled_before_enqueue" } }, leaseRef);
           log(`turn ${turnId.slice(0, 8)}: cancelled before enqueue → cancelled`);
@@ -1921,7 +1888,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // every later line for this turn names the session AND the command, so
       // "turn X completed" can be tied to the message it carried.
       const accepted = queueFor(sess).accept(text, { source: "rpc", visible: false, mirrorToRelay: false, relayTurnId: turnId, relayCommandId: offer.commandId });
-      activeTurns.set(turnId, { localId: sess.id, commandId: accepted.id, lease: leaseRef, started: false });
+      activeTurns.set(turnId, { localId: sess.id, commandId: accepted.id, lease: leaseRef, turn: pre, box: emptyMailbox() });
       const tag = `turn ${turnId.slice(0, 8)} [${sess.id}/${accepted.id}]`;
 
       // A joy-owned slash command (/title, /joy-prompt, …) is executed at
@@ -1930,10 +1897,13 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // session's relay execution slot with every later message stuck
       // behind it (live 2026-09-03).
       if (accepted.handled === "command") {
+        advanceTurn(turnId, { type: "handled_command" });
         try {
           await postStart(turnId, sess.id, accepted.id, leaseRef);
+          advanceTurn(turnId, { type: "start_ok" });
         } catch (e) {
           if ((e as { status?: number }).status === 409) {
+            advanceTurn(turnId, { type: "start_refused", code: (e as { relayError?: string }).relayError ?? "" });
             // The relay refuses the start (cancelled): a /joy-prompt may have
             // queued its reinjection already — cancel it, then say cancelled.
             const rein = accepted.reinjectionId;
@@ -1959,9 +1929,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         return;
       }
       log(`${tag}: prompt staged (chars=${text.length})`);
-      await driveTurn(turnId, sess.id, accepted.id, leaseRef, { startPosted: false, dropFiles, tag });
+      await driveTurn(turnId, sess.id, accepted.id, leaseRef, { dropFiles, tag });
     } catch (e) {
       log(`turn ${turnId.slice(0, 8)} error: ${String(e)}`);
+      preStep(isLeaseDeath(e) ? { type: "lease_lost" } : { type: "lane_error", detail: String(e).slice(0, 300), commandLive: false });
       // Best-effort: leave the relay a terminal instead of a forever-running
       // turn (with a live lease the sweep will never orphan it). If this post
       // also fails, lease death eventually orphans the turn — still honest.
@@ -1990,39 +1961,51 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
    *  "busy()" guess, no 180 s activity gate), POST /start, wait for the
    *  terminal state and post it. The states are the ledger's, so this loop
    *  can be resumed from the row after a daemon restart (R13). */
-  async function driveTurn(turnId: string, localId: string, commandId: string, leaseRef: Lease, opts: { startPosted: boolean; resumed?: boolean; dropFiles?: () => void; tag: string }): Promise<void> {
+  async function driveTurn(turnId: string, localId: string, commandId: string, leaseRef: Lease, opts: { resumed?: boolean; dropFiles?: () => void; tag: string }): Promise<void> {
     const { tag } = opts;
     const sessionNow = () => registry.get(localId);
     // The command is the coordinator's whatever object (or none) is under
     // the id right now — a restart replaces it.
     const q = () => queueFor({ id: localId });
-    // A stall that was surfaced on the card must come off it with the turn,
-    // whichever path closes the turn — finish is the one exit they all share.
-    let stalled = false;
-    const clearStalled = () => { if (stalled) { stalled = false; sessionNow()?.setStalled?.(null); } };
-    const finish = async (state: CommandState, reason?: string | null) => {
-      clearStalled();
-      if (state !== "completed") opts.dropFiles?.();
-      await postTerminal(turnId, localId, terminalBody(state, reason), leaseRef);
-      log(`${tag} ${state}${state !== "completed" && reason ? ` (${reason})` : ""}`);
+    /** The turn's state, off its loop entry — re-read at every decision,
+     *  never carried across an await (F30). No entry (closed and removed
+     *  under us) reads as closed. */
+    const turn = (): TurnState => activeTurns.get(turnId)?.turn ?? { phase: "terminal", state: "failed", reason: "command_lost" };
+    const closed = (): boolean => isTurnClosed(turn());
+    const stalledOf = (s: TurnState): boolean => (s.phase === "running" || s.phase === "cancelling" || s.phase === "adoption_pending") && s.stalled;
+    const startPostedOf = (s: TurnState): boolean =>
+      s.phase === "submitted" || s.phase === "running" || s.phase === "cancelling" || s.phase === "adoption_pending" ? s.startPosted : false;
+    /** One step of the machine, its effects performed, and — when the step
+     *  closes the turn — the terminal posted: completed/failed from the
+     *  runtime's turn-end, cancelled once a cancel is applied, interrupted on
+     *  idle-without-terminal, a restart or a kill (#463); the command's
+     *  terminal reason is the fact's `meta.reason`. Null: the event meant
+     *  nothing in this state — a closed turn stays closed. */
+    const step = async (ev: TurnEvent): Promise<TurnTransition | null> => {
+      const before = turn();
+      const tr = advanceTurn(turnId, ev);
+      if (!tr) return null;
+      for (const eff of tr.effects ?? []) {
+        if (eff === "cancel_command") q().cancel(commandId);
+        if (eff === "cancel_locally") {
+          // The prompt is running locally but the relay will not have it:
+          // cancel it (the coordinator interrupts and retries) and say
+          // cancelled — never `failed`; the relay leaves executing turns to
+          // their owner.
+          q().cancel(commandId);
+          try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
+        }
+      }
+      if (tr.to.phase === "terminal") {
+        // A stall surfaced on the card comes off it with the turn, whichever
+        // path closes the turn.
+        if (stalledOf(before)) sessionNow()?.setStalled?.(null);
+        if (tr.to.state !== "completed") opts.dropFiles?.();
+        await postTerminal(turnId, localId, terminalBody(tr.to.state, tr.to.reason), leaseRef);
+        log(`${tag} ${tr.to.state}${tr.to.state !== "completed" && tr.to.reason ? ` (${tr.to.reason})` : ""}`);
+      }
+      return tr;
     };
-    /** The prompt is running locally but the relay will not have it: cancel
-     *  it (the coordinator interrupts and retries) and say cancelled — never
-     *  `failed`; the relay leaves executing turns to their owner. */
-    const cancelLocally = async (reason: string) => {
-      q().cancel(commandId);
-      try { await sessionNow()?.abort(); } catch { /* pane teardown */ }
-      await finish("cancelled", reason);
-    };
-    let startPosted = opts.startPosted;
-    // The relay could not answer this turn's adoption (mirrors the loop
-    // entry's marker, which the sweep shares): no /start until it can.
-    let adoptionPending = false;
-    // An authoritative cancellation was applied here. Both sides can observe
-    // the SAME cancelled close (the sweep's carried answer and our own
-    // retry's), and it must reach the runtime once: one durable cancel, one
-    // interrupt, one `cancelled` terminal (Astra, F31).
-    let cancelClosed = false;
     /** The command's terminal wait, interruptible by the sweep. A verdict
      *  parked while we wait is a fact the loop must act on NOW — the wait is
      *  as long as the turn may run (30 min), so an un-woken wait meant a
@@ -2035,7 +2018,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       const entry = activeTurns.get(turnId);
       if (entry) {
         entry.wake = wake;
-        if (entry.adoptionAnswer) wake(); // parked between the last look and this wait
+        if (entry.box.answer) wake(); // parked between the last look and this wait
       }
       try {
         return await q().waitFor(commandId, TERMINAL_STATES, { timeoutMs, signal: ac.signal });
@@ -2044,77 +2027,69 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (cur?.wake === wake) cur.wake = null;
       }
     };
-    /** The relay ANSWERED the adoption question — whatever the answer: the
-     *  shared `adoption_pending` marker (the loop entry the sweep reads too)
-     *  comes off. Clearing it only for `running` (Astra, F21) left a
-     *  `cancelling` or terminal answer parked: the loop's next pass saw the
-     *  marker still set and asked again at once — twelve adoptions in one
-     *  burst against a relay that had closed the turn, until the 30-minute
-     *  cap — and its stale sliced wait hid the runtime's own terminal. */
-    const adoptionResolved = () => { const t = activeTurns.get(turnId); if (t?.adoptionPending) t.adoptionPending = null; };
-    /** Act on the relay's adoption answer. `continue` → the loop goes on to
-     *  the terminal; `done` → the turn is closed here; `none` → the relay
-     *  had nothing to adopt (the caller decides); `pending` → the relay
-     *  could not answer: the runtime keeps running, the turn is
-     *  `adoption_pending` and Phase C keeps retrying. Every answer but
-     *  `pending` is a resolution and clears the pending marker. */
+    /** Act on the relay's adoption answer, through the machine. `continue`
+     *  → the loop goes on to the terminal; `done` → the turn is closed here;
+     *  `none` → the relay had nothing to adopt (a question answered, not a
+     *  cancel); `pending` → the relay could not answer: the runtime keeps
+     *  running, the turn is `adoption_pending` and Phase C keeps retrying.
+     *  Every answer but `pending` is a resolution and takes the turn out of
+     *  `adoption_pending` (clearing it only for `running` — Astra, F21 —
+     *  left a `cancelling` or terminal answer parked and the loop asking
+     *  again at once, twelve adoptions in one burst). The same stop learned
+     *  twice (the sweep carried it and our own reconcile returned it) is
+     *  applied once — the machine answers null to a closed turn (F31). */
     const honourAdoption = async (a: Adoption, via: string): Promise<"continue" | "done" | "none" | "pending"> => {
-      if (a.kind !== "unavailable") adoptionResolved();
-      // The same stop, learned twice (the sweep carried it and our own
-      // reconcile returned it): it is applied once — a second cancelLocally
-      // would interrupt again and publish a second terminal (F31).
-      if (cancelClosed && isCancelAnswer(a)) {
+      if (closed() && isCancelAnswer(a)) {
         log(`${tag}: the relay's cancellation again (${a.kind}, ${via}) — already applied here`);
         return a.kind === "cancelling" ? "continue" : "done";
       }
+      await step({ type: "adoption", answer: a, now: now() });
+      const after = turn();
       switch (a.kind) {
-        case "running":
-          log(`${tag}: adopted on the relay under this lease (${via})`);
-          return "continue";
-        case "refused":
-          // The relay's authoritative no — the session is closed under the
-          // turn, or the budget failed it before its first start (#613): the
-          // same cancel class a /start refusal carries.
-          cancelClosed = true;
-          await cancelLocally(a.code);
-          log(`${tag}: adoption refused by the relay (${a.code}, ${via}) → cancelled locally`);
-          return "done";
-        case "unavailable":
-          // Unresolved: the relay said nothing about the turn. A runtime the
-          // driver confirmed running is never cancelled on a relay outage.
-          noteAdoptionPending(turnId, a.detail);
-          log(`${tag}: the relay cannot answer the adoption (${a.detail}, ${via}) — adoption_pending, the command keeps running; retrying every ${ADOPTION_PENDING_RETRY_MS / 1000}s`);
-          return "pending";
-        case "cancelling":
-          // The relay had a cancel requested for it — preserved through the
-          // adoption: honour it here, ONCE (the ledger's cancel flag is
-          // idempotent; a re-offer or a second answer adds nothing); the
-          // coordinator interrupts and the turn ends cancelled through Phase C.
-          log(`${tag}: adopted on the relay with a cancel pending (${via}) → cancelling locally`);
-          q().cancel(commandId);
-          return "continue";
+        case "running": log(`${tag}: adopted on the relay under this lease (${via})`); break;
+        // The relay's authoritative no — the session is closed under the
+        // turn, or the budget failed it before its first start (#613): the
+        // same cancel class a /start refusal carries.
+        case "refused": log(`${tag}: adoption refused by the relay (${a.code}, ${via}) → cancelled locally`); break;
+        // Unresolved: the relay said nothing about the turn. A runtime the
+        // driver confirmed running is never cancelled on a relay outage.
+        case "unavailable": log(`${tag}: the relay cannot answer the adoption (${a.detail}, ${via}) — adoption_pending, the command keeps running; retrying every ${ADOPTION_PENDING_RETRY_MS / 1000}s`); break;
+        // The relay had a cancel requested for it — preserved through the
+        // adoption: honoured here, ONCE (the ledger's cancel flag is
+        // idempotent); the coordinator interrupts and the turn ends
+        // cancelled through Phase C.
+        case "cancelling": log(`${tag}: adopted on the relay with a cancel pending (${via}) → cancelling locally`); break;
         case "terminal":
-          if (a.terminalState === "cancelled") {
-            cancelClosed = true;
-            await cancelLocally("relay_cancelled");
-            log(`${tag}: the relay closed this turn cancelled (${via}) → cancelled locally`);
-            return "done";
-          }
+          if (a.terminalState === "cancelled") log(`${tag}: the relay closed this turn cancelled (${via}) → cancelled locally`);
           // The relay closed the turn without us (an earlier generation's
           // sweep, an operator): completed / failed / interrupted. The agent
           // is still working on it here — a recovery 409 is no proof that a
           // runtime should be cancelled. It keeps running; its outcome is
           // reported through the terminal fact when it ends (the relay
-          // answers replay), and no /start is posted for a closed turn. The
-          // answer is honoured ONCE: the turn is never re-adopted after it.
-          log(`${tag}: the relay already closed this turn ${a.terminalState} (${via}) — the local command keeps running; its outcome posts as the terminal fact`);
-          startPosted = true;
-          return "continue";
-        case "none":
-          return "none";
+          // answers replay), and no /start is posted for a closed turn.
+          else log(`${tag}: the relay already closed this turn ${a.terminalState} (${via}) — the local command keeps running; its outcome posts as the terminal fact`);
+          break;
+        case "none": break;
+      }
+      if (after.phase === "terminal") return "done";
+      if (after.phase === "adoption_pending") return "pending";
+      return a.kind === "none" ? "none" : "continue";
+    };
+    /** The owed /start. `handled` = the answer is applied; the caller reads
+     *  the machine for what it was. */
+    const postStartStep = async (): Promise<{ refused: string | null; error: unknown }> => {
+      try {
+        await postStart(turnId, localId, commandId, leaseRef);
+        await step({ type: "start_ok" });
+        return { refused: null, error: null };
+      } catch (e) {
+        if ((e as { status?: number }).status !== 409) throw e;
+        const code = (e as { relayError?: string }).relayError ?? "";
+        await step({ type: "start_refused", code });
+        return { refused: code, error: e };
       }
     };
-    if (!startPosted || opts.resumed) {
+    if (!startPostedOf(turn()) || opts.resumed) {
       // Phase A — OUR prompt reaches the agent and its turn is running. A
       // message legitimately queued behind a long turn must not time out,
       // so the wait is as long as the turn itself may run. A resumed turn
@@ -2122,16 +2097,16 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // relay (below) is right only once the new driver generation has
       // confirmed the runtime is executing it.
       const r = await q().waitFor(commandId, ["running", ...TERMINAL_STATES], { timeoutMs: DELIVERY_WAIT_MS });
-      if (r.state === null) return finish("failed", "command_lost");
-      if (isTerminal(r.state)) return finish(r.state, r.reason);
+      if (r.state === null) { await step({ type: "command_lost" }); return; }
+      if (isTerminal(r.state)) { await step({ type: "turn_ended", status: r.state as TurnTerminal, reason: r.reason ?? null }); return; }
       if (r.state !== "running") {
         // Still not delivered: nothing will run it now. The row is cancelled
         // so the queue moves on; there is no agent turn to interrupt — the
         // abort that used to sit here could only ever reach unrelated work.
-        q().cancel(commandId);
-        return finish("failed", "dispatch_timeout");
+        await step({ type: "delivery_timeout" });
+        return;
       }
-      if (!startPosted) log(`${tag}: started (delivery confirmed)`);
+      if (!startPostedOf(turn())) log(`${tag}: started (delivery confirmed)`);
       // The adapter's verdicts count from DELIVERY, not from the relay's
       // acknowledgement of it (#584 residual, Astra on 81386fd0). This used
       // to be set after the /start round trip below, so a legacy adapter that
@@ -2140,7 +2115,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // relay's response time deciding whether an already-executed failure
       // counted. The prompt is running the moment the delivery is confirmed;
       // every turn-end from here belongs to THIS relay turn.
-      { const t = activeTurns.get(turnId); if (t) t.started = true; }
+      await step({ type: "delivery_confirmed" });
       if (opts.resumed) {
         // A resumed turn is a previous daemon generation's on the relay:
         // dispatching/running under the old epoch, or already orphaned by
@@ -2160,124 +2135,108 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         const { answer, via } = settleAdoption(turnId, a, epochBefore);
         const v = await honourAdoption(answer, via ?? "resumed");
         if (v === "done") return;
-        if (v === "pending") adoptionPending = true;
       }
-      if (!startPosted && !adoptionPending) {
-        try {
-          await postStart(turnId, localId, commandId, leaseRef);
-        } catch (e) {
-          const st = (e as { status?: number }).status;
-          if (st !== 409) throw e;
-          const code = (e as { relayError?: string }).relayError ?? "";
+      if (startOwed(turn())) {
+        const first = await postStartStep();
+        if (first.refused !== null) {
           // The relay refuses the start. A cancellation that beat the
-          // control offer here, or a session that is over (#614): cancel
-          // locally. Any OTHER refusal (turn_terminal, no_current_delivery,
-          // turn_orphaned_reconcile_first) is a recovery question — the
-          // turn is a predecessor's, or the relay already closed it — and
-          // the relay's reconcile answers it; a running agent is never
-          // cancelled on that 409 alone — and never on the relay failing to
-          // answer the question either (unavailable → adoption_pending).
-          let verdict: "continue" | "done" | "none" | "pending" = "none";
-          if (!START_CANCEL_CLASS.has(code)) {
-            const epochBefore = adoptionEpoch(turnId);
-            const a0 = await adoptWithBackoff(turnId, leaseRef, "start_refused", tag);
-            const { answer: a, via } = settleAdoption(turnId, a0, epochBefore);
-            verdict = await honourAdoption(a, via ?? "after /start refused");
-            if (verdict === "done") return;
-            if (verdict === "pending") adoptionPending = true;
-            if (a.kind === "running") {
-              try { await postStart(turnId, localId, commandId, leaseRef); }
-              catch (e3) {
-                if ((e3 as { status?: number }).status !== 409) throw e3;
-                await cancelLocally(sessionGone(e3) ?? "start_rejected");
-                log(`${tag}: /start refused again after adoption (${(e3 as Error).message}) → cancelled locally`);
-                return;
-              }
-            }
-          }
-          if (verdict === "none") {
-            await cancelLocally(sessionGone(e) ?? "start_rejected");
-            log(`${tag}: /start refused (${(e as Error).message}) → cancelled locally`);
+          // control offer here, or a session that is over (#614): the
+          // machine cancelled locally. Any OTHER refusal (turn_terminal,
+          // no_current_delivery, turn_orphaned_reconcile_first) is a
+          // recovery question — the turn is a predecessor's, or the relay
+          // already closed it — and the relay's reconcile answers it; a
+          // running agent is never cancelled on that 409 alone — and never
+          // on the relay failing to answer the question either
+          // (unavailable → adoption_pending).
+          if (closed()) { log(`${tag}: /start refused (${(first.error as Error).message}) → cancelled locally`); return; }
+          const epochBefore = adoptionEpoch(turnId);
+          const a0 = await adoptWithBackoff(turnId, leaseRef, "start_refused", tag);
+          const { answer: a, via } = settleAdoption(turnId, a0, epochBefore);
+          const verdict = await honourAdoption(a, via ?? "after /start refused");
+          if (verdict === "done") {
+            if (a.kind === "none") log(`${tag}: /start refused (${(first.error as Error).message}) → cancelled locally`);
             return;
+          }
+          if (a.kind === "running") {
+            const again = await postStartStep();
+            if (again.refused !== null) {
+              log(`${tag}: /start refused again after adoption (${(again.error as Error).message}) → cancelled locally`);
+              return;
+            }
           }
         }
       }
     }
-    { const t = activeTurns.get(turnId); if (t) t.started = true; } // idempotent: also covers a resumed turn whose /start was already posted (#584)
 
     // Phase C — the command's terminal IS the turn's: completed/failed from
     // the runtime's turn-end, cancelled once the interrupt is confirmed,
     // interrupted on idle-without-terminal, a restart or a kill (#463).
     // While the adoption is pending the wait is sliced: every
     // ADOPTION_PENDING_RETRY_MS the relay is asked again (the sweep may have
-    // adopted it meanwhile — the marker on the loop entry is shared); once
-    // the relay has ANSWERED — adopted, cancelling, or a terminal it already
-    // holds — the marker is off, the /start still owed is posted (a replay
-    // on the relay; the durable ack lands) and the loop returns to one fresh
-    // bounded wait for the command's own terminal. No answer is acted on
-    // twice: a resolved turn is never re-adopted (Astra, F21).
+    // adopted it meanwhile — the entry is shared); once the relay has
+    // ANSWERED — adopted, cancelling, or a terminal it already holds — the
+    // /start still owed is posted (a replay on the relay; the durable ack
+    // lands) and the loop returns to one fresh bounded wait for the
+    // command's own terminal. No answer is acted on twice: a resolved turn
+    // is never re-adopted (Astra, F21).
     // The stall clock runs from the last OUTPUT, not from the turn's start:
     // a turn producing anything is alive, however long it has run.
-    const openedAt = Date.now();
+    await step({ type: "terminal_wait" });
+    const openedAt = now();
     const quietSince = () => Math.max(openedAt, sessionNow()?.lastOutputAt?.() ?? 0);
     /** The next wait: up to the stall boundary while the turn is healthy; a
      *  short recheck once stalled, so output resuming is noticed. Never 0. */
-    const nextWait = () => stalled ? Math.min(STALL_RECHECK_MS, turnStallMs) : Math.max(1, quietSince() + turnStallMs - Date.now());
-    const observeStall = () => {
-      const quietFor = Date.now() - quietSince();
+    const nextWait = () => stalledOf(turn()) ? Math.min(STALL_RECHECK_MS, turnStallMs) : Math.max(1, quietSince() + turnStallMs - now());
+    const observeStall = async () => {
+      const quietFor = now() - quietSince();
       if (quietFor < turnStallMs) {
-        if (stalled) { clearStalled(); log(`${tag}: output resumed — no longer stalled`); }
+        if (stalledOf(turn())) { await step({ type: "output_resumed" }); sessionNow()?.setStalled?.(null); log(`${tag}: output resumed — no longer stalled`); }
         return;
       }
-      if (stalled) return;
-      stalled = true;
-      sessionNow()?.setStalled?.({ since: Date.now(), silentForMs: quietFor });
+      if (stalledOf(turn())) return;
+      await step({ type: "stalled" });
+      sessionNow()?.setStalled?.({ since: now(), silentForMs: quietFor });
       log(`${tag}: no output for ${Math.round(quietFor / 60_000)}m → stalled (surfaced on the card; NOT interrupted)`);
     };
-    let done = await waitForTerminal(adoptionPending ? Math.min(ADOPTION_PENDING_RETRY_MS, nextWait()) : nextWait());
+    let done = await waitForTerminal(turn().phase === "adoption_pending" ? Math.min(ADOPTION_PENDING_RETRY_MS, nextWait()) : nextWait());
     while (done.state !== null && !isTerminal(done.state)) {
-      observeStall();
+      await observeStall();
+      // A cancel the coordinator already holds for the command (the control
+      // lane's, the app's through the tunnel) is the machine's business: a
+      // cancel-class /start refusal while one is in progress is the same
+      // answer, already honoured — closing the turn on it would report
+      // `cancelled` before the agent had stopped.
+      if (ledger.getCommand(commandId)?.cancelRequestedAt != null) await step({ type: "cancel_requested" });
       const entry = activeTurns.get(turnId);
       // The SWEEP may have answered this turn's adoption while the loop was
       // waiting, and that answer is a VERDICT — not just the end of the wait.
       // Honour it here, through the same handler the in-loop retry uses, so a
       // cancelled close (or an authoritative refusal) cancels the local
       // command instead of leaving it running behind a closed turn (F28).
-      const swept = entry?.adoptionAnswer ?? null;
+      const swept = entry?.box.answer ?? null;
       if (swept && entry) {
-        entry.adoptionAnswer = null;
+        entry.box = { ...entry.box, answer: null };
         const v = await honourAdoption(swept, "orphan sweep");
         if (v === "done") return;
         // Resolved: the next pass takes the plain branch below — the owed
         // /start (none for a closed turn), then ONE fresh wait to the cap.
-        adoptionPending = false;
         continue;
       }
-      if (!entry?.adoptionPending) {
+      const s = turn();
+      if (s.phase !== "adoption_pending") {
         // The relay answered (here or through the sweep), or nothing was
         // ever pending: finish the owed /start, then wait out the turn.
-        adoptionPending = false;
-        if (!startPosted) {
-          try { await postStart(turnId, localId, commandId, leaseRef); startPosted = true; }
-          catch (e) {
-            if ((e as { status?: number }).status !== 409) throw e;
-            const code = (e as { relayError?: string }).relayError ?? "";
-            if (START_CANCEL_CLASS.has(code) && ledger.getCommand(commandId)?.cancelRequestedAt == null) {
-              // The relay's authoritative no, arriving as a /start refusal:
-              // the turn was cancelled (or its session closed) while this
-              // adoption was parked, and NOTHING has cancelled the command
-              // here. Waiting that out — the command still running,
-              // cancelRequestedAt null, zero interrupts — was the F28 wedge.
-              // (A cancel already requested locally is the same answer,
-              // already honoured: the coordinator is interrupting and Phase C
-              // ends the turn cancelled when the runtime confirms; closing it
-              // here would report `cancelled` before the agent had stopped.)
-              await cancelLocally(code);
-              log(`${tag}: /start after the adoption refused (${code}) → cancelled locally`);
-              return;
-            }
-            log(`${tag}: /start after the adoption refused (${errText(e)}) — the relay has its answer; the outcome posts as the terminal fact`);
-            startPosted = true;
+        if (startOwed(s)) {
+          const r = await postStartStep();
+          if (r.refused !== null) {
+            // The relay's authoritative no, arriving as a /start refusal
+            // while NOTHING has cancelled the command here: the machine
+            // cancelled locally (waiting that out — the command still
+            // running, cancelRequestedAt null, zero interrupts — was the
+            // F28 wedge). Otherwise the relay has its answer; the outcome
+            // posts as the terminal fact.
+            if (closed()) { log(`${tag}: /start after the adoption refused (${r.refused}) → cancelled locally`); return; }
+            log(`${tag}: /start after the adoption refused (${errText(r.error)}) — the relay has its answer; the outcome posts as the terminal fact`);
           }
         }
         done = await waitForTerminal(nextWait());
@@ -2285,45 +2244,34 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       }
       // Everything this pass needs off the entry is read BEFORE the await:
       // the sweep can answer this same turn while our reconcile is in flight
-      // and it CLEARS the pending marker when it does — reading
-      // `entry.adoptionPending.attempts` back after the await threw
-      // TypeError, and resumeTurn's catch turned that into a synthetic
-      // `failed` terminal over a still-running command whose cancellation
-      // the sweep had already been told about (Astra, F30).
-      const attempts = entry.adoptionPending.attempts;
-      const epochBefore = entry.adoptionEpoch ?? 0;
+      // and it moves the machine on when it does (Astra, F30).
+      const attempts = s.attempts;
+      const epochBefore = entry?.box.epoch ?? 0;
       const a0 = await adoptRelayTurn(turnId, leaseRef, "adoption_retry");
       // First complete answer wins: if the sweep resolved this adoption while
       // we were in flight, HERS is honoured (through the same handler) and
-      // ours is dropped — never both, and never a dereference of the marker
-      // she cleared.
+      // ours is dropped — never both.
       const { answer: a, via } = settleAdoption(turnId, a0, epochBefore);
       const v = await honourAdoption(a, via ?? `retry ${attempts}`);
       if (v === "done") return;
-      if (v === "continue") {
-        // Resolved (running / cancelling / a remote terminal): the marker is
-        // off, so the next pass takes the plain branch above — the owed
-        // /start (none for a closed turn), then ONE fresh wait to the cap.
-        adoptionPending = false;
-        if (a.kind === "terminal") startPosted = true; // closed elsewhere: no /start for a closed turn
-        continue;
-      }
       if (v === "none") {
         // Nothing to adopt any more (another turn is active, or the relay
         // no longer holds it as a predecessor's) — a question the relay
         // answered, not a cancel: the runtime finishes, its terminal posts.
-        adoptionPending = false;
         log(`${tag}: nothing left to adopt on the relay (${a.kind === "none" ? a.detail ?? "none" : a.kind}) — the command keeps running; its outcome posts as the terminal fact`);
-        startPosted = true;
         continue;
       }
+      // Resolved (running / cancelling / a remote terminal): the next pass
+      // takes the plain branch above — the owed /start (none for a closed
+      // turn), then ONE fresh wait to the cap.
+      if (v === "continue") continue;
       done = await waitForTerminal(Math.min(ADOPTION_PENDING_RETRY_MS, nextWait()));
     }
     // The loop leaves only on a terminal state or a lost row: there is no
     // deadline exit any more. What used to be here ended a still-running turn
     // `interrupted` and aborted the agent at 30 minutes of AGE.
-    if (done.state === null) return finish("failed", "command_lost");
-    await finish(done.state, done.reason);
+    if (done.state === null) { await step({ type: "command_lost" }); return; }
+    await step({ type: "turn_ended", status: done.state as TurnTerminal, reason: done.reason ?? null });
   }
 
   /** A relay turn the ledger still carries for a session with no loop here
@@ -2338,11 +2286,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // No ack → posted again under the stable event id (a relay that has it
     // answers replay; one that never got it starts the turn now).
     const started = startAcked(row.sessionId, turnId);
-    activeTurns.set(turnId, { localId: row.sessionId, commandId: row.id, lease: leaseRef, started });
+    activeTurns.set(turnId, { localId: row.sessionId, commandId: row.id, lease: leaseRef, turn: resumedTurnState(started), box: emptyMailbox() });
     const tag = `turn ${turnId.slice(0, 8)} [${row.sessionId}/${row.id}]`;
     log(`${tag}: resumed from the ledger (${row.state}, /start ${started ? "acknowledged" : ledger.hasReceipt(row.sessionId, START_INTENT_RECEIPT, turnId) ? "intended, unacknowledged — re-posting" : "not yet posted"})`);
     try {
-      await driveTurn(turnId, row.sessionId, row.id, leaseRef, { startPosted: started, resumed: true, tag });
+      await driveTurn(turnId, row.sessionId, row.id, leaseRef, { resumed: true, tag });
     } catch (e) {
       log(`${tag} error: ${String(e)}`);
       // A terminal here is the loop giving up — it must never be a LIE about
@@ -2353,6 +2301,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       // cancelRequestedAt null and no interrupt ever sent (Astra, F30).
       let state: CommandState = "failed";
       const live = ledger.getCommand(row.id);
+      advanceTurn(turnId, isLeaseDeath(e) ? { type: "lease_lost" } : { type: "lane_error", detail: String(e).slice(0, 300), commandLive: !!(live && !isTerminalState(live.state)) });
       if (live && !isTerminalState(live.state)) {
         state = "cancelled";
         log(`${tag}: the loop failed while ${row.id} was still ${live.state} → cancelling it before the turn's terminal`);
@@ -2486,9 +2435,6 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     return false;
   }
 
-  const isLeaseDeath = (e: unknown) =>
-    /lease_unknown|lease_expired|lease_epoch_stale/.test(String(e));
-
   function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
@@ -2554,7 +2500,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   /** One attempt. True once the intent is settled: the relay took the
    *  archive, or the row is gone / already terminal — nothing left to do. */
   async function runArchiveJob(job: ArchiveRowJob): Promise<boolean> {
-    const l = lease;
+    const l = lease();
     if (!l) return false;
     // Derive again on EVERY attempt — the scan that failed last time (or the
     // write the ledger refused) is what this backoff is waiting on (F28).
@@ -2630,7 +2576,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   async function announceLocalSession(session: AgentSession): Promise<void> {
-    if (!lease || boundByLocal.has(session.id) || announcing.has(session.id)) return;
+    if (!lease() || boundByLocal.has(session.id) || announcing.has(session.id)) return;
     if (!stillLive(session)) return;
     announcing.add(session.id);
     try {
@@ -2729,17 +2675,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // run under (codex review, 2026-09-04, second pass).
     while (!stopped) {
       await sleep(RENEW_MS);
-      if (!lease) continue;
+      const l = lease();
+      if (!l) continue;
       try {
-        const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${lease.leaseId}`, {
+        const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${l.leaseId}`, {
           method: "PUT",
-          headers: { ...baseHeaders(), "x-joy-lease-token": lease.leaseToken },
+          headers: { ...baseHeaders(), "x-joy-lease-token": l.leaseToken },
           signal: AbortSignal.timeout(RENEW_MS),
         });
         if (!res.ok) throw new Error(`renew -> ${res.status}`);
-      } catch {
-        lease = null; // acquire loop below re-establishes
-        freshTerminals.clear(); // whatever posts next does so under a new lease: reconcile, not facts
+        leaseEvent({ type: "renew_ok" });
+      } catch (e) {
+        // The lease is forgotten (the work lane re-acquires) and the fresh
+        // terminals with it: whatever posts next does so under a new lease —
+        // reconcile, not facts.
+        leaseEvent({ type: "renew_failed", error: errText(e) });
       }
     }
   }
@@ -2749,7 +2699,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     let ticks = 0;
     while (!stopped) {
       await sleep(RENEW_MS);
-      if (!lease) continue;
+      if (!lease()) continue;
       ticks += 1;
       // Sessions this daemon created ITSELF (joy new, fork, teleport, a
       // handoff target, a restart) have no relay row: nothing ever announced
@@ -2793,11 +2743,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           seen.add(turnId);
           const n = (noWorkerSeen.get(turnId) ?? 0) + 1;
           noWorkerSeen.set(turnId, n);
-          if (n < 2 || !lease) continue;
+          const l = lease();
+          if (n < 2 || !l) continue;
           // Re-check after the await: a claim may have started it meanwhile.
           if (inFlight.has(turnId) || activeTurns.has(turnId) || pendingLedgerTurn(turnId)) { noWorkerSeen.delete(turnId); continue; }
           try {
-            await api("POST", `/daemon/turns/${turnId}/reconcile`, { resolution: "terminal", terminalState: "interrupted", meta: { reason: "no_local_worker" } }, lease);
+            await api("POST", `/daemon/turns/${turnId}/reconcile`, { resolution: "terminal", terminalState: "interrupted", meta: { reason: "no_local_worker" } }, l);
             log(`released turn ${turnId.slice(0, 8)} on ${row.sessionId.slice(0, 8)}: executing on the relay, no worker here → interrupted`);
           } catch (e) {
             log(`release of turn ${turnId.slice(0, 8)} failed: ${(e as Error).message}`);
@@ -2822,8 +2773,8 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     let announced = false;
     while (!stopped) {
       try {
-        if (!lease) {
-          if (lane === "control") { await sleep(1_000); continue; } // work loop owns acquire
+        if (!lease()) {
+          if (lane === "control") { await sleep(CONTROL_LANE_RETRY_MS); continue; } // work loop owns acquire
           await acquire();
           // The boot pass (bindings, keys, cards, orphan cleanup) consults
           // the LEDGER before it touches any orphaned turn: a turn whose
@@ -2831,12 +2782,12 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // — its loop below adopts it under this lease once the driver
           // confirms the runtime running (Astra, C9).
           await refreshBindings();
-          bootReady = true; // bindings + content keys loaded: the outbox may send
+          leaseEvent({ type: "boot_done" }); // bindings + content keys loaded: the outbox may send
           sender.start(); // every session with unacked rows resumes from the ledger — in order
-          resumeLedgerTurns(lease!); // relay turns the ledger still carries get their loops back (R13)
+          resumeLedgerTurns(lease()!); // relay turns the ledger still carries get their loops back (R13)
           announced = false;
         }
-        const leaseRef = lease!;
+        const leaseRef = lease()!;
         const offers = await claim(lane, leaseRef);
         let anyNew = offers.length === 0; // empty = the long-poll waited; no spin
         for (const offer of offers) {
@@ -2849,7 +2800,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             // undecodable) comes back on every claim: it is not new work, and
             // treating it as such skipped the pause below — a hot loop (#114).
             const until = skipUntil.get(offer.turnId!);
-            if (until !== undefined) { if (Date.now() < until) continue; skipUntil.delete(offer.turnId!); }
+            if (until !== undefined) { if (now() < until) continue; skipUntil.delete(offer.turnId!); }
             if (inFlight.has(offer.turnId!)) continue; // still handling the previous offer of it
             // Backpressure: a session whose output backlog is over the cap
             // gets no new prompt until it drains — producing more output
@@ -2859,7 +2810,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             if (gatedLocal && notePressure(gatedLocal)) {
               publishOutboxHealth();
               if (!notedSkips.has(offer.turnId!)) { notedSkips.add(offer.turnId!); log(`turn ${offer.turnId!.slice(0, 8)}: ${gatedLocal} has ${ledger.outboundPressure(gatedLocal).rows} undelivered outputs — dispatch paused until they drain`); }
-              skipUntil.set(offer.turnId!, Date.now() + SKIP_RECHECK_MS);
+              skipUntil.set(offer.turnId!, now() + SKIP_RECHECK_MS);
               continue;
             }
             void runTurn(offer, leaseRef); anyNew = true;
@@ -2870,25 +2821,23 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         if (!anyNew) await sleep(2_000);
       } catch (e) {
         if (isLeaseDeath(e)) {
-          if (lane === "control") {
-            // The control lane NEVER acquires. Its long-poll simply raced a
-            // lease rotation by the work lane; nulling the shared lease here
-            // made the two lanes re-acquire in a loop (observed live: epoch
-            // climbing every few seconds). Drop this claim and pick up the
-            // work lane's current lease on the next pass.
-            await sleep(1_000);
-            continue;
-          }
-          // Work lane: superseded (another daemon generation holds this
-          // machineId) or expired. Back off with jitter so two daemons
-          // misconfigured onto one machineId thrash slowly and VISIBLY.
-          lease = null;
-          freshTerminals.clear();
+          // The machine decides what a lease death means to THIS lane
+          // (leaseMachine.ts): the control lane NEVER acquires — its
+          // long-poll merely raced a rotation by the work lane, and nulling
+          // the shared lease there made both lanes re-acquire in a loop
+          // (observed live: epoch climbing every few seconds) — so it drops
+          // this claim and picks up the work lane's lease on the next pass.
+          // The work lane is superseded (another daemon generation holds
+          // this machineId) or expired: it forgets the lease and backs off
+          // with jitter, so two daemons misconfigured onto one machineId
+          // thrash slowly and VISIBLY.
+          leaseEvent({ type: "lease_death", code: leaseDeathCode(e), lane });
+          if (lane === "control") { await sleep(CONTROL_LANE_RETRY_MS); continue; }
           log(`${lane} lane: lease lost (${String((e as Error).message ?? e)}) — re-acquiring after backoff`);
-          await sleep(10_000 + Math.floor(Math.random() * 10_000));
+          await sleep(reacquireBackoffMs());
           continue;
         }
-        if (lease) sender.start(); // boot failed mid-way: the outbox still holds the rows
+        if (lease()) sender.start(); // boot failed mid-way: the outbox still holds the rows
         if (!announced) {
           const cause = (e as { cause?: { code?: string; message?: string } }).cause;
           log(`${lane} lane idle (${String((e as Error).message ?? e)}${cause ? `: ${cause.code ?? cause.message ?? ""}` : ""}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
@@ -2908,7 +2857,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   return {
     async stop() {
       stopped = true;
-      lease = null;
+      leaseEvent({ type: "stopped" });
       sender.stop();
       setRecordSink(null);
       // A publish still coalescing owes the relay a card PATCH only: the
@@ -2919,11 +2868,11 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     },
     // The tunnel executor BORROWS this lease rather than acquiring its own
     // (a second acquirer on the same machineId evicts the first).
-    currentLease: () => (lease ? { leaseId: lease.leaseId, leaseToken: lease.leaseToken } : null),
+    currentLease: () => { const l = lease(); return l ? { leaseId: l.leaseId, leaseToken: l.leaseToken } : null; },
     relayTurns: () => [...activeTurns.entries()].map(([turnId, t]) => ({
       turnId, localSessionId: t.localId, commandId: t.commandId,
-      state: t.adoptionPending ? "adoption_pending" as const : t.started ? "running" as const : "dispatching" as const,
-      ...(t.adoptionPending ? { since: t.adoptionPending.since, attempts: t.adoptionPending.attempts, lastError: t.adoptionPending.lastError } : {}),
+      state: projectTurnState(t.turn),
+      ...(t.turn.phase === "adoption_pending" ? { since: t.turn.since, attempts: t.turn.attempts, lastError: t.turn.lastError } : {}),
     })),
     spawnSpecSealed: () => spawnSpecKey !== null,
     eventBudgetDrops: () => [...budgetDropped.entries()].map(([v2SessionId, st]) => ({
