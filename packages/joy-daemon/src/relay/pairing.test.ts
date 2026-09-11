@@ -311,3 +311,14 @@ describe("pairWithRelay: proof of possession (#127)", () => {
         expect(existsSync(join(credsDir, "access.key"))).toBe(false);
     });
 });
+
+describe("pairWithRelay", () => {
+  it("names a relay that never answers instead of hanging", async () => {
+    const { pairWithRelay } = await import("./pairing");
+    const orig = globalThis.fetch;
+    globalThis.fetch = (async () => { const e = new Error("t/o"); e.name = "TimeoutError"; throw e; }) as unknown as typeof fetch;
+    try {
+      await expect(pairWithRelay("https://relay.invalid", new Uint8Array(32), "/tmp/joy-pairing-test-never-written")).rejects.toThrow(/\/joy\/v2\/auth -> no answer within 20 s/);
+    } finally { globalThis.fetch = orig; }
+  });
+});

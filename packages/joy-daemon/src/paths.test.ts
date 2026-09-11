@@ -151,3 +151,14 @@ describe("canonicalCwd (#549 #564)", () => {
         expect(p.canonicalCwd("~")).toBe(root);
     });
 });
+
+describe("resolveRelayAlias", () => {
+  it("passes aliases and URLs through, and gives a bare host[:port] its scheme", async () => {
+    const { resolveRelayAlias } = await import("./paths");
+    expect(resolveRelayAlias("https://joy.voltai.party:4997")).toBe("https://joy.voltai.party:4997");
+    expect(resolveRelayAlias("http://localhost:3105")).toBe("http://localhost:3105");
+    expect(resolveRelayAlias("joy.voltai.party:4997")).toBe("https://joy.voltai.party:4997");
+    expect(resolveRelayAlias("joy.voltai.party")).toBe("https://joy.voltai.party");
+    expect(resolveRelayAlias("nonsense")).toBe("nonsense"); // no dot: still an unknown name
+  });
+});

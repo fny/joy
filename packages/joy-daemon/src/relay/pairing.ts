@@ -138,7 +138,15 @@ async function post(relayUrl: string, path: string, body: unknown, relayKey: str
   const headers: Record<string, string> = { "Content-Type": "application/json", "X-Joy-Client": "cli/joy-auth" };
   if (relayKey) headers["X-Joy-Relay-Key"] = relayKey;
   if (token) headers.Authorization = `Bearer ${token}`;
-  const r = await fetch(relayUrl + path, { method: "POST", headers, body: JSON.stringify(body) });
+  // Bounded: a relay that accepts the TCP connection and never answers used
+  // to hold `joy auth` forever at the backup-code prompt (2026-09-11).
+  let r: Response;
+  try {
+    r = await fetch(relayUrl + path, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
+  } catch (e) {
+    const why = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError") ? "no answer within 20 s" : e instanceof Error ? e.message : String(e);
+    throw new Error(`${path} -> ${why}`);
+  }
   if (!r.ok) throw new Error(`${path} -> HTTP ${r.status}: ${await r.text()}`);
   return (await r.json()) as Record<string, unknown>;
 }

@@ -78,7 +78,12 @@ export const RELAY_ALIASES: Record<string, string> = {
 };
 
 export function resolveRelayAlias(nameOrUrl: string): string {
-  return RELAY_ALIASES[nameOrUrl] ?? nameOrUrl;
+  const aliased = RELAY_ALIASES[nameOrUrl];
+  if (aliased) return aliased;
+  // A bare host[:port] is a relay too: `joy auth joy.voltai.party:4997` was
+  // refused as "unknown relay" for want of the scheme (2026-09-11).
+  if (/^[a-z0-9.-]+(:\d{1,5})?(\/.*)?$/i.test(nameOrUrl) && nameOrUrl.includes(".") && !/^https?:\/\//.test(nameOrUrl)) return `https://${nameOrUrl}`;
+  return nameOrUrl;
 }
 
 // The relay THIS PROCESS is bound to. One daemon/CLI process serves exactly
