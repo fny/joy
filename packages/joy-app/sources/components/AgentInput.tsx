@@ -790,6 +790,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     props.onAddImages!(previews.map((p) => ({
                         ...p,
                         id: `paste_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                        source: 'paste' as const,
                     })));
                 }
             })();
@@ -831,6 +832,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                     props.onAddImages!(previews.map((p) => ({
                         ...p,
                         id: `drop_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                        source: 'drop' as const,
                     })));
                 }
             })();

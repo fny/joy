@@ -8,6 +8,7 @@ import { FileIcon } from '@/components/FileIcon';
 import { sync } from '@/sync/sync';
 import { machineSessionFiles, type SessionFileEntry } from '@/sync/v2/machine';
 import { formatBytes, ageLabel } from '@/utils/storageFormat';
+import { stripUploadPrefix } from '@/sync/attachmentNames';
 import { t } from '@/text';
 
 /**
@@ -57,7 +58,7 @@ export const SessionFilesTab = React.memo(function SessionFilesTab({ sessionId, 
                     return (
                         <Item
                             key={f.path}
-                            title={f.name}
+                            title={stripUploadPrefix(f.name)}
                             subtitle={[folder, formatBytes(f.size), ageLabel(f.mtimeMs)].filter(Boolean).join(' · ')}
                             icon={<FileIcon fileName={f.name} size={32} />}
                             onPress={() => onFilePress(f.path)}

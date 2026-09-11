@@ -10,6 +10,7 @@ import { InvalidateSync } from '@/utils/sync';
 import { randomUUID } from 'expo-crypto';
 import * as Crypto from 'expo-crypto';
 import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2/crypto';
+import { attachmentDisplayName } from './attachmentNames';
 import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, v2CancelTurn, connectV2Stream, V2ApiError, getV2BaseUrl } from './v2/api';
 import { staleSessionIds } from './sessionListReconcile';
 import { StaleFetchError, isSendAcknowledged, cursorsNeedReanchor } from './sessionSyncGuards';
@@ -766,8 +767,8 @@ class Sync {
             // platform gives none; web paste/drop skips it entirely) — the
             // bytes we just read are the truth, and the relay would accept up
             // to 32MB, so the advertised cap is enforced HERE.
-            if (bytes.length === 0) throw new AttachmentRejected(t('imageUpload.emptyFileMessage', { name: a.name }));
-            if (bytes.length > MAX_ATTACHMENT_BYTES) throw new AttachmentRejected(t('imageUpload.fileTooLargeMessage', { name: a.name, maxMb: MAX_ATTACHMENT_MB }));
+            if (bytes.length === 0) throw new AttachmentRejected(t('imageUpload.emptyFileMessage', { name: attachmentDisplayName(a) }));
+            if (bytes.length > MAX_ATTACHMENT_BYTES) throw new AttachmentRejected(t('imageUpload.fileTooLargeMessage', { name: attachmentDisplayName(a), maxMb: MAX_ATTACHMENT_MB }));
             const sealed = sealV2Bytes(bytes, key);
             // Pass a TypedArray, NOT `.buffer`. expo-crypto's native digest casts
             // its data argument to TypedArray and throws on a bare ArrayBuffer —
@@ -782,6 +783,7 @@ class Sync {
                 name: a.name,
                 size: bytes.length,
                 ...(a.mimeType ? { mime: a.mimeType } : {}),
+                ...(a.source ? { source: a.source } : {}),
                 ...(a.width > 0 && a.height > 0 ? { width: a.width, height: a.height } : {}),
                 ...(a.thumbhash ? { thumbhash: a.thumbhash } : {}),
             });

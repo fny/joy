@@ -27,6 +27,9 @@ export interface V2Attachment {
     /** Plaintext size in bytes. */
     size: number;
     mime?: string;
+    /** Where the upload came from (paste | library | document | drop); the
+     *  daemon names an unnamed upload after it. */
+    source?: string;
     width?: number;
     height?: number;
     thumbhash?: string;
@@ -62,6 +65,7 @@ function parseAttachments(raw: unknown): V2Attachment[] {
             name: a.name,
             size: typeof a.size === 'number' ? a.size : 0,
             ...(typeof a.mime === 'string' ? { mime: a.mime } : {}),
+            ...(typeof a.source === 'string' ? { source: a.source } : {}),
             ...(typeof a.width === 'number' ? { width: a.width } : {}),
             ...(typeof a.height === 'number' ? { height: a.height } : {}),
             ...(typeof a.thumbhash === 'string' ? { thumbhash: a.thumbhash } : {}),

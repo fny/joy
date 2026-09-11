@@ -31,7 +31,8 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { Modal } from '@/modal';
 import { generateThumbhash } from '@/utils/thumbhash';
 import { t } from '@/text';
-import type { AttachmentPreview } from '@/sync/attachmentTypes';
+import type { AttachmentPreview, AttachmentSource } from '@/sync/attachmentTypes';
+import { attachmentDisplayName } from '@/sync/attachmentNames';
 import { appendWithinLimit } from './attachmentLimit';
 
 // iOS hands back HEIC from the photo library, which Claude's API rejects (and
@@ -84,7 +85,10 @@ function getImageSize(uri: string): Promise<{ width: number; height: number } | 
  *  dimensions + thumbhash. Returns null when rejected (too large). */
 async function buildPreview(input: {
     uri: string;
+    /** '' when the source gave no name — never invented here (the daemon
+     *  names it after `source`). */
     name: string;
+    source: AttachmentSource;
     size: number;
     mimeType: string;
 }): Promise<AttachmentPreview | null> {
@@ -94,7 +98,7 @@ async function buildPreview(input: {
     if (size > MAX_FILE_SIZE) {
         Modal.alert(
             t('imageUpload.fileTooLargeTitle'),
-            t('imageUpload.fileTooLargeMessage', { name, maxMb: 10 }),
+            t('imageUpload.fileTooLargeMessage', { name: attachmentDisplayName({ name, source: input.source, mimeType }), maxMb: 10 }),
             [{ text: t('common.ok') }],
         );
         return null;
@@ -112,7 +116,7 @@ async function buildPreview(input: {
                 const jpeg = await manipulateAsync(uri, [], { compress: IOS_JPEG_QUALITY, format: SaveFormat.JPEG });
                 uri = jpeg.uri;
                 mimeType = 'image/jpeg';
-                name = withJpegExtension(name);
+                if (name) name = withJpegExtension(name);
             } catch { /* keep original */ }
         }
         const dims = await getImageSize(uri);
@@ -131,6 +135,7 @@ async function buildPreview(input: {
         mimeType,
         size,
         name,
+        source: input.source,
         thumbhash,
     };
 }
@@ -191,7 +196,8 @@ export function useImagePicker(): UseImagePickerResult {
         for (const asset of assets) {
             const p = await buildPreview({
                 uri: asset.uri,
-                name: asset.name ?? `file_${Date.now()}`,
+                name: asset.name ?? '',
+                source: 'document',
                 size: asset.size ?? 0,
                 mimeType: asset.mimeType ?? 'application/octet-stream',
             });
@@ -222,7 +228,8 @@ export function useImagePicker(): UseImagePickerResult {
         for (const asset of result.assets.slice(0, remaining)) {
             const p = await buildPreview({
                 uri: asset.uri,
-                name: asset.fileName ?? `photo_${Date.now()}.jpg`,
+                name: asset.fileName ?? '',
+                source: 'library',
                 size: asset.fileSize ?? 0,
                 mimeType: asset.mimeType ?? 'image/jpeg',
             });
@@ -254,7 +261,8 @@ export function useImagePicker(): UseImagePickerResult {
             await writeAsStringAsync(uri, base64, { encoding: EncodingType.Base64 });
             const p = await buildPreview({
                 uri,
-                name: `pasted_${Date.now()}.jpg`,
+                name: '',
+                source: 'paste',
                 size: Math.floor(base64.length * 0.75),
                 mimeType: 'image/jpeg',
             });

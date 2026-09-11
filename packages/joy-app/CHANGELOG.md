@@ -1,7 +1,7 @@
 # Sep 11 (9) — Uploads stay out of your project
 
 - **Files you attach no longer land in your project.** A screenshot pasted into a message used to be saved as `paste-….png` in the session's folder — the repository — and they piled up. Uploads now go to the session's own folder on its machine, beside the images the agent shows you, and the agent gets the full path.
-- **Your file names are kept.** `report.pdf` arrives as `report.pdf`. If a file with that name is already there, the new one gets the time: `report.20260911-081518.pdf`. A pasted image with no name becomes `paste.png`, and a photo named `.HEIC` that is really a JPEG is saved as `.jpg`.
+- **Uploads sort by time and keep your file names.** Each one is saved as `20260911-162140-0000.report.pdf` — the time first, so the folder lists them in the order they arrived — and downloads as plain `report.pdf`. A file that comes with no name is named for where it came from: `paste.jpg` for a pasted screenshot, `photo.jpg` for a library photo without a name, `file` for a document, `drop` for a dropped file. A photo named `.HEIC` that is really a JPEG is saved as `.jpg`.
 - **Files → Session files.** A third tab beside Changes and All Files lists what the session keeps outside the project — your uploads and the agent's images — newest first. Tap one to open it.
 - Needs the updated daemon.
 

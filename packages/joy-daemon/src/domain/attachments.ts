@@ -9,12 +9,14 @@
 //      pasted screenshots used to pile up as paste-*.png in the repo root
 //   3. Appends the file's absolute path to the prompt text on its own line
 //
-// Names (2026-09-11): the name as given — `report.pdf`, `IMG_2041.jpg`. When
-// that name is taken, a timestamp goes between it and the extension:
-// `report.20260911-081518.pdf`, then `report.20260911-081518-2.pdf` for a
-// second one in the same second. No name → `paste.<ext>`. Images get the
-// extension of what the bytes ARE (sniffed from magic bytes — iOS names a
-// JPEG `.HEIC`, a clipboard paste may have no name at all).
+// Names (2026-09-11): `YYYYMMDD-HHMMSS-NNNN.<name>.<ext>` - a UTC timestamp
+// and a per-second counter first, so a plain name sort IS a time sort and the
+// app can strip the fixed-width prefix on download; then the name as given.
+// With no usable name, the word for where it came from (the app sends a
+// `source`): paste -> paste, library -> photo, document -> file, drop -> drop,
+// and no source -> unknown. A browser's default name for a raw clipboard
+// image (`image.png`) counts as no name for a paste. Images get the extension
+// of what the bytes ARE (iOS names a JPEG `.HEIC`).
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, basename, extname } from "node:path";
 
@@ -40,26 +42,43 @@ export function sniffMimeAndExt(bytes: Uint8Array): { mime: ClaudeImageMime; ext
   return null;
 }
 
-/** Local time as YYYYMMDD-HHMMSS — the clock the user saw when they pasted. */
+/** Where an upload came from, as the app reports it (sealed with the name). */
+export type UploadSource = "paste" | "library" | "document" | "drop";
+export const UPLOAD_SOURCES: readonly string[] = ["paste", "library", "document", "drop"];
+const FALLBACK_STEM: Record<UploadSource, string> = { paste: "paste", library: "photo", document: "file", drop: "drop" };
+const BROWSER_CLIPBOARD_DEFAULT = /^image\.(png|jpe?g|gif|webp)$/i;
+const MIME_EXT: Record<string, string> = {
+  "application/pdf": "pdf", "text/plain": "txt", "application/json": "json", "text/csv": "csv",
+  "text/markdown": "md", "application/zip": "zip", "text/html": "html",
+};
+
+/** The fixed-width prefix every upload name starts with; strip it to get the
+ *  name the file arrived with. */
+export const UPLOAD_PREFIX = /^\d{8}-\d{6}-\d{4}\./;
+
+/** UTC as YYYYMMDD-HHMMSS - sorts correctly across DST and time zones. */
 export function uploadTimestamp(at: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
+  return `${at.getUTCFullYear()}${pad(at.getUTCMonth() + 1)}${pad(at.getUTCDate())}-${pad(at.getUTCHours())}${pad(at.getUTCMinutes())}${pad(at.getUTCSeconds())}`;
 }
 
-/** The stem and extension an upload is saved under: the given name reduced to
- *  a safe basename (no directory part, no control characters), `paste` when
- *  nothing usable remains, and — for images — the extension of the real
- *  format rather than the claimed one. */
-export function uploadNameParts(name: string | undefined, bytes: Uint8Array): { stem: string; ext: string } {
-  let base = Array.from(name ? basename(name) : "")
+/** The name part after the prefix, split into stem and extension. */
+export function uploadNameParts(name: string | undefined, bytes: Uint8Array, opts: { source?: UploadSource; mime?: string } = {}): { stem: string; ext: string } {
+  let clean = Array.from(name ? basename(name) : "")
     .filter((c) => c.charCodeAt(0) >= 0x20)
     .join("")
     .trim();
-  if (!base || base === "." || base === "..") base = "paste";
-  let ext = extname(base);
-  let stem = ext ? base.slice(0, -ext.length) : base;
-  if (!stem) { stem = base; ext = ""; } // ".env" is a name, not an extension
+  if (clean === "." || clean === "..") clean = "";
+  if (opts.source === "paste" && BROWSER_CLIPBOARD_DEFAULT.test(clean)) clean = "";
   const sniffed = sniffMimeAndExt(bytes);
+  if (!clean) {
+    const stem = opts.source ? FALLBACK_STEM[opts.source] : "unknown";
+    const fromMime = opts.mime ? MIME_EXT[opts.mime.toLowerCase()] : undefined;
+    return { stem, ext: sniffed ? `.${sniffed.ext}` : fromMime ? `.${fromMime}` : "" };
+  }
+  let ext = extname(clean);
+  let stem = ext ? clean.slice(0, -ext.length) : clean;
+  if (!stem) { stem = clean; ext = ""; } // ".env" is a name, not an extension
   if (sniffed) {
     const claimed = ext.slice(1).toLowerCase().replace(/^jpeg$/, "jpg");
     if (claimed !== sniffed.ext) ext = `.${sniffed.ext}`;
@@ -67,29 +86,23 @@ export function uploadNameParts(name: string | undefined, bytes: Uint8Array): { 
   return { stem, ext };
 }
 
-/** Candidate names in order: `name.ext`, then `name.<ts>.ext`, then
- *  `name.<ts>-2.ext`, `name.<ts>-3.ext`, … */
+/** Candidate names in order: `<ts>-0000.<stem><ext>`, `<ts>-0001...`, ... */
 export function uploadNameCandidates(stem: string, ext: string, at: Date = new Date()): () => string {
   const ts = uploadTimestamp(at);
   let n = 0;
-  return () => {
-    n++;
-    if (n === 1) return `${stem}${ext}`;
-    if (n === 2) return `${stem}.${ts}${ext}`;
-    return `${stem}.${ts}-${n - 1}${ext}`;
-  };
+  return () => `${ts}-${String(n++).padStart(4, "0")}.${stem}${ext}`;
 }
 
 /**
  * Write an upload into `dir` (created if missing) under the naming rule above.
- * Returns the absolute path — what goes into the prompt — or null when there
+ * Returns the absolute path - what goes into the prompt - or null when there
  * are no bytes to write.
  */
-export function writeUpload(dir: string, bytes: Uint8Array, name?: string, at: Date = new Date()): string | null {
+export function writeUpload(dir: string, bytes: Uint8Array, name?: string, opts: { source?: UploadSource; mime?: string; at?: Date } = {}): string | null {
   if (bytes.length === 0) return null;
   mkdirSync(dir, { recursive: true });
-  const { stem, ext } = uploadNameParts(name, bytes);
-  const filename = writeAttachmentExclusive(dir, bytes, uploadNameCandidates(stem, ext, at), 50);
+  const { stem, ext } = uploadNameParts(name, bytes, opts);
+  const filename = writeAttachmentExclusive(dir, bytes, uploadNameCandidates(stem, ext, opts.at ?? new Date()), 10_000);
   return join(dir, filename);
 }
 

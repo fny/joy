@@ -36,7 +36,7 @@ import { saveWindowRecord } from "../domain/windowRecord";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
 import { coordinatorFor } from "../domain/coordinator";
-import { writeUpload } from "../domain/attachments";
+import { writeUpload, UPLOAD_SOURCES, type UploadSource } from "../domain/attachments";
 import { queueFor, isTerminal } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
@@ -197,7 +197,7 @@ export function decodeContent(ciphertext: string | null | undefined, key?: Uint8
 }
 /** An attachment cited inside a sealed prompt (mirrors app V2Attachment).
  *  `id` is the relay attachment id; `name` is the sender's filename. */
-export interface PromptAttachment { id: string; name: string; size: number; mime?: string }
+export interface PromptAttachment { id: string; name: string; size: number; mime?: string; source?: UploadSource }
 export interface DecodedPrompt { text: string; attachments: PromptAttachment[] }
 
 /** decodeContent, plus the attachment citations the app embeds beside the
@@ -211,7 +211,7 @@ export function decodePrompt(ciphertext: string | null | undefined, key?: Uint8A
   if (Array.isArray(p.attachments)) {
     for (const a of p.attachments) {
       if (!a || typeof a.id !== "string" || typeof a.name !== "string") continue;
-      attachments.push({ id: a.id, name: a.name, size: typeof a.size === "number" ? a.size : 0, ...(typeof a.mime === "string" ? { mime: a.mime } : {}) });
+      attachments.push({ id: a.id, name: a.name, size: typeof a.size === "number" ? a.size : 0, ...(typeof a.mime === "string" ? { mime: a.mime } : {}), ...(typeof a.source === "string" && UPLOAD_SOURCES.includes(a.source) ? { source: a.source as UploadSource } : {}) });
     }
   }
   return { text: p.text, attachments };
@@ -1864,7 +1864,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
               const sealed = await fetchAttachment(a.id);
               if (cancelledWhilePreparing) break;
               const bytes = openAttachmentBytes(sealed, sessionKeys.get(offer.sessionId));
-              if (bytes) { reason = "attachment_write_failed"; path = writeUpload(joySessionUploadsDir(sess.id), bytes, a.name); }
+              if (bytes) { reason = "attachment_write_failed"; path = writeUpload(joySessionUploadsDir(sess.id), bytes, a.name, { source: a.source, mime: a.mime }); }
               else reason = "attachment_open_failed";
             } catch (e) {
               log(`turn ${turnId.slice(0, 8)}: attachment ${a.id.slice(0, 8)} (${a.name}): ${(e as Error).message}`);

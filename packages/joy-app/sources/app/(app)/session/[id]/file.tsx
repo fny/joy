@@ -26,6 +26,7 @@ import { FileIcon } from '@/components/FileIcon';
 import { resolveSessionFilePath } from '@/utils/sessionFileLinks';
 import { FileRenderedView, fileRenderKind, isRasterImagePath } from '@/components/FileContentRender';
 import { downloadFile } from '@/utils/downloadFile';
+import { stripUploadPrefix } from '@/sync/attachmentNames';
 
 type DisplayMode = 'file' | 'diff' | 'rendered';
 
@@ -308,7 +309,9 @@ export default React.memo(function FileScreen() {
         });
     }, [displayMode, fileText, requestedLine]);
 
-    const fileName = filePath.split('/').pop() || filePath;
+    // An upload's name without its timestamp prefix (sync/attachmentNames):
+    // what the header shows and what a download is saved as.
+    const fileName = stripUploadPrefix(filePath.split('/').pop() || filePath);
     // Download what is ON DISK: the resource's bytes as received. Text and
     // images are already in memory; a binary that is not an image (pdf,
     // xlsx, zip…) was never fetched — the viewer only shows the "binary file"

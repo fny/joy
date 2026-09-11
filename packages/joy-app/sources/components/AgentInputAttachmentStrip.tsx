@@ -10,6 +10,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { AttachmentPreview } from '@/sync/attachmentTypes';
 import { thumbhashToDataUri } from '@/utils/thumbhash';
+import { attachmentDisplayName } from '@/sync/attachmentNames';
 
 const THUMB_SIZE = 64;
 const BORDER_RADIUS = 8;
@@ -81,7 +82,7 @@ function AttachmentThumbnail({
                 <View style={styles.fileChip}>
                     <Ionicons name="document-outline" size={24} color={theme.colors.textSecondary} />
                     <Text style={[styles.fileName, { color: theme.colors.textSecondary }]} numberOfLines={2}>
-                        {image.name}
+                        {attachmentDisplayName(image)}
                     </Text>
                 </View>
             )}

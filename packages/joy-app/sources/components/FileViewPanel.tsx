@@ -27,6 +27,7 @@ import { guarded, logError, alertError } from '@/utils/guardAsync';
 import { resources } from '@/sync/resource';
 import { fileContentsSpec, type FileContents } from '@/sync/fileContents';
 import { useResource } from '@/hooks/useResource';
+import { stripUploadPrefix } from '@/sync/attachmentNames';
 
 interface FileViewPanelProps {
     sessionId: string;
@@ -112,7 +113,9 @@ export const FileViewPanel = React.memo(function FileViewPanel({
     const [editContent, setEditContent] = React.useState('');
     const [displayMode, setDisplayMode] = React.useState<'edit' | 'preview'>('edit');
 
-    const fileName = filePath.split('/').pop() || filePath;
+    // An upload's name without its timestamp prefix (sync/attachmentNames):
+    // what the header shows and what a download is saved as.
+    const fileName = stripUploadPrefix(filePath.split('/').pop() || filePath);
     const language = getFileLanguage(filePath);
     const isMarkdown = language === 'markdown';
     // Renderable = has a source ⇄ preview toggle (md keeps its dedicated

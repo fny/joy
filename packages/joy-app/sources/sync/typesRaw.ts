@@ -69,6 +69,7 @@ export const MessageAttachmentSchema = z.object({
     name: z.string(),
     size: z.number(),
     mime: z.string().optional(),
+    source: z.string().optional(),
     width: z.number().optional(),
     height: z.number().optional(),
     thumbhash: z.string().optional(),
