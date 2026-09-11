@@ -34,7 +34,7 @@ import { Theme } from '@/theme';
 import { t } from '@/text';
 import { Metadata } from '@/sync/storageTypes';
 import { contextWindowFor, formatTokens } from './contextWindow';
-import { useMachineLimits } from '@/hooks/useMachineLimits';
+import { useMachineLimits, limitsHarnessFor } from '@/hooks/useMachineLimits';
 import { tightestLimit, limitWindowName, limitResetLabel, relevantLimitRows } from '@/utils/limitsFormat';
 
 interface AgentInputProps {
@@ -721,7 +721,9 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     // stops you working. Context only ever measured this conversation, and
     // against a window the app had to guess. Quota wins when we have it; the
     // context reading stays as the fallback.
-    const limits = useMachineLimits(props.machineId);
+    // The session's OWN harness's quota (a Codex session showed Claude's, which
+    // cannot stop it); a harness with no quota surface falls back to context.
+    const limits = useMachineLimits(props.machineId, limitsHarnessFor(props.metadata?.flavor ?? props.agentType));
     // Only the windows that can stop THIS model: the shared ones plus its own
     // scoped window. Another model's exhausted weekly used to drive the figure.
     const tightest = tightestLimit(relevantLimitRows(limits?.rows, modelLabel));

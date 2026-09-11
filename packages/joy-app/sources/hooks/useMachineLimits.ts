@@ -32,49 +32,67 @@ const REFRESH_MS = 5 * 60_000;
 const cache = new Map<string, { at: number; value: MachineLimits }>();
 const inflight = new Map<string, Promise<MachineLimits | null>>();
 
-async function fetchLimits(machineId: string): Promise<MachineLimits | null> {
+/** The harnesses the daemon has a quota surface for (`/v2/harnesses/:h/limits`
+ *  answers `unsupported` for the rest). A session on any other harness shows
+ *  the context reading instead — not Claude's quota, which cannot stop it. */
+export type LimitsHarness = 'claude' | 'codex';
+
+/** The quota surface a session's harness has, or null when it has none. */
+export function limitsHarnessFor(flavor: string | null | undefined): LimitsHarness | null {
+    if (flavor === 'codex') return 'codex';
+    if (!flavor || flavor === 'claude') return 'claude';
+    return null;
+}
+
+async function fetchLimits(machineId: string, harness: LimitsHarness): Promise<MachineLimits | null> {
     const ctx = sync.machineOnlyCtx(machineId);
     if (!ctx) return null;
-    const reply = await machineLimitsOnly(ctx, 'claude');
+    const reply = await machineLimitsOnly(ctx, harness);
     const data = reply?.data as { limits?: LimitRow[]; observedAt?: number } | undefined;
     const rows = data?.limits;
     if (!Array.isArray(rows)) return null;
     return { rows, observedAt: data?.observedAt ?? Date.now() };
 }
 
-function load(machineId: string): Promise<MachineLimits | null> {
-    const existing = inflight.get(machineId);
+function load(machineId: string, harness: LimitsHarness): Promise<MachineLimits | null> {
+    const key = `${machineId}:${harness}`;
+    const existing = inflight.get(key);
     if (existing) return existing;
-    const p = fetchLimits(machineId)
+    const p = fetchLimits(machineId, harness)
         .then((value) => {
-            if (value) cache.set(machineId, { at: Date.now(), value });
+            if (value) cache.set(key, { at: Date.now(), value });
             return value;
         })
         // A failed read keeps whatever was cached: quota that is a few minutes
         // old is far better than a segment that blinks out on one bad call.
         .catch(() => null)
-        .finally(() => { inflight.delete(machineId); });
-    inflight.set(machineId, p);
+        .finally(() => { inflight.delete(key); });
+    inflight.set(key, p);
     return p;
 }
 
-export function useMachineLimits(machineId: string | null | undefined): MachineLimits | null {
+export function useMachineLimits(machineId: string | null | undefined, harness: LimitsHarness | null = 'claude'): MachineLimits | null {
+    const key = machineId && harness ? `${machineId}:${harness}` : null;
     const [value, setValue] = React.useState<MachineLimits | null>(
-        () => (machineId ? cache.get(machineId)?.value ?? null : null),
+        () => (key ? cache.get(key)?.value ?? null : null),
     );
 
     React.useEffect(() => {
-        if (!machineId) { setValue(null); return; }
+        if (!machineId || !harness) { setValue(null); return; }
+        const k = `${machineId}:${harness}`;
         let cancelled = false;
+        // A harness switch shows that harness's cached rows at once (or nothing
+        // until they load) — never the previous harness's figure.
+        setValue(cache.get(k)?.value ?? null);
         const tick = () => {
-            const hit = cache.get(machineId);
+            const hit = cache.get(k);
             if (hit && Date.now() - hit.at < REFRESH_MS) { setValue(hit.value); return; }
-            void load(machineId).then((v) => { if (!cancelled && v) setValue(v); });
+            void load(machineId, harness).then((v) => { if (!cancelled && v) setValue(v); });
         };
         tick();
         const timer = setInterval(tick, REFRESH_MS);
         return () => { cancelled = true; clearInterval(timer); };
-    }, [machineId]);
+    }, [machineId, harness]);
 
     return value;
 }
