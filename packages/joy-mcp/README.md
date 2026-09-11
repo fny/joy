@@ -11,7 +11,7 @@ account's content key and machine keys, running beside the relay on its box
 and sharing its origin:
 
 ```
-https://joy.voltai.party:4997/mcp        the MCP endpoint (Streamable HTTP)
+https://joy.voltai.party/mcp             the MCP endpoint (Streamable HTTP; :4997 answers too)
 …/.well-known/oauth-protected-resource/mcp
 …/.well-known/oauth-authorization-server
 …/authorize  …/token  …/register         OAuth 2.1 with dynamic registration
@@ -35,10 +35,10 @@ Credentials, tokens and registered OAuth clients live in `~/.joy-mcp`
 
 ## Connecting
 
-- **Claude app** → Settings → Connectors → add `https://joy.voltai.party:4997/mcp`.
+- **Claude app** → Settings → Connectors → add `https://joy.voltai.party/mcp`.
   The sign-in page asks for the account's backup code (checked, never stored).
 - **Claude Code**: `node cli.mjs token new claude-code` prints a bearer, then
-  `claude mcp add --transport http joy https://joy.voltai.party:4997/mcp --header "Authorization: Bearer <token>"`.
+  `claude mcp add --transport http joy https://joy.voltai.party/mcp --header "Authorization: Bearer <token>"`.
 
 ## The surface
 

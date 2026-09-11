@@ -1,11 +1,25 @@
 # joy.voltai.party edge — one host, two doors into the relay:
 #   4997  Joy Relay        STABLE (:3105) — keep this one boring
 #   14997 Joy Relay Dev    DEV (:3106) — restart/iterate freely
-# 80/443/1443 are closed at the host firewall (ufw, see bootstrap.sh); certs
+# 80/1443 are closed at the host firewall (ufw, see bootstrap.sh); 443 is open
+# for the MCP server (same routes as 4997); certs
 # come from certbot, renewed standalone through a ufw punch-hole on :80 — so
 # caddy must never bind 80/443 itself (auto_https off, file-based tls).
 {
     auto_https off
+}
+# :443 — the standard door, added for the MCP server: Anthropic's connector
+# validation never reached :4997 (2026-09-11). Same routing as :4997; certbot
+# renews on :80 only, so caddy owning 443 is safe.
+joy.voltai.party:443 {
+    tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem
+    @mcp path /mcp /mcp/* /authorize /authorize/* /token /register /revoke /.well-known/oauth-* /healthz
+    handle @mcp {
+        reverse_proxy 127.0.0.1:3107
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3105
+    }
 }
 joy.voltai.party:4997 {
     tls /etc/joy-relay/certs/fullchain.pem /etc/joy-relay/certs/privkey.pem

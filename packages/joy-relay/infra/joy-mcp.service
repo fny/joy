@@ -11,7 +11,9 @@ After=network-online.target joy-relay.service
 User=ubuntu
 WorkingDirectory=/home/ubuntu/joy-mcp
 Environment=JOY_MCP_PORT=3107
-Environment=JOY_MCP_PUBLIC_URL=https://joy.voltai.party:4997
+# The origin Claude connects to. Bare 443: Anthropic's connector validation
+# never reached :4997. The same paths also answer on :4997.
+Environment=JOY_MCP_PUBLIC_URL=https://joy.voltai.party
 Environment=JOY_MCP_HOME=/home/ubuntu/.joy-mcp
 # JOY_RELAY_ACCESS_KEY (the perimeter key) comes from the same env file the
 # relay reads, when the gate is on; unset = derived from the account secret.

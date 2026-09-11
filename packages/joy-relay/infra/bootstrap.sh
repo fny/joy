@@ -69,6 +69,7 @@ echo "== firewall =="
 # 22 first — never lock ourselves out. 80/443/1443 are intentionally absent.
 sudo ufw allow OpenSSH > /dev/null
 sudo ufw allow 4997/tcp > /dev/null
+sudo ufw allow 443/tcp > /dev/null
 sudo ufw allow 14997/tcp > /dev/null
 sudo ufw delete allow 24997/tcp > /dev/null 2>&1 || true
 sudo ufw default deny incoming > /dev/null
