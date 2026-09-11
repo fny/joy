@@ -50,7 +50,7 @@ With it on:
 - Tap the **Pinned** header to switch its order between **by state** (the default: what needs you first, then unread, then working, then idle, then errors, then offline) and **by project** (alphabetical by project name).
 - **Automation failures** appears above Pinned when an automation run fails, and stays until you dismiss the failure. See [Automations](automations.md).
 - Running automation sessions sit under their own **Show automations** divider.
-- Archived sessions under **Show archived** are grouped by machine, and each machine group collapses like the ones at the top.
+- Archived sessions under **Show archived** are grouped under the same machine rows as live sessions. Each group folds on its own: folding a machine's archived sessions leaves its live ones open, and the reverse.
 
 Settings → Appearance has a **Pinned rows** group for the pinned identicon's shape and size, separate from the identicons in the rest of the list.
 

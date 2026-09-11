@@ -177,7 +177,19 @@ const SectionHeader = React.memo(({ session, displayPath }: { session: SessionRo
 // moving it would break the one thing people already know. Everything else in
 // the row folds the machine away, which is the thing you want while scanning a
 // list, not while inspecting a host.
-const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collapsed, count, worstState, onToggle }: {
+/**
+ * A machine's row: chevron, name (tap it for the machine page), a rule, and the
+ * numbers. Used for live sessions here and for archived ones in the session
+ * list, so a machine looks and folds the same wherever it appears.
+ *
+ * The numbers sit in FIXED-WIDTH columns with tabular digits. They used to be
+ * as wide as their text, pushed to the right edge, so a row reading "6%" had
+ * every column — and the end of the rule — further right than one reading
+ * "11%". `loadColumns` reserves the CPU and memory columns even when a machine
+ * reports no load, so an offline machine lines up with the rest; the archived
+ * list has no load to show and passes false.
+ */
+export const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collapsed, count, worstState, onToggle, loadColumns = true }: {
     machineName: string;
     machineId: string;
     cpu?: number;
@@ -187,6 +199,7 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
     /** What inside most wants a human — the dot on a collapsed machine. */
     worstState: SessionState | null;
     onToggle: () => void;
+    loadColumns?: boolean;
 }) => {
     const styles = stylesheet;
     const { theme } = useUnistyles();
@@ -241,23 +254,22 @@ const MachineSeparator = React.memo(({ machineName, machineId, cpu, ram, collaps
                 is left, so alignment is structural rather than tuned. */}
             <View style={styles.machineSeparatorLine} />
             {/* Collapsed, the row still says how much is inside and whether any
-                of it is waiting on you — folding away is not hiding. */}
-            {collapsed && (
-                <View style={styles.machineLoadItem}>
-                    {!!dot && <View style={[styles.machineCollapsedDot, { backgroundColor: dot }]} />}
-                    <Text style={styles.machineLoadText} numberOfLines={1}>{count}</Text>
+                of it is waiting on you — folding away is not hiding. The column
+                is kept (empty) while expanded, so the rule ends in one place. */}
+            <View style={[styles.machineLoadItem, styles.machineCountColumn]}>
+                {collapsed && !!dot && <View style={[styles.machineCollapsedDot, { backgroundColor: dot }]} />}
+                {collapsed && <Text style={styles.machineLoadText} numberOfLines={1}>{count}</Text>}
+            </View>
+            {(loadColumns || showCpu) && (
+                <View style={[styles.machineLoadItem, styles.machineLoadColumn]}>
+                    {showCpu && <Ionicons name="speedometer-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />}
+                    {showCpu && <Text style={styles.machineLoadText} numberOfLines={1}>{cpu}%</Text>}
                 </View>
             )}
-            {showCpu && (
-                <View style={styles.machineLoadItem}>
-                    <Ionicons name="speedometer-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />
-                    <Text style={styles.machineLoadText} numberOfLines={1}>{cpu}%</Text>
-                </View>
-            )}
-            {showRam && (
-                <View style={styles.machineLoadItem}>
-                    <Ionicons name="hardware-chip-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />
-                    <Text style={styles.machineLoadText} numberOfLines={1}>{ram}%</Text>
+            {(loadColumns || showRam) && (
+                <View style={[styles.machineLoadItem, styles.machineLoadColumn]}>
+                    {showRam && <Ionicons name="hardware-chip-outline" size={11} color={theme.colors.textSecondary} style={{ marginRight: 3 }} />}
+                    {showRam && <Text style={styles.machineLoadText} numberOfLines={1}>{ram}%</Text>}
                 </View>
             )}
         </Pressable>
@@ -633,7 +645,10 @@ const stylesheet = StyleSheet.create((theme) => ({
     machineSeparator: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingHorizontal: Platform.select({ ios: 32, default: 24 }),
+        // The list's one inset: the Pinned header, the dividers and every
+        // section title start and end 24 in. iOS used 32 here, so machine rows
+        // started and ended out of line with everything around them.
+        paddingHorizontal: 24,
         paddingTop: 8,
         paddingBottom: 0,
     },
@@ -667,11 +682,21 @@ const stylesheet = StyleSheet.create((theme) => ({
     machineLoadItem: {
         flexDirection: 'row',
         alignItems: 'center',
+        justifyContent: 'flex-end',
         marginLeft: 4,
+    },
+    // Wide enough for a dot and three digits.
+    machineCountColumn: {
+        minWidth: 30,
+    },
+    // Wide enough for the icon and "100%".
+    machineLoadColumn: {
+        minWidth: 46,
     },
     machineLoadText: {
         fontSize: 11,
         color: theme.colors.textSecondary,
+        fontVariant: ['tabular-nums'],
         ...Typography.default('regular'),
     },
     // Project card styles

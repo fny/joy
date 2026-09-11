@@ -6,7 +6,7 @@ import { SessionListViewItem, SessionRowData } from '@/sync/storage';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { STATUS_PALETTE, formatLastSeen, vibingMessages } from '@/utils/sessionUtils';
 import { Avatar } from './Avatar';
-import { ActiveSessionsGroupCompact } from './ActiveSessionsGroupCompact';
+import { ActiveSessionsGroupCompact, MachineSeparator } from './ActiveSessionsGroupCompact';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useVisibleSessionListViewData } from '@/hooks/useVisibleSessionListViewData';
 import { useLocalSettingMutable } from '@/sync/storage';
@@ -321,6 +321,7 @@ export function SessionsList() {
             case 'archive-toggle': return 'archive-toggle';
             case 'headless-toggle': return 'headless-toggle';
             case 'section-toggle': return `section-toggle-${item.key}`;
+            case 'machine-section': return `machine-section-${item.sectionKey}`;
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'session': return `session-${item.session.id}`;
         }
@@ -383,6 +384,19 @@ export function SessionsList() {
                     </Pressable>
                 );
             }
+
+            case 'machine-section':
+                return (
+                    <MachineSeparator
+                        machineName={item.title}
+                        machineId={item.machineId}
+                        collapsed={item.collapsed}
+                        count={item.count}
+                        worstState={(item.worstState as SessionState | null) ?? null}
+                        onToggle={() => toggleSection(item.sectionKey)}
+                        loadColumns={false}
+                    />
+                );
 
             case 'section-toggle': {
                 // A divider with its OWN rows beneath it. The count is on the
@@ -454,8 +468,8 @@ export function SessionsList() {
                 const prevItem = index > 0 ? data?.[index - 1] ?? null : null;
                 const nextItem = data && index < data.length - 1 ? data[index + 1] : null;
 
-                const isFirst = prevItem?.type === 'header';
-                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle' || nextItem?.type === 'headless-toggle' || nextItem?.type === 'section-toggle';
+                const isFirst = prevItem?.type === 'header' || prevItem?.type === 'machine-section';
+                const isLast = nextItem?.type === 'header' || nextItem == null || nextItem?.type === 'active-sessions' || nextItem?.type === 'archive-toggle' || nextItem?.type === 'headless-toggle' || nextItem?.type === 'section-toggle' || nextItem?.type === 'machine-section';
                 const isSingle = isFirst && isLast;
                 const selected = item.session.id === selectedSessionId;
 

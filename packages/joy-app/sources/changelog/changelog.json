@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 (10) — Machine rows line up",
+      "summary": "",
+      "markdown": "- **The numbers on machine rows sit in columns.** Each machine's session count, CPU and memory used to be exactly as wide as their text, so a machine at \"6%\" had its numbers, and the end of its rule, further right than one at \"11%\". They now sit in fixed columns that line up from row to row, and machine rows start and end at the same inset as Pinned and the dividers.\n- **Archived sessions use the same machine rows as live ones.** Show archived groups them under the same chevron rows, with the same count and waiting dot when folded, instead of a smaller header of their own. Folding a machine's archived group no longer folds its live sessions, and the reverse."
+    },
+    {
       "title": "Sep 11 (9) — Uploads stay out of your project",
       "summary": "",
       "markdown": "- **Files you attach no longer land in your project.** A screenshot pasted into a message used to be saved as `paste-….png` in the session's folder — the repository — and they piled up. Uploads now go to the session's own folder on its machine, beside the images the agent shows you, and the agent gets the full path.\n- **Uploads sort by time and keep your file names.** Each one is saved as `20260911-162140-0000.report.pdf` — the time first, so the folder lists them in the order they arrived — and downloads as plain `report.pdf`. A file that comes with no name is named for where it came from: `paste.jpg` for a pasted screenshot, `photo.jpg` for a library photo without a name, `file` for a document, `drop` for a dropped file. A photo named `.HEIC` that is really a JPEG is saved as `.jpg`.\n- **Files → Session files.** A third tab beside Changes and All Files lists what the session keeps outside the project — your uploads and the agent's images — newest first. Tap one to open it.\n- Needs the updated daemon."
@@ -481,5 +486,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 11 (9) — Uploads stay out of your project"
+  "latestTitle": "Sep 11 (10) — Machine rows line up"
 }

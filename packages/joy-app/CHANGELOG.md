@@ -1,3 +1,8 @@
+# Sep 11 (10) — Machine rows line up
+
+- **The numbers on machine rows sit in columns.** Each machine's session count, CPU and memory used to be exactly as wide as their text, so a machine at "6%" had its numbers, and the end of its rule, further right than one at "11%". They now sit in fixed columns that line up from row to row, and machine rows start and end at the same inset as Pinned and the dividers.
+- **Archived sessions use the same machine rows as live ones.** Show archived groups them under the same chevron rows, with the same count and waiting dot when folded, instead of a smaller header of their own. Folding a machine's archived group no longer folds its live sessions, and the reverse.
+
 # Sep 11 (9) — Uploads stay out of your project
 
 - **Files you attach no longer land in your project.** A screenshot pasted into a message used to be saved as `paste-….png` in the session's folder — the repository — and they piled up. Uploads now go to the session's own folder on its machine, beside the images the agent shows you, and the agent gets the full path.

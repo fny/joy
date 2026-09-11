@@ -136,14 +136,19 @@ export function useSessionListV2(): SessionListViewItem[] | null {
             items.push({ type: 'section-toggle', key, hidden: !showing, title, count: rowsIn.length });
             if (!showing) return;
             if (!byMachine) { emitRows(rowsIn); return; }
-            // Grouped by machine UNDER the divider — the collapsible machine
-            // sections, kept, but now inside the thing that reveals them
-            // rather than sitting above it.
-            for (const section of buildListLayout({ sessions: rowsIn, pinned: [], collapsed })) {
+            // Grouped by machine UNDER the divider, with the same machine row
+            // the live sessions use. Archived groups fold on their OWN keys
+            // (`a:<id>`): sharing the live rows' `m:<id>` meant folding a busy
+            // machine also hid its history, and revealing archived could open
+            // onto groups that were already shut.
+            const archivedCollapsed = collapsed.filter((k) => k.startsWith('a:')).map((k) => `m:${k.slice(2)}`);
+            for (const section of buildListLayout({ sessions: rowsIn, pinned: [], collapsed: archivedCollapsed })) {
+                const machineId = section.machineId ?? '';
                 items.push({
-                    type: 'header',
+                    type: 'machine-section',
+                    sectionKey: `a:${machineId}`,
+                    machineId,
                     title: machineName(section.machineId),
-                    sectionKey: section.key,
                     count: section.sessions.length,
                     collapsed: section.collapsed,
                     worstState: section.collapsed ? section.worstState : null,

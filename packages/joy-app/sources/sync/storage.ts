@@ -162,6 +162,20 @@ function buildSessionRowData(session: Session, unreadSessionIds?: Set<string>): 
 // Unified list item type for SessionsList component
 export type SessionListViewItem =
     /**
+     * A machine's row inside a revealed section (archived), drawn with the
+     * same component as the live machine rows so a machine looks and folds
+     * the same everywhere. `sectionKey` is the collapse key.
+     */
+    | {
+        type: 'machine-section';
+        sectionKey: string;
+        machineId: string;
+        title: string;
+        count: number;
+        collapsed: boolean;
+        worstState: string | null;
+    }
+    /**
      * A section head. The plain form is the date header the list has always
      * had; with `sectionKey` it is a machine section you can collapse
      * (localSettings.sessionListV2), which adds a chevron, a count, and — when
