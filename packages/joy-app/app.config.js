@@ -107,6 +107,11 @@ export default {
                 monochromeImage: "./sources/assets/images/icon-monochrome.png",
                 backgroundColor: "#18171C"
             },
+            // FCM (Firebase project joy-coder). Every Android package this
+            // config can produce must be registered in that project and the
+            // file re-downloaded — the google-services Gradle plugin fails the
+            // build on a package it doesn't list.
+            googleServicesFile: "./google-services.json",
             permissions: [
                 "android.permission.ACCESS_NETWORK_STATE",
                 "android.permission.POST_NOTIFICATIONS",
