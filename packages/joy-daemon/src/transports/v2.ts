@@ -349,6 +349,12 @@ route("GET", "/v2/slash-commands", (ctx) => {
 // ── sessions ────────────────────────────────────────────────────────────────
 route("GET", "/v2/sessions", async (ctx) => ok({ sessions: await mcall("list", ctx.registry, {}) }));
 route("POST", "/v2/sessions", async (ctx, _p, body) => ok(await mcall("create", ctx.registry, body)));
+// The daemon's own send (joy-send) on the machine plane: accepted at once,
+// /steer and friends intercepted and applied mid-turn. The app (0d6fc004) and
+// joy-mcp post here for a busy agent; until this route existed the v2 router
+// answered 404 and both fell back to a relay turn that queued behind the
+// running one, so a mid-turn steer only ever landed on a short turn.
+route("POST", "/v2/send", (ctx, _p, body) => mshaped("send", ctx.registry, body));
 route("DELETE", "/v2/sessions", async (ctx) => ok(await mcall("killAll", ctx.registry, {})));
 route("GET", "/v2/sessions/:id", withSession((_ctx, session) => ok(session.toJSON())));
 route("DELETE", "/v2/sessions/:id", withSession(async (ctx, _s, p, body) => {

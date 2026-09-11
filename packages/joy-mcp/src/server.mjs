@@ -115,7 +115,27 @@ export class Hub {
     }
     const wrapped = wrap(text, from, replyTo);
     const accepted = await this.relay.sendCiphertext(row.sessionId, this.index.sealFor(row, wrapped));
-    return { turn: accepted.turnId, message: accepted.messageId, queued: !!busy, ...(busy ? { check: before } : {}) };
+    // `queued` is judged after the relay accepted the row, not from the
+    // snapshot before: three sends racing from two clients all saw an idle
+    // session, yet only one could go first. Ahead of this row: the turn the
+    // relay has running (if it is not ours) and every earlier row still
+    // waiting to be picked up.
+    let ahead = 0;
+    try {
+      const [st, q, d] = await Promise.all([
+        this.relay.sessionState(row.sessionId),
+        this.relay.messages(row.sessionId, { status: 'queued', limit: 500 }),
+        this.relay.messages(row.sessionId, { status: 'delivering', limit: 500 }),
+      ]);
+      const active = st.execution?.turnId ?? null;
+      this.index.execution.set(row.sessionId, st.execution?.state ?? null);
+      if (active && active !== accepted.turnId) ahead += 1;
+      for (const m of [...(q.messages ?? []), ...(d.messages ?? [])]) {
+        if (m.id !== accepted.messageId && m.turnId !== active && Number(m.seq) < Number(accepted.seq)) ahead += 1;
+      }
+    } catch { /* the snapshot verdict stands */ }
+    const queued = !!busy || ahead > 0;
+    return { turn: accepted.turnId, message: accepted.messageId, queued, ahead, ...(busy ? { check: before } : {}) };
   }
 }
 

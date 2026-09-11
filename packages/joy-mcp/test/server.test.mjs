@@ -93,6 +93,9 @@ async function pumpDaemon() {
     await daemon.submitted(o.turnId);
     await daemon.start(o.turnId, {});
     const prompt = openPayload(o.ciphertext, sessionKey);
+    // A prompt that says so keeps the turn open a while (queue-depth tests).
+    const hold = /\bhold:(\d+)/.exec(prompt?.text ?? '');
+    if (hold) await new Promise((r) => setTimeout(r, Number(hold[1])));
     // Reply, then end the turn — sealed records the app would render.
     const rec = (ev) => sealV2Json({ v: 1, t: 'record', record: { role: 'session', content: { type: 'session', data: { time: Date.now(), turn: o.turnId, ev } } } }, sessionKey);
     await daemon.fact(o.turnId, { type: 'output', kind: 'output', ciphertext: rec({ t: 'text', text: `re: ${(prompt?.text ?? '').replace(/^<joy-message[^>]*>\s*|\s*<\/joy-message>$/g, '')}` }) });
@@ -221,6 +224,26 @@ describe('joy-mcp over a real relay', () => {
     const user = full.messages.find((m) => m.role === 'user');
     expect(user.text).toBe('ping'); // unwrapped: a client speaks for the account's owner
     expect(full.check.state).toBe('idle');
+  }, 20_000);
+
+  it('two sends in a row: the second reports the first ahead of it', async () => {
+    const { data: s } = await call('list_sessions');
+    const id = s.sessions[0].id;
+    const { data: first } = await call('send', { session: id, text: 'one hold:1500' });
+    const { data: second } = await call('send', { session: id, text: 'two' });
+    expect(first.turn).toBeTruthy();
+    expect(second.turn).not.toBe(first.turn);
+    expect(second.ahead).toBeGreaterThanOrEqual(1);
+    expect(second.queued).toBe(true);
+    // Both turns end before the next test listens, in order.
+    const seen = [];
+    let since;
+    for (let i = 0; i < 4 && !seen.includes(second.turn); i++) {
+      const { data: w } = await call('wait_for_turns', { sessions: [id], timeout_s: 15, ...(since ? { since } : {}) });
+      since = w.cursor;
+      seen.push(...w.events.filter((e) => e.kind === 'turn_ended').map((e) => e.turn));
+    }
+    expect(seen).toEqual([first.turn, second.turn]);
   }, 20_000);
 
   it('wait_for_turns returns the turn a later send finishes, with a cursor updates_since continues from', async () => {

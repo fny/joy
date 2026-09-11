@@ -24,6 +24,8 @@ let pub = "";
 /** What each fake session was asked to accept (route-targeting proof, #599):
  *  the coordinator's rows per session id. */
 let accepted: Record<string, () => string[]> = { abcd1234: () => [], sub00001: () => [] };
+/** The chat the fake registry mirrors a joy-send into. */
+const chat: Record<string, unknown>[] = [];
 
 const g = (args: string[]) => execFileSync("git", args, { cwd: repo });
 
@@ -63,7 +65,9 @@ beforeAll(async () => {
     size: 1,
     sseClientCount: 0,
     startedAt: Date.now(),
-    chatHistory: () => [],
+    chatHistory: () => chat,
+    nextChatId: () => `chat-${chat.length + 1}`,
+    addChatMessage: (m: Record<string, unknown>) => { chat.push(m); },
     claudeInfo: () => ({}),
     commands: {
       union: () => ["deploy", "review"],
@@ -448,6 +452,22 @@ describe("#53 the /v2 routes answer an op's HTTP contract, not a flat 200", () =
       expect(q.json).toMatchObject({ error: "not_durable" });
     } finally { spy.mockRestore(); }
     expect((await call("POST", "/v2/sessions/abcd1234/queue", { body: { text: "   " } })).status).toBe(400);
+  });
+});
+
+describe("POST /v2/send is the daemon's joy-send on the machine plane", () => {
+  test("an unknown session is the op's 404 sentence, an empty text its 400 refusal — not the router's not_found", async () => {
+    const missing = await call("POST", "/v2/send", { body: { session_id: "nope0000", text: "/steer stop" } });
+    expect([missing.status, missing.json]).toEqual([404, { error: "session_not_found" }]);
+    const empty = await call("POST", "/v2/send", { body: { session_id: "abcd1234", text: "   " } });
+    expect([empty.status, empty.json]).toEqual([400, { error: "empty" }]);
+  });
+  test("a known session accepts the text", async () => {
+    const r = await call("POST", "/v2/send", { body: { session_id: "abcd1234", text: "hello from the tunnel", from: "app" } });
+    expect(r.status).toBe(200);
+    expect(r.json.error).toBeUndefined();
+    expect(chat.at(-1)).toMatchObject({ role: "user" });
+    expect(String((chat.at(-1) as any).content)).toContain("hello from the tunnel");
   });
 });
 

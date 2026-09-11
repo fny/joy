@@ -113,7 +113,12 @@ export function turnEndOf(e, key) {
   }
   const p = recordOf(e, key);
   const ev = p?.t === 'record' ? p.record?.content?.data?.ev : null;
-  if (ev?.t === 'turn-end') return { turn: e.turnId ?? p.record.content.data.turn ?? null, status: ev.status ?? 'completed', marker: false };
+  // Inside a RELAY turn the daemon's turn-end records are segment ends —
+  // Claude closes one after a tool call and opens another for the reply —
+  // and only the relay's terminal marker ends the turn. A turn the daemon
+  // started itself (a joy send, terminal typing) has no relay turn, so its
+  // runtime turn-end is the end.
+  if (ev?.t === 'turn-end' && !e.turnId) return { turn: p.record.content.data.turn ?? null, status: ev.status ?? 'completed', marker: false };
   return null;
 }
 
@@ -288,10 +293,22 @@ export class SessionIndex extends EventEmitter {
     this.#timer = setInterval(() => { for (const id of this.rows.keys()) this.#pending.add(id); this.#schedule(); }, this.pollMs);
   }
   stop() { this.#stop?.(); this.#stop = null; if (this.#timer) clearInterval(this.#timer); this.#timer = null; }
-  #scheduled = null;
+  #scheduled = null; #draining = null; #again = false;
   #schedule() {
     if (this.#scheduled) return;
-    this.#scheduled = setTimeout(() => { this.#scheduled = null; this.#drain().catch((e) => this.log(`drain: ${e?.message ?? e}`)); }, 150);
+    this.#scheduled = setTimeout(() => { this.#scheduled = null; this.#runDrain(); }, 150);
+  }
+  /** One drain at a time. A poke that lands while a drain awaits the relay
+   *  used to start a second drain: both scanned the same session from the
+   *  same cursor, so a reply's text was folded twice and a turn ended twice. */
+  #runDrain() {
+    if (this.#draining) { this.#again = true; return; }
+    this.#draining = (async () => {
+      do {
+        this.#again = false;
+        try { await this.#drain(); } catch (e) { this.log(`drain: ${e?.message ?? e}`); }
+      } while (this.#again);
+    })().finally(() => { this.#draining = null; });
   }
   async #drain() {
     await this.refresh();
@@ -324,8 +341,9 @@ export class SessionIndex extends EventEmitter {
         after = Math.max(after, Number(e.seq));
         const end = turnEndOf(e, key);
         if (end) {
-          // One end per turn: the daemon's turn-end record and the relay's
-          // terminal marker both arrive; whichever comes first ends it.
+          // One end per turn (a relay turn ends on its terminal marker; a
+          // daemon-started one on its runtime turn-end; a replayed page must
+          // not end it again).
           const seen = this.endedTurns.get(row.sessionId) ?? new Set();
           this.endedTurns.set(row.sessionId, seen);
           if (end.turn && seen.has(end.turn)) continue;

@@ -71,8 +71,9 @@ describe('messages', () => {
   });
   it('spots a turn end on the relay\'s terminal kind and on the daemon\'s turn-end record', () => {
     expect(turnEndOf(ev('turn.terminal', sealedRec({ t: 'turn-end', status: 'cancelled' })), key)).toMatchObject({ turn: 'T1', status: 'cancelled', marker: true });
-    // The relay's turn id on the event wins; the runtime id in the record is the fallback.
-    expect(turnEndOf(ev('output', sealedRec({ t: 'turn-end', status: 'completed' }, 'R2')), key)).toMatchObject({ turn: 'T1', status: 'completed', marker: false });
+    // Inside a relay turn a daemon turn-end is a SEGMENT end (tool call, then the reply): not the end.
+    expect(turnEndOf(ev('output', sealedRec({ t: 'turn-end', status: 'completed' }, 'R2')), key)).toBeNull();
+    // A daemon-started turn (no relay turn) ends on its runtime turn-end.
     expect(turnEndOf(ev('output', sealedRec({ t: 'turn-end', status: 'completed' }, 'R2'), { turnId: null }), key)).toMatchObject({ turn: 'R2', status: 'completed' });
     // A bare terminal marker (no payload) still ends the turn, status unknown.
     expect(turnEndOf(ev('turn.terminal', null), key)).toMatchObject({ turn: 'T1', status: null, marker: true });

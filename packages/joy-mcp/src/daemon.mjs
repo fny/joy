@@ -8,8 +8,8 @@ const RETRYABLE = new Set(['relay_busy', 'daemon_busy']);
 
 export class DaemonTunnel {
   /** @param {{ relay: import('./relay.mjs').RelayClient, index: import('./model.mjs').SessionIndex, from?: string }} opts */
-  constructor({ relay, index, from = 'mcp' }) {
-    this.relay = relay; this.index = index; this.from = from;
+  constructor({ relay, index }) {
+    this.relay = relay; this.index = index;
     this.keys = new Map(); // machine id → tunnel key
   }
 
@@ -65,9 +65,13 @@ export class DaemonTunnel {
   }
   async harnesses(machineId) { return (await this.json(machineId, 'GET', '/v2/harnesses')).data?.harnesses ?? []; }
   /** A mid-turn steer (or any daemon-owned slash command) goes over the
-   *  tunnel so it lands in the running turn instead of queueing behind it. */
+   *  tunnel so it lands in the running turn instead of queueing behind it.
+   *  The daemon writes the provenance wrapper itself and only for a sender
+   *  it knows (joy:<id>, cli, app, cron:<name>): no `from` keeps the text
+   *  bare, as a relay send is; a reply_to goes as the app's, stamped by
+   *  the daemon. */
   async steer(row, text, { exclusive = false, replyTo } = {}) {
-    const body = { session_id: this.#local(row), text, from: this.from, exclusive, ...(replyTo === null ? { replyTo: null } : {}) };
+    const body = { session_id: this.#local(row), text, exclusive, ...(replyTo ? { from: 'app', replyTo } : {}) };
     return (await this.json(row.daemonId, 'POST', '/v2/send', body)).data ?? { error: 'no_answer' };
   }
 }

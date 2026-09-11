@@ -48,7 +48,7 @@ relay id, or a unique prefix):
 | Group | Tools |
 |---|---|
 | orientation | `list_sessions` (all machines by default), `session` (status + approvals + queue + conversation, paged with `before`), `check` |
-| talking | `send` (queues behind a running turn; carries `check` when it did), `ask` (send + wait for that turn's reply), `wait_for_turns` (until any watched session finishes or needs a human), `updates_since` (cursor paging), `events` (raw records) |
+| talking | `send` (queues behind a running turn; returns `ahead`, the rows the relay had in front of it, and carries `check` when it did not go straight in; a `/steer` mid-turn goes over the machine tunnel), `ask` (send + wait for that turn's reply), `wait_for_turns` (until any watched session finishes or needs a human), `updates_since` (cursor paging), `events` (raw records) |
 | decisions | `approvals`, `approve`, `deny` |
 | control | `abort`, `queue`, `queue_cancel`, `queue_resume`, `kill` |
 | creating | `machines`, `new_session` |
