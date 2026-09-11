@@ -174,6 +174,12 @@ export default React.memo(function AutomationsScreen() {
                             showChevron={false}
                         />
                         <Item
+                            title="Edit"
+                            subtitle="Name, folder, machine, prompt and trigger"
+                            icon={<Ionicons name="create-outline" size={29} color={theme.colors.textSecondary} />}
+                            onPress={() => router.push(`/settings/automation-new?id=${a.id}` as any)}
+                        />
+                        <Item
                             title={a.enabled ? 'Disable' : 'Enable'}
                             subtitle={a.enabled ? 'Stops it firing; runs already going are untouched.' : 'Currently disabled — its triggers fire nothing.'}
                             icon={<Ionicons name={a.enabled ? 'pause-outline' : 'play-circle-outline'} size={29} color={theme.colors.textSecondary} />}

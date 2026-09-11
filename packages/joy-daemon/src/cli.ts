@@ -1567,7 +1567,7 @@ export async function cmdAutomation(rest: string[]): Promise<number> {
     const filter = cron || takeFlag(args, "--filter");
     if (!prompt || !prompt.trim()) {
       console.error('usage: joy automation create [--dir <path>] -m "<prompt>"');
-      console.error('         [--on manual|turn_done|session_state|machine_online|automation_done]');
+      console.error('         [--on manual|automation_done] [--name <name>]');
       console.error('         [--cron "0 2 * * *" [--tz America/New_York]]');
       console.error('         [--name n] [--agent a] [--model m] [--effort e] [--json]');
       return 2;
@@ -2157,9 +2157,9 @@ ${c.b("Usage:")} joy [--relay <joy|joy-dev|url>] <command>
                ${c.dim("joy auth joy joy-dev")}
   ${c.b("notify")}       Push a notification:  joy notify -p "message" [-t title]
   ${c.b("automation")}   Saved work: a folder, a prompt and a trigger — and the runs it produces
-                 create [--dir p] -m "prompt" [--on manual|turn_done|session_state|
-                 machine_online|automation_done] [--cron "0 2 * * *" [--tz zone]] ·
-                 ls · show · run <id> [--wait] · runs <id> · enable/disable <id> · rm <id>
+                 create [--dir p] -m "prompt" [--on manual|automation_done]
+                 [--cron "0 2 * * *" [--tz zone]] · ls · show · run <id> [--wait] ·
+                 runs <id> · enable/disable <id> · rm <id>
                  (a run is a headless session; it FAILS the moment it needs a human —
                   blocked:login, blocked:trust, blocked:permission, agent_died, stalled.
                   run --wait exits with the outcome, so scripts and agents can use it.

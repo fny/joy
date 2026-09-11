@@ -690,75 +690,19 @@ describe('automations', () => {
       } finally { APP = prevApp; }
     };
 
-    it('fires every enabled automation listening for the kind, and no others', async () => {
-      await inIsolation(async ({ accountId, machine }) => {
-        const machineId = machine();
-        const d = makeDaemon(machineId); await d.acquire();
-        const listening = await create({ machineId, name: 'listens', triggers: [{ kind: 'machine_online' }] });
-        const other = await create({ machineId, name: 'manual only', triggers: [{ kind: 'manual' }] });
-
-        expect((await automations.onEvent('machine_online', { accountId, machineId })).fired).toBe(1);
-        expect((await call('GET', `/joy/v2/automations/${listening.id}/runs`)).json.runs).toHaveLength(1);
-        expect((await call('GET', `/joy/v2/automations/${other.id}/runs`)).json.runs).toHaveLength(0);
-      });
-    });
-
-    it('a disabled automation does not fire', async () => {
-      await inIsolation(async ({ accountId, machine }) => {
-        const machineId = machine();
-        const d = makeDaemon(machineId); await d.acquire();
-        const a = await create({ machineId, triggers: [{ kind: 'machine_online' }] });
-        await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { enabled: false } });
-        expect((await automations.onEvent('machine_online', { accountId, machineId })).fired).toBe(0);
-      });
-    });
-
-    it('a filter narrows to one machine', async () => {
-      await inIsolation(async ({ accountId, machine }) => {
-        const mine = machine();
-        const theirs = machine();
-        for (const m of [mine, theirs]) { const d = makeDaemon(m); await d.acquire(); }
-        await create({ machineId: mine, triggers: [{ kind: 'machine_online', filter: mine }] });
-        expect((await automations.onEvent('machine_online', { accountId, machineId: theirs })).fired).toBe(0);
-        expect((await automations.onEvent('machine_online', { accountId, machineId: mine })).fired).toBe(1);
-      });
-    });
-
-    it('a session an automation PRODUCED never fires triggers — that is the loop', async () => {
-      await inIsolation(async ({ accountId, machine }) => {
-        const machineId = machine();
-        const d = makeDaemon(machineId); await d.acquire();
-        const a = await create({ machineId, triggers: [{ kind: 'turn_done' }] });
-        // Its own run finishing must not fire it again, or it runs forever.
-        const { json: { run } } = await call('POST', `/joy/v2/automations/${a.id}/runs`, { body: {} });
-        const before = (await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs.length;
-        expect((await automations.onEvent('turn_done', { accountId, machineId, sessionId: run.sessionId })).fired).toBe(0);
-        expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(before);
-      });
-    });
-
-    it('an ORDINARY session finishing a turn does fire it', async () => {
-      await inIsolation(async ({ accountId, machine }) => {
-        const machineId = machine();
-        const d = makeDaemon(machineId); await d.acquire();
-        const a = await create({ machineId, triggers: [{ kind: 'turn_done' }] });
-        // A session nothing produced — the case turn_done exists for.
-        expect((await automations.onEvent('turn_done', { accountId, machineId, sessionId: 'some-hand-driven-session' })).fired).toBe(1);
-      });
-    });
-
-    it('manual is never fired by an event — it is the one you ask for', async () => {
-      await inIsolation(async ({ accountId, machine }) => {
-        const machineId = machine();
-        const d = makeDaemon(machineId); await d.acquire();
-        await create({ machineId, triggers: [{ kind: 'manual' }] });
-        expect((await automations.onEvent('manual', { accountId, machineId })).fired).toBe(0);
-      });
+    it('refuses the two kinds that were removed, rather than storing a dead trigger', async () => {
+      // `turn_done` and `machine_online` were built, offered and wanted by
+      // nobody (migration 012). Accepting one now would store a trigger that
+      // can never fire, which is the failure mode the whole validate-on-write
+      // rule exists to prevent.
+      for (const kind of ['turn_done', 'machine_online']) {
+        const r = await call('POST', '/joy/v2/automations', { body: { ...draft(), triggers: [{ kind }] } });
+        expect(r.status, kind).toBe(400);
+        expect(r.json.error).toBe('bad_trigger_kind');
+      }
     });
 
     it('a schedule expression is checked when it is WRITTEN, not when it fires', async () => {
-      // A bad expression accepted at authoring is an automation that silently
-      // never runs, and nothing later would say why.
       const bad = await call('POST', '/joy/v2/automations', {
         body: { ...draft(), triggers: [{ kind: 'schedule', filter: 'every night' }] },
       });
@@ -787,12 +731,10 @@ describe('automations', () => {
         const d = makeDaemon(machineId); await d.acquire();
         const a = await create({ machineId, triggers: [{ kind: 'schedule', filter: '*/5 * * * *', timezone: 'UTC' }] });
 
-        // Nothing is due yet. (The tick is global, so assert on THIS
-        // automation's runs rather than the fleet-wide count.)
         await automations.tick();
         expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(0);
 
-        // An hour later it is — and it fires ONCE, not twelve times.
+        // An hour later it is due — and it fires ONCE, not twelve times.
         const later = Date.now() + 60 * 60_000;
         await automations.tick(later);
 
@@ -805,8 +747,7 @@ describe('automations', () => {
 
         // The clock moved: ticking again at the same instant runs nothing more.
         await automations.tick(later);
-        const after = (await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs;
-        expect(after).toHaveLength(runs.length);
+        expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(runs.length);
       });
     });
 
@@ -820,17 +761,36 @@ describe('automations', () => {
         const later = Date.now() + 60 * 60_000;
         await automations.tick(later);
         expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(0);
-        // Re-enabling must not then replay the hour it was off for: the clock
-        // advanced while it was disabled, so there is nothing owed.
+        // Re-enabling must not then replay the hour it was off for.
         await call('PATCH', `/joy/v2/automations/${a.id}`, { body: { enabled: true } });
         await automations.tick(later);
         expect((await call('GET', `/joy/v2/automations/${a.id}/runs`)).json.runs).toHaveLength(0);
       });
     });
 
+    it('a chained automation fires when the one it follows ends', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        const first = await create({ machineId, name: 'first' });
+        const second = await create({ machineId, name: 'second', triggers: [{ kind: 'automation_done', filter: first.id }] });
+        expect((await automations.onEvent('automation_done', { accountId, filters: [first.id] })).fired).toBe(1);
+        expect((await call('GET', `/joy/v2/automations/${second.id}/runs`)).json.runs).toHaveLength(1);
+      });
+    });
+
+    it('manual is never fired by an event — it is the one you ask for', async () => {
+      await inIsolation(async ({ accountId, machine }) => {
+        const machineId = machine();
+        const d = makeDaemon(machineId); await d.acquire();
+        await create({ machineId, triggers: [{ kind: 'manual' }] });
+        expect((await automations.onEvent('manual', { accountId, machineId })).fired).toBe(0);
+      });
+    });
+
     it('an unknown kind, or no account, fires nothing rather than throwing', async () => {
       expect((await automations.onEvent('full_moon', { accountId: 'x' })).fired).toBe(0);
-      expect((await automations.onEvent('machine_online', {})).fired).toBe(0);
+      expect((await automations.onEvent('automation_done', {})).fired).toBe(0);
     });
   });
 });

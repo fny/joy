@@ -326,6 +326,17 @@ const MIGRATIONS = [
   ALTER TABLE automation_triggers ADD COLUMN next_run_at TIMESTAMPTZ;
   CREATE INDEX automation_triggers_due ON automation_triggers (kind, next_run_at);
   `,
+  // 012 — `turn_done` and `machine_online` removed. They were built, offered,
+  // and wanted by nobody: "after any turn on this machine" and "whenever the
+  // daemon restarts" are not things anyone asked an automation for, and a
+  // trigger nobody uses is a code path that rots while still being able to
+  // fire. Rows of those kinds go with the constraint that allowed them.
+  `
+  DELETE FROM automation_triggers WHERE kind IN ('turn_done','machine_online');
+  ALTER TABLE automation_triggers DROP CONSTRAINT automation_triggers_kind_check;
+  ALTER TABLE automation_triggers ADD CONSTRAINT automation_triggers_kind_check
+    CHECK (kind IN ('manual','session_state','automation_done','schedule'));
+  `,
 ];
 
 /** Exclusive ownership of a data directory. Two relay processes opening the

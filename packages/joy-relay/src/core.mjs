@@ -114,16 +114,14 @@ export function createCore(db, notify) {
    * automations needs core — a hook breaks the cycle that a direct import
    * would make.
    *
-   * Always called AFTER the transaction commits, never inside one: firing a
-   * trigger spawns a session, and doing that inside another session's write
-   * would hold a transaction open across a spawn.
+   * Nothing in core fires it today: `turn_done` and `machine_online` were the
+   * two event triggers and both were removed (migration 012) for want of
+   * anyone using them. The seam stays because the remaining kinds — and any
+   * future one — still need a way in that is not an import cycle, and because
+   * automations.onEvent is called directly by the module's own chaining.
    */
   let automationHook = null;
   function setAutomationHook(fn) { automationHook = fn; }
-  function fireTrigger(kind, ctx) {
-    if (!automationHook) return;
-    try { void Promise.resolve(automationHook(kind, ctx)).catch(() => {}); } catch { /* never the caller's problem */ }
-  }
 
   async function loadSession(t, sessionId, accountId) {
     const s = await one(t, `SELECT * FROM native_sessions WHERE id = $1`, [sessionId]);
@@ -639,11 +637,6 @@ export function createCore(db, notify) {
     });
     // A new epoch fences out the old process; anything it had in flight will
     // be rejected on write and re-resolved via reconcile.
-    //
-    // It also means the machine is BACK: a fresh lease is the only signal the
-    // relay gets that a daemon has started, so it is what `machine_online`
-    // listens to. Renewals are not — those happen every few seconds.
-    fireTrigger('machine_online', { accountId, machineId: daemonId, sessionId: null });
     return { ...lease, leaseToken: token, ttlSeconds: 20 };
   }
 
@@ -865,9 +858,7 @@ export function createCore(db, notify) {
   }
 
   async function turnFact(turnId, leaseRef, body) {
-    // Captured inside, fired outside: a `turn_done` trigger spawns a session,
-    // and doing that inside this transaction would hold it open across a
-    // spawn. Same shape as the `wake`/`poke` deferrals above.
+    // Captured inside, acted on outside — the `wake`/`poke` shape used above.
     let finished = null;
     const out = await withTurn(turnId, leaseRef, async (t, s, turn, lease) => {
       // Centralized runtime-fact idempotency: an exact retry of ANY fact kind
@@ -922,7 +913,6 @@ export function createCore(db, notify) {
       // sent at once ran 1.6 s, 25 s, 1.4 s, 1.4 s, 1.4 s apart (2026-09-11).
       // Correctness never depends on the wake (claims re-query on connect).
       if (finished.machineId) notify.wakeDaemon(finished.machineId, 'work');
-      fireTrigger('turn_done', finished);
     }
     return out;
   }

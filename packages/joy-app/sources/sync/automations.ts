@@ -47,9 +47,11 @@ async function specKeyFor(machineId: string): Promise<Uint8Array | null> {
     return deriveSpawnSpecKey(ctx.machineKey, machineId);
 }
 
-export async function createAutomation(draft: AutomationDraft): Promise<V2Automation> {
+/** The sealed spec for a draft — shared by create and edit, so an edited
+ *  automation is sealed exactly the way a new one is. */
+async function sealFor(draft: AutomationDraft): Promise<string> {
     const key = await specKeyFor(draft.machineId);
-    const spec = encodeSpawnSpec({
+    return encodeSpawnSpec({
         t: 'spawn',
         cwd: draft.directory,
         agent: draft.agent || 'claude',
@@ -61,17 +63,49 @@ export async function createAutomation(draft: AutomationDraft): Promise<V2Automa
         headless: true,
         yolo: true,
     } as Parameters<typeof encodeSpawnSpec>[0], key);
+}
 
+function triggersOf(draft: AutomationDraft) {
+    return [{
+        kind: draft.trigger,
+        ...(draft.triggerFilter ? { filter: draft.triggerFilter } : {}),
+        ...(draft.timezone ? { timezone: draft.timezone } : {}),
+    }];
+}
+
+export async function createAutomation(draft: AutomationDraft): Promise<V2Automation> {
     const { automation } = await v2.createAutomation({
         name: draft.name.trim() || draft.prompt.trim().split(/\s+/).slice(0, 6).join(' '),
         machineId: draft.machineId,
         directory: draft.directory,
-        spec,
-        triggers: [{
-            kind: draft.trigger,
-            ...(draft.triggerFilter ? { filter: draft.triggerFilter } : {}),
-            ...(draft.timezone ? { timezone: draft.timezone } : {}),
-        }],
+        spec: await sealFor(draft),
+        triggers: triggersOf(draft),
+    });
+    return automation;
+}
+
+/**
+ * Save an edit.
+ *
+ * The spec write is CONDITIONAL on the version that was loaded: two devices
+ * editing one automation is the same race the machine record already answers
+ * this way, and losing somebody else's edit silently is worse than being told
+ * to look again. The machine can change here too, which re-seals under the
+ * NEW machine's key — an automation can be moved between machines from the
+ * app, which the CLI can never do.
+ */
+export async function updateAutomation(
+    id: string,
+    draft: AutomationDraft,
+    expectedSpecVersion: number,
+): Promise<V2Automation> {
+    const { automation } = await v2.patchAutomation(id, {
+        name: draft.name.trim(),
+        machineId: draft.machineId,
+        directory: draft.directory,
+        spec: await sealFor(draft),
+        expectedSpecVersion,
+        triggers: triggersOf(draft),
     });
     return automation;
 }
