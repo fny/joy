@@ -51,7 +51,7 @@ relay id, or a unique prefix):
 | talking | `send` (queues behind a running turn; returns `ahead`, the rows the relay had in front of it, and carries `check` when it did not go straight in; a `/steer` mid-turn goes over the machine tunnel), `ask` (send + wait for that turn's reply), `wait_for_turns` (until any watched session finishes or needs a human), `updates_since` (cursor paging), `events` (raw records) |
 | decisions | `approvals`, `approve`, `deny` |
 | control | `abort`, `queue`, `queue_cancel`, `queue_resume`, `kill` |
-| creating | `machines`, `new_session` |
+| creating | `machines`, `new_session` (creates a missing folder itself unless `create_dir: false`; waits up to 60 s for the daemon's session id; a spawn the daemon refused answers `spawn_failed` with the reason and the row reads `failed`) |
 
 Resources: `joy://sessions`, `joy://sessions/{id}`, `joy://sessions/{id}/state`,
 `joy://machines`. Subscribing to a session's resource gets a
