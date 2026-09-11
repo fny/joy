@@ -34,6 +34,13 @@ import type { DeliverySource } from "../domain/agentSession";
 import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type AttemptRef, type SubmitResult, type InterruptResult, type HandledCommand } from "../domain/coordinator";
 import { ClaudeDriver } from "./claudeDriver";
+import {
+  createPhaseState, stepPhase, phaseOf,
+  turnClosedByHook as phaseTurnClosedByHook, turnRunning as phaseTurnRunning,
+  hookSaysIdle as phaseHookSaysIdle, transcriptOwnsTerminal as phaseTranscriptOwnsTerminal,
+  type PhaseState, type Observation, type PaneRead, type Effect, type Phase, type Wait,
+} from "./sessionPhase";
+export { HOOK_TIEBREAK_IDLE_POLLS, HOOK_NEEDS_INPUT_STALE_MS } from "./sessionPhase";
 import { joyPromptReinjection } from "../domain/agentTagsPrompt";
 import { OPTIONS_SYSTEM_PROMPT } from "./optionsPrompt";
 import { saveWindowRecord, loadWindowRecord, deleteWindowRecord, WindowRecordWriteError } from "../domain/windowRecord";
@@ -215,15 +222,13 @@ const NON_GENERATING_COMMANDS = new Set([
  *  rotation, a restart replacement under the same id) — the pid probe keeps
  *  the last word. */
 export const HOOK_SESSION_END_GRACE_MS = 1_500;
-/** With hooks live the pane may CLEAR thinking only after this many
- *  consecutive not-generating reads (3s apart) past the lease — a tie-breaker
- *  for the one edge hooks do not report (Stop does not fire on a terminal
- *  Esc; the transcript's interrupt marker normally closes that). Never SETS. */
-export const HOOK_TIEBREAK_IDLE_POLLS = 6;
-/** A hook-reported permission wait the pane has shown no dialog for, this
- *  long, is stale (the human answered in the terminal and no later hook
- *  cleared it). */
-export const HOOK_NEEDS_INPUT_STALE_MS = 10_000;
+/** The session's clock and timer, one seam (sessionPhase.ts owns the rules
+ *  that read time). The defaults read the globals at CALL time, so vitest's
+ *  fake timers drive them too; a test may also swap these directly. */
+export const sessionClock = {
+  now: (): number => Date.now(),
+  schedule: (fn: () => void, ms: number): ReturnType<typeof setTimeout> => setTimeout(fn, ms),
+};
 /** A confirmed dispatch awaiting the transcript turn it opened (#498): the
  *  window its turn ran in, per the daemon's clock — `openAt` when Enter went
  *  out (the confirm time when the hook beat our Enter callback), `closedAt`
@@ -736,10 +741,22 @@ export class Session {
    *  (the runtime's clock, what the pending windows are matched against);
    *  `since` is when the daemon read it — bookkeeping only, never ownership. */
   #turn: { turnId: string; since: number; openedAt: number; attribution: TurnAttribution } | null = null;
-  // Last "thinking" value pushed to the relay. The pane poll (#pollThinking)
-  // reconciles this against the live pane so the app's status matches the
-  // window; the event-driven setters below give instant feedback in between.
-  #thinking = false;
+  // ── The phase machine (sessionPhase.ts) ────────────────────────────────────
+  // Thinking and its lease, the idle-poll counters, the hook turn edge, the
+  // hook-reported wait, the dialog and login banners, the trust latch: one
+  // explicit state, stepped by observations (#observe), acting through
+  // effects (#effect). The getters below are the old private fields' names
+  // for the code that reads them; nothing writes them but the machine.
+  #phase: PhaseState;
+  get #thinking(): boolean { return this.#phase.thinking.on; }
+  get #clearedByTieBreaker(): boolean { return this.#phase.thinking.clearedByTieBreaker; }
+  get #hooksLive(): boolean { return this.#phase.hooks.live; }
+  get #hooksLiveAt(): number { return this.#phase.hooks.since; }
+  get #hookTurn(): { open: boolean; at: number } | null { return this.#phase.hookTurn; }
+  get #needsInput(): Wait | null { return this.#phase.wait; }
+  get #dialog(): JoyDialogInfo | null { return this.#phase.dialog.current; }
+  get #login(): JoyLoginInfo | null { return this.#phase.login.current; }
+  get #trustHandled(): boolean { return this.#phase.trustHandled; }
   // Outstanding background tasks (run_in_background bash + background agents),
   // keyed by Claude's backgroundTaskId, derived from the transcript. Keeps the
   // session "working" with an N/M count until they finish — survives turn-end,
@@ -785,25 +802,11 @@ export class Session {
   // When the 401 login-needed note last fired (0 = never) — one per
   // 5-minute episode (see the api_error handler).
   #autoLoginAt = 0;
-  // Surfaced as joy__login so the app can show a login bar. #loginUrlPending
-  // debounces detection: a URL must persist across two polls before we push it.
-  #login: JoyLoginInfo | null = null;
-  #loginUrlPending: string | null = null;
+  // joy__login (the login bar) and joy__dialog (the "answer this in the
+  // terminal" banner) are the phase machine's: two-poll debounced, cleared
+  // the poll they are gone.
   /** Latch for the auto-Enter on "Login successful. Press Enter to continue". */
   #loginContinuePressed = false;
-  // Interactive CLI dialog (model picker / switch confirm / effort slider…)
-  // currently occupying the pane — surfaced as joy__dialog ("answer this in
-  // the terminal"). Same two-poll debounce contract as #login.
-  #dialog: JoyDialogInfo | null = null;
-  #dialogKey: string | null = null;
-  #dialogPendingKey: string | null = null;
-  // Distinct-dialog observation tracking (undebounced): key of the dialog
-  // currently on the pane and when it was FIRST sighted — drives the causal
-  // guard for dispatch confirmation, which must not wait for the debounce.
-  #dialogObservedKey: string | null = null;
-  /** The current dialog sighting has had its auto-answer keys sent (once). */
-  #dialogAnswered = false;
-  #dialogFirstSeenAt = 0;
   // Consecutive #pollEnd passes where ONLY a pane dialog vouched for liveness
   // (no live pid, no running markers) — bounded grace, see #pollEnd.
   /** Consecutive #pollEnd passes with a dead pid and no child under the pane shell — pane text alone keeps the session alive for at most 12 of these. */
@@ -845,14 +848,6 @@ export class Session {
   // only 529/overload signal since api_error transcript entries disappeared.
   #paneRetryKey: string | null = null;
   #turn5xxStatus: number | null = null;
-  // Has THIS turn produced assistant output yet? The thinking lease exists for
-  // one failure — a long PRE-OUTPUT think, where a broken pane matcher read
-  // idle six seconds into a minutes-long turn — and once output has appeared,
-  // that failure is no longer possible for this turn. Without this, a turn
-  // whose Stop hook never arrived stayed "working" until the FULL 170s lease
-  // expired before the idle tie-breaker was even allowed to look, so a session
-  // that had plainly finished sat blue for minutes (#647).
-  #turnProducedOutput = false;
   /** When output last landed, any turn. Read by the nucleus lane's stall clock. */
   #lastOutputAt: number | null = null;
   #lastUserText: string | null = null;
@@ -887,7 +882,6 @@ export class Session {
   // The most recent `!cmd` command, captured from <bash-input> so it can head
   // the bash-output card.
   #pendingBashCmd?: string;
-  #trustHandled = false;
 
   // ── Hook authority (spike Wave F, candidate A, step one) ───────────────────
   // True once ANY hook event from THIS session's claude process reached the
@@ -900,8 +894,7 @@ export class Session {
   // the durable fallback for every edge. The pane remains the ONLY source for
   // what hooks cannot see: draft text, dialogs, the login form, the shells
   // footer (docs/review-campaign-2026-09-claude-runtime-spike.md §3 A).
-  #hooksLive = false;
-  #hooksLiveAt = 0;
+  // (#hooksLive / #hooksLiveAt: the phase machine's `hooks`.)
   /** The per-launch identity (see SessionInit.hookLaunchId) — THE ingress
    *  fence: a hook event that does not echo it is another process's (the
    *  retired predecessor under this route id, whose conversation id a
@@ -927,22 +920,15 @@ export class Session {
   /** Hook-reported waiting-for-input: a permission prompt (PermissionRequest /
    *  Notification permission_prompt), an elicitation, agent_needs_input. Not
    *  idle_prompt — that is plain idleness, not a question. */
-  #needsInput: { kind: string; tool?: string; since: number; agent?: string } | null = null;
-  /** `since` of the needs-input episode a "permission" push already went out
-   *  for — one push per episode, whichever hook opened it. */
-  #needsInputPushedFor = 0;
-  /** First poll at which a hook-reported permission wait was NOT on the pane
-   *  (0 = seen on the last poll, or nothing to track). The pane tie-breaker
-   *  clears the wait only after the dialog has been ABSENT this long — not
-   *  after the wait is merely old (#reconcileDialog). */
-  #needsInputAbsentSince = 0;
+  // (#needsInput: the phase machine's `wait`, with its one-push-per-episode
+  //  and continuous-absence staleness rules.)
   /** The hook-reported TURN edge — the runtime's own turn state, separate from
    *  the transcript's #turn bookkeeping (which stays open until the tailer
    *  reaches turn_duration). null until a hook has said either way. With
    *  hooks live the dispatch/clear gates and busy() consume THIS (see
    *  #turnRunning / #hookSaysIdle); the transcript's #turn is then output-
    *  drain bookkeeping, and the pane's generating footer a safety check only. */
-  #hookTurn: { open: boolean; at: number } | null = null;
+  // (#hookTurn: the phase machine's.)
   /** The dispatches the runtime took whose transcript turns have not opened
    *  yet (#498), oldest first: the confirmation (a hook's UserPromptSubmit,
    *  the transcript's user echo) lands BEFORE Claude's first assistant entry
@@ -1095,6 +1081,7 @@ export class Session {
     this.effort = init.effort;
     this.flags = init.flags;
     this.status = init.status;
+    this.#phase = createPhaseState(init.status);
     this.startedAt = init.startedAt;
     this.lastActiveAt = Date.now();
     this.pid = init.pid;
@@ -1282,12 +1269,8 @@ export class Session {
     if (this.status === "ended" || this.status === "active" || this.#trustHandled) return;
     const pane = this.#tmux.captureCached(this.tmuxWindow);
     if (pane.ok && /Yes, I trust this folder|Is this a project you (created|trust)/i.test(pane.out)) {
-      const keys = trustPromptKeys(pane.out);
-      if (keys) {
-        void this.#tmux.key(this.tmuxWindow, ...keys); // fire-and-forget (sync watcher)
-        this.#trustHandled = true;
-        return;
-      }
+      this.#observe({ type: "trust_prompt", at: sessionClock.now(), keys: trustPromptKeys(pane.out) });
+      if (this.#trustHandled) return;
       // Prompt text matched but the menu hasn't painted its options yet — keep
       // polling rather than guessing at a selection.
     }
@@ -1429,6 +1412,7 @@ export class Session {
     this.#tailer = null;
     this.#closeOpenTools(); // before the relay detaches below — don't strand tool spinners
     this.#turn = null;
+    this.#observe({ type: "transcript_turn", at: sessionClock.now(), open: false });
     if (this.#retry?.timer) clearTimeout(this.#retry.timer);
     this.#retry = null;
     if (this.#tasksPushTimer) { clearTimeout(this.#tasksPushTimer); this.#tasksPushTimer = null; }
@@ -1436,15 +1420,13 @@ export class Session {
     this.#turn5xxStatus = null;
     if (this.#dispatchTimer) { clearTimeout(this.#dispatchTimer); this.#dispatchTimer = null; }
     if (this.#hookSessionEndTimer) { clearTimeout(this.#hookSessionEndTimer); this.#hookSessionEndTimer = null; }
-    this.#needsInput = null;
+    // The machine ends: the wait is over and the dialog banner is cleared on
+    // BOTH end paths while the relay is still attached — the pane poll stops
+    // at status==='ended', so a teardown racing the 3s reconcile would
+    // otherwise pin ACTION NEEDED on a detached session forever.
+    this.#observe({ type: "ended", at: sessionClock.now(), reason });
     this.#clearDirtyRecheck();
     this.#clearCompacting(); // every end path — a kill mid-compaction leaked the 10-min backstop timer
-    // Clear the dialog banner on BOTH end paths while the relay is still
-    // attached: #pollThinking stops at status==='ended', so a teardown racing
-    // the 3s reconcile (e.g. process_exited right after the dialog resolved)
-    // would otherwise pin ACTION NEEDED on a detached session forever.
-    if (this.#dialog) { this.#dialog = null; this.#dialogKey = null; }
-    void this.#relay?.updateDialog(null);
     this.#clearSubmitTimer();
     this.#cancelSteerSubmit();
     // A dispatch mid-flight ends with the process: its verdict is unknown to
@@ -1727,7 +1709,7 @@ export class Session {
             if (!e.ok) { reject(new Error("steer: submit Enter failed")); return; }
             if (cmd.mirrorToRelay) this.#relay?.send(encodeUserMessage(text));
             this.#setThinking(true);
-            this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(text);
+            this.#observe({ type: "lease", at: sessionClock.now(), ms: thinkingLeaseMs(text) });
             resolve(true);
           } catch (e) { reject(e as Error); }
         }, ENTER_SUBMIT_DELAY_MS);
@@ -2395,7 +2377,7 @@ export class Session {
   /** Delivery confirmed by a post-submit interactive DIALOG (not by echo):
    *  slash commands like /model open one and may resolve via Esc with NO echo
    *  ever — waiting on the echo would requeue a consumed command. Called from
-   *  #reconcileDialog on dialog appearance (~6s: two debounce polls) and from
+   *  the phase machine on dialog appearance (its first sighting) and from
    *  the timeout as a backstop. Slash-only by design: a plain message cannot
    *  open a dialog, and confirming one here would be silent message loss. */
   #confirmDispatchOnDialog(dialogSince: number): void {
@@ -2511,7 +2493,7 @@ export class Session {
     // window would eventually requeue an already-consumed command and resume
     // would re-type it (double execution; gpt-5.6-sol review finding 1).
     // Confirm and move on: the drain gate's ready-prompt check holds any
-    // queued messages until the dialog resolves, and #reconcileDialog kicks
+    // queued messages until the dialog resolves, and the phase machine kicks
     // the drain when it clears.
     if (pane.ok && dialogFromPane(pane.out) != null) {
       if (inflight.text.trimStart().startsWith("/")) {
@@ -2595,21 +2577,14 @@ export class Session {
    *  AFTER the transcript's open turn began? Then #turn is bookkeeping for
    *  output still being tailed (its turn_duration entry lags), not a running
    *  turn — busy() and the drain gate must not wait on it. */
-  #turnClosedByHook(): boolean {
-    const h = this.#hookTurn;
-    return this.#hooksLive && h !== null && !h.open && (this.#turn === null || h.at >= this.#turn.since);
-  }
+  #turnClosedByHook(): boolean { return phaseTurnClosedByHook(this.#phase); }
   /** The runtime turn as the authority sees it: the transcript's turn unless a
    *  later hook closed it (hooks live). */
-  #turnRunning(): boolean {
-    return this.#turn !== null && !this.#turnClosedByHook();
-  }
+  #turnRunning(): boolean { return phaseTurnRunning(this.#phase); }
   /** Hooks are live and the last hook turn edge says IDLE — the pane's
    *  generating footer is then a stale frame, not a dispatch veto (the box and
    *  dialog checks still apply). */
-  #hookSaysIdle(): boolean {
-    return this.#hooksLive && this.#hookTurn !== null && !this.#hookTurn.open;
-  }
+  #hookSaysIdle(): boolean { return phaseHookSaysIdle(this.#phase); }
   /** Does the transcript own the turn-TERMINAL edge an entry stamped
    *  `entryTimeMs` reports (turn_duration / stop_hook_summary / end_turn /
    *  the interrupt marker)? Without hooks: yes, within the tail window. With
@@ -2622,12 +2597,36 @@ export class Session {
    *  that turn's opening: the current turn ending before its Stop lands (the
    *  fast path; the net for a lost Stop). An entry stamped at or before the
    *  hook turn's opening describes an older turn. */
-  #transcriptOwnsTerminal(entryTimeMs: number): boolean {
-    if (entryTimeMs < this.#tailBoundAt - 60_000) return false;
-    if (!this.#hooksLive) return true;
-    const h = this.#hookTurn;
-    if (h === null) return true;
-    return h.open && entryTimeMs > h.at;
+  #transcriptOwnsTerminal(entryTimeMs: number): boolean { return phaseTranscriptOwnsTerminal(this.#phase, entryTimeMs, this.#tailBoundAt); }
+
+  /** The session's phase, from the explicit machine (sessionPhase.ts). The
+   *  dispatch pipeline's own state (a typed-but-unconfirmed message, a
+   *  pending Enter) is passed in — the machine does not model it. */
+  phase(): Phase {
+    return phaseOf(this.#phase, { dispatching: !!(this.#dispatchInFlight || this.#submitTimer) });
+  }
+
+  /** Feed the phase machine one observation and perform what it hands back. */
+  #observe(obs: Observation): void {
+    const { state, effects } = stepPhase(this.#phase, obs);
+    this.#phase = state;
+    for (const e of effects) this.#effect(e);
+  }
+  #effect(e: Effect): void {
+    switch (e.type) {
+      case "set_thinking": this.#pushThinking(e.on); return;
+      case "publish_dialog": void this.#relay?.updateDialog(e.dialog); return;
+      case "publish_login": void this.#relay?.updateLogin(e.login); return;
+      case "auto_answer":
+        this.#dlog(`dialog "${e.title}" auto-answered with ${e.keys.join("+")}`);
+        void this.#tmux.key(this.tmuxWindow, ...e.keys);
+        return;
+      case "answer_trust": void this.#tmux.key(this.tmuxWindow, ...e.keys); return; // fire-and-forget (sync watcher)
+      case "confirm_dispatch_on_dialog": this.#confirmDispatchOnDialog(e.at); return;
+      case "drain": this.#maybeDrainQueue(); return;
+      case "notify_permission": this.#relay?.notify("permission"); return;
+      case "log": process.stderr.write(`[hook] ${this.id} ${e.line}\n`); return;
+    }
   }
 
   /**
@@ -2789,7 +2788,7 @@ export class Session {
     const esc = await this.#tmux.key(this.tmuxWindow, "Escape");
     if (!esc.ok) return { kind: "failed", error: esc.error ?? "tmux send-keys failed" }; // the agent was NOT interrupted (#8)
     this.#setThinking(false);
-    this.#needsInput = null; // Escape dismisses a permission prompt too
+    this.#observe({ type: "escape", at: sessionClock.now() }); // Escape dismisses a permission prompt too
     // Interrupting mid-tool means Claude won't write that tool's result — close any
     // open tools so their cards don't spin forever.
     this.#closeOpenTools();
@@ -2809,6 +2808,7 @@ export class Session {
       this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn.turnId, time: Date.now() }));
       this.#turnUsage = null;
       this.#turn = null;
+      this.#observe({ type: "transcript_turn", at: sessionClock.now(), open: false });
     }
     // The Escape landed: whatever was executing is over — the coordinator
     // confirms the cancel on this (the transcript's interrupt marker follows).
@@ -3013,13 +3013,16 @@ export class Session {
       const opened = !this.#turn;
       const turnId = this.#turn?.turnId ?? crypto.randomUUID();
       if (opened) {
-        this.#turn = { turnId, since: Date.now(), openedAt: timeMs, attribution: "foreign" }; // a note is nobody's dispatch
+        const openedNow = sessionClock.now();
+        this.#turn = { turnId, since: openedNow, openedAt: timeMs, attribution: "foreign" }; // a note is nobody's dispatch
+        this.#observe({ type: "transcript_turn", at: openedNow, open: true });
         this.#relay.send(encodeTurnStart({ turn: turnId, time: timeMs }));
       }
       this.#relay.send(encodeTextEvent(text, { turn: turnId, time: timeMs }));
       if (opened) {
         this.#relay.send(encodeTurnEnd("completed", { turn: turnId, time: timeMs }));
         this.#turn = null;
+        this.#observe({ type: "transcript_turn", at: sessionClock.now(), open: false });
       }
       // Note receipt (staged by #shouldEmitNote) rides the note's LAST row.
       if (this.#nextNoteReceipt && this.relaySessionId) {
@@ -3334,7 +3337,7 @@ export class Session {
       // the relay turn stayed open with the user's next messages queued
       // behind it (fny 47457b0f, 2026-09-04: /clear at 10:12:51 completed
       // at 10:15:44).
-      this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(opts.text);
+      this.#observe({ type: "lease", at: sessionClock.now(), ms: thinkingLeaseMs(opts.text) });
     }, ENTER_SUBMIT_DELAY_MS);
   }
 
@@ -3609,30 +3612,23 @@ export class Session {
   /** Single funnel for the app's "thinking" status — tracks the last value and
    *  pushes it to the relay. Lifecycle transitions (send/end_turn/abort) call
    *  this directly; the pane poll change-gates itself before calling. */
-  /** Trusted-positive thinking lease (codex review finding 7): after a
-   *  hook/echo-confirmed submit, the PANE POLL may not clear thinking — a
-   *  broken spinner matcher cleared it ~6s into a long pre-output think,
-   *  releasing held drafts early. Only trusted negative edges (Stop hook,
-   *  turn-end/error, abort, Notification) or lease expiry clear it; every
-   *  accepted clear voids the lease. Sized just under the app's 3-min TTL. */
-  #thinkingLeaseUntil = 0;
-
-  /** The last clear came from the pane tie-breaker (not a hook, not the
-   *  transcript). Output arriving in the still-open turn undoes it. */
-  #clearedByTieBreaker = false;
-
+  /** A TRUSTED thinking edge (a dispatch, the transcript, an abort): the
+   *  machine records it and this pushes it. The lease (codex review finding
+   *  7 — the PANE POLL may not clear thinking after a hook/echo-confirmed
+   *  submit; a broken spinner matcher cleared it ~6s into a long pre-output
+   *  think) and the tie-breaker latch live in the machine: every accepted
+   *  clear voids the lease there. Machine-made changes (a pane read, a
+   *  hook, a dialog) arrive as set_thinking effects and push the same way. */
   #setThinking(thinking: boolean): void {
-    if (thinking) this.#clearedByTieBreaker = false;
-    // The flag only means anything while thinking is true, so clearing is the
-    // one place it can be reset without hunting every turn-close path (#647).
-    if (!thinking) this.#turnProducedOutput = false;
-    if (!thinking) this.#thinkingLeaseUntil = 0; // any accepted clear ends the lease
+    this.#observe({ type: "thinking", at: sessionClock.now(), on: thinking });
+    this.#pushThinking(thinking);
+  }
+  #pushThinking(thinking: boolean): void {
     // A turn that closes — however it closes — is not stalled. The lane
     // clears the flag on its own exit too; this covers a close it never saw.
     // Optional call: the session tests attach relay fakes that predate the
     // key, and a missing publisher must not break the idle edge itself.
     if (!thinking) void this.#relay?.updateStalled?.(null);
-    this.#thinking = thinking;
     this.#relay?.setThinking(thinking);
   }
 
@@ -3882,7 +3878,7 @@ export class Session {
         }
         process.stderr.write(`[hook] ${this.id} SessionEnd reason=${reason} — confirming exit in ${HOOK_SESSION_END_GRACE_MS}ms\n`);
         this.#hookSessionEnd = { reason, at: Date.now() };
-        this.#needsInput = null;
+        this.#observe({ type: "hook_session_edge", at: sessionClock.now(), edge: "end" });
         this.#armHookSessionEnd();
         return { ok: true };
       }
@@ -3895,7 +3891,7 @@ export class Session {
         const tp = str("transcript_path");
         process.stderr.write(`[hook] ${this.id} SessionStart sid=${sid ?? "?"} source=${str("source") ?? "?"}\n`);
         if (str("source") === "startup") this.#authFailure = null; // a fresh process starts with whatever creds it has
-        this.#needsInput = null;
+        this.#observe({ type: "hook_session_edge", at: sessionClock.now(), edge: "start" });
         // STAGED binding (review finding 4, built per 5.6-sol audit #6): the
         // hook proposes {sid, path}; transcript ACTIVITY on that exact path
         // confirms it (see the starting-activation block) — persisting a sid
@@ -3948,14 +3944,11 @@ export class Session {
         // shows at turn start" gap), and a text match against the in-flight
         // dispatch confirms delivery outright — no echo-timeout heuristics,
         // no confirm-on-foreign-turn races.
-        this.#setThinking(true);
-        this.#needsInput = null;
-        this.#hookTurn = { open: true, at: Date.now() };
         const prompt = str("prompt");
-        // Trusted edge — the pane can't clear it. See takesThinkingLease for
-        // why a slash command is exempt.
-        this.#thinkingLeaseUntil = Date.now() + thinkingLeaseMs(prompt);
-        this.#idlePolls = 0;
+        // Thinking on, the wait over, the hook turn open, and the prompt's
+        // lease — a trusted edge the pane can't clear. See takesThinkingLease
+        // for why a slash command is exempt.
+        this.#observe({ type: "hook_prompt", at: sessionClock.now(), leaseMs: thinkingLeaseMs(prompt) });
         const flat = prompt ? flattenForMatch(prompt) : null;
         if (flat && this.#dispatchInFlight && flat === flattenForMatch(this.#dispatchInFlight.text)) {
           process.stderr.write(`[hook] ${this.id} UserPromptSubmit confirmed dispatch\n`);
@@ -3995,10 +3988,7 @@ export class Session {
         // transcript's #turn may stay open until the tailer reaches
         // turn_duration and the pane may still paint the generating footer —
         // neither holds the queue or busy() once this has fired (#turnRunning).
-        this.#setThinking(false);
-        this.#needsInput = null;
-        this.#hookTurn = { open: false, at: Date.now() };
-        this.#idlePolls = 0;
+        this.#observe({ type: "hook_stop", at: sessionClock.now() });
         this.#lastConfirmedRef = null;
         this.#closePendingTurnWindows(); // the turn that ran is over — its transcript entries end here (#498)
         this.#driver.emit({ kind: "turn_ended", status: "completed" });
@@ -4016,10 +4006,7 @@ export class Session {
         // turn_duration (or the next Stop) drains as before.
         const errorType = str("error_type") ?? "unknown";
         process.stderr.write(`[hook] ${this.id} StopFailure error_type=${errorType}\n`);
-        this.#setThinking(false);
-        this.#needsInput = null;
-        this.#hookTurn = { open: false, at: Date.now() };
-        this.#idlePolls = 0;
+        this.#observe({ type: "hook_stop", at: sessionClock.now() });
         this.#lastConfirmedRef = null;
         this.#closePendingTurnWindows();
         this.#driver.emit({ kind: "turn_ended", status: "failed", detail: errorType });
@@ -4043,14 +4030,7 @@ export class Session {
         // about the main agent — a background agent finishing a Read used to
         // erase the main Bash permission wait and revive a turn Stop had
         // already closed — so it only answers a wait of ITS OWN actor.
-        if (actor) {
-          if (this.#needsInput?.agent === actor) this.#needsInput = null;
-          return { ok: true };
-        }
-        if (!this.#needsInput?.agent) this.#needsInput = null;
-        this.#idlePolls = 0;
-        this.#hookTurn = { open: true, at: Date.now() };
-        if (this.#turn && !this.#thinking) this.#setThinking(true);
+        this.#observe({ type: "hook_tool_done", at: sessionClock.now(), agent: actor });
         return { ok: true };
       }
       case "PermissionRequest": {
@@ -4063,10 +4043,7 @@ export class Session {
         // A subagent's prompt is a real wait for the human too, tagged with
         // its actor so only that actor's tool completion answers it; it does
         // not touch the main agent's thinking.
-        if (!actor) this.#setThinking(false);
-        this.#idlePolls = 0;
-        if (this.#needsInput?.kind !== "permission") this.#needsInput = { kind: "permission", tool, since: Date.now(), ...(actor ? { agent: actor } : {}) };
-        else if (tool && (this.#needsInput.agent ?? null) === actor) this.#needsInput.tool = tool;
+        this.#observe({ type: "hook_permission", at: sessionClock.now(), tool, agent: actor });
         return { ok: true };
       }
       case "SubagentStop": {
@@ -4085,10 +4062,8 @@ export class Session {
         //   elicitation_* / agent_needs_input → needs_input of that kind
         const nt = str("notification_type") ?? "";
         process.stderr.write(`[hook] ${this.id} Notification${nt ? ` (${nt})` : ""}: ${(str("message") ?? "").slice(0, 80)}\n`);
-        this.#setThinking(false);
-        this.#idlePolls = 0;
+        this.#observe({ type: "hook_notification", at: sessionClock.now(), kind: nt });
         if (nt === "idle_prompt") {
-          this.#thinkingLeaseUntil = 0; this.#hookTurn = { open: false, at: Date.now() };
           // 60 s at the prompt: a command still recorded as running had no
           // terminal we saw — idle is the verdict (#463).
           this.#driver.emit({ kind: "idle" });
@@ -4096,14 +4071,6 @@ export class Session {
         if (nt === "auth_success") {
           if (this.#authFailure) process.stderr.write(`[hook] ${this.id} auth episode closed by auth_success\n`);
           this.#authFailure = null;
-        } else if (nt === "permission_prompt") {
-          if (this.#needsInput?.kind !== "permission") this.#needsInput = { kind: "permission", since: Date.now() };
-          if (this.#needsInputPushedFor !== this.#needsInput.since) {
-            this.#needsInputPushedFor = this.#needsInput.since;
-            this.#relay?.notify("permission");
-          }
-        } else if (nt === "agent_needs_input" || nt.startsWith("elicitation")) {
-          if (this.#needsInput?.kind !== nt) this.#needsInput = { kind: nt, since: Date.now() };
         }
         return { ok: true };
       }
@@ -4115,8 +4082,7 @@ export class Session {
   /** Flip the hook-authority latch on the first hook event (see #hooksLive). */
   #markHooksLive(event: string): void {
     if (this.#hooksLive) return;
-    this.#hooksLive = true;
-    this.#hooksLiveAt = Date.now();
+    this.#observe({ type: "hooks_live", at: sessionClock.now() });
     process.stderr.write(`[hook] ${this.id} hooks live (first event: ${event}) — hook authority on, pane demoted to tie-breaker\n`);
   }
 
@@ -4226,73 +4192,17 @@ export class Session {
     if (this.#relay) {
       const pane = this.#tmux.captureCached(this.tmuxWindow);
       if (pane.ok) {
-        const generating = paneShowsGenerating(pane.out);
-        // HOOK AUTHORITY: once this process has reported a hook, the pane's
-        // "esc to interrupt" read never SETS thinking (UserPromptSubmit /
-        // PostToolUse / the submit callback / the transcript own that edge —
-        // a quoted hint in a reply can no longer pin a session busy, #479)
-        // and CLEARS it only as a tie-breaker: a long run of idle reads past
-        // the lease, for the single edge hooks cannot report (Stop does not
-        // fire on a terminal Esc; the transcript's interrupt marker normally
-        // closes that one first).
-        if (this.#hooksLive) {
-          // An idle read is an EMPTY ready box with nothing generating — not
-          // merely "no spinner seen". A box holding typed-ahead text, a
-          // dialog, or a frame the parser cannot place is ambiguous and
-          // counts for nothing either way (fny 4477e540, 2026-09-09).
-          const idleBox = !generating && paneShowsReadyPrompt(pane.out) && (paneInputText(pane.out) ?? "").trim() === "";
-          if (generating || !this.#thinking) {
-            this.#idlePolls = 0;
-          } else if (idleBox) {
-            this.#idlePolls += 1;
-            if (this.#idlePolls >= HOOK_TIEBREAK_IDLE_POLLS) {
-              this.#idlePolls = 0;
-              // Past the lease, OR this turn already produced output — the
-              // lease guards the pre-output window and nothing else (#647).
-              if (Date.now() >= this.#thinkingLeaseUntil || this.#turnProducedOutput) {
-                process.stderr.write(`[hook] ${this.id} pane idle for ${HOOK_TIEBREAK_IDLE_POLLS} polls with no Stop — tie-breaker clears thinking\n`);
-                this.#clearedByTieBreaker = true;
-                this.#setThinking(false);
-              }
-            }
-          }
-        }
-        // HOOK-LESS (the pane is the ground truth). Hysteresis: SET on one
-        // generating read (thinking should appear fast), CLEAR only after two
-        // consecutive idle reads. A single stale/mid-repaint capture at a turn
-        // boundary used to flip thinking off and back on — the app status
-        // flapping between the busy state and "online" (2026-07-04). Real turn
-        // ends still clear instantly via the transcript event setters; this is
-        // only the poll's own clear path.
-        else if (generating) {
-          this.#idlePolls = 0;
-          if (!this.#thinking) this.#setThinking(true);
-        } else if (this.#thinking) {
-          this.#idlePolls += 1;
-          if (this.#idlePolls >= 2) {
-            this.#idlePolls = 0;
-            // Lease check: the pane's "not generating" read cannot override a
-            // trusted submit — a matcher broken by a TUI change looked idle
-            // ~6s into a minutes-long pre-output think. Trusted negative
-            // edges bypass this (they clear via #setThinking directly).
-            if (Date.now() >= this.#thinkingLeaseUntil) this.#setThinking(false);
-          }
-        } else {
-          this.#idlePolls = 0;
-        }
-        this.#reconcileLogin(pane.out);
-        this.#reconcileDialog(pane.out);
+        this.#reconcileLoginContinue(pane.out);
+        // Thinking (with hook authority, the lease and the tie-breaker), the
+        // login bar and the dialog banner are the phase machine's rules;
+        // the frame is read once and handed over (sessionPhase.ts).
+        this.#observe({ type: "pane", at: sessionClock.now(), read: readPane(pane.out) });
         this.#reconcileRetryBanner(pane.out);
       }
     }
-    setTimeout(() => this.#pollThinking(), 3000);
+    sessionClock.schedule(() => this.#pollThinking(), 3000);
   }
 
-  /** Surface an interactive CLI dialog (model picker / switch confirm / effort
-   *  slider…) as joy__dialog so the app can say "answer this in the terminal".
-   *  Same debounce contract as #reconcileLogin: two consecutive sightings of
-   *  the same dialog before pushing (a mid-repaint capture can transiently
-   *  look like anything), cleared as soon as the pane no longer shows it. */
   /** Surface the CLI's own API-retry spinner (`✻ 529 Overloaded · Retrying in
    *  18s · attempt N/M`) as the joy__retry banner. Claude Code stopped writing
    *  api_error transcript entries for these retries, so without this the app
@@ -4313,102 +4223,12 @@ export class Session {
     }
   }
 
-  #reconcileDialog(paneText: string): void {
-    const dialog = dialogFromPane(paneText);
-    if (dialog) {
-      // A dialog on screen is PROOF Claude is waiting for input, not
-      // generating — the strongest negative edge the pane can give. Without
-      // this the submit's thinking lease (170s, pane may not clear it) kept
-      // busy() true for a command that never generates anything, the lane's
-      // Phase C never saw an idle poll, and the relay turn stayed open with
-      // every later message queued behind it. `/effort high` wedged a session
-      // for a full minute — rescued only by Claude's 60s "waiting for your
-      // input" hook — and `/model` did the same (2026-09-03).
-      this.#thinkingLeaseUntil = 0;
-      if (this.#thinking) this.#setThinking(false);
-      this.#needsInputAbsentSince = 0; // the wait is visibly still on
-    }
-    if (!dialog) {
-      // Tie-breaker for a hook-reported permission wait: the human answered in
-      // the terminal and no later hook cleared it (an answer of "no" with no
-      // further tool or Stop for a while). Measured as the time the dialog has
-      // been continuously ABSENT — not the wait's age: one contradictory
-      // (mid-repaint) capture 12s into a still-visible prompt used to erase
-      // the wait for good, even when the dialog was back on the next poll.
-      if (this.#needsInput?.kind === "permission") {
-        if (!this.#needsInputAbsentSince) this.#needsInputAbsentSince = Date.now();
-        else if (Date.now() - this.#needsInputAbsentSince > HOOK_NEEDS_INPUT_STALE_MS) {
-          this.#needsInput = null;
-          this.#needsInputAbsentSince = 0;
-        }
-      } else this.#needsInputAbsentSince = 0;
-      this.#dialogPendingKey = null;
-      this.#dialogObservedKey = null;
-      if (this.#dialog) {
-        this.#dialog = null;
-        this.#dialogKey = null;
-        // Dialog resolved → the ready prompt is (about to be) back. Kick the
-        // drain so anything queued behind the dialog goes out promptly instead
-        // of waiting for the next natural trigger.
-        this.#maybeDrainQueue();
-      }
-      // Assert the clear EVERY poll, not just on the transition: updateDialog
-      // dedupes against server-ACKED metadata, so a clear whose write failed
-      // retries next poll instead of being lost (finding 6 — the old
-      // transition-only clear was fire-and-forget).
-      void this.#relay?.updateDialog(null);
-      return;
-    }
-    const key = `${dialog.title ?? ""} ${dialog.options.join(" ")}`;
-    // FIRST-sighting timestamp per distinct dialog — the causal input for
-    // dispatch confirmation. Confirmation must run on the FIRST sighting
-    // (verify round 3): a dialog opened and Esc-closed inside one poll gap
-    // would otherwise escape both the debounced publish AND the timeout
-    // backstop, requeuing a consumed command. Only the BANNER stays debounced.
-    if (this.#dialogObservedKey !== key) {
-      this.#dialogObservedKey = key;
-      this.#dialogFirstSeenAt = Date.now();
-      this.#dialogAnswered = false;
-    }
-    this.#confirmDispatchOnDialog(this.#dialogFirstSeenAt);
-    // Auto-answer (see dialogAutoAnswerKeys): once per sighting of a given
-    // dialog. The keys are fire-and-forget; if the dialog is still painted on
-    // the next poll it simply publishes as before, so a lost keystroke
-    // degrades to the old "answer this in the terminal" banner, never a loop.
-    if (!this.#dialogAnswered) {
-      const keys = dialogAutoAnswerKeys(dialog);
-      if (keys) {
-        this.#dialogAnswered = true;
-        this.#dlog(`dialog "${dialog.title ?? ""}" auto-answered with ${keys.join("+")}`);
-        void this.#tmux.key(this.tmuxWindow, ...keys);
-        return;
-      }
-    }
-    if (!this.#dialog && this.#dialogPendingKey !== key) {
-      this.#dialogPendingKey = key; // first sighting — publish on next poll
-      return;
-    }
-    this.#dialogPendingKey = null;
-    if (!this.#dialog || this.#dialogKey !== key) {
-      this.#dialog = { title: dialog.title, options: dialog.options, since: this.#dialogFirstSeenAt };
-      this.#dialogKey = key;
-    }
-    // Same convergence contract as the clear: assert every poll, dedupe on ack.
-    void this.#relay?.updateDialog(this.#dialog);
-  }
-
-  // Consecutive not-generating poll reads while thinking (see #pollThinking).
-  #idlePolls = 0;
-
-  /** Surface an interactive auth/login URL the CLI is showing (e.g. Claude
-   *  Code's /login OAuth box) as joy__login, so the app can show a login bar.
-   *  Debounced: a URL must be seen on two consecutive polls before we push it
-   *  (guards against a transient link in normal output), and it's cleared as
-   *  soon as the prompt is gone. */
-  #reconcileLogin(paneText: string): void {
-    // Auto-continue the post-login success screen: one Enter, no decision to
-    // make. Latched until the screen is gone so a slow redraw can't double-
-    // press into the restored conversation.
+  /** Auto-continue the post-login success screen: one Enter, no decision to
+   *  make. Latched until the screen is gone so a slow redraw can't double-
+   *  press into the restored conversation. (The login BAR — the URL seen on
+   *  two consecutive polls, cleared the poll it is gone — is the phase
+   *  machine's; see stepPaneLogin.) */
+  #reconcileLoginContinue(paneText: string): void {
     if (loginContinueFromPane(paneText)) {
       if (!this.#loginContinuePressed) {
         this.#loginContinuePressed = true;
@@ -4417,30 +4237,6 @@ export class Session {
     } else {
       this.#loginContinuePressed = false;
     }
-    const login = loginFromPane(paneText);
-    if (!login) {
-      this.#loginUrlPending = null;
-      if (this.#login) {
-        this.#login = null;
-        void this.#relay?.updateLogin(null);
-      }
-      return;
-    }
-    // Debounce only the FIRST appearance of a URL (guards a transient link);
-    // once we're showing the bar, error changes on the same URL push immediately.
-    if (!this.#login && this.#loginUrlPending !== login.url) {
-      this.#loginUrlPending = login.url; // first sighting — confirm next poll
-      return;
-    }
-    const sameUrl = this.#login?.url === login.url;
-    if (sameUrl && (this.#login?.error ?? undefined) === login.error) return; // no change
-    this.#loginUrlPending = null;
-    this.#login = {
-      url: login.url,
-      since: sameUrl ? this.#login!.since : Date.now(),
-      ...(login.error ? { error: login.error } : {}),
-    };
-    void this.#relay?.updateLogin(this.#login);
   }
 
   /** /login-code: type a pasted auth code straight into the CLI's "paste code"
@@ -4504,6 +4300,7 @@ export class Session {
         if (!entrySid) process.stderr.write(`[hook] ${this.id} confirmed staged sid ${sid} by transcript activity (entries carry no sessionId)\n`);
         this.claudeSessionId = sid;
         this.status = "active";
+        this.#observe({ type: "activated", at: sessionClock.now() });
         this.lastActiveAt = Date.now();
         // Persist the window→conversation binding so a daemon restart's recover()
         // can re-attach the RIGHT transcript instead of the newest-mtime one.
@@ -4615,6 +4412,7 @@ export class Session {
       this.#turnUsage = null;
       this.#closeOpenTools(entryTimeMs); // a tool abandoned by an errored turn shouldn't spin forever
       this.#turn = null;
+      this.#observe({ type: "transcript_turn", at: sessionClock.now(), open: false });
       // The transcript's turn end: the authority without hooks; with them a
       // lagging duplicate of the Stop edge that must not touch the NEXT
       // hook-owned run — its thinking, its confirmation ref, its command
@@ -4731,6 +4529,7 @@ export class Session {
           this.#relay?.send(encodeTurnEnd("cancelled", { turn: this.#turn.turnId, time: entryTimeMs }));
           this.#turnUsage = null;
           this.#turn = null;
+          this.#observe({ type: "transcript_turn", at: sessionClock.now(), open: false });
         }
         // The runtime's own record of the interrupt (a terminal Esc that no
         // hook reports): whatever was executing is cancelled — unless the
@@ -4979,18 +4778,15 @@ export class Session {
       // Output has appeared for this turn. Recorded AFTER the turn-open block
       // below would reset it — the first output entry is what OPENS the turn,
       // so setting it earlier means opening the turn wipes it (#647).
-      if (this.#relay && blocks.length > 0) { this.#turnProducedOutput = true; this.#lastOutputAt = Date.now(); }
-      // Output landing inside a turn the tie-breaker declared idle proves that
-      // read wrong: the pane looked idle to the parser, not to Claude. Only a
-      // tie-breaker clear is undone here — a Stop-driven clear is authoritative.
-      if (this.#relay && blocks.length > 0 && this.#turn && this.#hooksLive && !this.#thinking && this.#clearedByTieBreaker) {
-        process.stderr.write(`[hook] ${this.id} output inside the open turn after a tie-breaker clear — thinking re-asserted\n`);
-        this.#setThinking(true);
-      }
+      // (Output landing inside a turn the tie-breaker declared idle proves
+      // that read wrong — the machine re-asserts thinking; see `output`.)
+      if (this.#relay && blocks.length > 0) { this.#lastOutputAt = Date.now(); this.#observe({ type: "output", at: sessionClock.now() }); }
       if (this.#relay && blocks.length > 0) {
         // Ensure a turn is open; send turn-start on the first assistant entry per turn
         if (!this.#turn) {
-          this.#turn = { turnId: crypto.randomUUID(), since: Date.now(), openedAt: entryTimeMs, attribution: "unclaimed" };
+          const openedNow = sessionClock.now();
+          this.#turn = { turnId: crypto.randomUUID(), since: openedNow, openedAt: entryTimeMs, attribution: "unclaimed" };
+          this.#observe({ type: "transcript_turn", at: openedNow, open: true });
           this.#turnUsage = null; // fresh turn → reset usage accumulator
           this.#relay.send(encodeTurnStart({ turn: this.#turn.turnId, time: entryTimeMs }));
           // A fresh turn starting is the proof a dispatched queue message
@@ -5066,6 +4862,7 @@ export class Session {
           this.#pushContextUsage();
           this.#turnUsage = null;
           this.#turn = null;
+          this.#observe({ type: "transcript_turn", at: sessionClock.now(), open: false });
           this.#deps.broadcast("stop", { session_id: sid });
           // The transcript's terminal, unless a hook owns this edge and it
           // describes an older turn than the one running (#transcriptOwnsTerminal).
@@ -5307,6 +5104,19 @@ export function retryFromPane(text: string): { status: number; attempt: number; 
  * press (2026-09-11). Same confirm, same guard, one more title.
  */
 const AUTO_CONFIRM_TITLE = /^(Switch model|Change effort level)\?/i;
+
+/** One pane frame as the phase machine reads it (sessionPhase.ts): every
+ *  parser runs once, here, and the machine decides on the result. */
+export function readPane(text: string): PaneRead {
+  const dialog = dialogFromPane(text);
+  return {
+    generating: paneShowsGenerating(text),
+    readyPrompt: paneShowsReadyPrompt(text),
+    inputEmpty: (paneInputText(text) ?? "").trim() === "",
+    dialog: dialog ? { title: dialog.title, options: dialog.options, autoAnswer: dialogAutoAnswerKeys(dialog) } : null,
+    login: loginFromPane(text),
+  };
+}
 
 export function dialogAutoAnswerKeys(dialog: PaneDialog): string[] | null {
   const title = (dialog.title ?? "").trim();
