@@ -13,7 +13,8 @@
           "x": 22,
           "y": 22
         },
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "dragDropEnabled": false
       }
     ]
   }
