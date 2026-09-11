@@ -9,7 +9,8 @@
  *        page already in flight, so it cannot put a forward-only cursor back.
  */
 import { describe, it, expect } from 'vitest';
-import { FetchGeneration, StaleFetchError, cursorsNeedReanchor, isSendAcknowledged } from './sessionSyncGuards';
+import { StaleFetchError, cursorsNeedReanchor, isSendAcknowledged } from './sessionSyncGuards';
+import { SessionLogs } from './sessionLogMachine';
 import { buildSyncSubset } from './syncMembers.testutil';
 
 const defer = <T,>() => {
@@ -19,11 +20,21 @@ const defer = <T,>() => {
 };
 const quiet = { log: () => { } };
 
+/** Anchor a session's log the way an initial page would, so forward and
+ *  older fetches have cursors to move (the machine ignores pages for a
+ *  cold log). */
+const anchor = (x: any, id: string, lastSeq = 0, oldestSeq: number | null = null) => {
+    const g = x.logs.gen(id);
+    x.logs.send(id, { type: 'fetch_started', gen: g, viewing: true });
+    x.logs.send(id, { type: 'page_applied', gen: g, page: 'anchor', minSeq: oldestSeq, maxSeq: lastSeq, scannedTo: oldestSeq, hasMore: oldestSeq !== null });
+};
+
+
 function baseInstance(Sync: ReturnType<typeof buildSyncSubset>) {
     const x = new Sync();
-    for (const p of ['sessionLastSeq', 'sessionOldestSeq', 'unopenableStrikes', 'unopenableGaps', 'messagesSync', 'sessionMessageLocks', 'recentSendAt']) x[p] = new Map();
+    for (const p of ['unopenableStrikes', 'unopenableGaps', 'messagesSync', 'sessionMessageLocks', 'recentSendAt']) x[p] = new Map();
     x.replayUnopenableGap = async () => { }; // #128 gap replay has its own test file
-    x.fetchGen = new FetchGeneration();
+    x.logs = new SessionLogs();
     x.applyLifecycle = () => { };
     x.v2ReadCtx = () => ({ key: new Uint8Array(32) });
     return x;
@@ -49,9 +60,9 @@ describe('applyFetchedMessages (#407)', () => {
     it('a reset during decryption commits neither the message nor the thinking state', async () => {
         const { x, applied, sessionsApplied } = build();
         const decrypt = defer<unknown[]>();
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         const p = x.applyFetchedMessages('A', { decryptMessages: () => decrypt.promise }, [{ seq: 101 }], gen, { deriveThinking: true });
-        x.fetchGen.bump('A'); // resetSessionChatState while the page is being decrypted
+        x.logs.reset('A'); // resetSessionChatState while the page is being decrypted
         decrypt.resolve([{ id: 'old', createdAt: 1, seq: 101, content: 'TURN_START' }]);
         await expect(p).rejects.toBeInstanceOf(StaleFetchError);
         expect(applied).toEqual([]);
@@ -60,7 +71,7 @@ describe('applyFetchedMessages (#407)', () => {
 
     it('an unreset fetch still commits the message and the thinking flag', async () => {
         const { x, applied, sessionsApplied } = build();
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         await x.applyFetchedMessages('A', { decryptMessages: async (m: unknown[]) => m.map((r: any) => ({ ...r, id: 'm' + r.seq, content: 'TURN_START' })) }, [{ seq: 101 }], gen, { deriveThinking: true });
         expect(applied).toHaveLength(1);
         expect(sessionsApplied).toEqual([expect.objectContaining({ id: 'A', thinking: true })]);
@@ -83,15 +94,14 @@ describe('forgetSession (#406)', () => {
             forgetSessionFiles: (id: string) => { filesForgotten.push(id); }, // E4: the session's file/diff cache goes with it
         });
         const x = baseInstance(Sync);
-        x.sessionLastSeq.set('A', 100);
-        x.sessionOldestSeq.set('A', 50);
+        anchor(x, 'A', 100, 50);
         x.applyFetchedMessages = async (_s: string, _e: unknown, m: unknown[]) => { rows.push(...m); };
         return { x, page, rows, removed: () => removed, filesForgotten };
     }
 
     it('a forward page in flight when the session is removed restores nothing', async () => {
         const { x, page, rows, removed, filesForgotten } = build();
-        const gen = x.fetchGen.current('A'); // the generation the in-flight fetch captured (0)
+        const gen = x.logs.gen('A'); // the generation the in-flight fetch captured (0)
         const p = x.fetchForwardSince('A', {}, 100, gen);
         x.forgetSession('A');
         page.resolve({ messages: [{ seq: 101 }], lifecycle: [], cursor: 101, hasMore: false });
@@ -99,20 +109,21 @@ describe('forgetSession (#406)', () => {
         expect(removed()).toBe(true);
         expect(filesForgotten).toEqual(['A']); // the session's file/diff cache goes with it (E4)
         expect(rows).toEqual([]);
-        expect(x.sessionLastSeq.has('A')).toBe(false);
-        expect(x.sessionOldestSeq.has('A')).toBe(false);
+        expect(x.logs.lastSeq('A')).toBeUndefined();
+        expect(x.logs.oldestSeq('A')).toBeUndefined();
     });
 
     it('the invalidation token is unique: a later forget cannot revalidate an older fetch', () => {
         const { x } = build();
-        const captured = x.fetchGen.current('A');
+        const captured = x.logs.gen('A');
         x.forgetSession('A');
-        expect(x.fetchGen.isStale('A', captured)).toBe(true);
-        // A re-listed session bumps again on its next removal; the first
-        // capture never becomes valid again.
-        x.fetchGen.bump('A');
+        expect(x.logs.isStale('A', captured)).toBe(true);
+        // A re-listed session gets a fresh log from the same counter; the
+        // first capture never becomes valid again, and nor does a second
+        // removal make it so.
+        x.logs.gen('A');
         x.forgetSession('A');
-        expect(x.fetchGen.isStale('A', captured)).toBe(true);
+        expect(x.logs.isStale('A', captured)).toBe(true);
     });
 });
 
@@ -149,38 +160,38 @@ describe('sendMessage re-anchor (#12)', () => {
         const x = baseInstance(Sync);
         x.encryption = { getSessionEncryption: () => ({}), openV2SessionKey: () => null };
         x.sessionsSync = { awaitQueue: async () => { } };
-        x.sessionLastSeq.set('A', 100); // cursors outlived the evicted store
+        anchor(x, 'A', 100, 50); // cursors outlived the evicted store
         x.applyFetchedMessages = async (_s: string, _e: unknown, m: unknown[]) => { rows.push(...m); };
         return { x, page, rows, applied, state };
     }
 
     it('a forward page pending when the send re-anchors cannot restore a forward-only cursor', async () => {
         const { x, page, rows, applied } = build();
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         const pending = x.fetchForwardSince('A', {}, 100, gen); // already in flight from seq 100
 
         const res = await x.sendMessage('A', 'hello');
         expect(res.ok).toBe(true);
         expect(applied).toHaveLength(1); // the optimistic row re-created the store
-        expect(x.sessionLastSeq.has('A')).toBe(false);
+        expect(x.logs.lastSeq('A')).toBeUndefined();
 
         page.resolve({ messages: [{ seq: 101 }], lifecycle: [], cursor: 101, hasMore: false });
         await expect(pending).rejects.toBeInstanceOf(StaleFetchError);
         expect(rows).toEqual([]);
         // Still un-anchored: the next fetch takes the cold-open path (both cursors).
-        expect(x.sessionLastSeq.has('A')).toBe(false);
-        expect(x.sessionOldestSeq.has('A')).toBe(false);
+        expect(x.logs.lastSeq('A')).toBeUndefined();
+        expect(x.logs.oldestSeq('A')).toBeUndefined();
     });
 
     it('a send into a loaded store leaves the pending forward page valid', async () => {
         const { x, page, rows, state } = build();
         state.sessionMessages.A = { reducerState: { localIds: new Map() }, messagesMap: {} }; // store present
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         const pending = x.fetchForwardSince('A', {}, 100, gen);
         expect((await x.sendMessage('A', 'hello')).ok).toBe(true);
         page.resolve({ messages: [{ seq: 101 }], lifecycle: [], cursor: 101, hasMore: false });
         await pending;
         expect(rows).toHaveLength(1);
-        expect(x.sessionLastSeq.get('A')).toBe(101);
+        expect(x.logs.lastSeq('A')).toBe(101);
     });
 });

@@ -12,7 +12,10 @@ import * as Crypto from 'expo-crypto';
 import { sealV2Content, sealV2Bytes, openV2Bytes, type V2Attachment } from './v2/crypto';
 import { v2, v2SendCiphertext, v2UploadAttachment, v2FetchAttachment, v2CancelTurn, connectV2Stream, V2ApiError, getV2BaseUrl } from './v2/api';
 import { staleSessionIds } from './sessionListReconcile';
-import { FetchGeneration, StaleFetchError, isSendAcknowledged, cursorsNeedReanchor } from './sessionSyncGuards';
+import { StaleFetchError, isSendAcknowledged, cursorsNeedReanchor } from './sessionSyncGuards';
+import { initialSettingsSync, nextSettingsSync, pendingOf, type SettingsSyncState, type SettingsSyncEvent } from './settingsSyncMachine';
+import { initialLiveDriver, nextLiveDriver, indicatorOf, type LiveDriverState, type LiveDriverEvent } from './liveDriverMachine';
+import { SessionLogs, fetchBranchOf } from './sessionLogMachine';
 import { v2LinkForRow } from './sessionLink';
 import { readFileBytes } from '@/utils/readFileBytes';
 import { encodeHex } from '@/encryption/hex';
@@ -123,16 +126,11 @@ class Sync {
     getMasterSecret(): Uint8Array | null { return this.masterSecret; }
     private sessionsSync: InvalidateSync;
     private messagesSync = new Map<string, InvalidateSync>();
-    private sessionLastSeq = new Map<string, number>();
-    // Lowest seq value we have already fetched and applied for a session.
-    // Used as the cursor for backward pagination when the user scrolls up to
-    // load older history. Set after the initial latest-page fetch and
-    // advanced downward by loadOlderMessages.
-    private sessionOldestSeq = new Map<string, number>();
+    /** Per-session message log state: both cursors, whether the store holds
+     *  the rows, and the fetch generation — one machine (sessionLogMachine.ts)
+     *  where three maps used to disagree (#407, #406, #12, #4, #2). */
+    private logs = new SessionLogs();
     private sessionMessageLocks = new Map<string, AsyncLock>();
-    // Per-session fetch generation: a reset bumps it and every fetch that
-    // started earlier refuses to commit (#407). See sessionSyncGuards.ts.
-    private fetchGen = new FetchGeneration();
     private machineDataKeys = new Map<string, Uint8Array>(); // Store machine data encryption keys internally
     private settingsSync: InvalidateSync;
     private profileSync: InvalidateSync;
@@ -141,7 +139,10 @@ class Sync {
     /** Cancels the engine's own push-token requests at shutdown (logout). */
     private pushLifetime = new AbortController();
     private nativeUpdateSync: InvalidateSync;
-    private pendingSettings: Partial<Settings> = loadPendingSettings();
+    /** Settings sync state (settingsSyncMachine.ts). The persisted pending
+     *  deltas are its projection: what a restart must still push. */
+    private settingsState: SettingsSyncState = initialSettingsSync(loadPendingSettings());
+    private settingsRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor() {
         this.sessionsSync = new InvalidateSync(this.fetchSessions);
@@ -240,7 +241,7 @@ class Sync {
     probeViewedSessionStaleness = async () => {
         const sessionId = storage.getState().currentViewingSessionId;
         if (!sessionId) return;
-        const cursor = this.sessionLastSeq.get(sessionId);
+        const cursor = this.logs.lastSeq(sessionId);
         if (cursor === undefined) return; // initial load not done — it fetches anyway
         const ctx = this.v2ReadCtx(sessionId);
         if (!ctx) return;
@@ -265,9 +266,7 @@ class Sync {
         // restore only the forward cursor — one message, no backward anchor,
         // and the history never reloaded (#407). The stale fetch now aborts
         // at its commit point; the invalidate below re-runs from scratch.
-        this.fetchGen.bump(sessionId);
-        this.sessionLastSeq.delete(sessionId);
-        this.sessionOldestSeq.delete(sessionId);
+        this.logs.reset(sessionId);
         storage.getState().resetSessionMessages(sessionId);
         this.getMessagesSync(sessionId).invalidate();
     }
@@ -389,11 +388,15 @@ class Sync {
     // Sessions ride the relay's SSE doorbell (content-free pokes) with a poll
     // fallback, both of which simply invalidate the message sync — so the
     // fetch/reducer pipeline is the same whichever signal fires.
+    //
+    // The driver's state is a machine (liveDriverMachine.ts): every stream
+    // attempt is a generation, and an event from a retired one is ignored —
+    // so a stop/start inside the reconnect window can no longer let the old
+    // timer open a SECOND stream over the new driver's (#408). What lives
+    // here is only the world the state names: the open stream, the timers.
+    private live: LiveDriverState = initialLiveDriver();
     private v2StreamStop: (() => void) | null = null;
     private v2PollTimer: ReturnType<typeof setInterval> | null = null;
-    // The SSE reconnect delay. Cleared by stopV2Live: a stop/start inside the
-    // 3s window used to let the old timer open a SECOND stream over the new
-    // driver's, orphaning one of them (#408).
     private v2ReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     private v2SessionIdIndex(): Map<string, string> {
@@ -405,8 +408,27 @@ class Sync {
         return idx;
     }
 
-    startV2Live() {
-        if (this.v2StreamStop || this.v2PollTimer) return;
+    /** One step: apply the event, make the world match, publish the indicator. */
+    private liveSend(ev: LiveDriverEvent) {
+        const prev = this.live;
+        this.live = nextLiveDriver(prev, ev);
+        const c = this.live.conn;
+        if (c !== prev.conn) {
+            if (this.v2ReconnectTimer) { clearTimeout(this.v2ReconnectTimer); this.v2ReconnectTimer = null; }
+            if (c.kind === 'stopped' || c.kind === 'connecting') { this.v2StreamStop?.(); this.v2StreamStop = null; }
+            if (c.kind === 'connecting') this.openV2Stream(c.gen);
+            if (c.kind === 'polling_reconnect') {
+                const gen = c.gen;
+                this.v2ReconnectTimer = setTimeout(() => {
+                    this.v2ReconnectTimer = null;
+                    this.liveSend({ type: 'retry_due', gen, now: Date.now() });
+                }, Math.max(0, c.retryAt - Date.now()));
+            }
+        }
+        this.publishIndicator();
+    }
+
+    private openV2Stream(gen: number) {
         const invalidateFor = (v2SessionId: string) => {
             const sid = this.v2SessionIdIndex().get(v2SessionId);
             if (sid) this.getMessagesSync(sid).invalidate();
@@ -415,36 +437,36 @@ class Sync {
         // streaming fetch body (res.body.getReader), which React Native does
         // not have — so on native it can never open, and reporting its state as
         // the app's left the phone pulsing "connecting" forever while data
-        // flowed perfectly through the poll below. The indicator now reports
-        // what actually carries data: a recent successful poll is 'connected',
-        // whichever transport delivered it.
-        const connect = () => {
-            this.v2ReconnectTimer = null;
-            if (this.v2LiveStopped || this.v2StreamStop) return; // stopped, or this driver already has a stream
-            try {
-                this.v2StreamStop = connectV2Stream({
-                    onHello: () => this.noteRelayReadOk(),
-                    onPoke: (v2SessionId) => {
-                        invalidateFor(v2SessionId);
-                        // A state poke may mean a card/presence change (bind,
-                        // title, joy__state, lease death) — refresh the LIST.
-                        this.sessionsSync.invalidate();
-                    },
-                    onEphemeral: (v2SessionId) => invalidateFor(v2SessionId),
-                    onClose: () => {
-                        this.v2StreamStop = null;
-                        if (this.v2LiveStopped) return;
-                        // Deliberately does NOT touch the indicator: on native
-                        // this fires on every attempt, and the poll is the real
-                        // connection. Retry quietly.
-                        if (this.v2ReconnectTimer) clearTimeout(this.v2ReconnectTimer);
-                        this.v2ReconnectTimer = setTimeout(connect, 3000);
-                    },
-                });
-            } catch { /* SSE unavailable — the poll carries it */ }
-        };
-        this.v2LiveStopped = false;
-        connect();
+        // flowed perfectly through the poll. The indicator reports what
+        // actually carries data (indicatorOf): a recent successful read is
+        // 'connected', whichever transport delivered it.
+        try {
+            this.v2StreamStop = connectV2Stream({
+                onHello: () => this.liveSend({ type: 'hello', gen, now: Date.now() }),
+                onPoke: (v2SessionId) => {
+                    invalidateFor(v2SessionId);
+                    // A state poke may mean a card/presence change (bind,
+                    // title, joy__state, lease death) — refresh the LIST.
+                    this.sessionsSync.invalidate();
+                },
+                onEphemeral: (v2SessionId) => invalidateFor(v2SessionId),
+                onClose: () => {
+                    // Only this generation's stream is ours to forget; a
+                    // retired stream's close must not drop a newer one.
+                    const cur = this.live.conn;
+                    if ((cur.kind === 'connecting' || cur.kind === 'streaming') && cur.gen === gen) this.v2StreamStop = null;
+                    this.liveSend({ type: 'close', gen, now: Date.now() });
+                },
+            });
+        } catch {
+            // SSE unavailable — the poll carries it; the machine backs off.
+            this.liveSend({ type: 'close', gen, now: Date.now() });
+        }
+    }
+
+    startV2Live() {
+        if (this.live.conn.kind !== 'stopped' || this.v2PollTimer) return;
+        this.liveSend({ type: 'start' });
         // Poll: the baseline everywhere, and the ONLY live channel on native.
         // Its own success/failure drives the connection indicator.
         this.v2PollTimer = setInterval(() => {
@@ -468,34 +490,29 @@ class Sync {
 
     /** What each relay row last decrypted to — see v2/cardMemo.ts. */
     private cardMemo = new CardMemo<Session['metadata'] | null>();
-    private v2LiveStopped = false;
-    /** Last time anything was successfully read from the relay — the honest
-     *  input to the connection indicator (see startV2Live). */
-    private lastRelayReadOkAt = 0;
 
     /** A read reached the relay: we are connected, whichever transport did it. */
     private noteRelayReadOk() {
-        this.lastRelayReadOkAt = Date.now();
-        if (storage.getState().socketStatus !== 'connected') {
-            storage.getState().setSocketStatus('connected');
-        }
+        this.liveSend({ type: 'read_ok', now: Date.now() });
     }
 
     /** A read failed. One failure is noise (a dropped request, a radio waking);
-     *  only report trouble once nothing has landed for several poll cycles. */
+     *  the indicator reports trouble only once nothing has landed for several
+     *  poll cycles (indicatorOf). 'connecting' never showed the banner, so a
+     *  phone that lost the network stayed banner-less while a cold start
+     *  flashed it (#11). */
     private noteRelayReadFailed() {
-        if (Date.now() - this.lastRelayReadOkAt < 3 * POLL_INTERVAL_MS) return;
-        // Three polls without a successful read = offline for the banner's
-        // purposes. 'connecting' never showed it, so a phone that lost the
-        // network stayed banner-less while a cold start flashed it (#11).
-        const st = storage.getState().socketStatus;
-        if (st === 'connected' || st === 'connecting') storage.getState().setSocketStatus('disconnected');
+        this.liveSend({ type: 'read_failed', now: Date.now() });
+    }
+
+    /** The one notion of connected, derived from the driver's state. */
+    private publishIndicator() {
+        const want = indicatorOf(this.live, Date.now(), POLL_INTERVAL_MS);
+        if (storage.getState().socketStatus !== want) storage.getState().setSocketStatus(want);
     }
 
     stopV2Live() {
-        this.v2LiveStopped = true;
-        if (this.v2ReconnectTimer) { clearTimeout(this.v2ReconnectTimer); this.v2ReconnectTimer = null; }
-        this.v2StreamStop?.(); this.v2StreamStop = null;
+        this.liveSend({ type: 'stop' });
         if (this.v2PollTimer) { clearInterval(this.v2PollTimer); this.v2PollTimer = null; }
     }
 
@@ -511,8 +528,7 @@ class Sync {
         this.pushLifetime.abort();
         this.masterSecret = null;
         this.machineDataKeys.clear();
-        this.sessionLastSeq.clear();
-        this.sessionOldestSeq.clear();
+        this.logs.clear();
         this.sessionMessageLocks.clear();
         this.messagesSync.clear();
         storage.getState().resetAccountData();
@@ -603,16 +619,16 @@ class Sync {
         // so the next fetch walked forward from the old cursor and the chat
         // showed only rows after it with hasMoreOlder stuck false (#12).
         // Drop the cursors so that fetch re-anchors like a cold open.
-        if (cursorsNeedReanchor(!!storage.getState().sessionMessages[sessionId], this.sessionLastSeq.has(sessionId))) {
+        if (cursorsNeedReanchor(!!storage.getState().sessionMessages[sessionId], this.logs.lastSeq(sessionId) !== undefined)) {
             log.log(`💬 sendMessage: store evicted for ${sessionId} — clearing cursors so the next fetch re-anchors (#12)`);
             // Clearing the cursors is not enough on its own: a forward page
             // already in flight from the old cursor used to land afterwards
             // and put the forward cursor back — without the backward anchor —
-            // so the recreated store was forward-only again. The bump makes
-            // that page stale at its commit point (same fence as #407).
-            this.fetchGen.bump(sessionId);
-            this.sessionLastSeq.delete(sessionId);
-            this.sessionOldestSeq.delete(sessionId);
+            // so the recreated store was forward-only again. `recreated`
+            // mints a fresh generation, so that page is stale at its commit
+            // point (same fence as #407).
+            this.logs.send(sessionId, { type: 'evicted' });
+            this.logs.recreated(sessionId);
         }
         storage.getState().applyMessages(sessionId, [{
             id: localId,
@@ -716,15 +732,15 @@ class Sync {
     private forgetSession(sessionId: string) {
         // Invalidate FIRST, with a generation that stays unique: a page in
         // flight for this session must find itself stale at its commit point
-        // and write nothing after the delete below. Deleting the counter
-        // (FetchGeneration.forget) reset it to the reusable default 0 — the
-        // very value an in-flight fetch had captured — so that page landed
-        // after the removal and restored the messages and cursor.
-        this.fetchGen.bump(sessionId);
+        // and write nothing after the delete below. The old per-session
+        // counter reset to the reusable default 0 on forget — the very value
+        // an in-flight fetch had captured — so that page landed after the
+        // removal and restored the messages and cursor. SessionLogs mints
+        // every generation from one counter, so a re-listed session can
+        // never revalidate an old token.
+        this.logs.forget(sessionId);
         this.messagesSync.get(sessionId)?.stop();
         this.messagesSync.delete(sessionId);
-        this.sessionLastSeq.delete(sessionId);
-        this.sessionOldestSeq.delete(sessionId);
         this.sessionMessageLocks.delete(sessionId);
         this.recentSendAt.delete(sessionId);
         this.unopenableStrikes.delete(sessionId);
@@ -775,12 +791,9 @@ class Sync {
 
     applySettings = (delta: Partial<Settings>) => {
         storage.getState().applySettingsLocal(delta);
-
-        // Save pending settings
-        this.pendingSettings = { ...this.pendingSettings, ...delta };
-        savePendingSettings(this.pendingSettings);
-
-        // Invalidate settings sync
+        // Recorded BEFORE the sync is asked to run: a delta that lands while
+        // a push is in flight rides into the next dirty state, never dropped.
+        this.settingsSend({ type: 'local_change', delta });
         this.settingsSync.invalidate();
 
         // Toggling mobile push on/off re-runs token (de)registration immediately.
@@ -794,13 +807,13 @@ class Sync {
     // settings — keys the user removed in the editor are actually dropped.
     // The raw object is run through settingsParse() so known fields keep their
     // defaults and any kept unknown/deprecated keys are preserved verbatim,
-    // while removed keys stay removed. pendingSettings is replaced wholesale so
-    // stale deltas can't re-introduce a removed key on the next sync push.
+    // while removed keys stay removed. The pending deltas are replaced
+    // wholesale (local_replace) so stale deltas can't re-introduce a removed
+    // key on the next sync push.
     replaceSettings = (raw: unknown) => {
         const parsed = settingsParse(raw);
         storage.getState().applySettingsRaw(parsed);
-        this.pendingSettings = { ...parsed } as Partial<Settings>;
-        savePendingSettings(this.pendingSettings);
+        this.settingsSend({ type: 'local_replace', settings: { ...parsed } as Partial<Settings> });
         this.settingsSync.invalidate();
     }
 
@@ -1037,9 +1050,27 @@ class Sync {
         log.log(`🖥️ fetchMachines completed - processed ${decryptedMachines.length} machines`);
     }
 
-    // Settings are device-local: joy-relay has no account-settings store, so
-    // "sync" just retires the pending delta — applySettingsLocal/applySettingsRaw
-    // already persisted the merged settings on this device.
+    /** One step of the settings machine; the persisted pending deltas are
+     *  its projection (what a restart must still push). */
+    private settingsSend(ev: SettingsSyncEvent): SettingsSyncState {
+        this.settingsState = nextSettingsSync(this.settingsState, ev);
+        savePendingSettings(pendingOf(this.settingsState));
+        return this.settingsState;
+    }
+
+    /** A failed push waits out its backoff, then the sync is asked to run
+     *  again. Bounded (settingsSyncMachine.failedBackoffMs), unlike the
+     *  InvalidateSync backoff a throw would have fallen into. */
+    private armSettingsRetry(s: SettingsSyncState) {
+        if (this.settingsRetryTimer) { clearTimeout(this.settingsRetryTimer); this.settingsRetryTimer = null; }
+        if (s.kind !== 'failed') return;
+        this.settingsRetryTimer = setTimeout(() => {
+            this.settingsRetryTimer = null;
+            if (this.settingsSend({ type: 'tick', now: Date.now() }).kind === 'dirty') this.settingsSync.invalidate();
+        }, Math.max(0, s.retryAt - Date.now()));
+        (this.settingsRetryTimer as { unref?: () => void }).unref?.();
+    }
+
     /**
      * Settings, both directions, against ONE sealed blob on the relay.
      *
@@ -1052,6 +1083,12 @@ class Sync {
      * is what makes two devices adding a pin each end with both pins rather
      * than whichever wrote last. The relay never sees any of it: the blob is
      * sealed with the account key, like machine metadata.
+     *
+     * The phases are the settings machine's (settingsSyncMachine.ts). It
+     * used to capture `pending` before the push and clear the field after —
+     * a toggle made during the await was dropped and stayed device-local
+     * until the next unrelated change. Now a change during a push becomes
+     * the next dirty state and is pushed right after.
      */
     private syncSettings = async () => {
         if (!this.credentials) return;
@@ -1059,28 +1096,45 @@ class Sync {
         const remote = await v2.accountSettings();
         await this.absorbRemoteSettings(remote.settings, remote.version);
 
-        const pending = this.pendingSettings;
-        if (Object.keys(pending).length === 0) return;
+        let s = this.settingsSend({ type: 'pull_ok', version: remote.version, now: Date.now() });
+        if (s.kind !== 'pushing') return; // nothing pending, or a failed push still backing off
 
         // The pull may have replaced the store with the relay's copy, so the
         // deltas this device has not yet pushed go back on top before we seal.
-        storage.getState().applySettingsLocal(pending);
-
-        try {
-            await this.pushSettings(storage.getState().settingsVersion ?? 0);
-        } catch (e) {
-            // Lost a race with another device. The relay hands back the
-            // winner's blob with the 409, so one merge and one retry settles
-            // it — no second fetch to discover what we lost to.
-            if (!(e instanceof V2ApiError) || e.status !== 409) throw e;
-            const body = e.body as { version?: number; settings?: string | null } | null;
-            await this.absorbRemoteSettings(body?.settings ?? null, body?.version ?? 0, { force: true });
-            storage.getState().applySettingsLocal(pending);
-            await this.pushSettings(body?.version ?? 0);
+        storage.getState().applySettingsLocal(s.pending);
+        let expectedVersion = storage.getState().settingsVersion ?? 0;
+        for (;;) {
+            try {
+                const version = await this.pushSettings(expectedVersion);
+                s = this.settingsSend({ type: 'push_ok', version });
+                break;
+            } catch (e) {
+                if (!(e instanceof V2ApiError) || e.status !== 409) {
+                    // Kept, backed off, retried by the machine's own timer —
+                    // not thrown: the deltas are safe in `failed`, and the
+                    // pull half of this run already succeeded.
+                    this.armSettingsRetry(this.settingsSend({ type: 'push_failed', now: Date.now() }));
+                    log.log(`⚙️ settings push failed, retrying later: ${String(e)}`);
+                    return;
+                }
+                // Lost a race with another device. The relay hands back the
+                // winner's blob with the 409, so one merge and one retry
+                // settles it — no second fetch to discover what we lost to.
+                // A SECOND loss parks the deltas (conflicted) for the next
+                // run rather than throwing.
+                const body = e.body as { version?: number; settings?: string | null } | null;
+                const winnerVersion = body?.version ?? 0;
+                await this.absorbRemoteSettings(body?.settings ?? null, winnerVersion, { force: true });
+                s = this.settingsSend({ type: 'push_conflict', winnerVersion });
+                if (s.kind !== 'pushing' && s.kind !== 'conflicted') return;
+                storage.getState().applySettingsLocal(s.pending);
+                if (s.kind === 'conflicted') return;
+                expectedVersion = winnerVersion;
+            }
         }
-
-        this.pendingSettings = {};
-        savePendingSettings(this.pendingSettings);
+        // A change landed while the push was in flight: push it now, not on
+        // the next poll.
+        if (s.kind === 'dirty') this.settingsSync.invalidate();
     }
 
     /** Open a sealed blob from the relay and adopt it, unless what we hold is
@@ -1104,6 +1158,7 @@ class Sync {
         // Record the version the relay assigned, so the next push is
         // conditional on the right one.
         storage.getState().applySettings(storage.getState().settings, saved.version);
+        return saved.version;
     }
 
     private fetchProfile = async () => {
@@ -1144,7 +1199,7 @@ class Sync {
             // a reset that lands while a page is in flight makes both stale
             // together (#407). The commit guards below throw StaleFetchError;
             // the reset's own invalidate re-runs this command from scratch.
-            const gen = this.fetchGen.current(sessionId);
+            const gen = this.logs.gen(sessionId);
             try {
                 await this.fetchMessagesLocked(sessionId, encryption, gen);
             } catch (e) {
@@ -1162,47 +1217,48 @@ class Sync {
         encryption: ReturnType<Encryption['getSessionEncryption']> & {},
         gen: number,
     ) => {
-        const knownLastSeq = this.sessionLastSeq.get(sessionId);
-        const isInitialLoad = knownLastSeq === undefined;
-        if (isInitialLoad) {
-            // Initial load. Pull only the most recent page so the user can
-            // start chatting immediately. Older history streams in lazily
-            // through loadOlderMessages() when the user scrolls up — and
-            // also through a background prefetch kicked off below, so the
-            // history fills in even when the user doesn't scroll.
-            //
-            // Previously this method walked forward from seq=0 until every
-            // page had been fetched and decrypted, which blocked the chat
-            // from displaying anything for sessions with thousands of
-            // messages. The user's reported pain point was "opening a long
-            // session feels frozen" — this is the fix.
-            await this.fetchInitialLatestPage(sessionId, encryption, gen);
-        } else if (!storage.getState().sessionMessages[sessionId]) {
-            // An evicted session that is not on screen stays evicted: re-
-            // anchoring it here on a background poll defeated the memory
-            // limit (#2). It re-anchors when it becomes visible.
-            if (storage.getState().currentViewingSessionId !== sessionId) return;
-            // Cursor survived but the message store was evicted
-            // (limitSessionMemory unload). Forward-replaying the gap would
-            // rebuild history we no longer even hold — re-anchor: refetch
-            // exactly like a cold open (newest page; older fills on scroll).
-            log.log(`💬 fetchMessages: store evicted for ${sessionId} — re-anchoring at latest page`);
-            this.sessionLastSeq.delete(sessionId);
-            this.sessionOldestSeq.delete(sessionId);
-            await this.fetchInitialLatestPage(sessionId, encryption, gen);
-        } else {
-            // Forward incremental sync. Used after reconnect, invalidate,
-            // or any subsequent visit. Pulls messages newer than what we
-            // already have — bounded by the re-anchor inside (a huge gap
-            // stops replaying and jumps to the newest page instead).
-            await this.fetchForwardSince(sessionId, encryption, knownLastSeq, gen);
+        // The log machine decides the branch (sessionLogMachine.ts): a cold
+        // session anchors at the newest page; an anchored one syncs forward;
+        // an evicted one re-anchors only when it is on screen — re-anchoring
+        // it on a background poll defeated the memory limit (#2).
+        if (!storage.getState().sessionMessages[sessionId]) this.logs.send(sessionId, { type: 'evicted' });
+        const viewing = storage.getState().currentViewingSessionId === sessionId;
+        const branch = fetchBranchOf(this.logs.send(sessionId, { type: 'fetch_started', gen, viewing }));
+        if (branch === 'skip') return;
+        try {
+            if (branch === 'forward') {
+                // Forward incremental sync. Used after reconnect, invalidate,
+                // or any subsequent visit. Pulls messages newer than what we
+                // already have — bounded by the re-anchor inside (a huge gap
+                // stops replaying and jumps to the newest page instead).
+                await this.fetchForwardSince(sessionId, encryption, this.logs.lastSeq(sessionId) ?? 0, gen);
+            } else {
+                // Initial load (or a re-anchor after the store was evicted:
+                // forward-replaying the gap would rebuild history we no longer
+                // even hold). Pull only the most recent page so the user can
+                // start chatting immediately. Older history streams in lazily
+                // through loadOlderMessages() when the user scrolls up — and
+                // also through a background prefetch kicked off below, so the
+                // history fills in even when the user doesn't scroll.
+                //
+                // Previously this method walked forward from seq=0 until every
+                // page had been fetched and decrypted, which blocked the chat
+                // from displaying anything for sessions with thousands of
+                // messages. The user's reported pain point was "opening a long
+                // session feels frozen" — this is the fix.
+                if (branch === 'reanchor') log.log(`💬 fetchMessages: store evicted for ${sessionId} — re-anchoring at latest page`);
+                await this.fetchInitialLatestPage(sessionId, encryption, gen);
+            }
+        } catch (e) {
+            this.logs.send(sessionId, { type: 'fetch_failed', gen });
+            throw e;
         }
 
         this.assertFresh(sessionId, gen);
         storage.getState().applyMessagesLoaded(sessionId);
         log.log(`💬 fetchMessages completed for session ${sessionId}`);
 
-        if (isInitialLoad) {
+        if (branch !== 'forward') {
             // Fire-and-forget. The chat is interactive at this point;
             // background pages stream in without blocking either the
             // surrounding lock or the UI. loadOlderMessages takes the
@@ -1215,7 +1271,7 @@ class Sync {
     /** Commit guard for the message pipeline: throws once a reset has
      *  superseded the fetch that captured `gen` (#407). */
     private assertFresh(sessionId: string, gen: number) {
-        if (this.fetchGen.isStale(sessionId, gen)) throw new StaleFetchError(sessionId);
+        if (this.logs.isStale(sessionId, gen)) throw new StaleFetchError(sessionId);
     }
 
     private prefetchOlderMessagesInBackground = async (sessionId: string) => {
@@ -1245,7 +1301,7 @@ class Sync {
             if (!this.encryption.getSessionEncryption(sessionId)) {
                 return;
             }
-            const oldestSeq = this.sessionOldestSeq.get(sessionId);
+            const oldestSeq = this.logs.oldestSeq(sessionId);
             if (oldestSeq === undefined || oldestSeq <= 1) {
                 return;
             }
@@ -1385,18 +1441,17 @@ class Sync {
         }
 
         // Anchor both ends so future incremental forward sync resumes from
-        // maxSeq, and loadOlderMessages can page backward from minSeq.
-        this.sessionLastSeq.set(sessionId, maxSeq);
-        // The backward anchor is the last bound the loop scanned to, even when
+        // maxSeq, and loadOlderMessages can page backward from minSeq. The
+        // backward anchor is the last bound the loop scanned to, even when
         // every page was non-renderable: with no anchor, loadOlderMessages
         // never asked again although the relay said more existed (#4).
-        const scanned = beforeSeq !== SEQ_BACKWARD_INITIAL_SENTINEL ? beforeSeq : Number.POSITIVE_INFINITY;
-        const oldest = Math.min(scanned, anyMessages ? minSeq : Number.POSITIVE_INFINITY);
-        if (Number.isFinite(oldest)) {
-            this.sessionOldestSeq.set(sessionId, oldest);
-        }
+        const anchored = this.logs.send(sessionId, {
+            type: 'page_applied', gen, page: 'anchor',
+            minSeq: anyMessages ? minSeq : null, maxSeq: anyMessages ? maxSeq : null,
+            scannedTo: beforeSeq !== SEQ_BACKWARD_INITIAL_SENTINEL ? beforeSeq : null, hasMore,
+        });
         storage.getState().applyOlderMessagesPagination(sessionId, {
-            hasMore
+            hasMore: anchored.kind === 'anchored' ? anchored.hasMoreOlder : hasMore,
         });
     }
 
@@ -1466,7 +1521,7 @@ class Sync {
             this.assertFresh(sessionId, gen);
             this.applyLifecycle(sessionId, data.lifecycle);
 
-            this.sessionLastSeq.set(sessionId, maxSeq);
+            this.logs.send(sessionId, { type: 'page_applied', gen, page: 'forward', minSeq: null, maxSeq, scannedTo: null, hasMore: !!data.hasMore });
 
             if (!data.hasMore) break;
             if (maxSeq === afterSeq) {
@@ -1571,17 +1626,16 @@ class Sync {
      * older-fetch is already in flight for this session.
      */
     loadOlderMessages = async (sessionId: string) => {
-        const oldestSeq = this.sessionOldestSeq.get(sessionId);
-        if (oldestSeq === undefined || oldestSeq <= 1) {
-            return;
-        }
-        const sessionMessages = storage.getState().sessionMessages[sessionId];
-        if (!sessionMessages || sessionMessages.isLoadingOlder || !sessionMessages.hasMoreOlder) {
-            return;
-        }
+        // The store gone means the log is evicted, whatever it last thought.
+        if (!storage.getState().sessionMessages[sessionId]) { this.logs.send(sessionId, { type: 'evicted' }); return; }
+        // The machine refuses at seq 1, with no anchor, with nothing more,
+        // or while an older page is already in flight.
+        const gen = this.logs.gen(sessionId);
+        if (this.logs.send(sessionId, { type: 'older_started', gen }).kind !== 'loading_older') return;
 
         storage.getState().applyOlderMessagesLoading(sessionId, true);
         const lock = this.getSessionMessageLock(sessionId);
+        let settled = false;
         try {
             await lock.inLock(async () => {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
@@ -1589,19 +1643,18 @@ class Sync {
                     log.log(`💬 loadOlderMessages: encryption not ready for ${sessionId}`);
                     return;
                 }
-                // Re-read the cursor inside the lock. A concurrent live
-                // refetch or reload could have changed it.
-                const beforeSeq = this.sessionOldestSeq.get(sessionId);
-                if (beforeSeq === undefined || beforeSeq <= 1) {
+                // Re-read the anchor inside the lock. A concurrent live
+                // refetch or reload could have changed it (or reset the log).
+                const beforeSeq = this.logs.oldestSeq(sessionId);
+                if (beforeSeq === undefined || beforeSeq <= 1 || this.logs.isStale(sessionId, gen)) {
                     return;
                 }
                 const v2ctxOlder = this.v2ReadCtx(sessionId);
                 if (!v2ctxOlder) throw new Error(`Failed to load older messages for ${sessionId}: no v2 link`);
-                const gen = this.fetchGen.current(sessionId);
                 const data = await v2MessagesBefore({ ...v2ctxOlder, beforeSeq });
                 // A reset during this page: commit nothing (#407). The reset's
                 // invalidate re-anchors; the scroll-up path will ask again.
-                if (this.fetchGen.isStale(sessionId, gen)) return;
+                if (this.logs.isStale(sessionId, gen)) return;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
                 try {
@@ -1610,21 +1663,24 @@ class Sync {
                     if (e instanceof StaleFetchError) return; // reset while decrypting (#407)
                     throw e;
                 }
-                if (this.fetchGen.isStale(sessionId, gen)) return;
+                if (this.logs.isStale(sessionId, gen)) return;
 
-                let minSeq = beforeSeq;
+                let rowsMin: number | null = null;
                 for (const message of messages) {
-                    if (message.seq < minSeq) minSeq = message.seq;
+                    if (rowsMin === null || message.seq < rowsMin) rowsMin = message.seq;
                 }
                 // The reader's cursor is the oldest seq it scanned, which may be
                 // below every returned row — or the only progress when a page
                 // held nothing renderable. Without it, 20 pages of lifecycle
-                // rows left older history unreachable by scrolling (#4).
-                if (typeof data.cursor === 'number' && data.cursor < minSeq) minSeq = data.cursor;
-                const advanced = minSeq < beforeSeq;
-                if (advanced) {
-                    this.sessionOldestSeq.set(sessionId, minSeq);
-                }
+                // rows left older history unreachable by scrolling (#4). The
+                // machine takes the lowest of the two and ends hasMoreOlder
+                // when neither moved.
+                const after = this.logs.send(sessionId, {
+                    type: 'page_applied', gen, page: 'older', minSeq: rowsMin, maxSeq: null,
+                    scannedTo: typeof data.cursor === 'number' ? data.cursor : null, hasMore: !!data.hasMore,
+                });
+                settled = true;
+                const reached = after.kind === 'anchored' && after.oldestSeq !== null ? after.oldestSeq : beforeSeq;
                 // Sealed rows this older page could not open: the scroll-up
                 // path advances past them (a retry loop here would stall the
                 // scroll), but they are a recoverable gap like any other,
@@ -1636,15 +1692,18 @@ class Sync {
                 // so a re-stamped envelope reaches the next sync.
                 if ((data.unopenable ?? 0) > 0) {
                     this.sessionsSync.invalidate(); // fire only: awaiting queue idleness can starve under the 2.5s poll (Astra, a979cfef)
-                    const runs = Sync.sealedSpans(data, minSeq - 1, beforeSeq - 1);
+                    const runs = Sync.sealedSpans(data, reached - 1, beforeSeq - 1);
                     this.recordUnopenableGaps(sessionId, runs, v2ctxOlder.key, Sync.seqsOf(messages));
                     log.log(`💬 loadOlderMessages: ${data.unopenable} row(s) in ${sessionId} unopenable — ${Sync.describeSpans(runs)} kept as a recoverable gap (#128)`);
                 }
                 storage.getState().applyOlderMessagesPagination(sessionId, {
-                    hasMore: !!data.hasMore && advanced
+                    hasMore: after.kind === 'anchored' ? after.hasMoreOlder : false,
                 });
             });
         } finally {
+            // An early return or a throw: the page was not applied, the log
+            // goes back to anchored (a no-op if a reset moved it on).
+            if (!settled) this.logs.send(sessionId, { type: 'older_failed', gen });
             storage.getState().applyOlderMessagesLoading(sessionId, false);
         }
     }

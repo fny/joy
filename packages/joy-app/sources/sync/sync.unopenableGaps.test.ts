@@ -15,7 +15,8 @@
  * several suites at once; the point is one pass vs one pass per run.
  */
 import { describe, it, expect } from 'vitest';
-import { FetchGeneration, StaleFetchError } from './sessionSyncGuards';
+import { StaleFetchError } from './sessionSyncGuards';
+import { SessionLogs } from './sessionLogMachine';
 import { buildSyncSubset } from './syncMembers.testutil';
 import type { UnopenableGapRange } from './typesMessage';
 
@@ -23,6 +24,18 @@ const PERF_BUDGET_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 200);
 const PERF_BUDGET_SEEDED_MS = Number(process.env.JOY_PERF_BUDGET_MS ?? 300);
 
 const quiet = { log: () => { } };
+
+/** Anchor a session's log the way an initial page would, so forward and
+ *  older fetches have cursors to move (the machine ignores pages for a
+ *  cold log). */
+const anchor = (x: any, id: string, lastSeq = 0, oldestSeq: number | null = null) => {
+    const g = x.logs.gen(id);
+    x.logs.send(id, { type: 'fetch_started', gen: g, viewing: true });
+    x.logs.send(id, { type: 'page_applied', gen: g, page: 'anchor', minSeq: oldestSeq, maxSeq: lastSeq, scannedTo: oldestSeq, hasMore: oldestSeq !== null });
+};
+/** Move only the backward anchor (what loadOlderMessages pages from). */
+const setOldest = (x: any, id: string, oldestSeq: number) => anchor(x, id, x.logs.lastSeq(id) ?? 0, oldestSeq);
+
 const K1 = new Uint8Array(32).fill(1);
 const K2 = new Uint8Array(32).fill(2);
 const K3 = new Uint8Array(32).fill(3);
@@ -64,8 +77,9 @@ function build(
         storage: { getState: () => state },
     });
     const x = new Sync();
-    for (const p of ['sessionLastSeq', 'sessionOldestSeq', 'unopenableStrikes', 'unopenableGaps']) x[p] = new Map();
-    x.fetchGen = new FetchGeneration();
+    for (const p of ['unopenableStrikes', 'unopenableGaps']) x[p] = new Map();
+    x.logs = new SessionLogs();
+    anchor(x, 'A'); // forward pages move the cursor only on an anchored log
     x.applyLifecycle = () => { };
     x.sessionsSync = { invalidate: () => { invalidated++; } };
     let key: Uint8Array | null = K1;
@@ -74,7 +88,7 @@ function build(
     x.getSessionMessageLock = () => ({ inLock: (fn: () => Promise<void>) => fn() });
     x.applyFetchedMessages = async (_s: string, _e: unknown, m: { seq: number; id: string }[]) => { applied.push(...m); state.sessionMessages.A.messages.push(...m); };
     const gaps = (): Range[] => x.unopenableGaps.get('A') ?? [];
-    const sync = (fromSeq: number) => x.fetchForwardSince('A', {}, fromSeq, x.fetchGen.current('A'));
+    const sync = (fromSeq: number) => x.fetchForwardSince('A', {}, fromSeq, x.logs.gen('A'));
     return { x, calls, olderCalls, applied, published, gaps, sync, invalidated: () => invalidated, setKey: (k: Uint8Array | null) => { key = k; } };
 }
 
@@ -100,14 +114,14 @@ function oneRowPages(under: Uint8Array, last: number) {
 }
 
 async function exhaustRetries(x: any) {
-    const gen = x.fetchGen.current('A');
+    const gen = x.logs.gen('A');
     // MAX_UNOPENABLE_RETRIES present-key attempts throw "retrying"…
     for (let i = 0; i < 5; i++) {
         await expect(x.fetchForwardSince('A', {}, 100, gen)).rejects.toThrow(/could not be opened/);
     }
     // …then the sync advances past the row.
     await x.fetchForwardSince('A', {}, 100, gen);
-    expect(x.sessionLastSeq.get('A')).toBe(101);
+    expect(x.logs.lastSeq('A')).toBe(101);
 }
 
 describe('forward sync keeps unopenable rows as a recoverable gap (#128)', () => {
@@ -139,7 +153,7 @@ describe('forward sync keeps unopenable rows as a recoverable gap (#128)', () =>
         expect(applied).toEqual([{ seq: 101, id: 'm101' }]);
         expect(gaps()).toEqual([]);
         expect(published.at(-1)).toEqual([]); // the placeholder row goes with it
-        expect(x.sessionLastSeq.get('A')).toBe(101);
+        expect(x.logs.lastSeq('A')).toBe(101);
     });
 
     it('a different but still-wrong key keeps the gap and is itself not retried until the key changes again', async () => {
@@ -163,20 +177,20 @@ describe('forward sync keeps unopenable rows as a recoverable gap (#128)', () =>
     it('a missing key never spends the budget and never records a gap', async () => {
         const { x, gaps, setKey } = build(relayWithRowUnderK2);
         setKey(null);
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         for (let i = 0; i < 8; i++) {
             await expect(x.fetchForwardSince('A', {}, 100, gen)).rejects.toThrow(/no content key yet/);
         }
         expect(gaps()).toEqual([]);
-        expect(x.sessionLastSeq.has('A')).toBe(false);
+        expect(x.logs.lastSeq('A')).toBe(0); // never advanced from the anchor
     });
 
     it('a gap replay that is reset mid-flight writes nothing', async () => {
         const { x, applied, gaps, setKey } = build(relayWithRowUnderK2);
         await exhaustRetries(x);
         setKey(K2);
-        const gen = x.fetchGen.current('A');
-        x.fetchGen.bump('A'); // reset before the replay's first page lands
+        const gen = x.logs.gen('A');
+        x.logs.reset('A'); // reset before the replay's first page lands
         await expect(x.fetchForwardSince('A', {}, 101, gen)).rejects.toBeInstanceOf(StaleFetchError);
         expect(applied).toEqual([]);
         expect(gaps()).toHaveLength(1);
@@ -268,7 +282,7 @@ describe('a replay settles only the rows inside its range (#128 F5)', () => {
         const { x, applied, gaps, sync, setKey } = build(relay);
         x.recordUnopenableGaps('A', [{ fromSeq: 0, toSeq: 1, count: 1 }], K1);
         setKey(K2);
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         // Head is 1: the replay recovers seq 1, then the forward page after
         // 1 meets seq 2 sealed — that is the forward path's retry budget.
         for (let i = 0; i < 5; i++) {
@@ -277,7 +291,7 @@ describe('a replay settles only the rows inside its range (#128 F5)', () => {
         }
         await sync(1);
         expect(applied.map((m) => m.seq)).toEqual([1]);
-        expect(x.sessionLastSeq.get('A')).toBe(2);
+        expect(x.logs.lastSeq('A')).toBe(2);
         expect(gaps()).toEqual([{ fromSeq: 1, toSeq: 2, keyId: id(K2), count: 1 }]);
     });
 
@@ -299,10 +313,10 @@ describe('older pages that could not be opened record a gap (#128 b)', () => {
         const older = (_key: Uint8Array | null, beforeSeq: number): Page =>
             ({ messages: [], lifecycle: [], cursor: 1, hasMore: false, unopenable: 3, unopenableSeqs: [1, 50, 100] });
         const { x, olderCalls, gaps, published, invalidated } = build(relayWithRowUnderK2, older);
-        x.sessionOldestSeq.set('A', 101);
+        setOldest(x, 'A', 101);
         await x.loadOlderMessages('A');
         expect(olderCalls.map((c) => c.beforeSeq)).toEqual([101]);
-        expect(x.sessionOldestSeq.get('A')).toBe(1); // still advances: scrolling is never wedged
+        expect(x.logs.oldestSeq('A')).toBe(1); // still advances: scrolling is never wedged
         expect(gaps()).toEqual([
             { fromSeq: 0, toSeq: 1, keyId: id(K1), count: 1 },
             { fromSeq: 49, toSeq: 50, keyId: id(K1), count: 1 },
@@ -326,10 +340,10 @@ describe('older pages that could not be opened record a gap (#128 b)', () => {
             return { messages: rows.map((seq) => ({ seq, id: `m${seq}` })), lifecycle: [], cursor: 100, hasMore: false, unopenable: 0, unopenableSeqs: [] };
         };
         const { x, applied, calls, gaps, sync, setKey } = build(relay, older);
-        x.sessionOldestSeq.set('A', 101);
+        setOldest(x, 'A', 101);
         await x.loadOlderMessages('A');
         expect(applied.map((m) => m.seq)).toEqual([60]);
-        expect(x.sessionOldestSeq.get('A')).toBe(40);
+        expect(x.logs.oldestSeq('A')).toBe(40);
         expect(gaps()).toEqual([
             { fromSeq: 39, toSeq: 40, keyId: id(K1), count: 1 },
             { fromSeq: 99, toSeq: 100, keyId: id(K1), count: 1 },
@@ -351,11 +365,11 @@ describe('older pages that could not be opened record a gap (#128 b)', () => {
             lifecycle: [], cursor: 101, hasMore: true, unopenable: 1, unopenableSeqs: [1],
         });
         const { x, applied, gaps, published } = build(relayWithRowUnderK2, older);
-        x.sessionOldestSeq.set('A', 201);
+        setOldest(x, 'A', 201);
         await x.loadOlderMessages('A');
         expect(applied).toHaveLength(100);
         expect(applied.every((m) => m.seq >= 101)).toBe(true);
-        expect(x.sessionOldestSeq.get('A')).toBe(101);
+        expect(x.logs.oldestSeq('A')).toBe(101);
         expect(gaps()).toEqual([{ fromSeq: 0, toSeq: 1, keyId: id(K1), count: 1 }]); // exactly seq 1
         expect(published.at(-1)).toEqual([{ fromSeq: 0, toSeq: 1, count: 1 }]); // no placeholder over 101..200
     });
@@ -370,12 +384,12 @@ describe('older pages that could not be opened record a gap (#128 b)', () => {
                 : { messages: [{ seq: 101, id: 'm101' }, { seq: 103, id: 'm103' }], lifecycle: [], cursor: 103, hasMore: false, unopenable: 1, unopenableSeqs: [102] };
         };
         const { x, applied, gaps } = build(relay);
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         for (let i = 0; i < 5; i++) {
             await expect(x.fetchForwardSince('A', {}, 100, gen)).rejects.toThrow(/could not be opened/);
         }
         await x.fetchForwardSince('A', {}, 100, gen);
-        expect(x.sessionLastSeq.get('A')).toBe(103);
+        expect(x.logs.lastSeq('A')).toBe(103);
         expect(applied.map((m) => m.seq)).toEqual([101, 103]);
         expect(gaps()).toEqual([{ fromSeq: 101, toSeq: 102, keyId: id(K1), count: 1 }]);
     });
@@ -383,7 +397,7 @@ describe('older pages that could not be opened record a gap (#128 b)', () => {
     it('a clean older page records nothing', async () => {
         const older = (): Page => ({ messages: [{ seq: 50, id: 'm50' }], lifecycle: [], cursor: 50, hasMore: true, unopenable: 0 });
         const { x, gaps, published, invalidated } = build(relayWithRowUnderK2, older);
-        x.sessionOldestSeq.set('A', 101);
+        setOldest(x, 'A', 101);
         await x.loadOlderMessages('A');
         expect(gaps()).toEqual([]);
         expect(published).toEqual([]);
@@ -489,7 +503,7 @@ describe('sparse failures are recorded as runs, never as one envelope over rows 
         const { x, applied, calls, gaps, published, sync, setKey } = build(pagedRelay(200, [1, 3]), older);
         x.recordUnopenableGaps('A', [{ fromSeq: 1, toSeq: 2, count: 1 }], K1);
         setKey(K2);
-        x.sessionOldestSeq.set('A', 201);
+        setOldest(x, 'A', 201);
         await x.loadOlderMessages('A');
         expect(applied).toHaveLength(100);
         expect(applied.some((m) => m.seq === 2)).toBe(false);
@@ -569,7 +583,7 @@ describe('sparse failures are recorded as runs, never as one envelope over rows 
             return { messages: opened.map((seq) => ({ seq, id: `m${seq}` })), lifecycle: [], cursor: 105, hasMore: false, unopenable: failed.length, unopenableSeqs: failed };
         };
         const { x, applied, gaps } = build(relay);
-        const gen = x.fetchGen.current('A');
+        const gen = x.logs.gen('A');
         for (let i = 0; i < 5; i++) {
             await expect(x.fetchForwardSince('A', {}, 100, gen)).rejects.toThrow(/could not be opened/);
         }
@@ -593,7 +607,7 @@ describe('a read records its runs in one batch, and never a row the store holds 
 
     it('4,000 alternating sealed/lifecycle events are 2,000 gaps recorded with ONE publication, within budget', async () => {
         const { x, gaps, published } = build(relayWithRowUnderK2, alternatingOlder);
-        x.sessionOldestSeq.set('A', 4001);
+        setOldest(x, 'A', 4001);
         const t0 = performance.now();
         await x.loadOlderMessages('A');
         const ms = performance.now() - t0;
@@ -610,7 +624,7 @@ describe('a read records its runs in one batch, and never a row the store holds 
         x.recordUnopenableGaps('A', singletons(20000), K1); // seeded in one batch too
         expect(gaps()).toHaveLength(20000);
         published.length = 0;
-        x.sessionOldestSeq.set('A', 4001);
+        setOldest(x, 'A', 4001);
         const t0 = performance.now();
         await x.loadOlderMessages('A');
         const ms = performance.now() - t0;

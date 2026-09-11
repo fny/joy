@@ -2,38 +2,6 @@
  * Small pure guards for the per-session message pipeline in sync.ts.
  */
 
-/**
- * Per-session fetch generation. `resetSessionChatState` bumps it; a fetch
- * captures the generation when it starts and refuses to commit (apply rows,
- * move cursors) once it is stale. Without this, a forward fetch that was
- * already in flight when the user hit "Reload chat" applied its page AFTER
- * the reset had wiped the store and both cursors — leaving one message, no
- * backward anchor, and every later sync walking forward from it, so the
- * requested reset never reloaded the history (#407).
- */
-export class FetchGeneration {
-    private generations = new Map<string, number>();
-
-    current(sessionId: string): number {
-        return this.generations.get(sessionId) ?? 0;
-    }
-
-    /** Invalidate every fetch started before now. */
-    bump(sessionId: string): number {
-        const next = this.current(sessionId) + 1;
-        this.generations.set(sessionId, next);
-        return next;
-    }
-
-    isStale(sessionId: string, generation: number): boolean {
-        return this.current(sessionId) !== generation;
-    }
-
-    forget(sessionId: string): void {
-        this.generations.delete(sessionId);
-    }
-}
-
 /** Thrown at a commit point by a fetch whose generation went stale. */
 export class StaleFetchError extends Error {
     constructor(sessionId: string) {
