@@ -1,3 +1,10 @@
+# Sep 11 (5) — Settings that stay synced, and a queue that can be trusted
+
+- **A setting changed while a sync was already in flight is no longer lost.** Pins, sort order and every other synced setting used to have a small window: if you toggled something while the app was in the middle of pushing an earlier change, the new one was marked as sent without ever leaving the device, and only showed up on your other devices after some later, unrelated change carried it along. That is the "pins don't sync" you may have seen. The sync now tracks a change made during a push as the next thing to push, and pushes it right after.
+- **The connection indicator means one thing now.** "Connected" is whether the relay answered a read recently, whichever transport made it; a lost stream reconnects with a backing-off delay instead of hammering every three seconds; and the indicator can finally say **error** when it keeps failing, instead of sitting on "connecting" forever.
+- **Retrying a failed message that had already started works again.** A message whose agent had begun answering before the machine died, retried after it came back, was refused on its second start and sat there. Needs the updated relay.
+- Under the hood, the relay's queue is now exercised by a simulator that drives the real server with crashes, lost answers and a clock it controls, checking a dozen invariants after every step. It found the retry bug above and two more that never reached a screen: the relay was answering some internal errors with a dropped connection instead of an error, and a retried message kept a trace of its first run that confused the machine picking it up. All three are fixed.
+
 # Sep 11 (4) — Restore what a reboot took
 
 - **Sessions come back after a restart.** A daemon crash never lost anything — your sessions live in tmux, which outlives it — but a machine reboot killed tmux and left you reopening each folder by hand. The machine page now offers **Restore N sessions**, and each one resumes its conversation rather than just reopening the folder. From a terminal: `joy restore`, or `joy restore --dry-run` to see what it would bring back first.
