@@ -348,8 +348,8 @@ export const JoyMachineView = React.memo(({ machineId }: { machineId: string }) 
 
             <ItemGroup title="Go to">
                 <Item
-                    title="Sessions"
-                    subtitle="Browse this machine's projects & session logs"
+                    title="Projects"
+                    subtitle="Every folder this machine has worked in, newest first"
                     icon={<Ionicons name="folder-outline" size={29} color="#34C759" />}
                     onPress={() => router.push(`/machine/${machineId}/projects` as any)}
                 />

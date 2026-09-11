@@ -28,6 +28,11 @@ export interface Restorable {
   permissionMode?: string;
   effort?: string;
   extraArgs?: string;
+  /** When this session was last touched, from its record's mtime. The record
+   *  is written on every material change, so it is the closest thing to "when
+   *  did you last work on this" that survives a reboot — and it is what both
+   *  "most recent first" and "restore the latest in this project" need. */
+  lastSeenAt?: number;
 }
 
 /**
@@ -74,6 +79,7 @@ function settingsOf(rec: WindowRecord): { model?: string; permissionMode?: strin
 export function restorableFrom(
   records: WindowRecord[],
   alive: (rec: WindowRecord) => boolean,
+  lastSeen?: (rec: WindowRecord) => number | undefined,
 ): Restorable[] {
   const out: Restorable[] = [];
   for (const rec of records) {
@@ -90,9 +96,26 @@ export function restorableFrom(
       permissionMode: s.permissionMode,
       effort: s.effort,
       extraArgs: s.extraArgs,
+      lastSeenAt: lastSeen?.(rec),
     });
   }
-  // Stable order so a dry run and the restore that follows list the same
-  // things in the same order.
-  return out.sort((a, b) => a.cwd.localeCompare(b.cwd) || a.id.localeCompare(b.id));
+  // MOST RECENT FIRST. What you want back after a reboot is what you were
+  // working on, and an alphabetical list buries that under whatever happens
+  // to start with a. Ties break on cwd then id so the order is stable — a dry
+  // run and the restore that follows must list the same things the same way.
+  return out.sort((a, b) =>
+    (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0)
+    || a.cwd.localeCompare(b.cwd)
+    || a.id.localeCompare(b.id));
+}
+
+/** The most recent restorable session in each project, newest project first —
+ *  what "restore the latest here" needs, and what a per-project row shows. */
+export function latestPerProject(sessions: Restorable[]): Restorable[] {
+  const best = new Map<string, Restorable>();
+  for (const s of sessions) {
+    const current = best.get(s.cwd);
+    if (!current || (s.lastSeenAt ?? 0) > (current.lastSeenAt ?? 0)) best.set(s.cwd, s);
+  }
+  return [...best.values()].sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0) || a.cwd.localeCompare(b.cwd));
 }

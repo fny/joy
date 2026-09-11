@@ -184,6 +184,13 @@ export function deleteWindowRecord(id: string, baseDir = defaultStateDir()): boo
 /** All persisted window records (recovery scan). Tombstoned records and
  *  records whose delete failed in this process are excluded — and each such
  *  file gets another delete attempt while we are here. */
+/** When a record was last written. The record is rewritten on every material
+ *  change, so its mtime is the closest thing to "when did you last work on
+ *  this session" that survives the machine restart which lost it. */
+export function windowRecordMtime(id: string, baseDir = defaultStateDir()): number | undefined {
+  try { return fs.statSync(recordPath(id, baseDir)).mtimeMs; } catch { return undefined; }
+}
+
 export function listWindowRecords(baseDir = defaultStateDir()): WindowRecord[] {
   try {
     if (!fs.existsSync(baseDir)) return [];

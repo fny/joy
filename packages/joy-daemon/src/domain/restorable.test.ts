@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { restorableFrom, resumeIdOf } from "./restorable";
+import { restorableFrom, resumeIdOf, latestPerProject } from "./restorable";
 import type { WindowRecord } from "./windowRecord";
 
 const rec = (over: Partial<WindowRecord> & { id: string }): WindowRecord =>
@@ -65,7 +65,16 @@ describe("restorableFrom", () => {
     expect(out.find((x) => x.id === "p")).toMatchObject({ model: "m", extraArgs: "--flag" });
   });
 
+  it("puts the MOST RECENT first — what you want back is what you were working on", () => {
+    const records = [rec({ id: "old" }), rec({ id: "newest" }), rec({ id: "middle" })];
+    const at: Record<string, number> = { old: 1000, middle: 2000, newest: 3000 };
+    const out = restorableFrom(records, allDead, (r) => at[r.id]);
+    expect(out.map((x) => x.id)).toEqual(["newest", "middle", "old"]);
+  });
+
   it("is ordered the same every time, so a dry run matches the restore that follows", () => {
+    // With no timestamps at all the order still has to be total, or the dry
+    // run lists one thing and the restore does another.
     const records = [
       rec({ id: "b2", launchCwd: "/b" }), rec({ id: "a1", launchCwd: "/a" }),
       rec({ id: "a2", launchCwd: "/a" }), rec({ id: "c", launchCwd: "/c" }),
@@ -78,4 +87,33 @@ describe("restorableFrom", () => {
   it("is empty when nothing was lost", () => {
     expect(restorableFrom([], allDead)).toEqual([]);
   });
+});
+
+describe("latestPerProject", () => {
+    const r = (id: string, cwd: string, lastSeenAt: number) => ({ id, cwd, agent: "claude" as const, lastSeenAt });
+
+    it("keeps the newest session in each project, and nothing else", () => {
+        const out = latestPerProject([
+            r("a-old", "/a", 1000), r("a-new", "/a", 3000),
+            r("b-only", "/b", 2000),
+        ]);
+        expect(out.map((x) => x.id)).toEqual(["a-new", "b-only"]);
+    });
+
+    it("orders the projects by their newest session", () => {
+        const out = latestPerProject([r("a", "/a", 1000), r("b", "/b", 5000), r("c", "/c", 3000)]);
+        expect(out.map((x) => x.cwd)).toEqual(["/b", "/c", "/a"]);
+    });
+
+    it("is stable when nothing has a timestamp", () => {
+        const out = latestPerProject([
+            { id: "z", cwd: "/z", agent: "claude" },
+            { id: "a", cwd: "/a", agent: "claude" },
+        ]);
+        expect(out.map((x) => x.cwd)).toEqual(["/a", "/z"]);
+    });
+
+    it("is empty for an empty list", () => {
+        expect(latestPerProject([])).toEqual([]);
+    });
 });

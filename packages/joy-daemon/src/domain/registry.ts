@@ -25,7 +25,7 @@ import { PI_MODELS, defaultPiModel } from "../pi/models";
 import { defaultOpencodeModel } from "../opencode/models";
 import { codexJoyInstructions } from "./agentTagsPrompt";
 import { cwdToTranscriptDir, findLatestTranscript, cappedTailOffset, resolveTranscriptId } from "../claude/transcript";
-import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript } from "./windowRecord";
+import { loadWindowRecord, saveWindowRecord, listWindowRecords, deleteWindowRecord, resolveRecoveredTranscript, windowRecordMtime } from "./windowRecord";
 import { restorableFrom, type Restorable } from "./restorable";
 import { optionsPromptArg } from "../claude/optionsPrompt";
 import { ensureHookSettings, daemonFilePath } from "../claude/hooks";
@@ -1289,12 +1289,19 @@ export class SessionRegistry {
    * whatever its record says.
    */
   restorable(): Restorable[] {
-    return restorableFrom(listWindowRecords(), (rec) => {
-      if (this.#sessions.has(rec.id)) return true;
-      if (!rec.socket) return true; // unprobeable; restorableFrom drops it anyway
-      const names = tmuxNamesFor(rec.socket, rec.id);
-      return run("tmux", "-L", rec.socket, "has-session", "-t", names.session).ok;
-    });
+    return restorableFrom(
+      listWindowRecords(),
+      (rec) => {
+        if (this.#sessions.has(rec.id)) return true;
+        if (!rec.socket) return true; // unprobeable; restorableFrom drops it anyway
+        const names = tmuxNamesFor(rec.socket, rec.id);
+        return run("tmux", "-L", rec.socket, "has-session", "-t", names.session).ok;
+      },
+      // The record's mtime: it is rewritten on every material change, so it is
+      // the closest thing to "when did you last work on this" that survives
+      // the reboot which lost the session in the first place.
+      (rec) => windowRecordMtime(rec.id),
+    );
   }
 
   /**

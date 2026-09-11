@@ -203,6 +203,9 @@ export interface RestorableSession {
     /** Absent means the folder can be reopened but the conversation cannot. */
     resumeId?: string;
     model?: string;
+    /** From the record's mtime — "when did you last work on this". Drives both
+     *  most-recent-first and "restore the latest in this project". */
+    lastSeenAt?: number;
 }
 
 export const machineGitDiff = (ctx: MachineCtx, opts?: { staged?: boolean; head?: boolean; path?: string; numstat?: boolean }) =>
