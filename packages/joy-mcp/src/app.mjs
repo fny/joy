@@ -17,6 +17,13 @@ export function createApp({ hub, provider, publicUrl, log = () => {} }) {
   // The Claude app's connector setup runs in a browser: without CORS the 401
   // that carries WWW-Authenticate (how it discovers the OAuth server) is
   // unreadable and the UI says "no server responded". Every path gets it.
+  // One line per request: who asked what, and how it ended — the only way
+  // to tell a client that never arrived from one that arrived and was refused.
+  app.use((req, res, next) => {
+    const t0 = Date.now();
+    res.on('finish', () => log(`${req.method} ${req.originalUrl.split('?')[0]} → ${res.statusCode} ${Date.now() - t0}ms ip=${req.ip} origin=${req.headers.origin ?? '-'} ua=${String(req.headers['user-agent'] ?? '-').slice(0, 60)}`));
+    next();
+  });
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
