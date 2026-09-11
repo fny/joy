@@ -6,6 +6,7 @@ import { useDrafts, useDraftQueueStore, draftReason } from './draftQueue';
 import { MAX_AUTO_ATTEMPTS, cancelRelease, useCancelPending } from './draftQueueRelease';
 import { QueueStack, type QueueRowModel } from './QueueStack';
 import type { useJoyQueue } from '@/hooks/useJoyQueue';
+import { splitPeers, peerBody, peerLabel } from './queuePeers';
 import { useDelayedAppearance } from '@/hooks/useDelayedAppearance';
 
 type Queue = ReturnType<typeof useJoyQueue>;
@@ -31,7 +32,11 @@ export const WaitingStack = React.memo(function WaitingStack({ sessionId, queue 
     const retryRelease = useDraftQueueStore((s) => s.retryRelease);
     const cancelPending = useCancelPending(sessionId);
 
-    const daemonVisible = useDelayedAppearance(queue.queue, APPEAR_MS, queue.paused);
+    // Rows other sessions / the CLI / cron queued (`joy send`) stay out of
+    // the user's queue: their own stack, folded, below.
+    const split = React.useMemo(() => splitPeers(queue.queue), [queue.queue]);
+    const daemonVisible = useDelayedAppearance(split.own, APPEAR_MS, queue.paused);
+    const daemonPeers = useDelayedAppearance(split.peers, APPEAR_MS, queue.paused);
     const daemonHidden = useDelayedAppearance(queue.hidden ?? [], APPEAR_MS, queue.paused);
 
     // Daemon queue mutations reject when they did not land (#321); a failure
@@ -111,5 +116,16 @@ export const WaitingStack = React.memo(function WaitingStack({ sessionId, queue 
         onPress: () => daemonOp(queue.resume()),
     } : null;
 
-    return <QueueStack title={t('joyQueue.pendingTitle')} rows={rows} notice={notice} />;
+    const peerRows = React.useMemo<QueueRowModel[]>(() => daemonPeers.map((m): QueueRowModel => ({
+        id: `daemon-peer:${m.id}`, text: peerBody(m.text), caption: peerLabel(m), readOnly: true,
+        onRemove: () => daemonOp(queue.cancel(m.id)),
+        onSteer: () => { void steer(m.id, m.text); },
+    })), [daemonPeers, queue, steer, daemonOp]);
+
+    return (
+        <>
+            <QueueStack title={t('joyQueue.pendingTitle')} rows={rows} notice={notice} />
+            <QueueStack title={t('joyQueue.peersTitle')} rows={peerRows} defaultCollapsed />
+        </>
+    );
 });

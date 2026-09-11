@@ -600,6 +600,12 @@ export interface QueuedMessage {
   id: string;
   text: string;
   createdAt: number;
+  /** Who sent it when it was not the user: `joy:<id>` (another session),
+   *  `cli`, `cron:<name>` — read off the daemon-written wrapper. The app
+   *  shows such rows in their own collapsed stack, not the user's queue. */
+  from?: string;
+  /** The sender's harness + title, for that stack's caption. */
+  fromLabel?: string;
   /** For a handled /joy-prompt: the queue id of the instruction reinjection it
    *  enqueued, so a lane whose relay turn is cancelled can pluck it (#77). */
   reinjectionId?: string;

@@ -1,3 +1,7 @@
+# Sep 11 (3) — Messages from other sessions stay out of your queue
+
+- **Your queue is yours again.** When another session, the `joy` command or a scheduled job sends a session a message while it is busy, that message used to appear in the Queue above the composer exactly like something you had typed — and a few agents talking to each other could fill it. Those rows now sit in their own **From other sessions** stack, folded by default, each captioned with who sent it. You can still drop one or steer it into the running turn; you cannot edit another party's words. Needs the updated daemon, which now stamps each queued row with its sender.
+
 # Sep 11 (2) — Show archived, automations and headless where you asked for them
 
 - **A toggle now reveals its own rows, directly beneath it.** Show archived, Show automations and Show headless were filters rather than dividers: turning one on let its sessions appear wherever they would normally have gone — a running headless session into the block at the very top, an archived one into whichever machine group it belonged to. So a control near the bottom of the list changed what was at the top of it, and revealing one kind scattered it across three places. Each one is now a divider with its rows under it, and nothing a toggle controls can reach the top of the list.

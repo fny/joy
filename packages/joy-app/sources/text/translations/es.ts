@@ -459,6 +459,7 @@ export const es: TranslationStructure = {
         sendParked: ({ reason }: { reason: string }) => `No se pudo enviar — ${reason}. Toca ↻ para reintentar.`,
         draftsTitle: 'Borradores',
         pendingTitle: 'Cola',
+        peersTitle: 'De otras sesiones',
         steerNow: 'Dirigir ahora',
         draftPlaceholder: 'Borrador…',
         sendNow: 'Enviar',

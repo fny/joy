@@ -460,6 +460,7 @@ export const ja: TranslationStructure = {
         sendParked: ({ reason }: { reason: string }) => `送信できませんでした — ${reason}。↻ をタップして再試行してください。`,
         draftsTitle: '下書き',
         pendingTitle: 'キュー',
+        peersTitle: '他のセッションから',
         steerNow: '今すぐ指示',
         draftPlaceholder: '下書き…',
         sendNow: '送信',

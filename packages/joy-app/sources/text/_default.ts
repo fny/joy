@@ -508,6 +508,7 @@ export const en = {
         sendParked: ({ reason }: { reason: string }) => `Couldn’t send — ${reason}. Tap ↻ to try again.`,
         draftsTitle: 'Drafts',
         pendingTitle: 'Queue',
+        peersTitle: 'From other sessions',
         steerNow: 'Steer now',
         draftPlaceholder: 'Draft…',
         sendNow: 'Send',

@@ -36,16 +36,22 @@ export interface QueueRowModel {
     onSteer?: (text: string) => void;
     /** Red line under the row (why it is stuck). */
     error?: string | null;
+    /** Small line above the text: who queued it (rows from other sessions). */
+    caption?: string;
+    /** No editing: the text is another party's, shown as sent. */
+    readOnly?: boolean;
 }
 
-export const QueueStack = React.memo(function QueueStack({ title, rows, notice }: {
+export const QueueStack = React.memo(function QueueStack({ title, rows, notice, defaultCollapsed = false }: {
     title: string;
     rows: QueueRowModel[];
     /** Banner above the rows — tap to act (the daemon's paused-queue resume). */
     notice?: { text: string; onPress: () => void } | null;
+    /** Start folded (rows from other sessions: present, one tap away, not in the way). */
+    defaultCollapsed?: boolean;
 }) {
     const { theme } = useUnistyles();
-    const [collapsed, setCollapsed] = React.useState(false);
+    const [collapsed, setCollapsed] = React.useState(defaultCollapsed);
     if (rows.length === 0 && !notice) return null;
     const overflow = rows.length - VISIBLE_ROWS;
     return (
@@ -102,12 +108,14 @@ const QueueRow = React.memo(function QueueRow({ row }: { row: QueueRowModel }) {
     }, [row, text]);
     return (
         <View style={styles.row}>
+            {row.caption ? <Text style={styles.caption} numberOfLines={1}>{row.caption}</Text> : null}
             <View style={styles.inputWrap}>
                 <TextInput
                     value={text}
                     onChangeText={(next) => { setText(next); row.onChange?.(next); }}
                     onBlur={commit}
                     onSubmitEditing={commit}
+                    editable={!row.readOnly}
                     multiline
                     placeholder={t('joyQueue.draftPlaceholder')}
                     placeholderTextColor={theme.colors.textSecondary as string}
@@ -166,4 +174,5 @@ const styles = StyleSheet.create((theme) => ({
     actions: { position: 'absolute', right: 6, top: 0, bottom: 0, flexDirection: 'row', alignItems: 'center', gap: 4 },
     iconButton: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
     error: { paddingHorizontal: 12, fontSize: 12, color: theme.colors.textDestructive, ...Typography.default() },
+    caption: { paddingHorizontal: 12, fontSize: 11, color: theme.colors.textSecondary, ...Typography.default('semiBold') },
 }));

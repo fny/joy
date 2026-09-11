@@ -459,6 +459,7 @@ export const zhHant: TranslationStructure = {
         sendParked: ({ reason }: { reason: string }) => `無法傳送 — ${reason}。點一下 ↻ 重試。`,
         draftsTitle: '草稿',
         pendingTitle: '佇列',
+        peersTitle: '來自其他工作階段',
         steerNow: '立即引導',
         draftPlaceholder: '草稿…',
         sendNow: '傳送',

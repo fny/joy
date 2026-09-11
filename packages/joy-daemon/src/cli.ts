@@ -2023,7 +2023,13 @@ export async function cmdQueue(rest: string[]): Promise<number> {
   if (!qs) { console.error(`${bad} daemon not running`); return 1; }
   const items: any[] = qs.items ?? qs.queue ?? [];
   if (items.length === 0) { console.log(`queue empty${qs.paused ? " (paused)" : ""}`); return 0; }
-  for (const it of items) console.log(`  ${c.b(String(it.id))}  ${String(it.state ?? "").padEnd(10)} ${String(it.text ?? "").replace(/\s+/g, " ").slice(0, 100)}`);
+  for (const it of items) {
+    // A row another session / the CLI / cron queued shows its sender, not
+    // the daemon's wrapper (the app files such rows under their own stack).
+    const body = it.from ? String(it.text ?? "").replace(/^\s*<joy-message\b[^>]*>\s*/i, "").replace(/\s*<\/joy-message>\s*$/i, "") : String(it.text ?? "");
+    const who = it.from ? c.dim(`from ${it.fromLabel ? `${it.fromLabel} (${String(it.from).replace(/^joy:/, "")})` : it.from} · `) : "";
+    console.log(`  ${c.b(String(it.id))}  ${String(it.state ?? "").padEnd(10)} ${who}${body.replace(/\s+/g, " ").slice(0, 100)}`);
+  }
   if (qs.paused) console.log(c.y("  (queue paused)"));
   return 0;
 }

@@ -6,7 +6,13 @@ import { tunnelJson } from '@/sync/v2/tunnel';
 // lined up while Claude was busy; the daemon dispatches them one at a time
 // (see Session #maybeDrainQueue). `inFlight` is the message typed but not yet
 // confirmed; `paused` means a dispatch failed and auto-drain is halted.
-export interface QueuedMessage { id: string; text: string; createdAt: number; }
+export interface QueuedMessage {
+    id: string; text: string; createdAt: number;
+    /** Set when another session, the CLI or a cron job sent it (`joy:<id>` | `cli` | `cron:<name>`); absent for the user's own rows. */
+    from?: string;
+    /** The sender's harness + title, when the daemon knew it. */
+    fromLabel?: string;
+}
 export type QueuePauseReason = 'input_dirty' | 'dispatch_timeout' | 'dispatch_mismatch' | 'dispatch_failed';
 export interface JoyQueueState { queue: QueuedMessage[]; hidden?: QueuedMessage[]; pendingCount?: number; inFlight: string | null; paused: boolean; pauseReason?: QueuePauseReason; }
 

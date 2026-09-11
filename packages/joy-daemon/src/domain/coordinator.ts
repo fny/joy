@@ -35,6 +35,7 @@
 // driver call runs with no lock held, and its result is applied only if the
 // token and the generation still own the row (#34 deadlock class).
 import { randomUUID } from "node:crypto";
+import { peerOf } from "./peerMessage";
 import {
   Ledger, ledgerFor, isTerminalState,
   StaleCommandError, StaleGenerationError, LedgerWriteError, SessionEndedError,
@@ -620,7 +621,9 @@ export class SessionCoordinator {
     const actor = this.#actors.get(sessionId);
     const rows = this.ledger.listPending(sessionId);
     const sum = (r: CommandRow): CommandSummary => ({ id: r.id, text: r.text, createdAt: r.createdAt, state: r.state, origin: r.origin, visible: r.visible });
-    const slim = (r: CommandRow) => ({ id: r.id, text: r.text, createdAt: r.createdAt });
+    // A row another session / the CLI / cron sent carries its sender, so the
+    // app can keep it apart from the rows the user queued (peerMessage.ts).
+    const slim = (r: CommandRow) => ({ id: r.id, text: r.text, createdAt: r.createdAt, ...peerOf(r.text) });
     const running = rows.find((r) => r.state === "running" || r.state === "cancelling") ?? null;
     const dispatching = rows.find((r) => r.state === "submitting" || r.state === "accepted" || r.state === "unknown") ?? null;
     return {

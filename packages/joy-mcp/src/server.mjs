@@ -349,7 +349,7 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
     // Two places a row can wait: the relay's durable queue (until the daemon
     // claims it — one turn at a time) and the daemon's own queue behind a
     // running turn. Both are "queued" to a caller.
-    const items = [...held.map((h) => ({ turn: h.turn, text: h.text, at: 'relay' })), ...(q.queue ?? []).map((x) => ({ turn: x.id, text: x.text, at: 'daemon' }))];
+    const items = [...held.map((h) => ({ turn: h.turn, text: h.text, at: 'relay' })), ...(q.queue ?? []).map((x) => ({ turn: x.id, text: x.text, at: 'daemon', ...(x.from ? { from: x.from, ...(x.fromLabel ? { from_label: x.fromLabel } : {}) } : {}) }))];
     return { items, pending: items.length, running: q.running ? { turn: q.running.id, text: q.running.text } : null, paused: !!q.paused, ...(q.pauseReason ? { pause_reason: q.pauseReason } : {}) };
   }));
   server.registerTool('queue_cancel', {

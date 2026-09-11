@@ -476,6 +476,7 @@ export const pl: TranslationStructure = {
         sendParked: ({ reason }: { reason: string }) => `Nie udało się wysłać — ${reason}. Dotknij ↻, aby ponowić.`,
         draftsTitle: 'Szkice',
         pendingTitle: 'Kolejka',
+        peersTitle: 'Z innych sesji',
         steerNow: 'Skieruj teraz',
         draftPlaceholder: 'Szkic…',
         sendNow: 'Wyślij',

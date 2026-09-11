@@ -460,6 +460,7 @@ export const zhHans: TranslationStructure = {
         sendParked: ({ reason }: { reason: string }) => `无法发送 — ${reason}。点按 ↻ 重试。`,
         draftsTitle: '草稿',
         pendingTitle: '队列',
+        peersTitle: '来自其他会话',
         steerNow: '立即引导',
         draftPlaceholder: '草稿…',
         sendNow: '发送',

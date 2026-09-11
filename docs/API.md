@@ -347,7 +347,10 @@ begins with U+FEFF keeps it (the decoder is created with `ignoreBOM`).
   `retire(killed)` interrupts everything. The queue snapshot (`joy__queue`,
   `queueList`) adds `running`, `busy`, `provenance`, `unresolvedCancels`,
   `drafts` and `commands` (every non-terminal row with its state) to the
-  pre-C2 fields. `send … exclusive` refuses when anything is running OR
+  pre-C2 fields. A visible row carries `from` (`joy:<id>` | `cli` | `cron:<name>`)
+  and `fromLabel` when a joy-send from someone other than the user queued
+  it (parsed from the daemon-written wrapper, `domain/peerMessage.ts`); the
+  app files such rows under its own "From other sessions" stack. `send … exclusive` refuses when anything is running OR
   queued. **Claude specifics**: a row stays `queued` while it waits at the
   pane gate (`prepare`: idle per `Session.promptReadiness()`, a fresh
   capture at the ready prompt with an EMPTY box, a dirty box cleared by the

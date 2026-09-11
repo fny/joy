@@ -591,6 +591,7 @@ export const ru: TranslationStructure = {
         sendParked: ({ reason }: { reason: string }) => `Не удалось отправить — ${reason}. Нажмите ↻, чтобы повторить.`,
         draftsTitle: 'Черновики',
         pendingTitle: 'Очередь',
+        peersTitle: 'Из других сессий',
         steerNow: 'Направить сейчас',
         draftPlaceholder: 'Черновик…',
         sendNow: 'Отправить',

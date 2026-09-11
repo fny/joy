@@ -317,6 +317,12 @@ every relay; machines register per account.
   the daemon's dispatch queue (`joy__queue`: visible + hidden items, edit via
   PATCH on commit, cancel, ⇡ steer) plus the paused-queue banner; Drafts get
   ↑ send-now. There is no separate "queued" strip any more.
+  Rows another session, the CLI or a cron job queued (`joy send` — the
+  daemon stamps `from` / `fromLabel` on them, read off its own wrapper) are
+  NOT in the Queue: they sit in a second stack, **From other sessions**,
+  folded by default, captioned with the sender, read-only (× remove and ⇡
+  steer only) — a few agents talking to each other used to fill the user's
+  queue (2026-09-11).
 - **Copy · Reuse** live in the text-selection screen (`/text-selection`,
   opened by long-press with `markdownCopyV2` on): Copy puts the ORIGINAL
   markdown on the clipboard; Reuse inserts it into the session's composer via
