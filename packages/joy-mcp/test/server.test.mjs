@@ -219,7 +219,7 @@ describe('joy-mcp over a real relay', () => {
     const roles = full.messages.map((m) => [m.role, m.text]);
     expect(roles).toEqual(expect.arrayContaining([['assistant', 're: ping']]));
     const user = full.messages.find((m) => m.role === 'user');
-    expect(user.text).toMatch(/^<joy-message from="mcp:[^"]+" reply-to="mcp:[^"]+">\nping\n<\/joy-message>$/);
+    expect(user.text).toMatch(/^<joy-message from="mcp:[^"]+">\nping\n<\/joy-message>$/); // no reply-to by default: mcp:* is not routable
     expect(full.check.state).toBe('idle');
   }, 20_000);
 
@@ -228,11 +228,13 @@ describe('joy-mcp over a real relay', () => {
     const id = s.sessions[0].id;
     const waiting = call('wait_for_turns', { sessions: [id], timeout_s: 15 });
     await new Promise((r) => setTimeout(r, 300));
-    const { data: sent } = await call('send', { session: id, text: 'later', no_reply: true });
+    const { data: sent } = await call('send', { session: id, text: 'later', reply_to: 'joy:0123abcd' });
     expect(sent.turn).toBeTruthy();
     const { data } = await waiting;
     expect(data.outcome).toBe('answered');
     expect(data.events[0]).toMatchObject({ kind: 'turn_ended', session: id, text: 're: later' });
+    const { data: full } = await call('session', { session: id });
+    expect(full.messages.find((m) => m.role === 'user' && m.text.includes('later')).text).toContain('reply-to="joy:0123abcd"');
     const { data: upd } = await call('updates_since', { cursor: 0 });
     expect(upd.events.filter((e) => e.kind === 'turn_ended').length).toBeGreaterThanOrEqual(2);
     expect(upd.cursor).toBeGreaterThanOrEqual(data.cursor);

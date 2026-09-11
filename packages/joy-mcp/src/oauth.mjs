@@ -125,7 +125,8 @@ export class JoyOAuthProvider {
     // The SDK's bearer middleware insists on an expiry: a CLI-minted bearer
     // has none, so it reports one far away and stays valid until revoked.
     const expiresAt = Math.floor((rec.expiresAt ?? Date.now() + 10 * 365 * 24 * 3600_000) / 1000);
-    return { token, clientId: rec.clientId, scopes: rec.scopes ?? [], expiresAt, ...(rec.resource ? { resource: new URL(rec.resource) } : {}), extra: { name: rec.name ?? rec.clientId } };
+    const name = rec.name ?? this.store.data.clients[rec.clientId]?.client_name ?? rec.clientId;
+    return { token, clientId: rec.clientId, scopes: rec.scopes ?? [], expiresAt, ...(rec.resource ? { resource: new URL(rec.resource) } : {}), extra: { name } };
   }
 
   async revokeToken(_client, { token }) {

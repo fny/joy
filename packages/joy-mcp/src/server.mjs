@@ -86,7 +86,7 @@ export class Hub {
     }
   }
 
-  async send(row, text, { exclusive = false, replyTo, from }) {
+  async send(row, text, { exclusive = false, replyTo = null, from }) {
     const view = this.view(row);
     if (view.check_state === 'ended') throw new ToolError('session_ended', 'a detached session takes no text', 'new_session with resume, or the app\'s Resume');
     if (view.check_state === 'unreachable') throw new ToolError('machine_unreachable', `the daemon on ${view.machine.name} is not answering`, 'machines shows who is online');
@@ -114,7 +114,10 @@ export class Hub {
  *  is the sender, so it stamps the same shape with an mcp:* identity. */
 function wrap(text, from, replyTo) {
   const body = text.trim().replace(/^<joy-message\b[^>]*>\s*/i, '').replace(/\s*<\/joy-message>\s*$/i, '');
-  const attrs = `from="${from}"${replyTo === null ? '' : ` reply-to="${from}"`}`;
+  // No reply-to unless asked: an agent cannot route a reply to mcp:* — the
+  // reply a connected client wants is the session's next turn, which ask and
+  // wait_for_turns return. reply_to names a joy session that should answer.
+  const attrs = `from="${from}"${replyTo ? ` reply-to="${replyTo}"` : ''}`;
   const cmd = /^\/(steer|btw)\s+([\s\S]+)$/.exec(body);
   if (cmd) return `/${cmd[1]} <joy-message ${attrs}>\n${cmd[2].trim()}\n</joy-message>`;
   if (/^\/(title|login-code|joy-prompt)\b/.test(body)) return body;
@@ -202,11 +205,11 @@ export function createMcpServer(hub, { clientLabel = 'mcp' } = {}) {
   // ── talking ──────────────────────────────────────────────────────────────
   server.registerTool('send', {
     title: 'Send text',
-    description: `Deliver text through the durable queue. If a turn is running the text waits behind it and runs when it ends — the result then carries check so you see what it is behind. no_queue refuses instead (busy) and drives only yolo/read-only sessions. no_reply stamps no reply-to. Daemon-owned slash commands (/steer, /title, /joy-prompt) are intercepted daemon-side; /steer mid-turn lands in the running turn. Answer a question with offered options by sending the option's text or number.`,
-    inputSchema: { session: SESSION, text: z.string().min(1), no_queue: z.boolean().optional(), no_reply: z.boolean().optional() },
+    description: `Deliver text through the durable queue. If a turn is running the text waits behind it and runs when it ends — the result then carries check so you see what it is behind. no_queue refuses instead (busy) and drives only yolo/read-only sessions. No reply-to is stamped unless reply_to names a joy session. Daemon-owned slash commands (/steer, /title, /joy-prompt) are intercepted daemon-side; /steer mid-turn lands in the running turn. Answer a question with offered options by sending the option's text or number.`,
+    inputSchema: { session: SESSION, text: z.string().min(1), no_queue: z.boolean().optional(), reply_to: z.string().regex(/^joy:[0-9a-f]{8}$/).optional().describe('A joy session (joy:<id>) the agent should answer; by default no reply is expected — read the session\'s next turn with ask or wait_for_turns instead.') },
   }, guard(async (a) => {
     await hub.index.refresh();
-    return hub.send(hub.row(a.session), a.text, { exclusive: !!a.no_queue, replyTo: a.no_reply ? null : undefined, from });
+    return hub.send(hub.row(a.session), a.text, { exclusive: !!a.no_queue, replyTo: a.reply_to ?? null, from });
   }));
 
   server.registerTool('ask', {
