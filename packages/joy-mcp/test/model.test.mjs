@@ -64,6 +64,11 @@ describe('messages', () => {
     ]);
     expect(m[0].from).toBe('mcp:claude');
   });
+  it('folds a daemon-mirrored user record (a joy send from another agent) as a user row', () => {
+    const rec = sealV2Json({ v: 1, t: 'record', record: { role: 'user', content: { type: 'text', text: '<joy-message from="joy:9abd457c" reply-to="joy:9abd457c">\npeer-ack\n</joy-message>' }, meta: { sentFrom: 'joy', joyTime: 777 } } }, key);
+    const m = foldMessages([ev('output', rec, { turnId: null })], key);
+    expect(m).toEqual([expect.objectContaining({ role: 'user', from: 'joy:9abd457c', via: 'daemon', at: 777 })]);
+  });
   it('spots a turn end on the relay\'s terminal kind and on the daemon\'s turn-end record', () => {
     expect(turnEndOf(ev('turn.terminal', sealedRec({ t: 'turn-end', status: 'cancelled' })), key)).toMatchObject({ turn: 'T1', status: 'cancelled', marker: true });
     // The relay's turn id on the event wins; the runtime id in the record is the fallback.

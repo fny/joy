@@ -76,6 +76,13 @@ export function foldMessages(events, key) {
     }
     if (!p) continue;
     if (p.t === 'plain') { const text = stripDirectives(p.text); if (text) out.push({ seq, role: 'assistant', text, at: e.createdAt, turn: e.turnId ?? null }); continue; }
+    // A prompt the DAEMON mirrored — typed in the terminal, or sent by another
+    // agent with `joy send` — is a user record, not a queued relay turn.
+    if (p.record?.role === 'user' && typeof p.record.content?.text === 'string') {
+      const at = typeof p.record.meta?.joyTime === 'number' ? p.record.meta.joyTime : e.createdAt;
+      out.push({ seq, role: 'user', text: p.record.content.text, at, turn: e.turnId ?? null, from: joyMessageFrom(p.record.content.text), via: 'daemon' });
+      continue;
+    }
     const ev = p.record?.content?.data?.ev;
     if (!ev || typeof ev !== 'object') continue;
     const at = typeof p.record.content.data.time === 'number' ? p.record.content.data.time : e.createdAt;
