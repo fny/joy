@@ -124,6 +124,19 @@ describe('the docs token is required at launch unless the docs are switched off'
   });
 });
 
+describe('JOY_RELAY_MAX_EVENTS_PER_SESSION', () => {
+  it('a malformed value stops the relay at launch with the reason', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'joy-relay-cap-'));
+    try {
+      const env = { ...process.env, JOY_RELAY_DATA_DIR: join(dataDir, 'relay'), JOY_RELAY_PORT: '0', JOY_RELAY_DOCS: 'off', JOY_RELAY_MAX_EVENTS_PER_SESSION: 'lots' };
+      const server = fileURLToPath(new URL('../server.mjs', import.meta.url));
+      const r = spawnSync(process.execPath, [server], { env, encoding: 'utf8', timeout: 20_000 });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/refusing to start: JOY_RELAY_MAX_EVENTS_PER_SESSION must be a positive whole number/);
+    } finally { rmSync(dataDir, { recursive: true, force: true }); }
+  });
+});
+
 describe('the relay stops cleanly on SIGTERM', () => {
   it('exits 0, closes the database and releases the data directory — a second relay starts on it right after', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'joy-relay-stop-'));

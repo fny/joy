@@ -197,6 +197,7 @@ The relay reads its settings from environment variables.
 | `JOY_RELAY_TOKEN_ISSUERS` | `joy` | Comma-separated issuer names the relay accepts on tokens; the first one is used for new tokens. Leave it alone unless you are migrating. |
 | `JOY_RELAY_DOCS_TOKEN` | none, **required** | Password for the relay's API documentation page. The relay refuses to start without it unless `JOY_RELAY_DOCS=off`. |
 | `JOY_RELAY_DOCS` | on | Set to `off` to serve no API documentation. Then no docs password is needed, and `/docs` answers 404. |
+| `JOY_RELAY_MAX_EVENTS_PER_SESSION` | unset (no limit) | Cap each session's stored history at this many events. A session that reaches it stops saving output and refuses new messages, and its owner is told to continue in a new session. Leave it unset unless you need to bound disk use on a shared relay. |
 | `JOY_RELAY_TRUST_PROXY` | automatic | `1` to always trust `X-Forwarded-Proto` from your proxy, `0` never. Affects only the server address shown in the API documentation. |
 
 Keep `token.secret` (or `JOY_RELAY_TOKEN_SECRET`) with your backups. If it is lost or changed, every device and machine has to sign in again.

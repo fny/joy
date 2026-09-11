@@ -6,7 +6,7 @@
 import * as http from 'node:http';
 import { openDb } from './src/db.mjs';
 import { loadOrCreateTokenSecret } from './src/secret.mjs';
-import { createCore } from './src/core.mjs';
+import { createCore, parseMaxEventsPerSession } from './src/core.mjs';
 import { createNotify } from './src/notify.mjs';
 import { createAuth } from './src/auth.mjs';
 import { createTokenAuthority } from './src/tokens.mjs';
@@ -24,6 +24,12 @@ import { handleDocs, docsConfig } from './src/docs.mjs';
 const docs = docsConfig();
 if (docs.error) {
   console.error(`[joy-relay] refusing to start: ${docs.error}`);
+  process.exit(1);
+}
+// Session length: unbounded unless the owner sets a cap.
+const eventCap = parseMaxEventsPerSession(process.env.JOY_RELAY_MAX_EVENTS_PER_SESSION);
+if (eventCap.error) {
+  console.error(`[joy-relay] refusing to start: ${eventCap.error}`);
   process.exit(1);
 }
 
@@ -44,7 +50,7 @@ const ISSUERS = (process.env.JOY_RELAY_TOKEN_ISSUERS ?? 'joy').split(',').map((s
 
 const db = await openDb(DATA_DIR);
 const notify = createNotify();
-const core = createCore(db, notify);
+const core = createCore(db, notify, { maxEventsPerSession: eventCap.cap });
 const tokens = await createTokenAuthority({ secret: tokenSecret(), issuers: ISSUERS });
 const accounts = createAccounts(db, tokens);
 const automations = createAutomations(db, core, notify);
@@ -111,7 +117,7 @@ server.on('upgrade', (req, socket) => {
 });
 
 server.listen(LISTEN, HOST, () => {
-  console.log(`[joy-relay] listening ${HOST}:${LISTEN} (data ${DATA_DIR}, token issuers ${ISSUERS.join(',')})`);
+  console.log(`[joy-relay] listening ${HOST}:${LISTEN} (data ${DATA_DIR}, token issuers ${ISSUERS.join(',')}, events per session ${eventCap.cap ?? 'unlimited'})`);
 });
 
 // Graceful stop on SIGTERM/SIGINT. Without a handler, a relay that is PID 1

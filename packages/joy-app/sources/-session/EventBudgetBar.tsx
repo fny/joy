@@ -8,8 +8,9 @@ import { useSession } from '@/sync/storage';
 import { t } from '@/text';
 import { Typography } from '@/constants/Typography';
 
-// The relay caps a session at 50,000 events and answers every further output
-// post with 429 session_event_budget_exhausted — for good (docs/API.md). The
+// A relay configured with a per-session cap (JOY_RELAY_MAX_EVENTS_PER_SESSION;
+// none by default) answers every output post past it with 429
+// session_event_budget_exhausted — for good. The
 // daemon drops that output so the turn can still terminalize and carries the
 // loss on the card as `joy__eventBudget` {since, dropped} (#130). Without
 // this bar the user saw a conversation that simply stopped growing, with no

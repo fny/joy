@@ -17,7 +17,7 @@ Tap a push to open the session it is about.
 | **A turn finished** | Claude Code | The agent finished and the session is now idle. |
 | **Permission needed** | Claude Code | The agent is waiting for you to allow a tool call. |
 | **The agent's own notification** | Claude Code, Codex, OpenCode | The agent decided something was worth telling you. |
-| **This session is full** | All | The relay can no longer store the session's output. |
+| **This session is full** | All | The relay caps session length and this session reached the cap. |
 | **Resource alerts** | Not tied to a session | A machine's memory, disk, or Claude or Codex quota crosses 90%. |
 | **`joy notify`** | Not tied to a session | You or a script sent one from the command line. |
 
@@ -45,7 +45,7 @@ The push title is the project folder and the message ("my-project: Deploy finish
 
 ### This session is full
 
-The relay keeps a limited number of events per session. When a session reaches that limit, you get one push reading **This session is full**: the agent may still be running, but its output can no longer be saved. Continue the work in a new session.
+A relay can be set to cap how many events each session keeps; by default it does not. When a session reaches the cap, you get one push reading **This session is full**: the agent may still be running, but its output can no longer be saved. Continue the work in a new session.
 
 ### Resource alerts
 

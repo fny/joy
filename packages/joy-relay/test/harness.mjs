@@ -15,10 +15,10 @@ const TOKENS = new Map([['app-token', 'account-1'], ['other-token', 'account-2']
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function startRelay({ tunnel: tunnelOpts = {} } = {}) {
+export async function startRelay({ tunnel: tunnelOpts = {}, maxEventsPerSession = null } = {}) {
   const db = await openDb(':memory:');
   const notify = createNotify();
-  const core = createCore(db, notify);
+  const core = createCore(db, notify, { maxEventsPerSession });
   const auth = { verifyToken: async (t) => TOKENS.get(t) ?? null };
   const tunnel = createTunnel({ notify, ...tunnelOpts });
   const attachments = createAttachments(db);

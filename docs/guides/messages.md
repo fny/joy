@@ -99,7 +99,7 @@ If the session is busy, such messages wait in their own **From other sessions** 
 
 ## "This session is full"
 
-The relay stores a large but fixed amount of history per session. A very long session can run out. When it does:
+Sessions have no length limit unless your relay's owner sets one. On a relay that caps each session's history, a very long session can reach the cap. When it does:
 
 - A bar reads OUTPUT DROPPED: "This session is full — part of the conversation was not saved".
 - The agent keeps running, but its new output is not saved and new messages to the session are refused.

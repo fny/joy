@@ -3,13 +3,17 @@
 // a fake app and a fake daemon speaking only /joy/v2.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { ApiError, MAX_EVENTS_PER_SESSION } from '../src/core.mjs';
+import { ApiError, parseMaxEventsPerSession } from '../src/core.mjs';
+
+// The budget suites below run against a relay configured WITH a cap — the
+// relay has none unless its owner sets JOY_RELAY_MAX_EVENTS_PER_SESSION.
+const MAX_EVENTS_PER_SESSION = 50_000;
 import { startRelay, sleep } from './harness.mjs';
 
 let relay, base, db, core, attachments, call, makeDaemon, makeSession, post, getMsg, offerFor;
 
 beforeAll(async () => {
-  relay = await startRelay();
+  relay = await startRelay({ maxEventsPerSession: MAX_EVENTS_PER_SESSION });
   ({ base, db, core, attachments, call, makeDaemon, makeSession, post, getMsg, offerFor } = relay);
 });
 afterAll(() => relay.close());
@@ -475,4 +479,40 @@ describe('#619 SSE greeting: a client gone during the snapshot arms no heartbeat
       clearSpy.mockRestore();
     }
   });
+});
+
+describe('session length is unbounded unless the relay sets a cap', () => {
+  it('JOY_RELAY_MAX_EVENTS_PER_SESSION: unset/0/none/unlimited → no cap; a positive integer → that cap; anything else → a launch error', () => {
+    for (const v of [undefined, '', '0', 'none', 'unlimited', 'off', ' UNLIMITED ']) {
+      expect(parseMaxEventsPerSession(v), String(v)).toEqual({ cap: null, error: null });
+    }
+    expect(parseMaxEventsPerSession('50000')).toEqual({ cap: 50_000, error: null });
+    expect(parseMaxEventsPerSession('250_000')).toEqual({ cap: 250_000, error: null });
+    for (const v of ['-1', '1.5', 'lots', '1e6', '0x10']) {
+      expect(parseMaxEventsPerSession(v).error, v).toMatch(/must be a positive whole number/);
+    }
+  });
+
+  it('a relay with no cap takes prompts and output facts past the old 50,000-event limit', async () => {
+    const open = await startRelay(); // no maxEventsPerSession: unlimited
+    try {
+      const d = open.makeDaemon('mach-unbounded'); await d.acquire();
+      const sid = await open.makeSession(d);
+      await open.db.query(
+        `INSERT INTO session_events (session_id, seq, event_id, kind)
+         SELECT $1, 1000000 + g, 'e' || g, 'output' FROM generate_series(1, 60000) AS g`, [sid]);
+      const sent = await open.post(sid, { ciphertext: 'still here', clientIntentId: 'past-the-old-cap' });
+      expect(sent.status).toBe(202);
+      const offer = open.offerFor(await d.claim('work'), sid);
+      expect(offer).toBeTruthy();
+      expect((await d.received(offer.deliveryId)).status).toBe(200);
+      expect((await d.submitted(offer.turnId)).status).toBe(200);
+      expect((await d.start(offer.turnId, { runtimeEventId: `start:${offer.turnId}` })).status).toBe(200);
+      const fact = await d.fact(offer.turnId, { type: 'output', ciphertext: 'o', runtimeEventId: 'out-past-cap' });
+      expect(fact.status).toBe(200);
+      const outside = await open.call('POST', `/joy/v2/daemon/sessions/${sid}/facts`,
+        { body: { type: 'output', ciphertext: 'o', runtimeEventId: 'out-outside-turn' }, headers: d.headers() });
+      expect(outside.status).toBe(200);
+    } finally { await open.close(); }
+  }, 60_000);
 });

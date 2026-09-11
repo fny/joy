@@ -167,7 +167,7 @@ A session that is still running is never offered, so restore cannot put two agen
 
 ## "This session is full"
 
-The relay keeps a fixed number of events for each session. When a session reaches it, the relay refuses new output for that session. The agent can keep working, but nothing new it produces is saved, and messages you send there are refused. The status reads `output dropped — session full`. This does not recover by itself. Start a new session in the same folder and continue there.
+This only happens on a relay whose owner has capped session length (`JOY_RELAY_MAX_EVENTS_PER_SESSION`); by default there is no cap. When a session reaches the cap, the relay refuses new output for that session. The agent can keep working, but nothing new it produces is saved, and messages you send there are refused. The status reads `output dropped — session full`. This does not recover by itself. Start a new session in the same folder and continue there.
 
 ## Updates don't show up
 

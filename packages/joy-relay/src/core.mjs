@@ -16,7 +16,23 @@ export const MAX_CIPHERTEXT = 256 * 1024;   // bytes of base64 payload accepted 
 export const MAX_QUEUED_TURNS = 100;
 export const MAX_SESSIONS_PER_ACCOUNT = 200;
 export const MAX_DAEMONS_PER_ACCOUNT = 50;
-export const MAX_EVENTS_PER_SESSION = 50_000;
+/** Sessions have no upper bound on length unless the relay's owner sets one
+ *  (JOY_RELAY_MAX_EVENTS_PER_SESSION → createCore's maxEventsPerSession).
+ *  A cap used to be fixed at 50,000 events: a guardrail from a review, not a
+ *  measured limit, and its failure shape was the worst one — the relay kept
+ *  the old history and refused the live end, so a long session went silent
+ *  on every device while the agent kept working. */
+export const DEFAULT_MAX_EVENTS_PER_SESSION = null;
+
+/** JOY_RELAY_MAX_EVENTS_PER_SESSION as a cap: unset, empty, 0, "none" or
+ *  "unlimited" → null (no limit); a positive integer → that cap; anything
+ *  else → an error the relay refuses to start with. */
+export function parseMaxEventsPerSession(raw) {
+  const v = String(raw ?? '').trim();
+  if (v === '' || v === '0' || /^(none|unlimited|off)$/i.test(v)) return { cap: null, error: null };
+  if (/^[1-9]\d*$/.test(v.replace(/_/g, ''))) return { cap: Number(v.replace(/_/g, '')), error: null };
+  return { cap: null, error: `JOY_RELAY_MAX_EVENTS_PER_SESSION must be a positive whole number of events, or unset for no limit (got "${v}")` };
+}
 /** Events a turn writes besides its outputs (queued, started, terminal);
  *  prompt admission keeps this many free per open turn, and claim/start
  *  re-check the same reserve against the live count (#613). */
@@ -107,7 +123,11 @@ async function findExistingIntent(t, sessionId, actorId, clientIntentId, hash) {
   return acceptedIntentFrom(prior);
 }
 
-export function createCore(db, notify) {
+export function createCore(db, notify, { maxEventsPerSession = DEFAULT_MAX_EVENTS_PER_SESSION } = {}) {
+  // No cap unless one is configured; with none, the event-budget checks do no
+  // counting at all (each was a count(*) over the whole session per write).
+  const MAX_EVENTS_PER_SESSION = Number.isFinite(maxEventsPerSession) && maxEventsPerSession > 0 ? maxEventsPerSession : null;
+  const capped = MAX_EVENTS_PER_SESSION !== null;
   /**
    * Where automations listen. Set by the server (createAutomations) after both
    * exist, because an automation RUN is an ordinary spawned session and so
@@ -438,12 +458,14 @@ export function createCore(db, notify) {
       // events (queued/started/terminal) every already-accepted turn still
       // has to write. The 429 is the client's cue to continue in a NEW
       // session; nothing here clears by retrying.
-      const { rows: [{ n: eventCount }] } = await t.query(
-        `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [sessionId]);
-      const { rows: [{ n: openTurns }] } = await t.query(
-        `SELECT count(*)::int AS n FROM turns WHERE session_id = $1 AND state <> 'terminal'`, [sessionId]);
-      if (eventCount + EVENT_BUDGET_LIFECYCLE_RESERVE * (openTurns + 1) >= MAX_EVENTS_PER_SESSION) {
-        throw new ApiError(429, 'session_event_budget_exhausted');
+      if (capped) {
+        const { rows: [{ n: eventCount }] } = await t.query(
+          `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [sessionId]);
+        const { rows: [{ n: openTurns }] } = await t.query(
+          `SELECT count(*)::int AS n FROM turns WHERE session_id = $1 AND state <> 'terminal'`, [sessionId]);
+        if (eventCount + EVENT_BUDGET_LIFECYCLE_RESERVE * (openTurns + 1) >= MAX_EVENTS_PER_SESSION) {
+          throw new ApiError(429, 'session_event_budget_exhausted');
+        }
       }
 
       const { seq } = await nextSeq(t, sessionId);
@@ -599,6 +621,7 @@ export function createCore(db, notify) {
    *  exactly `cap` here — a turn admitted with nothing consumed in between is
    *  always claimable. Caller is in tx. */
   async function eventBudgetExhausted(t, sessionId) {
+    if (!capped) return false;
     const { rows: [{ n: eventCount }] } = await t.query(
       `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [sessionId]);
     const { rows: [{ n: openTurns }] } = await t.query(
@@ -906,9 +929,11 @@ export function createCore(db, notify) {
         }
         case 'output': {
           if ((body.ciphertext?.length ?? 0) > MAX_CIPHERTEXT) throw new ApiError(413, 'ciphertext_too_large');
-          const { rows: [{ n }] } = await t.query(
-            `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [s.id]);
-          if (n >= MAX_EVENTS_PER_SESSION) throw new ApiError(429, 'session_event_budget_exhausted');
+          if (capped) {
+            const { rows: [{ n }] } = await t.query(
+              `SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [s.id]);
+            if (n >= MAX_EVENTS_PER_SESSION) throw new ApiError(429, 'session_event_budget_exhausted');
+          }
           await t.query(`UPDATE turns SET last_progress_at = now() WHERE id = $1`, [turnId]);
           const { seq } = await nextSeq(t, s.id);
           await appendEvent(t, s.id, seq, {
@@ -955,8 +980,10 @@ export function createCore(db, notify) {
           [s.id, body.runtimeEventId]);
         if (dupe) return { ok: true, seq: String(dupe.seq), replay: true, accountId: s.account_id };
       }
-      const { rows: [{ n }] } = await t.query(`SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [s.id]);
-      if (n >= MAX_EVENTS_PER_SESSION) throw new ApiError(429, 'session_event_budget_exhausted');
+      if (capped) {
+        const { rows: [{ n }] } = await t.query(`SELECT count(*)::int AS n FROM session_events WHERE session_id = $1`, [s.id]);
+        if (n >= MAX_EVENTS_PER_SESSION) throw new ApiError(429, 'session_event_budget_exhausted');
+      }
       const { seq } = await nextSeq(t, s.id);
       await appendEvent(t, s.id, seq, { kind: body.kind ?? 'output', turnId: null, runtimeEventId: body.runtimeEventId ?? null, ciphertext: body.ciphertext });
       return { ok: true, seq, accountId: s.account_id };
