@@ -247,6 +247,10 @@ interface StorageState {
     incrementVoiceSessionGeneration: () => void;
     setVoiceArmedSessionId: (sessionId: string | null) => void;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
+    /** Rebuild the list from the sessions already held: for the freshness
+     *  boundary (useSessionFreshnessTick), where nothing in the data changed
+     *  but the clock crossed SESSION_STALE_AFTER_MS for one of them. */
+    refreshSessionListViewData: () => void;
     applyMachines: (machines: Machine[], replace?: boolean) => void;
     deleteMachine: (machineId: string) => void;
     applyLoaded: () => void;
@@ -739,6 +743,10 @@ export const storage = create<StorageState>()((set, get) => {
                 unreadSessionIds,
             };
         }),
+        refreshSessionListViewData: () => set((state) => ({
+            ...state,
+            sessionListViewData: buildSessionListViewData(state.sessions, state.unreadSessionIds),
+        })),
         applyLoaded: () => set((state) => {
             const result = {
                 ...state,

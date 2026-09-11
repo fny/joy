@@ -72,13 +72,13 @@ afterEach(async () => {
 });
 
 describe('attemptOwnsDraft (#133)', () => {
-    const d = { state: 'releasing' as const, releaseLocalId: 'L1' };
+    const d = { kind: 'releasing' as const, attempt: 0, lastError: null, localId: 'L1', leaseUntil: 0, token: 7, removal: false };
     it('owns only while token, state and release identity all match', () => {
-        expect(attemptOwnsDraft(d, 'L1', 7, 7)).toBe(true);
-        expect(attemptOwnsDraft(d, 'L1', 7, 8)).toBe(false); // a newer attempt took over
-        expect(attemptOwnsDraft(d, 'L9', 7, 7)).toBe(false); // edited: new release identity
-        expect(attemptOwnsDraft({ ...d, state: 'queued' }, 'L1', 7, 7)).toBe(false);
-        expect(attemptOwnsDraft(undefined, 'L1', 7, 7)).toBe(false);
+        expect(attemptOwnsDraft(d, 'L1', 7)).toBe(true);
+        expect(attemptOwnsDraft({ ...d, token: 8 }, 'L1', 7)).toBe(false); // a newer attempt took over
+        expect(attemptOwnsDraft(d, 'L9', 7)).toBe(false); // edited: new release identity
+        expect(attemptOwnsDraft({ kind: 'queued', attempt: 0, lastError: null, localId: 'L1', missing: [] }, 'L1', 7)).toBe(false);
+        expect(attemptOwnsDraft(undefined, 'L1', 7)).toBe(false);
     });
 });
 

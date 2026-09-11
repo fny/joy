@@ -18,7 +18,30 @@ export const SESSION_STALE_AFTER_MS = 90_000;
 export const EPHEMERAL_THINKING_TRUST_MS = 45_000;
 
 export function isFresh(session: { activeAt: number }): boolean {
-    return Date.now() - session.activeAt < SESSION_STALE_AFTER_MS;
+    return isFreshAt(session, Date.now());
+}
+
+export function isFreshAt(session: { activeAt: number }, now: number): boolean {
+    return now - session.activeAt < SESSION_STALE_AFTER_MS;
+}
+
+/**
+ * How long until the FIRST currently-fresh session in `sessions` goes stale,
+ * or null when none is fresh. Freshness is a pure function of the clock, and
+ * nothing in the store changes when a session crosses the boundary — so a
+ * list computed at render kept a dead daemon's session "online" until some
+ * unrelated update happened to re-render it. Machines have had this exact
+ * boundary timer since #180/#323 (useMachineOnline); this is the session
+ * half. Callers arm ONE timeout for the earliest expiry and recompute then.
+ */
+export function msUntilNextSessionStale(sessions: Iterable<{ activeAt: number }>, now: number): number | null {
+    let next: number | null = null;
+    for (const s of sessions) {
+        if (!isFreshAt(s, now)) continue;
+        const remaining = s.activeAt + SESSION_STALE_AFTER_MS - now;
+        if (next === null || remaining < next) next = remaining;
+    }
+    return next === null ? null : Math.max(0, next);
 }
 
 /**
