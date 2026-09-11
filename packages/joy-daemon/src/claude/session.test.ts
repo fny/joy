@@ -1044,6 +1044,20 @@ const DIALOG_SWITCH_CONFIRM = [
   "     2. No, go back",
 ].join("\n");
 
+// `/effort <level>` does NOT always open the slider: when the conversation is
+// cached for the current level it opens the same Yes/No confirm the model
+// switch does, under its own title. That shape went unmatched and the session
+// sat waiting for an Enter nobody was there to press (2026-09-11).
+const DIALOG_EFFORT_CONFIRM = [
+  "❯ /effort low",
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+  "   Change effort level?",
+  "   Your next response will be slower and use more tokens",
+  "   This conversation is cached for the current effort level. Switching to low means the full history gets re-read on your next message.",
+  "   ❯ 1. Yes, switch to low",
+  "     2. No, go back",
+].join("\n");
+
 const DIALOG_EFFORT_SLIDER = [
   "❯ /model opus",
   "  ⎿  Kept model as Haiku 4.5",
@@ -1088,6 +1102,19 @@ test("dialogAutoAnswerKeys: Enter on Switch model? when the highlight is Yes, on
   expect(flipped.selected).toBe(1);
   expect(dialogAutoAnswerKeys(flipped)).toBeNull();
   expect(dialogAutoAnswerKeys(dialogFromPane(DIALOG_EFFORT_SLIDER)!)).toEqual(["Enter"]);
+
+  // The effort CONFIRM — the second shape /effort has — answered the same way,
+  // and under the same guard: a flipped highlight is left for the human,
+  // because Enter would then answer "no".
+  const effortConfirm = dialogFromPane(DIALOG_EFFORT_CONFIRM)!;
+  expect(effortConfirm.title).toBe("Change effort level?");
+  expect(dialogAutoAnswerKeys(effortConfirm)).toEqual(["Enter"]);
+  const effortFlipped = dialogFromPane(
+    DIALOG_EFFORT_CONFIRM
+      .replace("❯ 1. Yes, switch to low", "  1. Yes, switch to low")
+      .replace("     2. No, go back", "   ❯ 2. No, go back"),
+  )!;
+  expect(dialogAutoAnswerKeys(effortFlipped)).toBeNull();
   expect(dialogAutoAnswerKeys(dialogFromPane(DIALOG_MODEL_PICKER)!)).toBeNull();
 });
 

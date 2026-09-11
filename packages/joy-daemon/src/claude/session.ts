@@ -5293,10 +5293,18 @@ export function retryFromPane(text: string): { status: number; attempt: number; 
  * level the command asked for, so Enter simply confirms it. Anything else —
  * the bare /model picker, a permission prompt, AskUserQuestion — is left for
  * the human. Returns the keys to send, or null to surface the dialog.
+ *
+ * `/effort` has TWO shapes, not one. The slider is what it opens with no
+ * argument; with a level it can instead open the same Yes/No confirm the
+ * model switch does, titled "Change effort level?" — and that one was not
+ * matched, so `/effort low` sat waiting for an Enter nobody was there to
+ * press (2026-09-11). Same confirm, same guard, one more title.
  */
+const AUTO_CONFIRM_TITLE = /^(Switch model|Change effort level)\?/i;
+
 export function dialogAutoAnswerKeys(dialog: PaneDialog): string[] | null {
   const title = (dialog.title ?? "").trim();
-  if (/^Switch model\?/i.test(title)) {
+  if (AUTO_CONFIRM_TITLE.test(title)) {
     // Options arrive with the ❯ stripped; the highlighted row is the one the
     // parser found selected — recover it from the raw marker when present,
     // else claude's default (first row).

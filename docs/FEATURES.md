@@ -567,7 +567,9 @@ changed file's contents while on.
 - `/model <x>` and `/effort <x>` no longer stall on Claude Code's own confirm:
   the daemon answers the "Switch model?" dialog with Enter when the highlighted
   row reads *Yes* (otherwise it surfaces it, the folder-trust lesson) and
-  confirms the effort slider the same way. Permission prompts, the bare
+  confirms the effort slider the same way, and answers the "Change effort
+  level?" confirm `/effort <level>` opens when the conversation is cached for
+  the current level. Permission prompts, the bare
   `/model` picker and AskUserQuestion are still yours to answer.
 - Extended thinking reaches the app: the daemon forwards Claude's `thinking`
   blocks as text events flagged `thinking: true`, and the chat shows each as a
