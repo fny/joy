@@ -35,6 +35,7 @@ import { opencodeJoyPreamble, joyPromptReinjection } from "../domain/agentTagsPr
 import { ledgerFor, type Ledger } from "../domain/ledger";
 import { coordinatorFor, type SessionCoordinator, type CommandView, type HandledCommand } from "../domain/coordinator";
 import { OpencodeDriver, type OpencodeRuntimePort } from "./opencodeDriver";
+import { initialResumeState, nextResumeState, type ResumeState, type ResumeEvent, type ResumeEffect } from "./opencodeResume";
 
 export interface OpencodeInit {
   id: string;
@@ -296,8 +297,9 @@ export class OpencodeSession implements AgentSession {
   #proc: ChildProcess | null = null;
   #relay: RelaySession | null = null;
   #norm: OpencodeNormalizer | null = null;
-  #ocSessionId: string | null = null;
-  #resumeOcSessionId?: string;
+  /** How this session finds its server-side opencode session, whether it
+   *  backfills, owes the preamble, may be auto-titled (opencodeResume.ts). */
+  #resume: ResumeState;
   #reapPid?: number;
   /** Spawn identity persisted with #reapPid — verified before the recorded
    *  server is signalled (#628). */
@@ -310,7 +312,6 @@ export class OpencodeSession implements AgentSession {
    *  binds to THIS incarnation, never to a later spawn given the same pid. */
   #procGroup?: GroupRegistration;
   #thinking = false;
-  #started = false;
   #activeTurn: string | null = null;
   #archivePromise: Promise<boolean> | null = null;
   // Durable inbound queue: ledger commands the coordinator owns; this
@@ -328,18 +329,6 @@ export class OpencodeSession implements AgentSession {
   // outbox rows are acked. Advanced on live turn completion and after
   // reconcile replay.
   #deliveredThrough?: string;
-  #continueLast = false;
-  // First-prompt auto-title fires once, and only for sessions whose card is
-  // NEW (fresh create / continue). Resume/recovery reattaches an existing
-  // card that already carries its title — never retitle those.
-  #titled = false;
-  // /title lock: a user-set title beats agent <joy-title> emissions.
-  #titleLocked = false;
-  // Send the title preamble with the first prompt of a FRESH oc session.
-  #needsPreamble = false;
-  // Set when continue actually resolved to an existing session (drives the
-  // reconcile backfill; a fresh fallback session has nothing to replay).
-  #continuedInto = false;
 
   constructor(init: OpencodeInit, deps: SessionDeps) {
     this.id = init.id;
@@ -349,17 +338,19 @@ export class OpencodeSession implements AgentSession {
     this.#providerID = init.providerID;
     this.#startedAt = init.startedAt;
     this.#deps = deps;
-    this.#resumeOcSessionId = init.opencodeSessionId;
     this.#reapPid = init.opencodeServerPid;
-    this.#continueLast = init.continueLast === true;
-    this.#titled = init.opencodeSessionId != null;
     const rec = loadWindowRecord(init.id);
+    // Origin, title lock and what construction owes the ledger: the resume
+    // machine's initial state (a resume keeps its rows; anything else is a
+    // NEW opencode session under this id and interrupts what an earlier one
+    // left pending).
+    const boot = initialResumeState({ resumeId: init.opencodeSessionId, continueLast: init.continueLast, titleLocked: rec?.titleLockedByUser === true });
+    this.#resume = boot.state;
     // Both knobs ride the record so a restart/recover reopens the session
     // the way it was running (they are per opencode session server-side too,
     // but the server is respawned fresh every time).
     this.#permissionMode = init.permissionMode ?? rec?.opencodeSettings?.permissionMode ?? "default";
     this.currentEffort = init.effort ?? rec?.opencodeSettings?.effort;
-    this.#titleLocked = rec?.titleLockedByUser === true;
     // The persisted identity belongs to the persisted pid — pair them, or the
     // reap would verify one server's pid against another's start time (#628).
     if (this.#reapPid !== undefined && rec?.opencodeServerPid === this.#reapPid) {
@@ -369,8 +360,8 @@ export class OpencodeSession implements AgentSession {
     // closes the previous one (its in-flight prompts become `unknown`).
     this.#ledger = deps.ledger ?? ledgerFor();
     this.#generation = this.#ledger.openGeneration(init.id, "opencode");
-    this.#deliveredThrough = init.opencodeSessionId ? (this.#ledger.getCheckpoint(init.id, "opencode_msg")?.ref || undefined) : undefined; // "" = pending, nothing committed
-    if (!init.opencodeSessionId) {
+    this.#deliveredThrough = !boot.interruptPendingRows ? (this.#ledger.getCheckpoint(init.id, "opencode_msg")?.ref || undefined) : undefined; // "" = pending, nothing committed
+    if (boot.interruptPendingRows) {
       this.#ledger.clearCheckpoint(init.id, "opencode_msg");
       this.#ledger.clearCheckpoint(init.id, REPLAY_PROJECTION_KIND);
       // A fresh opencode session under this id: nothing queued for an earlier
@@ -395,7 +386,7 @@ export class OpencodeSession implements AgentSession {
       ocSessionId: () => this.#ocSessionId,
       currentTurn: () => this.#norm?.currentTurn ?? null,
       lastAdmitted: () => this.#lastAdmitted,
-      takePreamble: () => { if (!this.#needsPreamble) return ""; this.#needsPreamble = false; return opencodeJoyPreamble(); },
+      takePreamble: () => (this.#resumeStep({ type: "prompt_out" }).some((e) => e.type === "send_preamble") ? opencodeJoyPreamble() : ""),
       turnInterrupted: () => { if (this.#activeTurn) this.#endTurn(this.#activeTurn, "cancelled"); },
       handleCommand: (text, opts) => this.#handleCommand(text, opts),
       mirrorAccepted: (cmd) => this.#mirrorAccepted(cmd),
@@ -407,7 +398,21 @@ export class OpencodeSession implements AgentSession {
   get coordinator(): SessionCoordinator { return this.#coordinator; }
 
   get relayAttached(): boolean { return this.#relay !== null; }
-  get opencodeSessionId(): string | undefined { return this.#ocSessionId ?? this.#resumeOcSessionId; }
+  get opencodeSessionId(): string | undefined { return this.#resume.ocSessionId ?? undefined; }
+  /** The bound server-side session (null until the machine binds one). */
+  get #ocSessionId(): string | null { return this.#resume.phase === "bound" || this.#resume.phase === "ended" ? this.#resume.ocSessionId : null; }
+  /** Test/diagnostic access to the resume machine's state. */
+  get resumeState(): ResumeState { return this.#resume; }
+
+  /** One step of the resume machine; the effects are returned to the caller
+   *  that knows how to perform them. Null (the event means nothing now)
+   *  answers no effects. */
+  #resumeStep(ev: ResumeEvent): ResumeEffect[] {
+    const t = nextResumeState(this.#resume, ev);
+    if (!t) return [];
+    this.#resume = t.to;
+    return t.effects ?? [];
+  }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
@@ -424,8 +429,8 @@ export class OpencodeSession implements AgentSession {
   }
 
   beginWatching(): void {
-    if (this.#started) return;
-    this.#started = true;
+    if (nextResumeState(this.#resume, { type: "begin" }) === null) return; // already begun, or ended
+    this.#resumeStep({ type: "begin" });
     void this.#start();
   }
 
@@ -468,26 +473,32 @@ export class OpencodeSession implements AgentSession {
       const client = new OpencodeClient(p);
       this.#client = client;
 
-      if (this.#resumeOcSessionId) {
-        this.#ocSessionId = this.#resumeOcSessionId;
-      } else {
-        if (this.#continueLast) {
-          try {
-            const found = pickNewestSessionForCwd(await client.request("GET", "/api/session").then((r) => ((r as { data?: Array<Record<string, unknown>> })?.data ?? [])), this.cwd);
-            if (found) {
-              this.#ocSessionId = found;
-              this.#continuedInto = true;
-              process.stderr.write(`[opencode ${this.id}] continue: resuming newest session ${found} in ${this.cwd}\n`);
-            }
-          } catch (e) { process.stderr.write(`[opencode ${this.id}] continue lookup failed (${e}) — starting fresh\n`); }
+      // Which opencode session to run: the machine decides (resume the known
+      // id; continue = look the newest up, fall back to fresh; fresh =
+      // create) and says whether its history is backfilled.
+      let effects = this.#resumeStep({ type: "server_up" });
+      while (effects.length) {
+        const next: ResumeEffect[] = [];
+        for (const eff of effects) {
+          if (eff.type === "lookup") {
+            let found: string | null = null;
+            try {
+              found = pickNewestSessionForCwd(await client.request("GET", "/api/session").then((r) => ((r as { data?: Array<Record<string, unknown>> })?.data ?? [])), this.cwd);
+              if (found) process.stderr.write(`[opencode ${this.id}] continue: resuming newest session ${found} in ${this.cwd}\n`);
+            } catch (e) { process.stderr.write(`[opencode ${this.id}] continue lookup failed (${e}) — starting fresh\n`); }
+            next.push(...this.#resumeStep(found ? { type: "session_found", ocSessionId: found } : { type: "session_missing" }));
+          } else if (eff.type === "create") {
+            const created = await client.createSession();
+            next.push(...this.#resumeStep({ type: "session_created", ocSessionId: created.id }));
+          }
+          // "resume" and "backfill" need nothing here: the id is already the
+          // state's, and the backfill runs below once the client is wired.
         }
-        if (!this.#ocSessionId) {
-          const s = await client.createSession();
-          this.#ocSessionId = s.id;
-          this.#needsPreamble = true;
-        }
+        effects = next;
       }
-      this.#norm = new OpencodeNormalizer(this.#ocSessionId);
+      const ocSessionId = this.#ocSessionId;
+      if (!ocSessionId) throw new Error("no opencode session bound");
+      this.#norm = new OpencodeNormalizer(ocSessionId);
       client.onEvent((e) => {
         this.touchTurnActivity();
         if (this.#norm) this.#applyEffects(this.#norm.handle(e));
@@ -496,7 +507,7 @@ export class OpencodeSession implements AgentSession {
 
       if (this.model && this.#providerID) {
         try {
-          await client.switchModel(this.#ocSessionId, this.#providerID, this.model, this.currentEffort);
+          await client.switchModel(ocSessionId, this.#providerID, this.model, this.currentEffort);
           this.currentModel = this.model;
           void this.#relay?.updateModelCode(this.model);
         } catch (e) { process.stderr.write(`[opencode ${this.id}] model switch failed: ${e}\n`); }
@@ -504,12 +515,12 @@ export class OpencodeSession implements AgentSession {
       // The permission mode is a property of the server-side session, and
       // this is a fresh server: re-apply it on every start.
       if (this.#permissionMode !== "default") {
-        try { await this.#applyPermissionMode(client, this.#ocSessionId, this.#permissionMode); }
+        try { await this.#applyPermissionMode(client, ocSessionId, this.#permissionMode); }
         catch (e) { process.stderr.write(`[opencode ${this.id}] permission mode ${this.#permissionMode} not applied: ${e}\n`); }
       }
 
       // Backfill for every non-fresh session: explicit resume AND continue.
-      if (this.#resumeOcSessionId || this.#continuedInto) await this.#reconcileHistory();
+      if (this.#resume.backfill) await this.#reconcileHistory();
 
       this.#persistRecord();
       if (this.status === "starting") this.status = "active";
@@ -615,21 +626,17 @@ export class OpencodeSession implements AgentSession {
     const titleCmd = /^\/title(?:\s+(.*))?$/s.exec(text.trim());
     if (titleCmd) {
       const t = (titleCmd[1] ?? "").trim();
-      if (t) {
-        this.#titleLocked = true;
-        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: true });
-        this.summary = t;
-        void this.#relay?.updateSummary(t);
-      } else {
-        this.#titleLocked = false;
-        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: false });
+      for (const eff of this.#resumeStep({ type: "title_command", text: t || null })) {
+        if (eff.type !== "set_title") continue;
+        saveWindowRecord(this.id, { launchCwd: this.cwd, titleLockedByUser: eff.locked });
+        if (eff.value) { this.summary = eff.value; void this.#relay?.updateSummary(eff.value); }
       }
       this.#deps.broadcast("session_update", this.toJSON());
       if (opts.mirrorToRelay && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${opts.seq ?? Date.now()}`);
       return { handled: true };
     }
     if (/^\/joy-prompt(?:\s|$)/.test(text.trim())) {
-      this.#needsPreamble = false;
+      this.#resumeStep({ type: "joy_prompt" });
       if (opts.mirrorToRelay && this.#relay) this.#relay.send(encodeUserMessage(text, Date.now()), `oc:in:${this.id}:${opts.seq ?? Date.now()}`);
       return { handled: true, reinjection: joyPromptReinjection() };
     }
@@ -737,9 +744,10 @@ export class OpencodeSession implements AgentSession {
         case "context": void this.#relay?.updateContext(eff.tokens); break;
         case "notify": this.#relay?.notifyCustom(eff.headline, eff.detail); break;
         case "title":
-          if (!this.#titleLocked) {
-            this.summary = eff.value;
-            void this.#relay?.updateSummary(eff.value);
+          for (const r of this.#resumeStep({ type: "agent_title", value: eff.value })) {
+            if (r.type !== "apply_title") continue;
+            this.summary = r.value;
+            void this.#relay?.updateSummary(r.value);
             this.#deps.broadcast("session_update", this.toJSON());
           }
           break;
@@ -801,10 +809,12 @@ export class OpencodeSession implements AgentSession {
     }
   }
 
-  /** First-prompt auto-title: once, fresh cards only (see #titled). */
+  /** First-prompt auto-title: once, new cards only (the machine's `titled`;
+   *  a resumed card already carries its title). Without a relay there is
+   *  nothing to title yet, and the chance is not spent. */
   #maybeTitle(text: string): void {
-    if (this.#titled || !this.#relay) return;
-    this.#titled = true;
+    if (!this.#relay || this.#resume.titled) return;
+    if (!this.#resumeStep({ type: "prompt_accepted" }).some((e) => e.type === "auto_title")) return;
     const title = titleFromPrompt(text);
     if (title) void this.#relay.updateSummary(title);
   }
@@ -900,6 +910,7 @@ export class OpencodeSession implements AgentSession {
     // mistaken for the runtime's verdict on a dead generation's commands.
     this.#unsubscribeQueue();
     this.#coordinator.retire(this.id, reason);
+    this.#resumeStep({ type: "ended" });
     if (this.#activeTurn) this.#endTurn(this.#activeTurn, "cancelled");
     this.#relay?.setThinking(false);
     if (reason === "process_exited") {
