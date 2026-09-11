@@ -884,7 +884,12 @@ function cmdInstall(): number {
 const RELEASE_SPEC = "git+https://github.com/fny/joy.git#release&path:packages/joy-daemon";
 function cmdUpdate(): number {
   console.log("updating @fny/joy-daemon from release branch…");
-  const r = spawnSync("pnpm", ["add", "-g", RELEASE_SPEC], { stdio: "inherit" });
+  // pnpm 10 stops a git-hosted dependency at "Choose which packages to
+  // build" — an interactive picker — even though this package has no
+  // install script to run (tsx runs the TypeScript as shipped). In CI mode
+  // pnpm skips the picker and the build, and says so in one line; that is
+  // the install every deploy script already does (2026-09-11).
+  const r = spawnSync("pnpm", ["add", "-g", RELEASE_SPEC], { stdio: "inherit", env: { ...process.env, CI: process.env.CI ?? "1" } });
   if (r.status !== 0) { console.log(`${bad} pnpm add -g failed (is pnpm on PATH? repo access?)`); return 1; }
   return cmdInstall();
 }
