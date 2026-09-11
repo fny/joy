@@ -856,6 +856,9 @@ export const en = {
     },
 
     files: {
+        sessionFiles: 'Session files',
+        noSessionFiles: 'No uploads or images yet. Files you attach to a message land here, outside the project.',
+        sessionFilesFooter: 'Uploads you sent and images the agent showed — kept outside the project, in the session’s own folder on its machine.',
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: 'Unified',

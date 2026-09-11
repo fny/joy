@@ -241,6 +241,14 @@ export const machineListDir = (ctx: MachineCtx, path: string, depth = 1) =>
     j<{ success: boolean; entries?: unknown[]; tree?: unknown; error?: string }>(ctx, 'GET',
         `/v2/sessions/${ctx.localSessionId}/files/entries?path=${encodeURIComponent(path)}&depth=${depth}`);
 
+/** A file the session keeps outside its project (~/.joy/sessions/<id>/:
+ *  uploads the app sent, the agent's media). `path` is absolute and opens
+ *  through machineReadFile like any project file. */
+export interface SessionFileEntry { path: string; relativePath: string; name: string; size: number; mtimeMs: number }
+export const machineSessionFiles = (ctx: MachineCtx) =>
+    j<{ ok?: boolean; root?: string; files?: SessionFileEntry[]; truncated?: boolean; error?: string }>(ctx, 'GET',
+        `/v2/sessions/${ctx.localSessionId}/files/session`);
+
 export const machineGrep = (ctx: MachineCtx, q: string, opts?: { path?: string; glob?: string; caseSensitive?: boolean; maxResults?: number }) =>
     j<{ success: boolean; stdout?: string; error?: string }>(ctx, 'GET',
         `/v2/sessions/${ctx.localSessionId}/files/grep?q=${encodeURIComponent(q)}`

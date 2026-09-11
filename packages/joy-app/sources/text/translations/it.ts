@@ -805,6 +805,9 @@ export const it: TranslationStructure = {
     },
 
     files: {
+        sessionFiles: 'File della sessione',
+        noSessionFiles: 'Ancora nessun caricamento o immagine. I file allegati a un messaggio finiscono qui, fuori dal progetto.',
+        sessionFilesFooter: "File che hai inviato e immagini mostrate dall'agente, conservati fuori dal progetto, nella cartella della sessione sulla sua macchina.",
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: 'Unificato',

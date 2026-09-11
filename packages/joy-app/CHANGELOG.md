@@ -1,3 +1,10 @@
+# Sep 11 (9) — Uploads stay out of your project
+
+- **Files you attach no longer land in your project.** A screenshot pasted into a message used to be saved as `paste-….png` in the session's folder — the repository — and they piled up. Uploads now go to the session's own folder on its machine, beside the images the agent shows you, and the agent gets the full path.
+- **Your file names are kept.** `report.pdf` arrives as `report.pdf`. If a file with that name is already there, the new one gets the time: `report.20260911-081518.pdf`. A pasted image with no name becomes `paste.png`, and a photo named `.HEIC` that is really a JPEG is saved as `.jpg`.
+- **Files → Session files.** A third tab beside Changes and All Files lists what the session keeps outside the project — your uploads and the agent's images — newest first. Tap one to open it.
+- Needs the updated daemon.
+
 # Sep 11 (8) — Usage left, for the model you're on
 
 - **"% left" now means this model's quota.** The corner of the composer showed the single worst window across every model on the account, so a Sonnet session could read "4% left" because Fable's weekly allowance was nearly spent. It now counts only what can stop the session you're in: the shared 5-hour and weekly windows plus the selected model's own window.

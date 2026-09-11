@@ -807,6 +807,9 @@ export const zhHant: TranslationStructure = {
     },
 
     files: {
+        sessionFiles: '工作階段檔案',
+        noSessionFiles: '尚無上傳或圖片。附加到訊息的檔案會放在這裡，不在專案中。',
+        sessionFilesFooter: '你傳送的檔案與代理顯示的圖片——保存在專案之外，位於該工作階段所在機器上的資料夾中。',
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: '統一',

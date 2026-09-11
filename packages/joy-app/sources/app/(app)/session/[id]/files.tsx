@@ -18,6 +18,7 @@ import { FileIcon } from '@/components/FileIcon';
 import { Shaker, ShakeInstance } from '@/components/Shaker';
 import { usePrefetchFileContents } from '@/hooks/usePrefetchFileContents';
 import { AllFilesTab } from '@/components/FilesSidebar';
+import { SessionFilesTab } from '@/components/SessionFilesTab';
 
 /** Shared addressability boundary for every row kind on this screen: a git
  *  identity key for a non-UTF-8 name carries a NUL (gitPathIdentity) and is
@@ -43,7 +44,7 @@ export default React.memo(function FilesScreen() {
     usePrefetchFileContents(sessionId!, gitStatusFiles, revision);
     // Changes (git status, the default) vs All files (the same browsable tree
     // the desktop sidebar shows — AllFilesTab brings its own search + cache).
-    const [mode, setMode] = React.useState<'changes' | 'allFiles'>('changes');
+    const [mode, setMode] = React.useState<'changes' | 'allFiles' | 'session'>('changes');
     const [searchQuery, setSearchQuery] = React.useState('');
     const [searchResults, setSearchResults] = React.useState<FileItem[]>([]);
     const [isSearching, setIsSearching] = React.useState(false);
@@ -232,7 +233,7 @@ export default React.memo(function FilesScreen() {
             borderRadius: 9,
             padding: 2,
         }}>
-            {(['changes', 'allFiles'] as const).map((m) => (
+            {(['changes', 'allFiles', 'session'] as const).map((m) => (
                 <Pressable
                     key={m}
                     onPress={() => setMode(m)}
@@ -249,12 +250,21 @@ export default React.memo(function FilesScreen() {
                         color: mode === m ? theme.colors.text : theme.colors.textSecondary,
                         ...Typography.default('semiBold'),
                     }}>
-                        {m === 'changes' ? t('files.changes') : t('files.allFiles')}
+                        {m === 'changes' ? t('files.changes') : m === 'allFiles' ? t('files.allFiles') : t('files.sessionFiles')}
                     </Text>
                 </Pressable>
             ))}
         </View>
     );
+
+    if (mode === 'session') {
+        return (
+            <View style={[styles.container, { backgroundColor: theme.colors.surface }]}>
+                {modeToggle}
+                <SessionFilesTab sessionId={sessionId!} onFilePress={handleProjectFilePress} />
+            </View>
+        );
+    }
 
     if (mode === 'allFiles') {
         return (

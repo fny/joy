@@ -18,6 +18,8 @@ import { machineOps, sessionOps, httpAnswer } from "../domain/operations";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
 import { validatePath, withPathLock } from "../domain/fileOps";
+import { listSessionFiles } from "../domain/sessionFiles";
+import { joySessionDir } from "../paths";
 import { writeFileAtomicAsync } from "../domain/atomicWrite";
 import { readAgentConfig, writeAgentConfigRaw, applyAgentConfigAssignments, fetchAgentSchema, agentConfigSpec } from "../domain/agentConfig";
 import { fetchClaudeLimits, readCodexLimits, claudeLimitRows } from "../domain/limits";
@@ -538,6 +540,10 @@ route("DELETE", "/v2/sessions/:id/files/content", withSession(async (ctx, sessio
   if (!path) return ok({ success: false, error: "path required" }, 400);
   return ok(await scall("deleteFile", session, { path }));
 }));
+// The session's own files, outside its project: ~/.joy/sessions/<id>/
+// (uploads the app sent, the agent's media, handoff notes), newest first,
+// with absolute paths the files/content read already accepts.
+route("GET", "/v2/sessions/:id/files/session", withSession(async (_ctx, session) => ok({ ok: true, ...listSessionFiles(joySessionDir(session.id)) })));
 route("GET", "/v2/sessions/:id/files/entries", withSession(async (ctx, session) => {
   const path = ctx.url.searchParams.get("path") ?? ".";
   const depth = Number(ctx.url.searchParams.get("depth") ?? 1);

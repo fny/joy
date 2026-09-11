@@ -808,6 +808,9 @@ export const zhHans: TranslationStructure = {
     },
 
     files: {
+        sessionFiles: '会话文件',
+        noSessionFiles: '还没有上传或图片。附加到消息的文件会放在这里，不在项目中。',
+        sessionFilesFooter: '你发送的文件和代理展示的图片——保存在项目之外，位于该会话所在机器上的会话文件夹中。',
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: '统一',

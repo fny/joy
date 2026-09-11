@@ -29,14 +29,14 @@ import { join } from "node:path";
 import { registerV2CardPublisher, unregisterV2CardPublisher, registerV2SessionId, cardStateFor, publishV2Card } from "./v2Card";
 import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../domain/registry";
 import type { AgentSession } from "../domain/agentSession";
-import { joyRelayAccessKey, canonicalCwd } from "../paths";
+import { joyRelayAccessKey, canonicalCwd, joySessionUploadsDir } from "../paths";
 import { setRecordSink, setOutboundPersistDegraded, relaySessionFor, type WireRecord } from "./relay";
 import { automationRunIdOf } from "../domain/automationRun";
 import { saveWindowRecord } from "../domain/windowRecord";
 import { OutboxSender, type PostResult } from "./outbox";
 import { ledgerFor, LedgerWriteError, isTerminalState, TERMINAL_STATES, type JobRow, type NewOutbound, type OutboxRow, type CommandRow, type CommandState } from "../domain/ledger";
 import { coordinatorFor } from "../domain/coordinator";
-import { writeAttachmentToCwd } from "../domain/attachments";
+import { writeUpload } from "../domain/attachments";
 import { queueFor, isTerminal } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
@@ -1824,9 +1824,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         throw e;
       }
 
-      // Materialize the cited attachments into the session's cwd BEFORE the
-      // prompt goes in: each becomes a bare `./name` line the agent resolves
-      // against its cwd. A prompt about a screenshot that lost the screenshot
+      // Materialize the cited attachments into the session's uploads directory
+      // (~/.joy/sessions/<id>/uploads/, never the project) BEFORE the prompt
+      // goes in: each becomes a line with its absolute path. A prompt about a screenshot that lost the screenshot
       // is worse than an honest failure, so any fetch/open/write miss fails
       // the turn (submitted → failed) instead of dispatching a truncated ask.
       let text = prompt.text;
@@ -1864,7 +1864,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
               const sealed = await fetchAttachment(a.id);
               if (cancelledWhilePreparing) break;
               const bytes = openAttachmentBytes(sealed, sessionKeys.get(offer.sessionId));
-              if (bytes) { reason = "attachment_write_failed"; path = writeAttachmentToCwd(sess.cwd, bytes, a.name); }
+              if (bytes) { reason = "attachment_write_failed"; path = writeUpload(joySessionUploadsDir(sess.id), bytes, a.name); }
               else reason = "attachment_open_failed";
             } catch (e) {
               log(`turn ${turnId.slice(0, 8)}: attachment ${a.id.slice(0, 8)} (${a.name}): ${(e as Error).message}`);
@@ -1872,7 +1872,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
             if (cancelledWhilePreparing) break;
             if (!path) return fail(reason, a);
             paths.push(path);
-            writtenAttachments.push(join(sess.cwd, path.slice(2)));
+            writtenAttachments.push(path);
           }
         } finally { preparing.delete(turnId); }
         if (cancelledWhilePreparing) {
@@ -1887,7 +1887,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
         const uncited = [...authorized].filter((id) => !prompt.attachments.some((a) => a.id === id));
         if (uncited.length) log(`turn ${turnId.slice(0, 8)}: ${uncited.length} offered attachment(s) not cited in the sealed prompt — ignored`);
         text = `${text}\n${paths.join("\n")}`;
-        log(`turn ${turnId.slice(0, 8)}: materialized ${paths.length} attachment(s) in ${sess.cwd}`);
+        log(`turn ${turnId.slice(0, 8)}: materialized ${paths.length} attachment(s) in ${joySessionUploadsDir(sess.id)}`);
       }
 
       // The command row carries the relay turn: a re-offer dedupes on it and

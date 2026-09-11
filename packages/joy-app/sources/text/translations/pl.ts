@@ -823,6 +823,9 @@ export const pl: TranslationStructure = {
     },
 
     files: {
+        sessionFiles: 'Pliki sesji',
+        noSessionFiles: 'Brak przesłanych plików i obrazów. Pliki dołączone do wiadomości trafiają tutaj, poza projekt.',
+        sessionFilesFooter: 'Przesłane pliki i obrazy pokazane przez agenta — przechowywane poza projektem, w folderze sesji na jej maszynie.',
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: 'Scalony',

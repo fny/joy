@@ -519,6 +519,19 @@ This is the intervention surface — trust prompts, TUI menus, wedged sessions.
   secret, so the manual value is an override for relays gated on something
   else. The welcome screen's relay step asks for it when the relay is gated.
 - Identicons drawn from the joy logotype palette (circles / squares).
+- **Session files, outside the project** (2026-09-11). Uploads the app
+  attaches to a message land in `~/.joy/sessions/<id>/uploads/` (daemon
+  `domain/attachments.ts` writeUpload), not the session's cwd — pasted
+  screenshots used to pile up as `paste-*.png` in the repo. Names are kept as
+  given; a taken name gets a local timestamp before the extension
+  (`report.20260911-081518.pdf`, then `-2`, `-3` in the same second); no name
+  → `paste.<ext>`; an image gets the extension of its real bytes (a `.HEIC`
+  name holding JPEG bytes is saved `.jpg`). The prompt carries the absolute
+  path. Claude is launched with `--add-dir` for the session directory so a
+  non-yolo mode reads uploads/media without asking. App: Files has a third
+  mode, **Session files**, listing that directory (uploads + the agent's
+  media, newest first) via `GET /v2/sessions/:id/files/session`; rows open in
+  the ordinary file viewer.
 - Relay in a container: `packages/joy-relay/Dockerfile` (Node 22, the one
   dependency PGlite is WebAssembly — no native build). Plain HTTP on
   `JOY_RELAY_PORT` (3105), bound via `JOY_RELAY_HOST` (0.0.0.0 in the image;

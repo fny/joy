@@ -4,25 +4,19 @@
 // (relay/nucleusLane.ts runTurn):
 //   1. Fetches the sealed blob from the relay's v2 attachment store and opens
 //      it with the session key (openAttachmentBytes)
-//   2. Writes the file to the session's cwd (writeAttachmentToCwd)
-//   3. Appends the bare path to the prompt text on its own line
+//   2. Writes the file into the session's uploads directory,
+//      ~/.joy/sessions/<id>/uploads/ (writeUpload) — never into the project:
+//      pasted screenshots used to pile up as paste-*.png in the repo root
+//   3. Appends the file's absolute path to the prompt text on its own line
 //
-// Images (PNG / JPEG / GIF / WEBP, sniffed from magic bytes rather than
-// trusting the wire mimeType — iOS reports image/heic or empty strings) get a
-// paste-* filename, matching what the claude CLI expects for pasted images. Any other
-// file type keeps its original (sanitized) name so the agent can read or
-// reference it by a meaningful path.
-
-import { writeFileSync, lstatSync } from "node:fs";
+// Names (2026-09-11): the name as given — `report.pdf`, `IMG_2041.jpg`. When
+// that name is taken, a timestamp goes between it and the extension:
+// `report.20260911-081518.pdf`, then `report.20260911-081518-2.pdf` for a
+// second one in the same second. No name → `paste.<ext>`. Images get the
+// extension of what the bytes ARE (sniffed from magic bytes — iOS names a
+// JPEG `.HEIC`, a clipboard paste may have no name at all).
+import { writeFileSync, mkdirSync } from "node:fs";
 import { join, basename, extname } from "node:path";
-import { randomBytes } from "node:crypto";
-
-/** Is there ANY directory entry at `p` — a file, a directory, or a symlink
- *  whether or not its target exists? existsSync follows symlinks, so a
- *  dangling one read as "free" and the write went through it (#530). */
-function entryExists(p: string): boolean {
-  try { lstatSync(p); return true; } catch { return false; }
-}
 
 export type ClaudeImageMime = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
 
@@ -46,82 +40,75 @@ export function sniffMimeAndExt(bytes: Uint8Array): { mime: ClaudeImageMime; ext
   return null;
 }
 
-/**
- * Build a paste-style filename: `paste-YYYYMMDD-HHMMSS-{4-hex}.{ext}`.
- * The timestamp is local time, not UTC, so the filename matches what the
- * user sees on the clock when they paste. The 4-hex short id prevents
- * collisions when two pastes land in the same second.
- */
-export function formatPasteFilename(ext: string, at: Date = new Date()): string {
+/** Local time as YYYYMMDD-HHMMSS — the clock the user saw when they pasted. */
+export function uploadTimestamp(at: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  const y = at.getFullYear();
-  const mo = pad(at.getMonth() + 1);
-  const d = pad(at.getDate());
-  const h = pad(at.getHours());
-  const mi = pad(at.getMinutes());
-  const s = pad(at.getSeconds());
-  const shortId = randomBytes(2).toString("hex");
-  return `paste-${y}${mo}${d}-${h}${mi}${s}-${shortId}.${ext}`;
+  return `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
 }
 
-/**
- * Sanitize a user-supplied filename to a safe basename inside `cwd`, avoiding
- * collisions with existing files. basename() drops any directory component;
- * control characters (code points below 0x20) are stripped so the write stays
- * a single safe entry in cwd. Falls back to a paste-* name when nothing usable
- * remains.
- */
-export function safeAttachmentFilename(cwd: string, name: string | undefined): string {
+/** The stem and extension an upload is saved under: the given name reduced to
+ *  a safe basename (no directory part, no control characters), `paste` when
+ *  nothing usable remains, and — for images — the extension of the real
+ *  format rather than the claimed one. */
+export function uploadNameParts(name: string | undefined, bytes: Uint8Array): { stem: string; ext: string } {
   let base = Array.from(name ? basename(name) : "")
     .filter((c) => c.charCodeAt(0) >= 0x20)
     .join("")
     .trim();
-  if (!base || base === "." || base === "..") {
-    base = formatPasteFilename("bin");
+  if (!base || base === "." || base === "..") base = "paste";
+  let ext = extname(base);
+  let stem = ext ? base.slice(0, -ext.length) : base;
+  if (!stem) { stem = base; ext = ""; } // ".env" is a name, not an extension
+  const sniffed = sniffMimeAndExt(bytes);
+  if (sniffed) {
+    const claimed = ext.slice(1).toLowerCase().replace(/^jpeg$/, "jpg");
+    if (claimed !== sniffed.ext) ext = `.${sniffed.ext}`;
   }
-  // Don't clobber an existing entry: insert a short id before the extension.
-  if (entryExists(join(cwd, base))) {
-    const ext = extname(base);
-    const stem = ext ? base.slice(0, -ext.length) : base;
-    base = `${stem}-${randomBytes(2).toString("hex")}${ext}`;
-  }
-  return base;
+  return { stem, ext };
+}
+
+/** Candidate names in order: `name.ext`, then `name.<ts>.ext`, then
+ *  `name.<ts>-2.ext`, `name.<ts>-3.ext`, … */
+export function uploadNameCandidates(stem: string, ext: string, at: Date = new Date()): () => string {
+  const ts = uploadTimestamp(at);
+  let n = 0;
+  return () => {
+    n++;
+    if (n === 1) return `${stem}${ext}`;
+    if (n === 2) return `${stem}.${ts}${ext}`;
+    return `${stem}.${ts}-${n - 1}${ext}`;
+  };
 }
 
 /**
- * Decode + write a file attachment into the session's cwd. Returns the relative
- * path (e.g. `./paste-20260608-134523-a3f9.png` for images, or `./report.pdf`
- * for other files) suitable for appending to a chat message. Returns null only
- * when there are no bytes to write.
+ * Write an upload into `dir` (created if missing) under the naming rule above.
+ * Returns the absolute path — what goes into the prompt — or null when there
+ * are no bytes to write.
  */
-export function writeAttachmentToCwd(cwd: string, bytes: Uint8Array, name?: string): string | null {
+export function writeUpload(dir: string, bytes: Uint8Array, name?: string, at: Date = new Date()): string | null {
   if (bytes.length === 0) return null;
-  const sniffed = sniffMimeAndExt(bytes);
-  // Known image format → paste-* filename (keeps the established convention).
-  // Anything else → keep the original (sanitized) name. Each attempt draws a
-  // fresh name, so a collision on the 4-hex suffix simply retries.
-  const filename = writeAttachmentExclusive(cwd, bytes, () => sniffed ? formatPasteFilename(sniffed.ext) : safeAttachmentFilename(cwd, name));
-  // Bare relative path on its own line, as agreed: claude code interactive
-  // resolves these against the session cwd.
-  return `./${filename}`;
+  mkdirSync(dir, { recursive: true });
+  const { stem, ext } = uploadNameParts(name, bytes);
+  const filename = writeAttachmentExclusive(dir, bytes, uploadNameCandidates(stem, ext, at), 50);
+  return join(dir, filename);
 }
 
 /**
  * Create the attachment EXCLUSIVELY (`wx` = O_CREAT|O_EXCL): the kernel
  * refuses if any entry — including a symlink, dangling or not — already
- * sits at that name, so the write can never follow a link out of cwd nor
- * truncate an earlier upload whose generated suffix collided (#530). On
- * EEXIST the next candidate name is tried; returns the name that landed.
+ * sits at that name, so the write can never follow a link out of the
+ * directory nor truncate an earlier upload (#530). On EEXIST the next
+ * candidate name is tried; returns the name that landed.
  */
-export function writeAttachmentExclusive(cwd: string, bytes: Uint8Array, nextName: () => string, maxAttempts = 8): string {
+export function writeAttachmentExclusive(dir: string, bytes: Uint8Array, nextName: () => string, maxAttempts = 8): string {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const filename = nextName();
     try {
-      writeFileSync(join(cwd, filename), bytes, { flag: "wx" });
+      writeFileSync(join(dir, filename), bytes, { flag: "wx" });
       return filename;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
   }
-  throw new Error(`attachment: no free name in ${cwd} after ${maxAttempts} attempts`);
+  throw new Error(`attachment: no free name in ${dir} after ${maxAttempts} attempts`);
 }

@@ -808,6 +808,9 @@ export const ja: TranslationStructure = {
     },
 
     files: {
+        sessionFiles: 'セッションファイル',
+        noSessionFiles: 'アップロードや画像はまだありません。メッセージに添付したファイルはプロジェクト外のここに保存されます。',
+        sessionFilesFooter: '送信したファイルとエージェントが表示した画像——プロジェクト外、セッションのマシン上のフォルダに保存されます。',
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: '統合',

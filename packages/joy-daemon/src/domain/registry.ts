@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, statSync, readFileSync } from "fs";
 import { join, basename, resolve } from "path";
 import { run } from "../tmux/shell";
 import { tmux, tmuxHandleFor, disposeTmuxHandle, type TmuxDriver } from "../tmux/driver";
-import { tmuxServerLabel, tmuxNamesFor, TMUX_AGENT_WINDOW, canonicalCwd, expandHome } from "../paths";
+import { tmuxServerLabel, tmuxNamesFor, TMUX_AGENT_WINDOW, canonicalCwd, expandHome, joySessionDir } from "../paths";
 import { applyEnvStore } from "./envStore";
 import { CLIENT_ATTACHED_HOOK } from "../tmux/controlClient";
 import { createRelaySession, type RelayClient, type RelaySession } from "../relay/relay.ts";
@@ -731,6 +731,10 @@ export class SessionRegistry {
       if (opts.forkSession && (opts.resume_id || (withContinue && opts.continue))) f.push("--fork-session");
       if (mode === "bypassPermissions") f.push("--dangerously-skip-permissions");
       else if (mode && mode !== "default") f.push("--permission-mode", mode);
+      // The session's own directory (uploads the app sends, the agent's
+      // media): outside the project, so Claude in a non-yolo mode would
+      // otherwise ask before reading a pasted screenshot.
+      f.push("--add-dir", `'${joySessionDir(id).replace(/'/g, `'\\''`)}'`);
       if (opts.chrome) f.push("--chrome");
       if (opts.extraArgs?.trim()) f.push(opts.extraArgs.trim());
       return f;

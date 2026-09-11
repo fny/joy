@@ -807,6 +807,9 @@ export const ca: TranslationStructure = {
     },
 
     files: {
+        sessionFiles: 'Fitxers de la sessió',
+        noSessionFiles: 'Encara no hi ha pujades ni imatges. Els fitxers adjunts a un missatge arriben aquí, fora del projecte.',
+        sessionFilesFooter: "Fitxers que has enviat i imatges que ha mostrat l'agent, desats fora del projecte, a la carpeta de la sessió a la seva màquina.",
         // The Changes view's view-mode toggle. "Whole file" shows the
         // change against the complete file instead of the patch hunks.
         diffUnified: 'Unificat',

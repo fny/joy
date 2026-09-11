@@ -206,3 +206,9 @@ export function joyRelayCredsDir(serverUrl: string = joyRelayUrl()): string {
 export function joySessionDir(sessionId: string): string {
   return join(joyHomeDir(), "sessions", sessionId);
 }
+
+/** Where the app's uploads for a session land (attachments.ts writeUpload) —
+ *  beside the agent's media, never in the project. */
+export function joySessionUploadsDir(sessionId: string): string {
+  return join(joySessionDir(sessionId), "uploads");
+}
