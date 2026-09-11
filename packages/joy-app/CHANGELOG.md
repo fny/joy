@@ -1,3 +1,11 @@
+# Sep 11 — Automations on a schedule
+
+- **Automations can run on a clock.** Pick **On a schedule** when you create one and give it a cron expression — `0 2 * * *` every day at 2am, `*/15 * * * *` every fifteen minutes, `0 9 * * 1-5` weekdays at 9am — in a time zone you name. The zone is yours, not the machine's: 2am means 2am where you are, and it stays 2am across daylight saving rather than drifting an hour twice a year.
+- **A backlog is never replayed.** If the machine was off for a week, a five-minute schedule does not owe you 2,016 runs when it comes back. It runs once, and the history records how many occurrences passed while nothing was listening — so the gap is visible instead of being either a stampede or a silent hole.
+- **A bad expression is caught when you type it,** not months later when you notice nothing has run.
+- From a terminal: `joy automation create -m "…" --cron "0 2 * * *" --tz America/New_York`.
+- **`/effort low` no longer waits for you.** It sometimes opens its own "Change effort level?" confirm, and the session sat on it until you pressed Enter in the terminal. The daemon now presses it, as long as the highlighted answer is Yes — the same rule `/model` already followed. Needs the updated daemon.
+
 # Sep 10 (5) — Automations
 
 - **Saved work that runs itself.** An automation is a folder, a prompt and a trigger. Create one from a terminal on the machine that should run it — `joy automation create -m "run the tests and fix what breaks"` — and it runs there, in that folder, whenever its trigger fires.

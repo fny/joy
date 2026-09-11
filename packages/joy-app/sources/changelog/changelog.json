@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 — Automations on a schedule",
+      "summary": "",
+      "markdown": "- **Automations can run on a clock.** Pick **On a schedule** when you create one and give it a cron expression — `0 2 * * *` every day at 2am, `*/15 * * * *` every fifteen minutes, `0 9 * * 1-5` weekdays at 9am — in a time zone you name. The zone is yours, not the machine's: 2am means 2am where you are, and it stays 2am across daylight saving rather than drifting an hour twice a year.\n- **A backlog is never replayed.** If the machine was off for a week, a five-minute schedule does not owe you 2,016 runs when it comes back. It runs once, and the history records how many occurrences passed while nothing was listening — so the gap is visible instead of being either a stampede or a silent hole.\n- **A bad expression is caught when you type it,** not months later when you notice nothing has run.\n- From a terminal: `joy automation create -m \"…\" --cron \"0 2 * * *\" --tz America/New_York`.\n- **`/effort low` no longer waits for you.** It sometimes opens its own \"Change effort level?\" confirm, and the session sat on it until you pressed Enter in the terminal. The daemon now presses it, as long as the highlighted answer is Yes — the same rule `/model` already followed. Needs the updated daemon."
+    },
+    {
       "title": "Sep 10 (5) — Automations",
       "summary": "",
       "markdown": "- **Saved work that runs itself.** An automation is a folder, a prompt and a trigger. Create one from a terminal on the machine that should run it — `joy automation create -m \"run the tests and fix what breaks\"` — and it runs there, in that folder, whenever its trigger fires.\n- **A run is a session.** Each firing starts a headless agent session, so everything you already know about sessions applies: you can open it, read it, see what it did. It appears in an **Automations** section in the list while it works, and leaves on its own when it finishes.\n- **If it stops for a human, it fails — loudly.** A run that hits a sign-in prompt, a permission question or the folder-trust dialog does not sit there waiting to be noticed: it fails, with a reason, and the failure sits **above everything else in the list** until you dismiss it. That is the whole point of unattended work — you stop watching, so it has to tell you.\n- **Triggers, not schedules.** `manual` (you, or a script), `turn_done` (a session finished a turn), `session_state`, `machine_online` (a machine came back), and `automation_done` (chain one after another). No cron, no timezones, and nothing owes you 2,000 catch-up runs after a machine was offline for a week.\n- **`joy automation run <id> --wait`** blocks until the run finishes and exits with the outcome, so a script, CI, or another agent can use one directly.\n- **Settings → Automations** lists what you have, runs one now, and shows each one's run history with a link to the session it produced."
@@ -436,5 +441,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 10 (5) — Automations"
+  "latestTitle": "Sep 11 — Automations on a schedule"
 }
