@@ -411,6 +411,43 @@ export function checkSession(registry: SessionRegistry, id: string): Record<stri
   return { state: "idle", queue, permissionMode, lastActiveAt: (session as { lastActiveAt?: number }).lastActiveAt ?? null };
 }
 
+/** Asks in flight, per registry: asker session id → what it waits on. A
+ *  `joy ask` blocks the asker's own turn (a tool call) until the target's
+ *  command ends, so an ask back the other way — X asking C while C's ask of
+ *  X is still open — waits for a turn that is waiting for it: both sat busy
+ *  for the whole 600 s default timeout in the lab (2026-09-11). An entry is
+ *  live while its command is non-terminal; a stale one is dropped on read. */
+const liveAsks = new WeakMap<object, Map<string, { target: string; queuedId: string | null; since: number }>>();
+function asksOf(registry: object): Map<string, { target: string; queuedId: string | null; since: number }> {
+  let m = liveAsks.get(registry);
+  if (!m) { m = new Map(); liveAsks.set(registry, m); }
+  return m;
+}
+const TERMINAL_COMMAND_STATES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+function askStillOpen(registry: SessionRegistry, e: { target: string; queuedId: string | null; since: number }): boolean {
+  const target = registry.get(e.target);
+  if (!target) return false;
+  if (!e.queuedId) return Date.now() - e.since < 600_000;
+  const c = queueFor(target).command(e.queuedId);
+  return !!c && !TERMINAL_COMMAND_STATES.has(String(c.state));
+}
+/** The chain of sessions that would wait on each other if `asker` asked
+ *  `target` now — [asker, target, …, asker] — or null when it is safe. */
+export function askCycle(registry: SessionRegistry, asker: string, target: string): string[] | null {
+  const asks = asksOf(registry);
+  const chain = [asker, target];
+  let cur = target;
+  for (let hop = 0; hop < 16; hop++) {
+    const e = asks.get(cur);
+    if (!e) return null;
+    if (!askStillOpen(registry, e)) { asks.delete(cur); return null; }
+    if (e.target === asker) return [...chain, asker];
+    chain.push(e.target);
+    cur = e.target;
+  }
+  return null;
+}
+
 export const machineOps: MachineOp[] = [
   {
     name: "list",
@@ -1132,6 +1169,7 @@ export const machineOps: MachineOp[] = [
         from: { type: "string", description: "Sender identity: joy:<session id> (must exist here), cli, app, or cron:<name>. The daemon wraps the text in <joy-message from=… reply-to=…> — never trust a caller-written wrapper." },
         replyTo: { type: ["string", "null"], description: "Where the callee should answer (joy:<id>). Defaults to `from` when that is a joy session; an explicit null or \"\" means no reply expected (joy send --no-reply, joy run) and stamps no reply-to." },
         exclusive: { type: "boolean", description: "Scripting contract: refuse (busy) instead of queueing when work is in flight, and only drive yolo/read-only sessions" },
+        ask: { type: "boolean", description: "The sender waits on this turn (joy ask): the wrapper carries answer=\"inline\" and no reply-to, so the callee answers in its reply text instead of a joy send back; a joy: sender is recorded as waiting, and an ask that would close a cycle of waits is refused (would_deadlock)" },
       },
     },
     result: { type: "object", properties: { ok: { type: "boolean" }, chat_id: { type: "string" }, queued_id: { type: "string" }, error: { type: "string" } } },
@@ -1163,14 +1201,24 @@ export const machineOps: MachineOp[] = [
       // stripped so it cannot forge the attribute.
       let text = rawText.trim().replace(/^<joy-message\b[^>]*>\s*/i, "").replace(/\s*<\/joy-message>\s*$/i, "");
       const from = typeof params.from === "string" ? params.from.trim() : "";
+      const ask = params.ask === true;
       if (from) {
         const okFrom = /^joy:[0-9a-f]{8}$/.test(from) ? !!registry.get(from.slice(4)) : /^(cli|app|cron:[A-Za-z0-9_.-]{1,64})$/.test(from);
         if (!okFrom) return { error: "bad_from", from };
+        if (ask && from.startsWith("joy:")) {
+          const cycle = askCycle(registry, from.slice(4), session.id);
+          if (cycle) return { error: "would_deadlock", chain: cycle.map((id) => `joy:${id}`), message: `${cycle[1] === session.id ? `joy:${session.id}` : cycle.map((id) => `joy:${id}`).join(" → ")} is waiting on your turn (joy ask). Answer it in your reply instead of asking back.` };
+        }
         // An EXPLICIT null (or "") is "no reply expected" — `joy send --no-reply`
         // and `joy run` send it. `typeof null` is "object", so it used to fall
         // into the default branch and stamp reply-to=<sender> anyway: every
         // FYI from inside a session solicited an answer back (#112).
-        const replyTo = params.replyTo === null || params.replyTo === "" ? ""
+        // An ask is answered on the turn itself: no reply-to, the wrapper
+        // says answer="inline". With a reply-to the callee `joy send`s the
+        // answer back AND the asker reads the turn's prose — two channels,
+        // and the real answer landed later as a stray peer message (lab 3).
+        const replyTo = ask ? ""
+          : params.replyTo === null || params.replyTo === "" ? ""
           : typeof params.replyTo === "string" ? params.replyTo.trim()
           : (from.startsWith("joy:") ? from : "");
         if (replyTo && !/^joy:[0-9a-f]{8}$/.test(replyTo)) return { error: "bad_reply_to", replyTo };
@@ -1179,7 +1227,7 @@ export const machineOps: MachineOp[] = [
         // session it never had a card for. Escaped for the attribute.
         const sender = from.startsWith("joy:") ? registry.get(from.slice(4)) : undefined;
         const fromLabel = sender ? `${sessionLabel(sender)}${sender.summary ? ` · ${sender.summary}` : ""}`.replace(/["<>]/g, "") : "";
-        const wrap = (body: string) => `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}>\n${body}\n</joy-message>`;
+        const wrap = (body: string) => `<joy-message from="${from}"${fromLabel ? ` from-label="${fromLabel}"` : ""}${replyTo ? ` reply-to="${replyTo}"` : ""}${ask ? ` answer="inline"` : ""}>\n${body}\n</joy-message>`;
         // A daemon-owned slash command keeps its leading `/command` (#552):
         // wrapped whole, `/title`, `/steer`, `/login-code` reached the
         // adapters as ordinary prompts and lost their control behaviour. A
@@ -1210,6 +1258,7 @@ export const machineOps: MachineOp[] = [
         if (e instanceof SessionEndedError) return { error: "session_ended" };
         return { error: "not_durable", detail: e instanceof Error ? e.message : String(e) };
       }
+      if (ask && from.startsWith("joy:")) asksOf(registry).set(from.slice(4), { target: session.id, queuedId: queued?.id ?? null, since: Date.now() });
       const chat_id = registry.nextChatId();
       registry.addChatMessage({ role: "user", content: trimmed, source, chat_id, session_id: session.claudeSessionId });
       return { ok: true, chat_id, queued_id: queued?.id ?? null };
@@ -1218,7 +1267,7 @@ export const machineOps: MachineOp[] = [
       const r = result as { error?: string };
       if (r.error === "empty") return { status: 400, body: result };
       if (r.error === "session_not_found" || r.error === "session_ended") return { status: 404, body: result };
-      if (r.error === "busy") return { status: 409, body: result };
+      if (r.error === "busy" || r.error === "would_deadlock") return { status: 409, body: result };
       if (r.error === "mode_not_scriptable") return { status: 409, body: result };
       if (r.error === "not_durable") return { status: 503, body: result };
       return { status: 200, body: result };

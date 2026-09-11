@@ -1446,7 +1446,7 @@ export async function waitTurn(id: string, opts: { afterSeq: number; queuedId?: 
 
 /** A send that always leaves an audit trail: the queued id back from the
  *  daemon, or a typed failure (exit code). */
-async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?: string; replyTo?: string | null; signal?: AbortSignal }): Promise<{ ok: true; queuedId: string | null; seq: number } | { ok: false; code: number }> {
+async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?: string; replyTo?: string | null; ask?: boolean; signal?: AbortSignal }): Promise<{ ok: true; queuedId: string | null; seq: number } | { ok: false; code: number }> {
   // The seq probe and the send itself run under the caller's lifetime
   // (#501): a daemon that accepts and never answers ends `ask`/`run` at
   // their --timeout, as a timeout (exit 4) — not an open-ended hang.
@@ -1454,11 +1454,12 @@ async function sendTo(rec: any, text: string, opts: { exclusive?: boolean; from?
   if (opts.signal?.aborted) { console.error(`${bad} timed out before the message could be sent (session ${rec.id})`); return { ok: false, code: OUTCOME_EXIT.timeout }; }
   // replyTo travels as-is: `null` is the explicit "no reply expected" the
   // daemon honours (#112); `?? undefined` used to erase it from the body.
-  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo }, { signal: opts.signal }).catch(() => null);
+  const r = await api("POST", "/send", { session_id: rec.id, text, exclusive: opts.exclusive === true, from: opts.from, replyTo: opts.replyTo, ...(opts.ask ? { ask: true } : {}) }, { signal: opts.signal }).catch(() => null);
   if (opts.signal?.aborted) { console.error(`${bad} timed out waiting for the daemon to accept the message (session ${rec.id}) — it may or may not have been queued; \`joy queue ${rec.id}\` shows`); return { ok: false, code: OUTCOME_EXIT.timeout }; }
   if (!r) { console.error(`${bad} daemon not running`); return { ok: false, code: 1 }; }
   const body = await r.json().catch(() => ({})) as any;
   if (body.error === "busy") { console.error(`${bad} session ${rec.id} is busy (--no-queue)`); return { ok: false, code: 3 }; }
+  if (body.error === "would_deadlock") { console.error(`${bad} ${body.message ?? `${rec.id} is waiting on your turn`} (chain: ${(body.chain ?? []).join(" → ")})`); return { ok: false, code: 3 }; }
   if (body.error === "mode_not_scriptable") { console.error(`${bad} mode "${body.mode}" not scriptable with --no-queue (need yolo or read-only)`); return { ok: false, code: 5 }; }
   if (body.error === "bad_from") { console.error(`${bad} unknown sender ${body.from} (JOY_SESSION_ID must name a session on this daemon)`); return { ok: false, code: 2 }; }
   if (!r.ok || body.error) { console.error(`${bad} send failed: ${JSON.stringify(body)}`); return { ok: false, code: 1 }; }
@@ -1793,7 +1794,10 @@ export async function cmdAsk(rest: string[]): Promise<number> {
   const life = lifetime(timeoutS * 1000); // one clock for resolve + send + wait (#501)
   const rec = await resolveSession(target, life.signal);
   if (!rec) return life.expired() ? OUTCOME_EXIT.timeout : 1;
-  const sent = await sendTo(rec, text, { exclusive: noQueue, from: senderIdentity(), signal: life.signal });
+  // ask: true — the callee answers on this turn (answer="inline", no
+  // reply-to), and the daemon refuses an ask that would wait on a turn that
+  // is itself waiting on us.
+  const sent = await sendTo(rec, text, { exclusive: noQueue, from: senderIdentity(), ask: true, signal: life.signal });
   if (!sent.ok) return sent.code;
   const out = await waitTurn(rec.id, { afterSeq: sent.seq, queuedId: sent.queuedId, timeoutMs: life.remaining() });
   if (json) {
