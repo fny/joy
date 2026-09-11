@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 11 (2) — Show archived, automations and headless where you asked for them",
+      "summary": "",
+      "markdown": "- **A toggle now reveals its own rows, directly beneath it.** Show archived, Show automations and Show headless were filters rather than dividers: turning one on let its sessions appear wherever they would normally have gone — a running headless session into the block at the very top, an archived one into whichever machine group it belonged to. So a control near the bottom of the list changed what was at the top of it, and revealing one kind scattered it across three places. Each one is now a divider with its rows under it, and nothing a toggle controls can reach the top of the list.\n- Archived sessions are still grouped by machine and still collapse — just underneath the divider rather than above it, which is what they are: history."
+    },
+    {
       "title": "Sep 11 — Automations on a schedule",
       "summary": "",
       "markdown": "- **Automations can run on a clock.** Pick **On a schedule** when you create one and give it a cron expression — `0 2 * * *` every day at 2am, `*/15 * * * *` every fifteen minutes, `0 9 * * 1-5` weekdays at 9am — in a time zone you name. The zone is yours, not the machine's: 2am means 2am where you are, and it stays 2am across daylight saving rather than drifting an hour twice a year.\n- **A backlog is never replayed.** If the machine was off for a week, a five-minute schedule does not owe you 2,016 runs when it comes back. It runs once, and the history records how many occurrences passed while nothing was listening — so the gap is visible instead of being either a stampede or a silent hole.\n- **A bad expression is caught when you type it,** not months later when you notice nothing has run.\n- From a terminal: `joy automation create -m \"…\" --cron \"0 2 * * *\" --tz America/New_York`.\n- **`/effort low` no longer waits for you.** It sometimes opens its own \"Change effort level?\" confirm, and the session sat on it until you pressed Enter in the terminal. The daemon now presses it, as long as the highlighted answer is Yes — the same rule `/model` already followed. Needs the updated daemon."
@@ -441,5 +446,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 11 — Automations on a schedule"
+  "latestTitle": "Sep 11 (2) — Show archived, automations and headless where you asked for them"
 }

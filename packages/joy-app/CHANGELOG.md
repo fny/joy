@@ -1,3 +1,8 @@
+# Sep 11 (2) — Show archived, automations and headless where you asked for them
+
+- **A toggle now reveals its own rows, directly beneath it.** Show archived, Show automations and Show headless were filters rather than dividers: turning one on let its sessions appear wherever they would normally have gone — a running headless session into the block at the very top, an archived one into whichever machine group it belonged to. So a control near the bottom of the list changed what was at the top of it, and revealing one kind scattered it across three places. Each one is now a divider with its rows under it, and nothing a toggle controls can reach the top of the list.
+- Archived sessions are still grouped by machine and still collapse — just underneath the divider rather than above it, which is what they are: history.
+
 # Sep 11 — Automations on a schedule
 
 - **Automations can run on a clock.** Pick **On a schedule** when you create one and give it a cron expression — `0 2 * * *` every day at 2am, `*/15 * * * *` every fifteen minutes, `0 9 * * 1-5` weekdays at 9am — in a time zone you name. The zone is yours, not the machine's: 2am means 2am where you are, and it stays 2am across daylight saving rather than drifting an hour twice a year.
