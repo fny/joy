@@ -14,6 +14,18 @@ import { loginPage } from './oauth.mjs';
 export function createApp({ hub, provider, publicUrl, log = () => {} }) {
   const app = express();
   app.set('trust proxy', true);
+  // The Claude app's connector setup runs in a browser: without CORS the 401
+  // that carries WWW-Authenticate (how it discovers the OAuth server) is
+  // unreadable and the UI says "no server responded". Every path gets it.
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID');
+    res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, Mcp-Protocol-Version, WWW-Authenticate');
+    res.setHeader('Access-Control-Max-Age', '86400');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    next();
+  });
   app.use(express.json({ limit: '4mb' }));
   app.use(express.urlencoded({ extended: false }));
 
@@ -28,6 +40,12 @@ export function createApp({ hub, provider, publicUrl, log = () => {} }) {
     scopesSupported: ['joy'],
     clientRegistrationOptions: { clientSecretExpirySeconds: 0 },
   }));
+
+  // RFC 9728 names the path-aware form (/.well-known/oauth-protected-resource/mcp);
+  // some clients ask at the root first. Same document at both.
+  app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+    res.json({ resource: mcpUrl.href, authorization_servers: [issuer.href], bearer_methods_supported: ['header'], resource_name: 'joy', scopes_supported: ['joy'] });
+  });
 
   // The login form the authorize page posts to.
   app.post('/authorize/login', (req, res) => {
