@@ -25,7 +25,7 @@ export const DEFAULT_WEIGHTS = {
   spawn: 0.4, send: 4, refresh: 2, edit: 1, remove: 1, move: 1, cancel: 1, retry: 1, retrySpawn: 1,
 };
 /** How far one `advance` step moves the clock. 21 s is past the lease TTL. */
-export const ADVANCE_STEPS_MS = [100, 1000, 4000, 21_000];
+export const ADVANCE_STEPS_MS = [100, 500, 1000, 4000, 4000, 21_000];
 
 /** Fault model, all opt-in and all off by default:
  *  - `crashes`      crash/reboot actions in the generator

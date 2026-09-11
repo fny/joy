@@ -188,6 +188,9 @@ const INVARIANTS = [
       for (const d of daemons) {
         if (!leaseLive(S, d)) continue;
         for (const row of d.ledger.values()) {
+          // 'waived': the machine let the runtime finish without a /start the
+          // relay would take (the relay has its answer); the relay may hold
+          // the turn dispatching until the terminal fact.
           if (row.state !== 'started' || row.epoch !== d.lease.epoch) continue;
           // The terminal fact is on the wire (sent, answer not yet seen):
           // the relay may already have closed the turn.
@@ -215,7 +218,7 @@ const INVARIANTS = [
           if (s.owner_daemon_id !== d.id || String(t.lease_epoch) !== d.lease.epoch) continue;
           if (s.state === 'archived' || s.state === 'failed') continue;
           const row = d.ledger.get(t.id);
-          if (!row || !['submitted', 'started', 'cancel_owed'].includes(row.state)) {
+          if (!row || !['submitted', 'started', 'waived', 'terminal_owed'].includes(row.state)) {
             out.push(`${d.label}: relay has ${t.id.slice(0, 8)} ${t.state} under its epoch ${d.lease.epoch}; ledger has ${row ? row.state : 'nothing'}`);
           }
         }

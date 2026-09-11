@@ -568,6 +568,15 @@ export function createCore(db, notify) {
     if (session.active_turn_id === turn.id) {
       await t.query(`UPDATE native_sessions SET active_turn_id = NULL, updated_at = now() WHERE id = $1`, [session.id]);
     }
+    // The sweep flagged the session when it orphaned this turn; closing the
+    // turn is the recovery. Reconcile and the message retry cleared the flag
+    // on their paths, but the owner's own terminal fact — an agent that
+    // finished after its daemon's lease lapsed and was re-acquired under a
+    // new epoch — did not, and the session read "recovery required" for
+    // good. Found by the simulator (test/sim).
+    if (turn.state === 'orphaned') {
+      await t.query(`UPDATE native_sessions SET recovery_required = FALSE, updated_at = now() WHERE id = $1`, [session.id]);
+    }
     await t.query(
       `UPDATE commands SET state = 'applied', disposition = $2 WHERE session_id = $3 AND kind = 'cancel'
          AND target_turn_id = $1 AND state IN ('queued','delivered')`,

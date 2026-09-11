@@ -237,8 +237,8 @@ describe('invariants and faults', () => {
       world.faults.after = (e) => e.path.endsWith('/facts');   // this one answer is lost
       await expect(d.finish(turnId)).rejects.toThrow(/response lost/);
       world.faults.after = null;
-      expect(d.ledger.get(turnId).state).toBe('started');       // the daemon does not know
-      expect((await turnRow(world, turnId)).state).toBe('terminal'); // the relay does
+      expect(d.ledger.get(turnId).state).toBe('terminal_owed');  // the daemon still owes the fact
+      expect((await turnRow(world, turnId)).state).toBe('terminal'); // the relay already has it
       await checkInvariants(world, { daemons: [d], apps: [app] }); // and that is a legal state
       const again = await d.finish(turnId);                      // the retry replays
       expect(again.status).toBe(200);
@@ -334,6 +334,89 @@ describe('found by the simulator: the second life of a requeued turn', () => {
       expect((await d.finish(turnId)).status).toBe(200);
       await app.refresh(sid);
       expect(app.sessions.get(sid).messages.get(messageId).status).toBe('delivered');
+      await checkInvariants(world, { daemons: [d], apps: [app] });
+    } finally { await world.close(); }
+  });
+});
+
+describe('found by the simulator: recovery_required', () => {
+  it('an orphaned turn closed by its owner\'s own terminal fact (agent finished after the lease lapsed and was re-acquired) clears recovery_required', async () => {
+    const { world, d, app } = await boot(12);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId } = (await app.send(sid)).json;
+      await d.claim('work'); await d.ack([...d.offers.values()][0]);
+      await d.submit(turnId); await d.start(turnId);
+      // The daemon stays up but misses its renewals; the relay orphans.
+      clock.advance(21_000);
+      expect(await world.sweep()).toBe(1);
+      expect((await app.call('GET', `/joy/v2/sessions/${sid}`)).json.recoveryRequired).toBe(true);
+      // The agent finishes; the daemon (new lease) posts the terminal for the orphan.
+      expect((await d.renew()).status).toBe(412);
+      await d.acquire();
+      d.ledger.get(turnId).epoch = d.lease.epoch; // the loop that ran the agent posts under the lease it now holds
+      expect((await d.finish(turnId)).status).toBe(200);
+      const st = (await app.call('GET', `/joy/v2/sessions/${sid}`)).json;
+      expect(st.recoveryRequired).toBe(false);
+      expect(st.execution.state).toBe('idle');
+      await checkInvariants(world, { daemons: [d], apps: [app] });
+    } finally { await world.close(); }
+  });
+});
+
+describe('the real daemon turn machine drives the fake daemon', () => {
+  it('a /start refused with turn_orphaned_reconcile_first makes the machine ask for an adoption; adopted, the start replays and the turn completes', async () => {
+    const { world, d, app } = await boot(13);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId } = (await app.send(sid)).json;
+      await d.claim('work'); await d.ack([...d.offers.values()][0]);
+      await d.submit(turnId);
+      // Lease lapses and the sweep orphans the dispatching turn; the daemon
+      // (which never noticed) re-acquires and posts /start under epoch 2.
+      clock.advance(21_000); await world.sweep();
+      expect((await d.renew()).status).toBe(412);
+      await d.acquire();
+      const row = d.ledger.get(turnId);
+      row.epoch = d.lease.epoch; row.resumed = true; // the same loop, same process: no restart
+      const refused = await d.start(turnId);
+      expect(refused.code).toBe('turn_orphaned_reconcile_first');
+      expect(row.turn).toMatchObject({ phase: 'running', refusals: 1, startPosted: false });
+      expect(row.adoptOwed).toBe(true);
+      expect(d.actions().some((a) => a.name === 'adopt')).toBe(true);
+      const adopted = await d.adopt(turnId);
+      expect(adopted.json).toMatchObject({ state: 'running', adopted: true });
+      expect(row.turn).toMatchObject({ phase: 'running', startPosted: false });
+      expect((await d.start(turnId)).json).toMatchObject({ state: 'running', replay: true });
+      expect(row.turn.startPosted).toBe(true);
+      expect((await d.finish(turnId)).status).toBe(200);
+      expect(row.turn).toMatchObject({ phase: 'terminal', state: 'completed' });
+      await checkInvariants(world, { daemons: [d], apps: [app] });
+    } finally { await world.close(); }
+  });
+
+  it('a cancel-class refusal at /start interrupts the agent and the owed terminal is posted as cancelled', async () => {
+    const { world, d, app } = await boot(14);
+    try {
+      await d.acquire();
+      const sid = (await d.announce()).json.sessionId;
+      app.see(sid, d.id);
+      const { turnId } = (await app.send(sid)).json;
+      await d.claim('work'); await d.ack([...d.offers.values()][0]);
+      await d.submit(turnId);
+      expect((await app.cancel(sid, turnId)).json.disposition).toBe('cancellation_requested');
+      const r = await d.start(turnId);
+      expect(r.code).toBe('turn_cancelled');
+      const row = d.ledger.get(turnId);
+      expect(row.turn).toMatchObject({ phase: 'terminal', state: 'cancelled' });
+      expect(row.state).toBe('terminal_owed');
+      expect(d.runtime.has(turnId)).toBe(false);
+      expect((await d.finish(turnId)).status).toBe(200);
+      expect((await turnRow(world, turnId))).toMatchObject({ state: 'terminal', terminal_state: 'cancelled' });
       await checkInvariants(world, { daemons: [d], apps: [app] });
     } finally { await world.close(); }
   });
