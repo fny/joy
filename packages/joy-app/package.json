@@ -1,4 +1,7 @@
 {
+  "engines": {
+    "npm": ">=11.10.0"
+  },
   "name": "joy-app",
   "main": "index.ts",
   "version": "1.2.0",
@@ -183,5 +186,5 @@
     "typescript": "5.9.3"
   },
   "private": true,
-  "packageManager": "pnpm@10.11.0"
+  "packageManager": "pnpm@10.34.5"
 }

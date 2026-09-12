@@ -12,7 +12,8 @@
     "public"
   ],
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.13",
+    "npm": ">=11.10.0"
   },
   "publishConfig": {
     "access": "public"
@@ -43,5 +44,5 @@
     "typescript": "5.9.3",
     "vitest": "^3.2.0"
   },
-  "packageManager": "pnpm@10.11.0"
+  "packageManager": "pnpm@10.34.5"
 }

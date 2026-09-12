@@ -71,6 +71,21 @@ This is a pnpm workspace. From the repository root:
 pnpm install
 ```
 
+Use the pnpm version pinned in every `package.json` (10.34.5). Dependency resolution
+waits seven days after a version is published, including transitive dependencies.
+Keep the committed lockfile and use `pnpm install --frozen-lockfile` for repeatable
+builds; the age policy does not replace reviewing existing locked versions.
+For an urgent, reviewed security fix, add only the specific package version to
+`minimumReleaseAgeExclude` in `pnpm-workspace.yaml`, then remove the exception
+once the release has aged seven days.
+
+Standalone source installs with npm require npm 11.10.0 or later. The root and
+each package carry a `.npmrc` with the same seven-day delay and `engine-strict`
+enabled, so an older npm fails instead of ignoring the policy. Keep `.npmrc`
+when copying a package for deployment. These are project install settings;
+global installs outside the checkout need the same policy in the user's package
+manager configuration.
+
 | Package | Run | Check |
 |---|---|---|
 | `packages/joy-daemon` | `pnpm start` | `pnpm typecheck && pnpm test` |

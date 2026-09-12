@@ -28,9 +28,13 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
+# Node 22 ships npm 10, which cannot enforce min-release-age. Bootstrap a
+# compatible npm before loading the project's engine-strict configuration.
+RUN npm install --global npm@11.16.0 --ignore-scripts --no-audit --no-fund
+
 # One dependency (PGlite, WebAssembly — nothing to compile), installed from
 # the package's own manifest so the image does not need the monorepo.
-COPY package.json ./
+COPY package.json .npmrc ./
 RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY server.mjs ./

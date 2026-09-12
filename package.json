@@ -1,4 +1,7 @@
 {
+    "engines": {
+        "npm": ">=11.10.0"
+    },
     "name": "joy",
     "private": true,
     "scripts": {
@@ -36,5 +39,5 @@
             "sharp"
         ]
     },
-    "packageManager": "pnpm@10.11.0"
+    "packageManager": "pnpm@10.34.5"
 }
