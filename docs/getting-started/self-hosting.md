@@ -158,6 +158,13 @@ Leave `JOY_RELAY_ACCESS_KEY` empty for now; [Protect the relay with an access ke
 
 ## Run it with Node
 
+Use Node 22.13 or later and npm 11.10.0 or later. The relay's `.npmrc` requires
+newly resolved dependency releases to be at least seven days old and rejects
+older npm versions that cannot enforce the policy. Upgrade npm before installing
+if needed (the container already includes a compatible version).
+The same prerequisite applies on hosts using the `infra/bootstrap.sh` or
+`infra/deploy.sh` scripts; their package copies retain `.npmrc`.
+
 ```bash
 cd packages/joy-relay
 npm install --omit=dev

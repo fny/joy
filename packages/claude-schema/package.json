@@ -1,4 +1,8 @@
 {
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "npm": ">=11.10.0"
+  },
   "name": "@joy/claude-schema",
   "version": "0.1.0",
   "type": "module",

@@ -7,5 +7,9 @@ packages:
 
 # Expo / React Native need a flat node_modules (Metro and native autolinking
 # do not follow pnpm's isolated symlinks). The rest of what .npmrc used to set
-# is pnpm 10's default, so this is the only setting.
+# is pnpm 10's default.
 nodeLinker: hoisted
+
+# Wait seven days before resolving newly published dependencies, including
+# transitive dependencies. pnpm measures this in minutes.
+minimumReleaseAge: 10080
