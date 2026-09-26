@@ -1,3 +1,4 @@
+import { en } from '../_default';
 /**
  * Chinese (Simplified) translations for the Joy app
  * Values can be:
@@ -17,6 +18,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 }
 
 export const zhHans: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: '终端',
@@ -126,7 +130,7 @@ export const zhHans: TranslationStructure = {
         appearance: '外观',
         appearanceSubtitle: '自定义应用外观',
         voice: '语音',
-        voiceSubtitle: '通过你的 ElevenLabs 代理与会话对话',
+        voiceSubtitle: '使用 Pocket TTS 朗读会话更新',
         models: '模型',
         modelsSubtitle: '每个代理的选择器提供哪些模型',
         mods: 'Mods',
@@ -284,8 +288,6 @@ export const zhHans: TranslationStructure = {
         sessionNotFound: '会话未找到',
         voiceSessionFailed: '启动语音会话失败',
         voiceServiceUnavailable: '语音服务暂时不可用',
-        voiceLimitReachedTitle: '已达语音上限',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `您本月已使用超过 ${hours} 小时的语音。这是允许的最大用量。您可以在语音设置中配置自己的 ElevenLabs 代理，以使用您自己的配额。`,
         oauthInitializationFailed: '初始化 OAuth 流程失败',
         tokenStorageFailed: '存储认证令牌失败',
         oauthStateMismatch: '安全验证失败。请重试',
@@ -1033,8 +1035,6 @@ export const zhHans: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: '没有语音代理',
-        noAgentMessage: '请先在 设置 → 语音 中添加 ElevenLabs 代理。',
         startFailed: ({ reason }: { reason: string }) => `无法启动语音：${reason}`,
         micTitle: '需要麦克风权限',
         micAskAgain: '语音功能需要麦克风，请在提示时允许。',
@@ -1050,10 +1050,6 @@ export const zhHans: TranslationStructure = {
         tapToTalk: '点按说话',
         tapToEnd: '点按结束',
         tapToRetry: '点按重试',
-        refusedTitle: '语音通话被拒绝',
-        refusedMessage: ({ reason }: { reason: string }) => `代理在连接后立即结束了通话，双方尚未说话。${reason}`,
-        refusedOverrides: '“待机”模式会覆盖系统提示词和首条消息，而此代理不允许。请在 ElevenLabs 控制台的 Security 中启用这两项，或将语音切换为“持续在线”。',
-        refusedNoReason: '请在 ElevenLabs 控制台中检查该代理。',
         end: '结束语音',
     },
     settingsModels: {
@@ -1073,44 +1069,6 @@ export const zhHans: TranslationStructure = {
         filterPlaceholder: '筛选模型',
         default: '默认',
         recommended: '推荐',
-    },
-    settingsVoice: {
-        agentsTitle: '代理',
-        agentsFooter: '公开代理只需要 id。私有代理（开启认证）还需要 API 密钥；密钥保存在你的加密设置中，仅用于签发会话令牌。',
-        noAgents: '还没有代理',
-        addAgent: '添加代理',
-        addAgentName: '名称',
-        addAgentNamePlaceholder: '例如 Joy',
-        addAgentId: '代理 id',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'API 密钥',
-        addAgentKeyMessage: '公开代理请留空。',
-        inUse: '使用中',
-        publicAgent: '公开代理',
-        privateAgent: '私有代理（已设置密钥）',
-        use: '使用此代理',
-        rename: '重命名',
-        setKey: '设置 API 密钥',
-        replaceKey: '替换 API 密钥',
-        remove: '移除',
-        removeConfirm: ({ name }: { name: string }) => `移除“${name}”？`,
-        modeTitle: '通话',
-        modeClassic: '持续在线',
-        modeClassicSubtitle: '从点按麦克风到你结束为止，只有一段对话。不会发送任何需要代理授权的内容，因此标准代理可直接使用。',
-        modeStandby: '待机',
-        modeStandbySubtitle: '静音后挂断，并在会话事件或你的声音出现时唤醒。需要代理允许覆盖系统提示词和首条消息（Security 标签页）。',
-        behaviorTitle: '待命',
-        wakeOnEvents: '会话事件时唤醒',
-        wakeOnEventsSubtitle: '待命时，在回合结束、等待批准或提出问题时重新连接并说话。',
-        wakeOnSound: '声音唤醒',
-        wakeOnSoundSubtitle: '空闲且应用打开时，在设备上监听，你开始说话时重新连接。仅按音量判断，不识别词语：电视或附近的谈话也可能唤醒。',
-        idleTimeout: '静默后挂断',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? '从不' : `${seconds} 秒`}`,
-        idleTimeoutPrompt: '会话挂断并进入待命前的静默秒数。0 = 从不。',
-        setupTitle: '代理设置',
-        setupFooter: '在 ElevenLabs 控制台中，代理需要客户端工具 sendMessageToSession(sessionId, message) 和 processPermissionRequest(requestId, decision)，可选内置的 skip_turn 工具。“待机”模式还需要启用系统提示词和首条消息的覆盖（Security 标签页）；“持续在线”无需任何设置。',
-        setupPrompt: '建议的系统提示词',
-        setupPromptSubtitle: '点按复制，然后粘贴到控制台中代理的提示词里。在“持续在线”模式下，同样的说明也会在每次连接时作为上下文发送。',
     },
     machine: {
         environment: '环境变量',

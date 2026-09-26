@@ -249,16 +249,14 @@ interface StorageState {
     isDataReady: boolean;
     nativeUpdateStatus: { available: boolean; updateUrl?: string } | null;
     // Voice (see realtime/RealtimeSession.ts): connection status of the
-    // ElevenLabs conversation, who is talking, a remount counter for the SDK
-    // provider, and which session voice is ARMED for (null = off).
+    // voice conversation, who is talking, and which session voice is ARMED
+    // for (null = off).
     realtimeStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
     realtimeMode: 'idle' | 'agent-speaking' | 'user-speaking';
-    voiceSessionGeneration: number;
     voiceArmedSessionId: string | null;
     setRealtimeStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
     setRealtimeMode: (mode: 'idle' | 'agent-speaking' | 'user-speaking', immediate?: boolean) => void;
     clearRealtimeModeDebounce: () => void;
-    incrementVoiceSessionGeneration: () => void;
     setVoiceArmedSessionId: (sessionId: string | null) => void;
     applySessions: (sessions: (Omit<Session, 'presence'> & { presence?: "online" | number })[]) => void;
     /** Rebuild the list from the sessions already held: for the freshness
@@ -517,7 +515,6 @@ export const storage = create<StorageState>()((set, get) => {
         nativeUpdateStatus: null,
         realtimeStatus: 'disconnected',
         realtimeMode: 'idle',
-        voiceSessionGeneration: 0,
         voiceArmedSessionId: null,
         setRealtimeStatus: (status) => set((state) => ({ ...state, realtimeStatus: status })),
         setRealtimeMode: (mode, immediate) => {
@@ -535,7 +532,6 @@ export const storage = create<StorageState>()((set, get) => {
         clearRealtimeModeDebounce: () => {
             if (realtimeModeDebounceTimer) { clearTimeout(realtimeModeDebounceTimer); realtimeModeDebounceTimer = null; }
         },
-        incrementVoiceSessionGeneration: () => set((state) => ({ ...state, voiceSessionGeneration: state.voiceSessionGeneration + 1 })),
         setVoiceArmedSessionId: (sessionId) => set((state) => ({ ...state, voiceArmedSessionId: sessionId })),
         unreadSessionIds: new Set<string>(),
         currentViewingSessionId: null,
@@ -1671,10 +1667,6 @@ export function useRealtimeStatus(): 'disconnected' | 'connecting' | 'connected'
 
 export function useRealtimeMode(): 'idle' | 'agent-speaking' | 'user-speaking' {
     return storage(useShallow((state) => state.realtimeMode));
-}
-
-export function useVoiceSessionGeneration(): number {
-    return storage(useShallow((state) => state.voiceSessionGeneration));
 }
 
 export function useVoiceArmedSessionId(): string | null {

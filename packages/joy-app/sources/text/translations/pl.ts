@@ -1,3 +1,4 @@
+import { en } from '../_default';
 import type { TranslationStructure } from '../_default';
 
 /**
@@ -26,6 +27,9 @@ function plural({ count, one, few, many }: { count: number; one: string; few: st
  * Must match the exact structure of the English translations
  */
 export const pl: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'Terminale',
@@ -141,7 +145,7 @@ export const pl: TranslationStructure = {
         appearance: 'Wygląd',
         appearanceSubtitle: 'Dostosuj wygląd aplikacji',
         voice: 'Głos',
-        voiceSubtitle: 'Rozmawiaj z sesjami przez swojego agenta ElevenLabs',
+        voiceSubtitle: 'Czytaj aktualizacje sesji za pomocą Pocket TTS',
         models: 'Modele',
         modelsSubtitle: 'Które modele oferują selektory każdego agenta',
         mods: 'Mods',
@@ -300,8 +304,6 @@ export const pl: TranslationStructure = {
         sessionNotFound: 'Sesja nie została znaleziona',
         voiceSessionFailed: 'Nie udało się uruchomić sesji głosowej',
         voiceServiceUnavailable: 'Usługa głosowa jest tymczasowo niedostępna',
-        voiceLimitReachedTitle: 'Osiągnięto limit głosu',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `Wykorzystałeś ${hours}+ godzin głosu w tym miesiącu. To jest maksymalny dozwolony limit. Możesz skonfigurować własnego agenta ElevenLabs w ustawieniach głosu, aby korzystać z własnego limitu.`,
         oauthInitializationFailed: 'Nie udało się zainicjować przepływu OAuth',
         tokenStorageFailed: 'Nie udało się zapisać tokenów uwierzytelniania',
         oauthStateMismatch: 'Weryfikacja bezpieczeństwa nie powiodła się. Spróbuj ponownie',
@@ -1048,8 +1050,6 @@ export const pl: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: 'Brak agenta głosowego',
-        noAgentMessage: 'Najpierw dodaj agenta ElevenLabs w Ustawienia → Głos.',
         startFailed: ({ reason }: { reason: string }) => `Nie udało się uruchomić głosu: ${reason}`,
         micTitle: 'Wymagany dostęp do mikrofonu',
         micAskAgain: 'Joy potrzebuje mikrofonu do rozmów głosowych. Zezwól, gdy pojawi się prośba.',
@@ -1065,10 +1065,6 @@ export const pl: TranslationStructure = {
         tapToTalk: 'Dotknij, aby mówić',
         tapToEnd: 'Dotknij, aby zakończyć',
         tapToRetry: 'Dotknij, aby spróbować ponownie',
-        refusedTitle: 'Połączenie głosowe odrzucone',
-        refusedMessage: ({ reason }: { reason: string }) => `Agent zakończył połączenie zaraz po nawiązaniu, zanim cokolwiek powiedziano. ${reason}`,
-        refusedOverrides: 'Tryb „Czuwanie” nadpisuje prompt systemowy i pierwszą wiadomość, na co ten agent nie zezwala. Włącz oba w Security w panelu ElevenLabs albo przełącz Głos na „Ciągła”.',
-        refusedNoReason: 'Sprawdź agenta w panelu ElevenLabs.',
         end: 'Zakończ głos',
     },
     settingsModels: {
@@ -1088,44 +1084,6 @@ export const pl: TranslationStructure = {
         filterPlaceholder: 'Filtruj modele',
         default: 'domyślny',
         recommended: 'polecany',
-    },
-    settingsVoice: {
-        agentsTitle: 'Agenci',
-        agentsFooter: 'Publiczny agent potrzebuje tylko id. Prywatny (z włączonym uwierzytelnianiem) potrzebuje też klucza API; klucz pozostaje w zaszyfrowanych ustawieniach i służy tylko do wystawiania tokenów rozmowy.',
-        noAgents: 'Brak agentów',
-        addAgent: 'Dodaj agenta',
-        addAgentName: 'Nazwa',
-        addAgentNamePlaceholder: 'np. Joy',
-        addAgentId: 'Id agenta',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'Klucz API',
-        addAgentKeyMessage: 'Zostaw puste dla agenta publicznego.',
-        inUse: 'W użyciu',
-        publicAgent: 'Agent publiczny',
-        privateAgent: 'Agent prywatny (klucz ustawiony)',
-        use: 'Użyj tego agenta',
-        rename: 'Zmień nazwę',
-        setKey: 'Ustaw klucz API',
-        replaceKey: 'Zamień klucz API',
-        remove: 'Usuń',
-        removeConfirm: ({ name }: { name: string }) => `Usunąć „${name}”?`,
-        modeTitle: 'Rozmowa',
-        modeClassic: 'Ciągła',
-        modeClassicSubtitle: 'Jedna rozmowa od dotknięcia mikrofonu do jej zakończenia. Nie wysyła niczego, na co agent musiałby zezwolić, więc standardowy agent działa bez zmian.',
-        modeStandby: 'Czuwanie',
-        modeStandbySubtitle: 'Rozłącza się po ciszy i budzi na zdarzenia sesji lub Twój głos. Wymaga, aby agent zezwalał na nadpisanie promptu systemowego i pierwszej wiadomości (zakładka Security).',
-        behaviorTitle: 'Gotowość',
-        wakeOnEvents: 'Budź przy zdarzeniach sesji',
-        wakeOnEventsSubtitle: 'W gotowości połącz ponownie i mów, gdy tura się kończy, czeka zatwierdzenie lub padło pytanie.',
-        wakeOnSound: 'Budź dźwiękiem',
-        wakeOnSoundSubtitle: 'W bezczynności, gdy aplikacja jest otwarta, nasłuchuj na urządzeniu i połącz ponownie, gdy zaczniesz mówić. Tylko poziom dźwięku, bez rozpoznawania słów: telewizor lub rozmowa obok też mogą obudzić.',
-        idleTimeout: 'Rozłącz po ciszy',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'Nigdy' : `${seconds} s`}`,
-        idleTimeoutPrompt: 'Sekundy ciszy, po których rozmowa się rozłącza i przechodzi w gotowość. 0 = nigdy.',
-        setupTitle: 'Konfiguracja agenta',
-        setupFooter: 'W panelu ElevenLabs agent potrzebuje narzędzi klienta sendMessageToSession(sessionId, message) i processPermissionRequest(requestId, decision) oraz opcjonalnie wbudowanego narzędzia skip_turn. Tryb „Czuwanie” wymaga dodatkowo włączonych nadpisań promptu systemowego i pierwszej wiadomości (zakładka Security); „Ciągła” nie wymaga niczego.',
-        setupPrompt: 'Sugerowany prompt systemowy',
-        setupPromptSubtitle: 'Dotknij, aby skopiować, i wklej do promptu agenta w panelu. W trybie „Ciągła” te same uwagi są też wysyłane jako kontekst przy każdym połączeniu.',
     },
     machine: {
         environment: 'Środowisko',

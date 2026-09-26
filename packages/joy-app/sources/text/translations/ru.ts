@@ -1,3 +1,4 @@
+import { en } from '../_default';
 import type { TranslationStructure } from '../_default';
 
 /**
@@ -26,6 +27,9 @@ function plural({ count, one, few, many }: { count: number; one: string; few: st
  * Must match the exact structure of the English translations
  */
 export const ru: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'Терминалы',
@@ -99,7 +103,7 @@ export const ru: TranslationStructure = {
         appearance: 'Внешний вид',
         appearanceSubtitle: 'Настройка внешнего вида приложения',
         voice: 'Голос',
-        voiceSubtitle: 'Говорите с сессиями через своего агента ElevenLabs',
+        voiceSubtitle: 'Озвучивание обновлений сессии с Pocket TTS',
         models: 'Модели',
         modelsSubtitle: 'Какие модели предлагают селекторы каждого агента',
         mods: 'Mods',
@@ -257,8 +261,6 @@ export const ru: TranslationStructure = {
         sessionNotFound: 'Сессия не найдена',
         voiceSessionFailed: 'Не удалось запустить голосовую сессию',
         voiceServiceUnavailable: 'Голосовой сервис временно недоступен',
-        voiceLimitReachedTitle: 'Лимит голоса достигнут',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `Вы использовали ${hours}+ часов голосового общения в этом месяце. Это максимально допустимый лимит. Вы можете настроить собственного агента ElevenLabs в настройках голоса, чтобы использовать свою квоту.`,
         oauthInitializationFailed: 'Не удалось инициализировать процесс OAuth',
         tokenStorageFailed: 'Не удалось сохранить токены аутентификации',
         oauthStateMismatch: 'Ошибка проверки безопасности. Попробуйте снова',
@@ -1036,8 +1038,6 @@ export const ru: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: 'Нет голосового агента',
-        noAgentMessage: 'Сначала добавьте агента ElevenLabs в Настройки → Голос.',
         startFailed: ({ reason }: { reason: string }) => `Не удалось запустить голос: ${reason}`,
         micTitle: 'Нужен доступ к микрофону',
         micAskAgain: 'Joy нужен микрофон для голоса. Разрешите доступ по запросу.',
@@ -1053,10 +1053,6 @@ export const ru: TranslationStructure = {
         tapToTalk: 'Нажмите, чтобы говорить',
         tapToEnd: 'Нажмите, чтобы завершить',
         tapToRetry: 'Нажмите, чтобы повторить',
-        refusedTitle: 'Голосовой вызов отклонён',
-        refusedMessage: ({ reason }: { reason: string }) => `Агент завершил вызов сразу после подключения, прежде чем что-либо было сказано. ${reason}`,
-        refusedOverrides: 'Режим «Ожидание» переопределяет системный промпт и первое сообщение, что этот агент не разрешает. Включите оба в Security в панели ElevenLabs или переключите Голос на «Постоянный».',
-        refusedNoReason: 'Проверьте агента в панели ElevenLabs.',
         end: 'Завершить голос',
     },
     settingsModels: {
@@ -1076,44 +1072,6 @@ export const ru: TranslationStructure = {
         filterPlaceholder: 'Фильтр моделей',
         default: 'по умолчанию',
         recommended: 'рекомендуется',
-    },
-    settingsVoice: {
-        agentsTitle: 'Агенты',
-        agentsFooter: 'Публичному агенту нужен только id. Приватному (с включённой аутентификацией) нужен ещё API-ключ; ключ хранится в зашифрованных настройках и используется только для выпуска токенов разговора.',
-        noAgents: 'Агентов пока нет',
-        addAgent: 'Добавить агента',
-        addAgentName: 'Имя',
-        addAgentNamePlaceholder: 'например, Joy',
-        addAgentId: 'Id агента',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'API-ключ',
-        addAgentKeyMessage: 'Оставьте пустым для публичного агента.',
-        inUse: 'Используется',
-        publicAgent: 'Публичный агент',
-        privateAgent: 'Приватный агент (ключ задан)',
-        use: 'Использовать этого агента',
-        rename: 'Переименовать',
-        setKey: 'Задать API-ключ',
-        replaceKey: 'Заменить API-ключ',
-        remove: 'Удалить',
-        removeConfirm: ({ name }: { name: string }) => `Удалить «${name}»?`,
-        modeTitle: 'Разговор',
-        modeClassic: 'Постоянный',
-        modeClassicSubtitle: 'Один разговор от нажатия на микрофон до его завершения. Не отправляет ничего, что агент должен разрешать, поэтому стандартный агент работает как есть.',
-        modeStandby: 'Ожидание',
-        modeStandbySubtitle: 'Кладёт трубку после тишины и просыпается от событий сессии или вашего голоса. Требует, чтобы агент разрешал переопределение системного промпта и первого сообщения (вкладка Security).',
-        behaviorTitle: 'Режим ожидания',
-        wakeOnEvents: 'Просыпаться по событиям сессии',
-        wakeOnEventsSubtitle: 'В режиме ожидания переподключаться и говорить, когда ход завершён, ждёт подтверждение или задан вопрос.',
-        wakeOnSound: 'Просыпаться по звуку',
-        wakeOnSoundSubtitle: 'В ожидании при открытом приложении слушать на устройстве и переподключаться, когда вы начинаете говорить. Только по уровню звука, без распознавания слов: телевизор или разговор рядом тоже могут разбудить.',
-        idleTimeout: 'Отключаться после тишины',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'Никогда' : `${seconds} с`}`,
-        idleTimeoutPrompt: 'Секунды тишины до отключения разговора и перехода в ожидание. 0 = никогда.',
-        setupTitle: 'Настройка агента',
-        setupFooter: 'В панели ElevenLabs агенту нужны клиентские инструменты sendMessageToSession(sessionId, message) и processPermissionRequest(requestId, decision), а также по желанию встроенный инструмент skip_turn. Режиму «Ожидание» дополнительно нужны включённые переопределения системного промпта и первого сообщения (вкладка Security); «Постоянный» не требует ничего.',
-        setupPrompt: 'Рекомендуемый системный промпт',
-        setupPromptSubtitle: 'Нажмите, чтобы скопировать, и вставьте в промпт агента в панели. В режиме «Постоянный» те же заметки также отправляются как контекст при каждом подключении.',
     },
     machine: {
         environment: 'Окружение',

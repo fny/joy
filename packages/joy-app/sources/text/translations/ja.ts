@@ -1,3 +1,4 @@
+import { en } from '../_default';
 /**
  * Japanese translations for the Joy app
  * Values can be:
@@ -18,6 +19,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 }
 
 export const ja: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'ターミナル',
@@ -126,7 +130,7 @@ export const ja: TranslationStructure = {
         appearance: '外観',
         appearanceSubtitle: 'アプリの見た目をカスタマイズ',
         voice: '音声',
-        voiceSubtitle: 'ElevenLabs エージェント経由でセッションと話す',
+        voiceSubtitle: 'Pocket TTS でセッションの更新を読み上げる',
         models: 'モデル',
         modelsSubtitle: '各エージェントの選択肢に表示するモデル',
         mods: 'Mods',
@@ -284,8 +288,6 @@ export const ja: TranslationStructure = {
         sessionNotFound: 'セッションが見つかりません',
         voiceSessionFailed: '音声セッションの開始に失敗しました',
         voiceServiceUnavailable: '音声サービスは一時的に利用できません',
-        voiceLimitReachedTitle: '音声の上限に達しました',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `今月${hours}時間以上の音声を使用しました。これは許可される最大量です。音声設定で独自の ElevenLabs エージェントを設定して、自分のクォータを使用できます。`,
         oauthInitializationFailed: 'OAuth フローの初期化に失敗しました',
         tokenStorageFailed: '認証トークンの保存に失敗しました',
         oauthStateMismatch: 'セキュリティ検証に失敗しました。再試行してください',
@@ -1033,8 +1035,6 @@ export const ja: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: '音声エージェントがありません',
-        noAgentMessage: '先に 設定 → 音声 で ElevenLabs エージェントを追加してください。',
         startFailed: ({ reason }: { reason: string }) => `音声を開始できませんでした: ${reason}`,
         micTitle: 'マイクへのアクセスが必要です',
         micAskAgain: '音声機能にはマイクが必要です。求められたら許可してください。',
@@ -1050,10 +1050,6 @@ export const ja: TranslationStructure = {
         tapToTalk: 'タップで話す',
         tapToEnd: 'タップで終了',
         tapToRetry: 'タップで再試行',
-        refusedTitle: '音声通話が拒否されました',
-        refusedMessage: ({ reason }: { reason: string }) => `接続直後、何も話される前にエージェントが通話を終了しました。${reason}`,
-        refusedOverrides: '「待機」モードはシステムプロンプトと最初のメッセージを上書きしますが、このエージェントはそれを許可していません。ElevenLabsダッシュボードのSecurityで両方を有効にするか、音声を「つなぎっぱなし」に切り替えてください。',
-        refusedNoReason: 'ElevenLabsダッシュボードでエージェントを確認してください。',
         end: '音声を終了',
     },
     settingsModels: {
@@ -1073,44 +1069,6 @@ export const ja: TranslationStructure = {
         filterPlaceholder: 'モデルを絞り込む',
         default: '既定',
         recommended: 'おすすめ',
-    },
-    settingsVoice: {
-        agentsTitle: 'エージェント',
-        agentsFooter: '公開エージェントは id のみで使えます。非公開（認証あり）の場合は API キーも必要です。キーは暗号化された設定内に保存され、会話トークンの発行にのみ使われます。',
-        noAgents: 'エージェントはまだありません',
-        addAgent: 'エージェントを追加',
-        addAgentName: '名前',
-        addAgentNamePlaceholder: '例: Joy',
-        addAgentId: 'エージェント id',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'API キー',
-        addAgentKeyMessage: '公開エージェントの場合は空のままにします。',
-        inUse: '使用中',
-        publicAgent: '公開エージェント',
-        privateAgent: '非公開エージェント（キー設定済み）',
-        use: 'このエージェントを使う',
-        rename: '名前を変更',
-        setKey: 'API キーを設定',
-        replaceKey: 'API キーを置き換え',
-        remove: '削除',
-        removeConfirm: ({ name }: { name: string }) => `「${name}」を削除しますか？`,
-        modeTitle: '会話',
-        modeClassic: 'つなぎっぱなし',
-        modeClassicSubtitle: 'マイクをタップしてから終了するまで、ひとつの会話が続きます。エージェント側で許可が必要なものは何も送らないため、標準のエージェントがそのまま使えます。',
-        modeStandby: '待機',
-        modeStandbySubtitle: '無音が続くと切断し、セッションのイベントやあなたの声で再接続します。エージェントでシステムプロンプトと最初のメッセージの上書きを許可する必要があります（Securityタブ）。',
-        behaviorTitle: '待機',
-        wakeOnEvents: 'セッションのイベントで起動',
-        wakeOnEventsSubtitle: '待機中、ターン終了・承認待ち・質問があったときに再接続して話します。',
-        wakeOnSound: '音で起動',
-        wakeOnSoundSubtitle: '待機中でアプリが開いているとき、端末上で聞き取り、話し始めると再接続します。音量のみで単語は認識しません。テレビや近くの会話でも起動することがあります。',
-        idleTimeout: '無音で切断',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'しない' : `${seconds} 秒`}`,
-        idleTimeoutPrompt: '会話を切断して待機に戻るまでの無音秒数。0 = 切断しない。',
-        setupTitle: 'エージェントの設定',
-        setupFooter: 'ElevenLabsのダッシュボードで、エージェントにはクライアントツール sendMessageToSession(sessionId, message) と processPermissionRequest(requestId, decision)、必要に応じて組み込みの skip_turn ツールが必要です。「待機」モードではさらにシステムプロンプトと最初のメッセージの上書きを有効にする必要があります（Securityタブ）。「つなぎっぱなし」には何も必要ありません。',
-        setupPrompt: '推奨システムプロンプト',
-        setupPromptSubtitle: 'タップしてコピーし、ダッシュボードのエージェントのプロンプトに貼り付けてください。「つなぎっぱなし」モードでは、同じ内容が接続のたびにコンテキストとしても送られます。',
     },
     machine: {
         environment: '環境変数',

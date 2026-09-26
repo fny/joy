@@ -4,12 +4,7 @@ import { sessionAllow, sessionDeny } from '@/sync/ops';
 import { storage } from '@/sync/storage';
 import { noteVoiceActivity } from './RealtimeSession';
 
-/**
- * Client tools the ElevenLabs agent can call. They must be declared on the
- * agent (dashboard → Tools) with these exact names and parameters; the app
- * implements them locally, so nothing here goes through ElevenLabs' servers
- * except the call itself.
- */
+/** Actions exposed to Joy's voice conversation, executed through normal session operations. */
 export const realtimeClientTools = {
     /** Send text into a coding session, exactly as if typed in the composer. */
     sendMessageToSession: async (parameters: unknown) => {
@@ -47,7 +42,7 @@ export const realtimeClientTools = {
         let sessionId: string | null = null;
         outer: for (const [sid, sm] of Object.entries(state.sessionMessages)) {
             for (const m of Object.values(sm.messagesMap)) {
-                if (m.kind === 'tool-call' && m.tool.permission?.id === requestId) { sessionId = sid; break outer; }
+                if (m.kind === 'tool-call' && m.tool.permission?.id === requestId && m.tool.permission.status === 'pending') { sessionId = sid; break outer; }
             }
         }
         if (!sessionId) return 'error (permission request not found)';
@@ -61,3 +56,15 @@ export const realtimeClientTools = {
         }
     },
 };
+
+
+export const voiceToolDefinitions = [
+    { name: 'sendMessageToSession', description: 'Send the user’s explicitly requested instruction or selected answer to a coding session.', parameters: {
+        type: 'object', properties: { sessionId: { type: 'string' }, message: { type: 'string' } }, required: ['sessionId', 'message'], additionalProperties: false,
+    } },
+    { name: 'processPermissionRequest', description: 'Allow or deny a currently pending request on the user’s instruction.', parameters: {
+        type: 'object', properties: { requestId: { type: 'string' }, decision: { type: 'string', enum: ['allow', 'deny'] } }, required: ['requestId', 'decision'], additionalProperties: false,
+    } },
+    { name: 'skip_turn', description: 'Stay silent when the user is not addressing Joy.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
+    { name: 'end_call', description: 'End voice when the user asks to stop talking.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
+];

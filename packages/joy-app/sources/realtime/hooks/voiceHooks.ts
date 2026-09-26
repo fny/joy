@@ -198,6 +198,7 @@ export const voiceHooks = {
     /** New or changed messages landed in the store. Detects held approvals
      *  and <joy-options> questions on the way through. */
     onMessages(sessionId: string, messages: Message[]) {
+        if (storage.getState().voiceArmedSessionId === null) return;
         const session = sessionOf(sessionId);
         for (const m of messages) {
             if (m.kind === 'tool-call' && m.tool.permission) {
@@ -239,6 +240,7 @@ export const voiceHooks = {
 
     /** The session's turn ended (thinking → idle). */
     onReady(sessionId: string) {
+        if (storage.getState().voiceArmedSessionId === null) return;
         injectSessionContext(sessionId);
         sendPrompt(sessionId, formatReadyEvent(sessionId, sessionOf(sessionId)));
     },

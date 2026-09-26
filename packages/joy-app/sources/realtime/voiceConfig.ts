@@ -6,5 +6,5 @@ export const VOICE_CONFIG = {
     MAX_HISTORY_MESSAGES: 12,
     /** Characters per message in injected history (text is truncated beyond). */
     MAX_MESSAGE_CHARS: 1200,
-    ENABLE_DEBUG_LOGGING: __DEV__,
+    ENABLE_DEBUG_LOGGING: false,
 } as const;

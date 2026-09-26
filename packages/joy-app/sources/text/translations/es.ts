@@ -1,3 +1,4 @@
+import { en } from '../_default';
 import type { TranslationStructure } from '../_default';
 
 /**
@@ -15,6 +16,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
  * Must match the exact structure of the English translations
  */
 export const es: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'Terminales',
@@ -124,7 +128,7 @@ export const es: TranslationStructure = {
         appearance: 'Apariencia',
         appearanceSubtitle: 'Personaliza como se ve la app',
         voice: 'Voz',
-        voiceSubtitle: 'Habla con tus sesiones a través de tu agente de ElevenLabs',
+        voiceSubtitle: 'Escucha las novedades de la sesión con Pocket TTS',
         models: 'Modelos',
         modelsSubtitle: 'Qué modelos ofrecen los selectores de cada agente',
         mods: 'Mods',
@@ -283,8 +287,6 @@ export const es: TranslationStructure = {
         sessionNotFound: 'Sesión no encontrada',
         voiceSessionFailed: 'Falló al iniciar sesión de voz',
         voiceServiceUnavailable: 'El servicio de voz no está disponible temporalmente',
-        voiceLimitReachedTitle: 'Límite de voz alcanzado',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `Has usado ${hours}+ horas de voz este mes. Este es el máximo permitido. Puedes configurar tu propio agente ElevenLabs en la configuración de voz para usar tu propia cuota.`,
         oauthInitializationFailed: 'Falló al inicializar el flujo OAuth',
         tokenStorageFailed: 'Falló al almacenar los tokens de autenticación',
         oauthStateMismatch: 'Falló la validación de seguridad. Inténtalo de nuevo',
@@ -1032,8 +1034,6 @@ export const es: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: 'Sin agente de voz',
-        noAgentMessage: 'Añade primero un agente de ElevenLabs en Ajustes → Voz.',
         startFailed: ({ reason }: { reason: string }) => `No se pudo iniciar la voz: ${reason}`,
         micTitle: 'Se necesita acceso al micrófono',
         micAskAgain: 'Joy necesita el micrófono para la voz. Permítelo cuando se te pida.',
@@ -1049,10 +1049,6 @@ export const es: TranslationStructure = {
         tapToTalk: 'Toca para hablar',
         tapToEnd: 'Toca para terminar',
         tapToRetry: 'Toca para reintentar',
-        refusedTitle: 'Llamada de voz rechazada',
-        refusedMessage: ({ reason }: { reason: string }) => `El agente terminó la llamada justo después de conectar, antes de decir nada. ${reason}`,
-        refusedOverrides: 'El modo "En espera" sobrescribe el prompt del sistema y el primer mensaje, y este agente no lo permite. Actívalo en Security en el panel de ElevenLabs, o cambia Voz a "Siempre activa".',
-        refusedNoReason: 'Revisa el agente en el panel de ElevenLabs.',
         end: 'Terminar voz',
     },
     settingsModels: {
@@ -1072,44 +1068,6 @@ export const es: TranslationStructure = {
         filterPlaceholder: 'Filtrar modelos',
         default: 'por defecto',
         recommended: 'recomendado',
-    },
-    settingsVoice: {
-        agentsTitle: 'Agentes',
-        agentsFooter: 'Un agente público solo necesita su id. Uno privado (con autenticación) necesita además una clave API; la clave se queda en tus ajustes cifrados y solo se usa para emitir tokens de conversación.',
-        noAgents: 'Aún no hay agentes',
-        addAgent: 'Añadir agente',
-        addAgentName: 'Nombre',
-        addAgentNamePlaceholder: 'p. ej. Joy',
-        addAgentId: 'Id del agente',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'Clave API',
-        addAgentKeyMessage: 'Déjalo vacío para un agente público.',
-        inUse: 'En uso',
-        publicAgent: 'Agente público',
-        privateAgent: 'Agente privado (clave configurada)',
-        use: 'Usar este agente',
-        rename: 'Renombrar',
-        setKey: 'Definir clave API',
-        replaceKey: 'Reemplazar clave API',
-        remove: 'Eliminar',
-        removeConfirm: ({ name }: { name: string }) => `¿Eliminar «${name}»?`,
-        modeTitle: 'Conversación',
-        modeClassic: 'Siempre activa',
-        modeClassicSubtitle: 'Una sola conversación desde que tocas el micrófono hasta que la terminas. No envía nada que el agente tenga que permitir, así que un agente estándar funciona tal cual.',
-        modeStandby: 'En espera',
-        modeStandbySubtitle: 'Cuelga tras el silencio y se despierta con eventos de sesión o con tu voz. Necesita que el agente permita sobrescribir el prompt del sistema y el primer mensaje (pestaña Security).',
-        behaviorTitle: 'En espera',
-        wakeOnEvents: 'Despertar con eventos de la sesión',
-        wakeOnEventsSubtitle: 'En espera, reconectar y hablar cuando termina un turno, hay una aprobación pendiente o se hace una pregunta.',
-        wakeOnSound: 'Despertar con sonido',
-        wakeOnSoundSubtitle: 'Inactivo y con la app abierta, escucha en el dispositivo y reconecta cuando empiezas a hablar. Solo nivel de sonido, sin reconocer palabras: una TV o una conversación cercana también pueden despertarlo.',
-        idleTimeout: 'Colgar tras silencio',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'Nunca' : `${seconds} segundos`}`,
-        idleTimeoutPrompt: 'Segundos de silencio antes de que la conversación cuelgue y quede en espera. 0 = nunca.',
-        setupTitle: 'Configuración del agente',
-        setupFooter: 'En el panel de ElevenLabs el agente necesita las herramientas de cliente sendMessageToSession(sessionId, message) y processPermissionRequest(requestId, decision), y opcionalmente la herramienta integrada skip_turn. El modo "En espera" además necesita permitir sobrescribir el prompt del sistema y el primer mensaje (pestaña Security); "Siempre activa" no necesita nada.',
-        setupPrompt: 'Prompt de sistema sugerido',
-        setupPromptSubtitle: 'Toca para copiar y pégalo en el prompt del agente en el panel. En modo "Siempre activa" estas notas también se envían como contexto en cada conexión.',
     },
     machine: {
         environment: 'Entorno',

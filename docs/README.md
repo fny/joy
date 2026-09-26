@@ -20,7 +20,7 @@ These pages are for people using joy. If you want to work on joy itself, start w
 | [Automations](guides/automations.md) | Saved prompts that run on demand, on a schedule, or after one another |
 | [Notifications](guides/notifications.md) | What sends a push and when, muting, resource alerts, and what a push reveals |
 | [Usage and limits](guides/usage-and-limits.md) | The "% left" in the composer, account quota windows, and cost by project and model |
-| [Voice](guides/voice.md) | Talking to your sessions through your own ElevenLabs agent |
+| [Voice](guides/voice.md) | Talk to sessions with configurable transcription and conversation APIs |
 | [Scripting and agents](guides/scripting-and-agents.md) | Driving joy from scripts and from agents, messages between sessions, and the tags an agent can write |
 | [Your browser](guides/browser.md) | The Joy Browser extension for Chrome and Firefox: a session tied to your browser, a chat button on every page, saved scripts, excluded sites |
 

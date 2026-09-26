@@ -1,96 +1,78 @@
 # Voice
 
-Voice lets you talk to your sessions: ask what they're doing, send them instructions, and answer their permission requests, hands-free. joy doesn't run a voice service of its own. You bring your own conversational agent from ElevenLabs, and the app connects your microphone to it directly. This page covers setting the agent up, the two conversation modes, and what the agent can see.
+Voice lets you talk to your coding sessions: ask what they are doing, send instructions, hear concise updates, and answer questions and permission requests. Joy supplies session context and executes the same message and permission operations used by the app.
 
-## What you need
+This replacement is still **draft**. Its conversation and transcription integrations are implemented, but live-provider accuracy, device compatibility, speakerphone echo, listening quality and latency must be validated before it is ready to replace the previous voice service.
 
-- An **ElevenLabs** account and a Conversational AI agent created on the ElevenLabs dashboard.
-- The agent's **agent id** (it starts with `agent_`).
-- If the agent has authentication turned on, an ElevenLabs **API key**. A public agent needs only its id.
-- Microphone access for the app, on your phone or in your browser.
+## Configure Voice
 
-Voice works in the phone app and on the web.
+In **Settings → Voice**, configure:
 
-## Set up the agent on ElevenLabs
+- **Conversation API format:** OpenAI-compatible Chat Completions or Anthropic-compatible Messages.
+- **Conversation base URL:** include the API version path, for example `https://api.openai.com/v1` or `https://api.anthropic.com/v1`. Joy appends `/chat/completions` or `/messages`. A compatible gateway or self-hosted endpoint can be used instead.
+- **Conversation model and API key:** use a model available at that endpoint with tool calling. The model identifier is editable; Joy does not assume that your account has access to a particular model. Keys can be empty for endpoints that require no authentication. Changing the endpoint or API format clears its key.
+- **Transcription base URL, model and API key:** a separate OpenAI-compatible `/audio/transcriptions` service. `whisper-1` is the initial editable model value. Anthropic-style conversation routing does not supply transcription. Enter transcription credentials separately even if you use the same provider for both.
+- **Voice:** choose Alba, Marius, Javert, Fantine, Éponine or Azelma for local speech. Legacy Jean/Cosette selections fall back to Alba because those source voices carry noncommercial licenses.
 
-On the ElevenLabs dashboard, give your agent two **client tools**. These are how it acts on your sessions:
+Provider requests originate from the client. Browser endpoints must support CORS for the app's origin, POST, and the relevant headers (`Authorization`, or `x-api-key`, `anthropic-version`, and `anthropic-dangerous-direct-browser-access`). A custom endpoint that works with curl may still need CORS configuration. An HTTPS page cannot generally call a plain HTTP endpoint. Native networking also follows the platform's transport policies. Browser `localhost` refers to the computer running the browser.
 
-| Tool | What it does |
-|---|---|
-| `sendMessageToSession(sessionId, message)` | Sends text into a session, as if you had typed it. |
-| `processPermissionRequest(requestId, decision)` | Allows or denies a tool call a session is waiting on. |
+The transcription service must accept the device's recording format: WebM or MP4 on web, M4A on Android, and WAV on iOS. Matching the `/audio/transcriptions` request shape alone does not establish audio-format compatibility. For example, [z.ai transcription](https://docs.z.ai/api-reference/audio/audio-transcriptions) documents WAV/MP3 input; it is not a drop-in choice for Joy's current web and Android capture.
 
-You can also add ElevenLabs' built-in `skip_turn` tool.
+OpenAI-style conversation requests use `max_completion_tokens`; compatible endpoints must support that field and function tools. Anthropic-style requests use `max_tokens` and content-block tool results. Requests have a 45-second overall deadline and retry transport failures, HTTP 408/429 and server failures at most twice. Authentication and validation errors require corrected settings. Requests and action responses are not logged with credentials.
 
-Then give the agent its instructions. Settings → Voice → **Suggested system prompt** copies joy's operating notes to your clipboard; paste them into the agent's prompt on the dashboard.
+## Talk to your sessions
 
-If you plan to use **Standby** mode (below), also open the agent's **Security** tab on the dashboard and enable overrides for the **system prompt** and the **first message**. **Stays on** mode needs neither.
+Tap the microphone in a session. The first activation downloads approximately **132–134 MB** of pinned model and selected voice data. Microphone permission is required. Joy then listens for spoken phrases, transcribes them, and asks the configured conversational model how to respond. Pocket TTS generates the spoken reply on the device.
 
-## Add the agent in joy
+The conversation keeps track of the session you are viewing and receives updates from other sessions too. It summarizes results naturally, reads question options, and can send your selected answer or approve/deny a pending request when instructed. Session context is supplied as background data; it is not spoken verbatim. Approval execution rechecks that the request is still pending. Recent voice history is retained through pause/resume and cleared when voice ends.
 
-1. Open Settings → **Voice**.
-2. Tap **Add agent**.
-3. Enter a **Name** (for example "Joy"), the **Agent id**, and, for a private agent, the **API key**. Leave the key empty for a public agent.
+**Stays on** listens until ended. **Standby** also allows pausing, waking on session events or speech, and an optional idle timeout. There is no default billing-driven hang-up. The status bar controls pause/retry/end according to the selected mode; × always ends voice. You can cancel startup from the status bar. The microphone and audio stop when the app backgrounds; returning to the foreground resumes a previously active conversation. Changing voice configuration ends the active conversation.
 
-You can add several agents. The one marked **In use** is the one the microphone connects to; tap another and choose **Use this agent** to switch. Each agent can be renamed, have its key set or replaced, or be removed.
+Capture uses a local audio-level detector with sustained-sound and trailing-silence thresholds. It is not a wake-word or speaker-recognition model. Background speech can trigger it. Web capture requests browser echo cancellation. Android pairs a voice-communication recording source with communication-mode playback. A local Expo module gives iOS voice-processing capture and playback through one audio engine. **Native compilation, speakerphone echo and interruption behavior remain release gates on real devices.** Do not assume a unit test or headset test establishes speakerphone compatibility.
 
-## Start and end a conversation
+Speech is generated in complete short clips before playback to avoid mid-word gaps when synthesis is slower than real time. Longer spoken replies are split at word boundaries instead of being shortened to excerpts. A new utterance cancels an obsolete model response or speech output. An action already sent to a coding session cannot be undone by interrupting its spoken acknowledgment. Conversation requests and tool rounds are bounded; context and complete tool/result turns are retained within memory limits.
 
-When the composer is empty and no turn is running, its send button shows a microphone. Tap it to start voice.
+## Privacy and storage
 
-A voice bar shows where the conversation stands:
+Microphone recordings go to the configured transcription endpoint. Transcripts, recent conversational history, coding-session context and tool results go to the configured conversation endpoint. Provider retention and usage depend on that endpoint. Static model downloads contact Hugging Face; **speech synthesis itself** sends no text or generated audio to a speech service.
 
-| Status | Meaning |
-|---|---|
-| **Connecting…** | The app is opening the conversation. |
-| **Voice live** | You're talking to the agent. In **Stays on** mode, tap the bar to end it; in **Standby**, tap to hang up and stand by. |
-| **Joy idle** | Standby: the conversation has hung up and is waiting to wake. Tap to talk, or just start talking if **Wake on sound** is on. |
-| **Voice error** | Voice could not start or was refused. Tap to retry. |
+API keys and preferences use Joy's existing encrypted account-settings sync. Local settings use the app's existing persistence mechanism; this is not a new guarantee of device keychain storage. Keys are entered with a masked field, can be cleared, and are never displayed in full by Voice settings. Temporary recordings and generated audio are removed after use or cancellation.
 
-The **×** on the bar ends voice altogether. The agent can also end the call itself, which turns voice off.
+Downloaded speech assets are verified against pinned sizes and SHA-256 hashes before caching. Interrupted downloads are not committed. Native model files use app storage; web uses Cache Storage when available. Browsers may evict cached data. Stopping or pausing speech releases the model; later synthesis reloads cached assets. Local synthesis does not make transcription, conversation APIs, or Joy's session sync offline.
 
-If the connection drops, the app reconnects on its own, a few times, with a short delay between tries.
+## Build and validate
 
-## Conversation modes
+The app bundles `onnxruntime-web@1.24.3` and `onnxruntime-react-native@1.24.3`, including pinned Android AAR and iOS pod versions. App postinstall runs `pocket:prepare` to copy installed web runtime files and the worker to `public/pocket`. Run it again after changing the engine or worker:
 
-Settings → Voice → **Conversation** has two modes.
+```sh
+cd packages/joy-app
+node scripts/prepare-pocket.cjs
+```
 
-### Stays on
+Native runtime version **23** includes the ONNX runtime and local voice-audio module, and removes the ElevenLabs native stack. Install a newly compiled native app; an OTA update or Expo Go cannot add native modules. Web exports must include the generated `/pocket` assets. No standalone Pocket server is required.
 
-The default. Tapping the microphone opens one conversation, and it stays open until you end it. There is no hang-up after silence and nothing wakes it. The app sends nothing the agent has to allow, so an agent straight off the dashboard works as is. Joy's operating notes and a briefing on your sessions are sent as context each time the conversation connects.
+For up to four WASM CPU threads, serve the app with:
 
-### Standby
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
 
-The conversation hangs up after a stretch of silence and stays **armed**: nothing is connected, so nothing is billed, but it can wake again. While standing by:
+The worker falls back to one thread without cross-origin isolation. HTTPS or localhost is required for browser microphone access and model verification. Plain remote HTTP, including `http://agent-01`, is insufficient for voice. See the [Joy development stack](../../dev/stack/README.md) for direct HTTPS on the VM while keeping daemon and relay ports private.
 
-- **Wake on session events** reconnects and speaks when a turn ends, an approval is waiting, or a session asks you a question.
-- **Wake on sound** listens on the device while the app is open, and reconnects when you start talking. It measures sound level only, not words, so a TV or a nearby conversation can wake it too.
-- **Hang up after silence** sets how many seconds of silence end the conversation. The default is 45 seconds; 0 means never.
+Using installed dependencies and pinned speech assets (filenames and hashes in `sources/realtime/pocket/assets.json`):
 
-What was said is kept across hang-ups and replayed to the agent when it reconnects.
+```sh
+cd packages/joy-app
+../../node_modules/.bin/vitest run sources/realtime sources/sync/settings.spec.ts
+../../node_modules/.bin/tsc --noEmit
+node scripts/test-pocket.mjs /path/to/models /tmp/voice.wav
+node scripts/test-pocket-browser.cjs /path/to/models
+node scripts/test-voice-browser.cjs /path/to/models
+```
 
-Standby mode needs the system-prompt and first-message overrides enabled on the agent's **Security** tab. Without them, ElevenLabs closes every call as soon as it opens. The app detects this: if a call ends within a few seconds of connecting, before anyone has spoken, it stops and shows **Voice call refused** with the likely reason, instead of retrying. Enable the overrides on the dashboard, or switch to **Stays on**.
+The tests cover provider wire contracts, retries, context and tool results, stale requests, startup/stop/background races, recording cleanup and playback cancellation. The browser conversation fixture uses a fake microphone and simulated API responses; it does not establish real transcription accuracy or LLM behavior. Pocket smoke tests use real inference, but do not establish subjective speech quality.
 
-## What the agent can see and do
+Before merge, exercise the actual Joy UI on web, Android and iOS with configured providers: first-use setup, repeat use, spoken instructions and questions, approvals including already-answered requests, multiple sessions, interruptions, pause/wake, cancellation, app backgrounding, voice changes and provider errors. Measure full utterance-to-response latency, memory and battery use. Native compilation, device playback and speakerphone echo need explicit evidence; JavaScript export alone is insufficient.
 
-While a conversation is live, the agent is kept up to date on your sessions:
-
-- When it connects, it gets joy's operating notes, a list of your sessions, the session you have open, and, after a reconnect, what was said so far.
-- As you move between sessions and as new messages arrive, it is told quietly, without speaking.
-- When a turn ends, a permission request arrives, or a session asks you a question, it is prompted to tell you.
-
-It acts only through the two client tools: sending a message into a session, and answering a permission request. It can't read your files or run commands on its own.
-
-## Privacy
-
-- **Your voice and the session context go to ElevenLabs.** The app connects your microphone straight to ElevenLabs from your device; no joy server is involved. Whatever the agent is told about your sessions, including recent messages, is sent to ElevenLabs to make that possible. Use voice only with sessions you are comfortable sharing with ElevenLabs.
-- **Your API key stays with you.** A private agent's API key is stored in your account settings, which are encrypted end to end. The app uses it only on your device, to open each conversation; it is never sent to the relay in readable form.
-- **Wake on sound stays on the device.** It measures sound level locally and sends nothing until it decides to reconnect.
-
-## Related
-
-- [The app](app.md)
-- [Messages and the queue](messages.md)
-- [Notifications](notifications.md)
-- [Security](../reference/security.md)
-- [FAQ](../reference/faq.md)
+See [third-party notices](../../packages/joy-app/sources/realtime/pocket/NOTICE.md) for model, voice and runtime licenses.

@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["JoyVoiceAudioModule"] },
+  "android": { "modules": ["expo.modules.joyvoiceaudio.JoyVoiceAudioModule"] }
+}

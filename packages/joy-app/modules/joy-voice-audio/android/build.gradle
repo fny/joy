@@ -1,0 +1,18 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.joyvoiceaudio'
+version = '1.0.0'
+
+android {
+  namespace 'expo.modules.joyvoiceaudio'
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+  compileOptions {
+    targetCompatibility JavaVersion.VERSION_1_8
+  }
+}

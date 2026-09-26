@@ -141,7 +141,7 @@ The settings screens, in the order they appear:
 | **Agent Defaults** | Default model, effort and permission mode for each agent, used when a session starts without one. |
 | **Models** | Which models each agent's pickers offer. **Recommended only** shows the daemon's short list; **Enable all** shows everything. |
 | **Agent Config** | Edit each agent's own config file on a machine, field by field or as raw text. |
-| **Voice** | Your ElevenLabs voice agents and how voice behaves. See [Voice](voice.md). |
+| **Voice** | Conversation and transcription providers, voices, and listening behavior. See [Voice](voice.md). |
 | **Features** | Feature switches: **File Diffs Sidebar**, **Group Tool Calls**, **Chat history limit**, **Show thinking**, **Double tap**, the experiments (including **New session list**), and on the web **Enter to Send** and **Command Palette** (⌘K). |
 | **Usage** | Token usage and estimated cost. See [Usage and limits](usage-and-limits.md). |
 | **Limits** | Live account quota windows for Claude and Codex. |

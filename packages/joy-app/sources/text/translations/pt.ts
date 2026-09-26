@@ -1,3 +1,4 @@
+import { en } from '../_default';
 import type { TranslationStructure } from '../_default';
 
 /**
@@ -15,6 +16,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
  * Must match the exact structure of the English translations
  */
 export const pt: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'Terminais',
@@ -124,7 +128,7 @@ export const pt: TranslationStructure = {
         appearance: 'Aparência',
         appearanceSubtitle: 'Personalize a aparência do aplicativo',
         voice: 'Voz',
-        voiceSubtitle: 'Fale com as suas sessões através do seu agente ElevenLabs',
+        voiceSubtitle: 'Ouça as atualizações da sessão com Pocket TTS',
         models: 'Modelos',
         modelsSubtitle: 'Quais modelos os seletores de cada agente oferecem',
         mods: 'Mods',
@@ -282,8 +286,6 @@ export const pt: TranslationStructure = {
         sessionNotFound: 'Sessão não encontrada',
         voiceSessionFailed: 'Falha ao iniciar sessão de voz',
         voiceServiceUnavailable: 'Serviço de voz temporariamente indisponível',
-        voiceLimitReachedTitle: 'Limite de voz atingido',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `Você usou ${hours}+ horas de voz este mês. Este é o máximo permitido. Você pode configurar seu próprio agente ElevenLabs nas configurações de voz para usar sua própria cota.`,
         oauthInitializationFailed: 'Falha ao inicializar o fluxo OAuth',
         tokenStorageFailed: 'Falha ao armazenar tokens de autenticação',
         oauthStateMismatch: 'Falha na validação de segurança. Por favor, tente novamente',
@@ -1031,8 +1033,6 @@ export const pt: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: 'Sem agente de voz',
-        noAgentMessage: 'Adicione primeiro um agente ElevenLabs em Definições → Voz.',
         startFailed: ({ reason }: { reason: string }) => `Não foi possível iniciar a voz: ${reason}`,
         micTitle: 'É necessário acesso ao microfone',
         micAskAgain: 'O Joy precisa do microfone para a voz. Permita quando for pedido.',
@@ -1048,10 +1048,6 @@ export const pt: TranslationStructure = {
         tapToTalk: 'Toque para falar',
         tapToEnd: 'Toque para encerrar',
         tapToRetry: 'Toque para tentar de novo',
-        refusedTitle: 'Chamada de voz recusada',
-        refusedMessage: ({ reason }: { reason: string }) => `O agente encerrou a chamada logo após conectar, antes de qualquer fala. ${reason}`,
-        refusedOverrides: 'O modo "Em espera" substitui o prompt do sistema e a primeira mensagem, o que este agente não permite. Habilite ambos em Security no painel do ElevenLabs, ou mude Voz para "Sempre ligada".',
-        refusedNoReason: 'Verifique o agente no painel do ElevenLabs.',
         end: 'Terminar voz',
     },
     settingsModels: {
@@ -1071,44 +1067,6 @@ export const pt: TranslationStructure = {
         filterPlaceholder: 'Filtrar modelos',
         default: 'padrão',
         recommended: 'recomendado',
-    },
-    settingsVoice: {
-        agentsTitle: 'Agentes',
-        agentsFooter: 'Um agente público só precisa do id. Um privado (autenticação ativa) precisa também de uma chave API; a chave fica nas suas definições cifradas e só serve para emitir tokens de conversa.',
-        noAgents: 'Ainda sem agentes',
-        addAgent: 'Adicionar agente',
-        addAgentName: 'Nome',
-        addAgentNamePlaceholder: 'ex.: Joy',
-        addAgentId: 'Id do agente',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'Chave API',
-        addAgentKeyMessage: 'Deixe vazio para um agente público.',
-        inUse: 'Em uso',
-        publicAgent: 'Agente público',
-        privateAgent: 'Agente privado (chave definida)',
-        use: 'Usar este agente',
-        rename: 'Renomear',
-        setKey: 'Definir chave API',
-        replaceKey: 'Substituir chave API',
-        remove: 'Remover',
-        removeConfirm: ({ name }: { name: string }) => `Remover «${name}»?`,
-        modeTitle: 'Conversa',
-        modeClassic: 'Sempre ligada',
-        modeClassicSubtitle: 'Uma única conversa desde o toque no microfone até você encerrá-la. Não envia nada que o agente precise permitir, então um agente padrão funciona como está.',
-        modeStandby: 'Em espera',
-        modeStandbySubtitle: 'Desliga após o silêncio e acorda com eventos da sessão ou com a sua voz. Requer que o agente permita substituir o prompt do sistema e a primeira mensagem (aba Security).',
-        behaviorTitle: 'Em espera',
-        wakeOnEvents: 'Acordar com eventos da sessão',
-        wakeOnEventsSubtitle: 'Em espera, voltar a ligar e falar quando um turno termina, há uma aprovação pendente ou é feita uma pergunta.',
-        wakeOnSound: 'Acordar com som',
-        wakeOnSoundSubtitle: 'Inativo e com a app aberta, ouve no dispositivo e volta a ligar quando começa a falar. Apenas nível de som, sem reconhecer palavras: uma TV ou uma conversa próxima também o podem acordar.',
-        idleTimeout: 'Desligar após silêncio',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'Nunca' : `${seconds} segundos`}`,
-        idleTimeoutPrompt: 'Segundos de silêncio antes de a conversa desligar e ficar em espera. 0 = nunca.',
-        setupTitle: 'Configuração do agente',
-        setupFooter: 'No painel do ElevenLabs o agente precisa das client tools sendMessageToSession(sessionId, message) e processPermissionRequest(requestId, decision), e opcionalmente da ferramenta integrada skip_turn. O modo "Em espera" também precisa dos overrides habilitados para prompt do sistema e primeira mensagem (aba Security); "Sempre ligada" não precisa de nada.',
-        setupPrompt: 'Prompt de sistema sugerido',
-        setupPromptSubtitle: 'Toque para copiar e cole no prompt do agente no painel. No modo "Sempre ligada" as mesmas notas também são enviadas como contexto a cada conexão.',
     },
     machine: {
         environment: 'Ambiente',

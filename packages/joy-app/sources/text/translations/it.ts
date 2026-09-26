@@ -1,3 +1,4 @@
+import { en } from '../_default';
 import type { TranslationStructure } from '../_default';
 
 /**
@@ -15,6 +16,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
  * Must match the exact structure of the English translations
  */
 export const it: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'Terminali',
@@ -123,7 +127,7 @@ export const it: TranslationStructure = {
         appearance: 'Aspetto',
         appearanceSubtitle: 'Personalizza l\'aspetto dell\'app',
         voice: 'Voce',
-        voiceSubtitle: 'Parla con le sessioni tramite il tuo agente ElevenLabs',
+        voiceSubtitle: 'Ascolta gli aggiornamenti della sessione con Pocket TTS',
         models: 'Modelli',
         modelsSubtitle: 'Quali modelli offrono i selettori di ogni agente',
         mods: 'Mods',
@@ -281,8 +285,6 @@ export const it: TranslationStructure = {
         sessionNotFound: 'Sessione non trovata',
         voiceSessionFailed: 'Avvio della sessione vocale non riuscito',
         voiceServiceUnavailable: 'Il servizio vocale non è temporaneamente disponibile',
-        voiceLimitReachedTitle: 'Limite vocale raggiunto',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `Hai utilizzato ${hours}+ ore di voce questo mese. Questo è il massimo consentito. Puoi configurare il tuo agente ElevenLabs nelle impostazioni vocali per utilizzare la tua quota.`,
         oauthInitializationFailed: 'Impossibile inizializzare il flusso OAuth',
         tokenStorageFailed: 'Impossibile salvare i token di autenticazione',
         oauthStateMismatch: 'Convalida di sicurezza non riuscita. Riprova',
@@ -1030,8 +1032,6 @@ export const it: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: 'Nessun agente vocale',
-        noAgentMessage: 'Aggiungi prima un agente ElevenLabs in Impostazioni → Voce.',
         startFailed: ({ reason }: { reason: string }) => `Impossibile avviare la voce: ${reason}`,
         micTitle: 'Serve l’accesso al microfono',
         micAskAgain: 'Joy ha bisogno del microfono per la voce. Consentilo quando richiesto.',
@@ -1047,10 +1047,6 @@ export const it: TranslationStructure = {
         tapToTalk: 'Tocca per parlare',
         tapToEnd: 'Tocca per terminare',
         tapToRetry: 'Tocca per riprovare',
-        refusedTitle: 'Chiamata vocale rifiutata',
-        refusedMessage: ({ reason }: { reason: string }) => `L'agente ha terminato la chiamata subito dopo la connessione, prima che fosse detto qualcosa. ${reason}`,
-        refusedOverrides: 'La modalità "In attesa" sovrascrive il prompt di sistema e il primo messaggio, cosa che questo agente non consente. Abilitali in Security nella dashboard di ElevenLabs, oppure imposta Voce su "Sempre attiva".',
-        refusedNoReason: 'Controlla l\'agente nella dashboard di ElevenLabs.',
         end: 'Termina voce',
     },
     settingsModels: {
@@ -1070,44 +1066,6 @@ export const it: TranslationStructure = {
         filterPlaceholder: 'Filtra modelli',
         default: 'predefinito',
         recommended: 'consigliato',
-    },
-    settingsVoice: {
-        agentsTitle: 'Agenti',
-        agentsFooter: 'Un agente pubblico richiede solo l’id. Uno privato (autenticazione attiva) richiede anche una chiave API; la chiave resta nelle impostazioni cifrate e serve solo a emettere token di conversazione.',
-        noAgents: 'Nessun agente',
-        addAgent: 'Aggiungi agente',
-        addAgentName: 'Nome',
-        addAgentNamePlaceholder: 'es. Joy',
-        addAgentId: 'Id agente',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'Chiave API',
-        addAgentKeyMessage: 'Lascia vuoto per un agente pubblico.',
-        inUse: 'In uso',
-        publicAgent: 'Agente pubblico',
-        privateAgent: 'Agente privato (chiave impostata)',
-        use: 'Usa questo agente',
-        rename: 'Rinomina',
-        setKey: 'Imposta chiave API',
-        replaceKey: 'Sostituisci chiave API',
-        remove: 'Rimuovi',
-        removeConfirm: ({ name }: { name: string }) => `Rimuovere «${name}»?`,
-        modeTitle: 'Conversazione',
-        modeClassic: 'Sempre attiva',
-        modeClassicSubtitle: 'Una sola conversazione dal tocco del microfono finché non la termini. Non invia nulla che l\'agente debba autorizzare, quindi un agente standard funziona così com\'è.',
-        modeStandby: 'In attesa',
-        modeStandbySubtitle: 'Riaggancia dopo il silenzio e si risveglia con gli eventi di sessione o con la tua voce. Richiede che l\'agente consenta l\'override del prompt di sistema e del primo messaggio (scheda Security).',
-        behaviorTitle: 'In attesa',
-        wakeOnEvents: 'Risveglia con eventi della sessione',
-        wakeOnEventsSubtitle: 'In attesa, riconnetti e parla quando un turno finisce, un’approvazione è in sospeso o viene posta una domanda.',
-        wakeOnSound: 'Risveglia con il suono',
-        wakeOnSoundSubtitle: 'Inattivo e con l’app aperta, ascolta sul dispositivo e riconnette quando inizi a parlare. Solo livello sonoro, senza riconoscere parole: anche una TV o una conversazione vicina possono svegliarlo.',
-        idleTimeout: 'Riaggancia dopo il silenzio',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'Mai' : `${seconds} secondi`}`,
-        idleTimeoutPrompt: 'Secondi di silenzio prima che la conversazione riagganci e resti in attesa. 0 = mai.',
-        setupTitle: 'Configurazione agente',
-        setupFooter: 'Nella dashboard di ElevenLabs l\'agente ha bisogno dei client tool sendMessageToSession(sessionId, message) e processPermissionRequest(requestId, decision), e facoltativamente dello strumento integrato skip_turn. La modalità "In attesa" richiede inoltre gli override abilitati per prompt di sistema e primo messaggio (scheda Security); "Sempre attiva" non richiede nulla.',
-        setupPrompt: 'Prompt di sistema suggerito',
-        setupPromptSubtitle: 'Tocca per copiare e incollalo nel prompt dell\'agente nella dashboard. In modalità "Sempre attiva" le stesse note vengono inviate anche come contesto a ogni connessione.',
     },
     machine: {
         environment: 'Ambiente',

@@ -1,3 +1,4 @@
+import { en } from '../_default';
 import type { TranslationStructure } from '../_default';
 
 /**
@@ -15,6 +16,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
  * Must match the exact structure of the English translations
  */
 export const ca: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: 'Terminals',
@@ -124,7 +128,7 @@ export const ca: TranslationStructure = {
         appearance: 'Aparença',
         appearanceSubtitle: 'Personalitza l\'aspecte de l\'aplicació',
         voice: 'Veu',
-        voiceSubtitle: 'Parla amb les sessions a través del teu agent d’ElevenLabs',
+        voiceSubtitle: 'Escolta les novetats de la sessió amb Pocket TTS',
         models: 'Models',
         modelsSubtitle: 'Quins models ofereixen els selectors de cada agent',
         mods: 'Mods',
@@ -283,8 +287,6 @@ export const ca: TranslationStructure = {
         sessionNotFound: 'Sessió no trobada',
         voiceSessionFailed: 'Ha fallat l\'inici de la sessió de veu',
         voiceServiceUnavailable: 'El servei de veu no està disponible temporalment',
-        voiceLimitReachedTitle: 'Límit de veu assolit',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `Has utilitzat ${hours}+ hores de veu aquest mes. Aquest és el màxim permès. Pots configurar el teu propi agent ElevenLabs a la configuració de veu per utilitzar la teva pròpia quota.`,
         oauthInitializationFailed: 'Ha fallat la inicialització del flux OAuth',
         tokenStorageFailed: 'Ha fallat l\'emmagatzematge dels tokens d\'autenticació',
         oauthStateMismatch: 'Ha fallat la validació de seguretat. Si us plau, torna-ho a provar',
@@ -1032,8 +1034,6 @@ export const ca: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: 'Sense agent de veu',
-        noAgentMessage: 'Afegeix primer un agent d’ElevenLabs a Configuració → Veu.',
         startFailed: ({ reason }: { reason: string }) => `No s’ha pogut iniciar la veu: ${reason}`,
         micTitle: 'Cal accés al micròfon',
         micAskAgain: 'Joy necessita el micròfon per a la veu. Permet-ho quan se’t demani.',
@@ -1049,10 +1049,6 @@ export const ca: TranslationStructure = {
         tapToTalk: 'Toca per parlar',
         tapToEnd: 'Toca per acabar',
         tapToRetry: 'Toca per tornar-ho a provar',
-        refusedTitle: 'Trucada de veu rebutjada',
-        refusedMessage: ({ reason }: { reason: string }) => `L'agent ha acabat la trucada just després de connectar, abans de dir res. ${reason}`,
-        refusedOverrides: 'El mode "En espera" sobreescriu el prompt del sistema i el primer missatge, i aquest agent no ho permet. Activa-ho a Security al tauler d\'ElevenLabs, o canvia Veu a "Sempre activa".',
-        refusedNoReason: 'Revisa l\'agent al tauler d\'ElevenLabs.',
         end: 'Acaba la veu',
     },
     settingsModels: {
@@ -1072,44 +1068,6 @@ export const ca: TranslationStructure = {
         filterPlaceholder: 'Filtra models',
         default: 'per defecte',
         recommended: 'recomanat',
-    },
-    settingsVoice: {
-        agentsTitle: 'Agents',
-        agentsFooter: 'Un agent públic només necessita l’id. Un de privat (amb autenticació) necessita també una clau API; la clau es queda a la configuració xifrada i només serveix per emetre tokens de conversa.',
-        noAgents: 'Encara no hi ha agents',
-        addAgent: 'Afegeix un agent',
-        addAgentName: 'Nom',
-        addAgentNamePlaceholder: 'p. ex. Joy',
-        addAgentId: 'Id de l’agent',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'Clau API',
-        addAgentKeyMessage: 'Deixa-ho buit per a un agent públic.',
-        inUse: 'En ús',
-        publicAgent: 'Agent públic',
-        privateAgent: 'Agent privat (clau definida)',
-        use: 'Usa aquest agent',
-        rename: 'Canvia el nom',
-        setKey: 'Defineix la clau API',
-        replaceKey: 'Substitueix la clau API',
-        remove: 'Elimina',
-        removeConfirm: ({ name }: { name: string }) => `Vols eliminar «${name}»?`,
-        modeTitle: 'Conversa',
-        modeClassic: 'Sempre activa',
-        modeClassicSubtitle: 'Una sola conversa des que toques el micròfon fins que l\'acabes. No envia res que l\'agent hagi de permetre, així que un agent estàndard funciona tal qual.',
-        modeStandby: 'En espera',
-        modeStandbySubtitle: 'Penja després del silenci i es desperta amb esdeveniments de sessió o amb la teva veu. Cal que l\'agent permeti sobreescriure el prompt del sistema i el primer missatge (pestanya Security).',
-        behaviorTitle: 'En espera',
-        wakeOnEvents: 'Desperta amb esdeveniments de la sessió',
-        wakeOnEventsSubtitle: 'En espera, reconnecta i parla quan acaba un torn, hi ha una aprovació pendent o es fa una pregunta.',
-        wakeOnSound: 'Desperta amb so',
-        wakeOnSoundSubtitle: 'Inactiu i amb l’app oberta, escolta al dispositiu i reconnecta quan comences a parlar. Només nivell de so, sense reconèixer paraules: una TV o una conversa propera també el poden despertar.',
-        idleTimeout: 'Penja després de silenci',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? 'Mai' : `${seconds} segons`}`,
-        idleTimeoutPrompt: 'Segons de silenci abans que la conversa pengi i quedi en espera. 0 = mai.',
-        setupTitle: 'Configuració de l’agent',
-        setupFooter: 'Al tauler d\'ElevenLabs l\'agent necessita les eines de client sendMessageToSession(sessionId, message) i processPermissionRequest(requestId, decision), i opcionalment l\'eina integrada skip_turn. El mode "En espera" a més necessita permetre sobreescriure el prompt del sistema i el primer missatge (pestanya Security); "Sempre activa" no necessita res.',
-        setupPrompt: 'Prompt de sistema suggerit',
-        setupPromptSubtitle: 'Toca per copiar i enganxa\'l al prompt de l\'agent al tauler. En mode "Sempre activa" aquestes notes també s\'envien com a context a cada connexió.',
     },
     machine: {
         environment: 'Entorn',

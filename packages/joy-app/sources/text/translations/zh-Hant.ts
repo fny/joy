@@ -1,3 +1,4 @@
+import { en } from '../_default';
 /**
  * Chinese (Traditional) translations for the Joy app
  * Values can be:
@@ -17,6 +18,9 @@ function plural({ count, singular, plural }: { count: number; singular: string; 
 }
 
 export const zhHant: TranslationStructure = {
+    voiceConfiguration: en.voiceConfiguration,
+    // Pocket TTS copy falls back to English until localized.
+    pocketVoice: en.pocketVoice,
     tabs: {
         // Tab navigation labels
         sessions: '終端',
@@ -125,7 +129,7 @@ export const zhHant: TranslationStructure = {
         appearance: '外觀',
         appearanceSubtitle: '自訂應用程式外觀',
         voice: '語音',
-        voiceSubtitle: '透過你的 ElevenLabs 代理與工作階段對話',
+        voiceSubtitle: '使用 Pocket TTS 朗讀工作階段更新',
         models: '模型',
         modelsSubtitle: '每個代理的選擇器提供哪些模型',
         mods: 'Mods',
@@ -283,8 +287,6 @@ export const zhHant: TranslationStructure = {
         sessionNotFound: '工作階段未找到',
         voiceSessionFailed: '啟動語音工作階段失敗',
         voiceServiceUnavailable: '語音服務暫時無法使用',
-        voiceLimitReachedTitle: '已達語音上限',
-        voiceHardLimitReached: ({ hours }: { hours: number }) => `您本月已使用超過 ${hours} 小時的語音。這是允許的最大用量。您可以在語音設定中配置自己的 ElevenLabs 代理，以使用您自己的配額。`,
         oauthInitializationFailed: '初始化 OAuth 流程失敗',
         tokenStorageFailed: '儲存驗證權杖失敗',
         oauthStateMismatch: '安全驗證失敗。請重試',
@@ -1032,8 +1034,6 @@ export const zhHant: TranslationStructure = {
     },
 
     voice: {
-        noAgentTitle: '沒有語音代理',
-        noAgentMessage: '請先在 設定 → 語音 中新增 ElevenLabs 代理。',
         startFailed: ({ reason }: { reason: string }) => `無法啟動語音：${reason}`,
         micTitle: '需要麥克風權限',
         micAskAgain: '語音功能需要麥克風，請在提示時允許。',
@@ -1049,10 +1049,6 @@ export const zhHant: TranslationStructure = {
         tapToTalk: '點一下說話',
         tapToEnd: '點按結束',
         tapToRetry: '點按重試',
-        refusedTitle: '語音通話被拒絕',
-        refusedMessage: ({ reason }: { reason: string }) => `代理在連線後立即結束了通話，雙方尚未說話。${reason}`,
-        refusedOverrides: '「待機」模式會覆寫系統提示詞和第一則訊息，而此代理不允許。請在 ElevenLabs 控制台的 Security 中啟用這兩項，或將語音切換為「持續連線」。',
-        refusedNoReason: '請在 ElevenLabs 控制台中檢查該代理。',
         end: '結束語音',
     },
     settingsModels: {
@@ -1072,44 +1068,6 @@ export const zhHant: TranslationStructure = {
         filterPlaceholder: '篩選模型',
         default: '預設',
         recommended: '推薦',
-    },
-    settingsVoice: {
-        agentsTitle: '代理',
-        agentsFooter: '公開代理只需要 id。私人代理（開啟驗證）還需要 API 金鑰；金鑰保存在你的加密設定中，僅用於簽發對話權杖。',
-        noAgents: '還沒有代理',
-        addAgent: '新增代理',
-        addAgentName: '名稱',
-        addAgentNamePlaceholder: '例如 Joy',
-        addAgentId: '代理 id',
-        addAgentIdPlaceholder: 'agent_…',
-        addAgentKey: 'API 金鑰',
-        addAgentKeyMessage: '公開代理請留空。',
-        inUse: '使用中',
-        publicAgent: '公開代理',
-        privateAgent: '私人代理（已設定金鑰）',
-        use: '使用此代理',
-        rename: '重新命名',
-        setKey: '設定 API 金鑰',
-        replaceKey: '更換 API 金鑰',
-        remove: '移除',
-        removeConfirm: ({ name }: { name: string }) => `移除「${name}」？`,
-        modeTitle: '通話',
-        modeClassic: '持續連線',
-        modeClassicSubtitle: '從點按麥克風到你結束為止，只有一段對話。不會傳送任何需要代理授權的內容，因此標準代理可直接使用。',
-        modeStandby: '待機',
-        modeStandbySubtitle: '靜音後掛斷，並在工作階段事件或你的聲音出現時喚醒。需要代理允許覆寫系統提示詞和第一則訊息（Security 分頁）。',
-        behaviorTitle: '待命',
-        wakeOnEvents: '工作階段事件時喚醒',
-        wakeOnEventsSubtitle: '待命時，在回合結束、等待核准或提出問題時重新連線並說話。',
-        wakeOnSound: '聲音喚醒',
-        wakeOnSoundSubtitle: '閒置且 App 開啟時，在裝置上聆聽，你開始說話時重新連線。僅依音量判斷，不辨識字詞：電視或附近的談話也可能喚醒。',
-        idleTimeout: '靜默後掛斷',
-        idleTimeoutSubtitle: ({ seconds }: { seconds: number }) => `${seconds === 0 ? '從不' : `${seconds} 秒`}`,
-        idleTimeoutPrompt: '對話掛斷並進入待命前的靜默秒數。0 = 從不。',
-        setupTitle: '代理設定',
-        setupFooter: '在 ElevenLabs 控制台中，代理需要用戶端工具 sendMessageToSession(sessionId, message) 和 processPermissionRequest(requestId, decision)，可選內建的 skip_turn 工具。「待機」模式還需要啟用系統提示詞和第一則訊息的覆寫（Security 分頁）；「持續連線」不需要任何設定。',
-        setupPrompt: '建議的系統提示詞',
-        setupPromptSubtitle: '點按複製，然後貼到控制台中代理的提示詞裡。在「持續連線」模式下，同樣的說明也會在每次連線時作為情境傳送。',
     },
     machine: {
         environment: '環境變數',

@@ -1,372 +1,202 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-// vi.mock factories are hoisted above every other statement, so the fixtures
-// they close over must be hoisted too.
-const { state, permission, agent, token, hooks, transcript } = vi.hoisted(() => {
-    // A minimal store: only what startVoice / notifyVoiceConnected touch.
-    const state = {
-        realtimeStatus: 'disconnected' as string,
-        realtimeMode: 'idle',
-        voiceArmedSessionId: null as string | null,
-        settings: { voiceMode: 'standby' as 'standby' | 'classic', voiceIdleTimeoutSec: 0, voiceWakeOnSound: false, voiceWakeOnEvents: true },
-        setRealtimeStatus(s: string) { state.realtimeStatus = s; },
-        setVoiceArmedSessionId(id: string | null) { state.voiceArmedSessionId = id; },
-    };
-    return {
-        state,
-        permission: { request: vi.fn<() => Promise<{ granted: boolean; canAskAgain: boolean }>>() },
-        agent: { current: { agentId: 'agent-1', apiKey: undefined as string | undefined } },
-        token: { mint: vi.fn<() => Promise<string>>() },
-        transcript: { lastTurnAt: null as number | null },
-        hooks: {
-            onVoiceStarted: vi.fn((sessionId: string) => `ctx:${sessionId}`),
-            onFocusChangedWhileConnecting: vi.fn(),
-            onVoiceConnected: vi.fn(),
-            onVoiceDisconnected: vi.fn(),
-            onVoiceStopped: vi.fn(),
-        },
-    };
-});
-vi.mock('@/sync/storage', () => ({ storage: { getState: () => state } }));
-vi.mock('react-native', () => ({ AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) } }));
-vi.mock('@/modal', () => ({ Modal: { alert: vi.fn() } }));
-vi.mock('@/text', () => ({ t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key) }));
-vi.mock('@/utils/microphonePermissions', () => ({
-    requestMicrophonePermission: () => permission.request(),
-    showMicrophonePermissionDeniedAlert: vi.fn(),
-}));
-vi.mock('./voiceSystemPrompt', () => ({
-    buildVoiceSystemPrompt: ({ sessionContext }: { sessionContext: string }) => `prompt(${sessionContext})`,
-    buildVoiceBriefing: ({ sessionContext }: { sessionContext: string }) => `briefing(${sessionContext})`,
-    buildVoiceFirstMessage: () => 'hello',
-}));
-vi.mock('./voiceTranscript', () => ({
-    clearVoiceTranscript: vi.fn(),
-    getRecentVoiceTranscript: () => null,
-    hasVoiceTranscript: () => false,
-    lastVoiceTurnAt: () => transcript.lastTurnAt,
-}));
-vi.mock('./elevenLabs', () => ({
-    activeVoiceAgent: () => agent.current,
-    mintConversationToken: () => token.mint(),
-}));
-vi.mock('./hooks/voiceHooks', () => ({
-    voiceHooks: hooks,
-    flushPendingPrompts: vi.fn(),
-    hasPendingPrompts: () => false,
-}));
-vi.mock('./soundWake', () => ({
-    startSoundWake: vi.fn(async () => {}),
-    stopSoundWake: vi.fn(async () => {}),
-}));
-vi.mock('./voiceRules', async (importActual) => ({
-    ...(await importActual<typeof import('./voiceRules')>()),
-    canListenWhileIdle: () => false,
-}));
-
-import {
-    startVoice,
-    hangUp,
-    endVoice,
-    wakeForEvent,
-    registerVoiceSession,
-    setCurrentRealtimeSessionId,
-    notifyVoiceConnected,
-    notifyVoiceAgentEnded,
-    notifyVoiceUnexpectedDisconnect,
-} from './RealtimeSession';
-import { Modal } from '@/modal';
-import type { VoiceSession, VoiceSessionConfig } from './types';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 function deferred<T>() {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((r) => { resolve = r; });
-    return { promise, resolve };
+    let reject!: (reason: Error) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
 }
-const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
-function fakeSdk(connectOnStart = true) {
-    const started: VoiceSessionConfig[] = [];
-    const session: VoiceSession = {
-        startSession: vi.fn(async (config: VoiceSessionConfig) => {
-            started.push(config);
-            if (connectOnStart) {
-                state.setRealtimeStatus('connected');
-                notifyVoiceConnected();
-            }
-            return null;
-        }),
-        endSession: vi.fn(async () => { state.setRealtimeStatus('disconnected'); }),
-        sendTextMessage: vi.fn(),
-        sendContextualUpdate: vi.fn(),
+const fixture = vi.hoisted(() => {
+    const state = {
+        realtimeStatus: 'disconnected', realtimeMode: 'idle', voiceArmedSessionId: null as string | null,
+        settings: {
+            voiceMode: 'standby', voiceIdleTimeoutSec: 0, voiceWakeOnSound: false, voiceWakeOnEvents: true,
+            voiceApiModel: 'model', voiceSttModel: 'stt', voiceApiStyle: 'openai',
+            voiceApiBaseUrl: 'https://api.example/v1', voiceSttBaseUrl: 'https://api.example/v1',
+            voiceApiKey: 'key', voiceSttApiKey: 'key', pocketTtsVoice: 'alba',
+        },
+        setRealtimeStatus(value: string) { state.realtimeStatus = value; },
+        setRealtimeMode(value: string) { state.realtimeMode = value; },
+        setVoiceArmedSessionId(value: string | null) { state.voiceArmedSessionId = value; },
+        clearRealtimeModeDebounce() {},
     };
-    registerVoiceSession(session);
-    return { session, started };
-}
-
-describe('startVoice re-reads the focused session at every async boundary (#338)', () => {
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        vi.useRealTimers();
-        // Reset the module's connection state between tests.
-        await hangUp();
-        state.realtimeStatus = 'disconnected';
-        state.voiceArmedSessionId = null;
-        agent.current = { agentId: 'agent-1', apiKey: undefined };
-        token.mint.mockResolvedValue('tok');
-    });
-
-    it('focus moving to B while the microphone prompt is pending briefs and starts B, not A', async () => {
-        const { started } = fakeSdk();
-        const perm = deferred<{ granted: boolean; canAskAgain: boolean }>();
-        permission.request.mockReturnValue(perm.promise);
-
-        const result = startVoice('A');
-        await tick();
-        setCurrentRealtimeSessionId('B');
-        perm.resolve({ granted: true, canAskAgain: true });
-
-        expect(await result).toBe(true);
-        expect(hooks.onVoiceStarted).toHaveBeenCalledTimes(1);
-        expect(hooks.onVoiceStarted).toHaveBeenCalledWith('B');
-        expect(started).toHaveLength(1);
-        expect(started[0].sessionId).toBe('B');
-        expect(started[0].systemPrompt).toBe('prompt(ctx:B)');
-        // Nothing to announce: the agent was briefed about B from the start.
-        expect(hooks.onFocusChangedWhileConnecting).not.toHaveBeenCalled();
-    });
-
-    it('focus moving while the conversation token is minted rebuilds the prompt for the new session', async () => {
-        const { started } = fakeSdk();
-        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
-        agent.current = { agentId: 'agent-1', apiKey: 'key' };
-        const mint = deferred<string>();
-        token.mint.mockReturnValue(mint.promise);
-
-        const result = startVoice('A');
-        await tick();
-        expect(hooks.onVoiceStarted).toHaveBeenLastCalledWith('A');
-        setCurrentRealtimeSessionId('B');
-        mint.resolve('tok');
-
-        expect(await result).toBe(true);
-        expect(hooks.onVoiceStarted).toHaveBeenLastCalledWith('B');
-        expect(started[0].sessionId).toBe('B');
-        expect(started[0].systemPrompt).toBe('prompt(ctx:B)');
-        expect(started[0].conversationToken).toBe('tok');
-    });
-
-    it('focus moving during the SDK connect is announced once, whether the connect callback or the start sees it first', async () => {
-        const { session } = fakeSdk(false);
-        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
-        const connect = deferred<null>();
-        (session.startSession as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-            await connect.promise;
-            state.setRealtimeStatus('connected');
-            notifyVoiceConnected();
-            return null;
-        });
-
-        const result = startVoice('A');
-        await tick();
-        setCurrentRealtimeSessionId('C');
-        connect.resolve(null);
-
-        expect(await result).toBe(true);
-        expect(hooks.onVoiceStarted).toHaveBeenCalledWith('A');
-        expect(hooks.onFocusChangedWhileConnecting).toHaveBeenCalledTimes(1);
-        expect(hooks.onFocusChangedWhileConnecting).toHaveBeenCalledWith('C');
-    });
-
-    it('a start with unchanged focus announces nothing', async () => {
-        const { started } = fakeSdk();
-        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
-        expect(await startVoice('A')).toBe(true);
-        expect(started[0].sessionId).toBe('A');
-        expect(hooks.onFocusChangedWhileConnecting).not.toHaveBeenCalled();
-    });
+    type Callbacks = { mode(mode: string): void; idle(): void; wake(): void; ended(): void; failed(error: Error): void };
+    class FakeLocalVoiceSession {
+        static instances: FakeLocalVoiceSession[] = [];
+        static nextStartGate: Promise<void> | null = null;
+        startSession = vi.fn(async (_config: unknown) => { await this.startGate; return 'A'; });
+        endSession = vi.fn(async () => { await this.endGate; });
+        pause = vi.fn(async (_listen: boolean) => { await this.pauseGate; });
+        resume = vi.fn(async () => {});
+        sendContextualUpdate = vi.fn();
+        sendTextMessage = vi.fn();
+        greet = vi.fn();
+        startGate: Promise<void> = Promise.resolve();
+        endGate: Promise<void> = Promise.resolve();
+        pauseGate: Promise<void> = Promise.resolve();
+        constructor(_model: unknown, _stt: unknown, _voice: string, public callbacks: Callbacks, public retirement: Promise<void>) {
+            if (FakeLocalVoiceSession.nextStartGate) {
+                this.startGate = FakeLocalVoiceSession.nextStartGate;
+                FakeLocalVoiceSession.nextStartGate = null;
+            }
+            FakeLocalVoiceSession.instances.push(this);
+        }
+    }
+    return {
+        state, FakeLocalVoiceSession,
+        hooks: {
+            onVoiceStarted: vi.fn((id: string) => `context:${id}`),
+            onSessionFocus: vi.fn(), onFocusChangedWhileConnecting: vi.fn(),
+            onVoiceConnected: vi.fn(), onVoiceDisconnected: vi.fn(), onVoiceStopped: vi.fn(),
+        },
+        flush: vi.fn(), pending: { value: false },
+        transcript: { value: false }, alert: vi.fn(),
+    };
 });
 
-describe('the context ledger lives only as long as the connection (#340)', () => {
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        vi.useRealTimers();
-        await hangUp();
-        vi.clearAllMocks();
-        state.realtimeStatus = 'disconnected';
-        state.voiceArmedSessionId = null;
-        agent.current = { agentId: 'agent-1', apiKey: undefined };
-        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
-    });
+vi.mock('@/sync/storage', () => ({ storage: { getState: () => fixture.state } }));
+vi.mock('@/modal', () => ({ Modal: { alert: fixture.alert } }));
+vi.mock('@/text', () => ({ t: (key: string) => key }));
+vi.mock('@/utils/microphonePermissions', () => ({ showMicrophonePermissionDeniedAlert: vi.fn() }));
+vi.mock('./LocalVoiceSession', () => ({
+    LocalVoiceSession: fixture.FakeLocalVoiceSession,
+    VoicePermissionError: class VoicePermissionError extends Error { canAskAgain = true; },
+}));
+vi.mock('./conversationApi', () => ({ apiEndpoint: (base: string, path: string) => `${base}/${path}` }));
+vi.mock('./hooks/voiceHooks', () => ({ voiceHooks: fixture.hooks, flushPendingPrompts: fixture.flush, hasPendingPrompts: () => fixture.pending.value }));
+vi.mock('./voiceSystemPrompt', () => ({ buildVoiceSystemPrompt: ({ sessionContext }: { sessionContext: string }) => `prompt(${sessionContext})` }));
+vi.mock('./voiceTranscript', () => ({
+    clearVoiceTranscript: vi.fn(), getRecentVoiceTranscript: () => null, hasVoiceTranscript: () => fixture.transcript.value,
+}));
 
-    it('a hang-up (the idle timeout, a tap) retires it while voice stays armed', async () => {
-        fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        expect(hooks.onVoiceDisconnected).not.toHaveBeenCalled();
-        await hangUp();
-        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(1);
-        expect(hooks.onVoiceStopped).not.toHaveBeenCalled();
-        expect(state.voiceArmedSessionId).toBe('A');
-    });
-
-    it('the agent ending the call, and a drop, retire it', async () => {
-        fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        transcript.lastTurnAt = Date.now() + 1; // something was said: a real call
-        state.realtimeStatus = 'disconnected';
-        notifyVoiceAgentEnded();
-        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(1);
-        // A drop while armed schedules a reconnect, which briefs afresh.
-        state.voiceArmedSessionId = null;
-        notifyVoiceUnexpectedDisconnect();
-        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(2);
-    });
-
-    it('a failed connect retires it, before the attempt is parked in error', async () => {
-        const { session } = fakeSdk(false);
-        (session.startSession as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('no network'));
-        vi.spyOn(console, 'error').mockImplementation(() => {});
-        expect(await startVoice('A', { silentWake: true })).toBe(false);
-        expect(hooks.onVoiceStarted).toHaveBeenCalledTimes(1);
-        expect(hooks.onVoiceDisconnected).toHaveBeenCalledTimes(1);
-        expect(state.realtimeStatus).toBe('error');
-    });
-
-    it('a connect that succeeds does not', async () => {
-        fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        expect(hooks.onVoiceDisconnected).not.toHaveBeenCalled();
-    });
+type Realtime = typeof import('./RealtimeSession');
+let voice: Realtime;
+beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    fixture.FakeLocalVoiceSession.instances.length = 0;
+    fixture.FakeLocalVoiceSession.nextStartGate = null;
+    fixture.state.realtimeStatus = 'disconnected';
+    fixture.state.realtimeMode = 'idle';
+    fixture.state.voiceArmedSessionId = null;
+    fixture.state.settings.voiceMode = 'standby';
+    fixture.state.settings.voiceWakeOnSound = false;
+    fixture.state.settings.voiceWakeOnEvents = true;
+    fixture.pending.value = false;
+    fixture.transcript.value = false;
+    voice = await import('./RealtimeSession');
 });
 
-describe('classic mode: one conversation from the tap until it is ended', () => {
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        vi.useRealTimers();
-        await endVoice();
-        vi.clearAllMocks();
-        state.realtimeStatus = 'disconnected';
-        state.voiceArmedSessionId = null;
-        state.settings.voiceMode = 'classic';
-        state.settings.voiceIdleTimeoutSec = 0;
-        transcript.lastTurnAt = null;
-        agent.current = { agentId: 'agent-1', apiKey: undefined };
-        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
-    });
-    afterEach(() => { state.settings.voiceMode = 'standby'; });
-
-    it('sends no overrides; the briefing rides the dynamic variable and a contextual update once the line is up', async () => {
-        const { session, started } = fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        expect(started).toHaveLength(1);
-        expect(started[0].systemPrompt).toBeUndefined();
-        expect(started[0].firstMessage).toBeUndefined();
-        expect(started[0].initialContext).toBe('ctx:A');
-        expect(session.sendContextualUpdate).toHaveBeenCalledTimes(1);
-        expect(session.sendContextualUpdate).toHaveBeenCalledWith('briefing(ctx:A)');
+describe('voice orchestration', () => {
+    it('stops an in-flight startup and ignores its late success', async () => {
+        const gate = deferred<void>();
+        fixture.FakeLocalVoiceSession.nextStartGate = gate.promise;
+        const start = voice.startVoice('A');
+        const own = fixture.FakeLocalVoiceSession.instances[0];
+        await voice.endVoice();
+        gate.resolve();
+        expect(await start).toBe(false);
+        expect(own.endSession).toHaveBeenCalledOnce();
+        expect(fixture.state.voiceArmedSessionId).toBeNull();
+        expect(fixture.state.realtimeStatus).toBe('disconnected');
     });
 
-    it('standby still sends the overrides its silent wakes depend on', async () => {
-        state.settings.voiceMode = 'standby';
-        const { session, started } = fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        expect(started[0].systemPrompt).toBe('prompt(ctx:A)');
-        expect(started[0].firstMessage).toBe('hello');
-        expect(started[0].initialContext).toBeUndefined();
-        expect(session.sendContextualUpdate).not.toHaveBeenCalled();
-    });
-
-    it('never hangs up on silence', async () => {
-        state.settings.voiceIdleTimeoutSec = 0.03; // 30ms
-        const { session } = fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        await new Promise((r) => setTimeout(r, 90));
-        expect(session.endSession).not.toHaveBeenCalled();
-        expect(state.realtimeStatus).toBe('connected');
-    });
-
-    it('standby hangs up on the same silence', async () => {
-        state.settings.voiceMode = 'standby';
-        state.settings.voiceIdleTimeoutSec = 0.03;
-        const { session } = fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        await new Promise((r) => setTimeout(r, 90));
-        expect(session.endSession).toHaveBeenCalled();
-    });
-
-    it('session events do not wake it: there is nothing hung up to wake', async () => {
-        const { session } = fakeSdk();
-        state.voiceArmedSessionId = 'A';
-        wakeForEvent('A');
+    it('retires the previous session before the replacement claims devices', async () => {
+        expect(await voice.startVoice('A')).toBe(true);
+        const old = fixture.FakeLocalVoiceSession.instances[0];
+        const closed = deferred<void>();
+        old.endGate = closed.promise;
+        const stopping = voice.endVoice();
+        const restarting = voice.startVoice('B');
+        const next = fixture.FakeLocalVoiceSession.instances[1];
+        let retired = false;
+        void next.retirement.then(() => { retired = true; });
         await tick();
-        expect(session.startSession).not.toHaveBeenCalled();
+        expect(retired).toBe(false);
+        closed.resolve();
+        await stopping;
+        await restarting;
+        expect(retired).toBe(true);
+        expect(fixture.state.realtimeStatus).toBe('connected');
     });
 
-    it('the agent ending a real call (end_call, on the user\'s say-so) turns voice off, not standby', async () => {
-        fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        transcript.lastTurnAt = Date.now() + 1;
-        state.realtimeStatus = 'disconnected';
-        notifyVoiceAgentEnded();
+    it('announces focus that moved while startup was pending', async () => {
+        const gate = deferred<void>();
+        fixture.FakeLocalVoiceSession.nextStartGate = gate.promise;
+        const start = voice.startVoice('A');
+        voice.setCurrentRealtimeSessionId('B');
+        gate.resolve();
+        expect(await start).toBe(true);
+        expect(fixture.hooks.onVoiceStarted).toHaveBeenCalledWith('A');
+        expect(fixture.hooks.onFocusChangedWhileConnecting).toHaveBeenCalledWith('B');
+    });
+
+    it('foreground waits for a background pause and keeps the resumed status', async () => {
+        expect(await voice.startVoice('A')).toBe(true);
+        const own = fixture.FakeLocalVoiceSession.instances[0];
+        const paused = deferred<void>();
+        own.pauseGate = paused.promise;
+        const background = voice.setVoiceForeground(false);
+        const foreground = voice.setVoiceForeground(true);
+        expect(own.resume).not.toHaveBeenCalled();
+        paused.resolve();
+        await Promise.all([background, foreground]);
+        expect(own.resume).toHaveBeenCalledOnce();
+        expect(fixture.state.realtimeStatus).toBe('connected');
+    });
+
+    it('wakes silently for an event, then flushes pending prompts', async () => {
+        expect(await voice.startVoice('A')).toBe(true);
+        await voice.hangUp();
+        fixture.flush.mockClear();
+        voice.wakeForEvent('A');
         await tick();
-        expect(state.voiceArmedSessionId).toBeNull();
-        expect(hooks.onVoiceStopped).toHaveBeenCalled();
-        expect(Modal.alert).not.toHaveBeenCalled();
-    });
-});
-
-describe('a call refused right after connect is said so, not retried', () => {
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        vi.useRealTimers();
-        await endVoice();
-        vi.clearAllMocks();
-        state.realtimeStatus = 'disconnected';
-        state.voiceArmedSessionId = null;
-        state.settings.voiceIdleTimeoutSec = 0;
-        transcript.lastTurnAt = null;
-        agent.current = { agentId: 'agent-1', apiKey: undefined };
-        permission.request.mockResolvedValue({ granted: true, canAskAgain: true });
-        vi.spyOn(console, 'warn').mockImplementation(() => {});
-    });
-    afterEach(() => { state.settings.voiceMode = 'standby'; });
-
-    it('native: the agent "ending" the call before a word — standby names the overrides and parks in error, still armed', async () => {
-        state.settings.voiceMode = 'standby';
-        fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        state.realtimeStatus = 'disconnected';
-        notifyVoiceAgentEnded();
-        expect(state.realtimeStatus).toBe('error');
-        expect(state.voiceArmedSessionId).toBe('A');
-        expect(Modal.alert).toHaveBeenCalledTimes(1);
-        expect(String((Modal.alert as ReturnType<typeof vi.fn>).mock.calls[0][1])).toContain('voice.refusedOverrides');
-        expect(hooks.onVoiceStopped).not.toHaveBeenCalled();
+        expect(fixture.state.realtimeStatus).toBe('connected');
+        expect(fixture.flush).toHaveBeenCalled();
+        expect(fixture.FakeLocalVoiceSession.instances[0].greet).toHaveBeenCalledTimes(1);
     });
 
-    it('web: the server\'s close reason is what the user reads, and no reconnect is scheduled', async () => {
-        state.settings.voiceMode = 'classic';
-        const { session } = fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        state.realtimeStatus = 'disconnected';
-        notifyVoiceUnexpectedDisconnect("Override for field 'prompt' is not allowed by config.");
-        expect(state.realtimeStatus).toBe('error');
-        expect(Modal.alert).toHaveBeenCalledTimes(1);
-        expect(String((Modal.alert as ReturnType<typeof vi.fn>).mock.calls[0][1])).toContain("Override for field 'prompt'");
-        await new Promise((r) => setTimeout(r, 20));
-        expect(session.startSession).toHaveBeenCalledTimes(1); // no retry
+    it('ignores a slow resume after a background and foreground cycle', async () => {
+        await voice.startVoice('A');
+        await voice.hangUp();
+        const own = fixture.FakeLocalVoiceSession.instances[0];
+        const resumed = deferred<void>();
+        own.resume.mockImplementationOnce(() => resumed.promise);
+        const start = voice.startVoice('A');
+        await tick();
+        await voice.setVoiceForeground(false);
+        await voice.setVoiceForeground(true);
+        resumed.resolve();
+        expect(await start).toBe(false);
+        expect(fixture.state.realtimeStatus).toBe('disconnected');
     });
 
-    it('a drop after a real exchange still reconnects', async () => {
-        state.settings.voiceMode = 'classic';
-        const { session } = fakeSdk();
-        expect(await startVoice('A')).toBe(true);
-        transcript.lastTurnAt = Date.now() + 1;
-        state.realtimeStatus = 'disconnected';
-        notifyVoiceUnexpectedDisconnect();
-        expect(state.realtimeStatus).toBe('connecting');
-        expect(Modal.alert).not.toHaveBeenCalled();
-        await new Promise((r) => setTimeout(r, 900));
-        expect(session.startSession).toHaveBeenCalledTimes(2);
+    it('rebriefs the retained session when sound wakes a paused listener', async () => {
+        fixture.state.settings.voiceWakeOnSound = true;
+        expect(await voice.startVoice('A')).toBe(true);
+        const own = fixture.FakeLocalVoiceSession.instances[0];
+        await voice.hangUp();
+        expect(own.pause).toHaveBeenCalledWith(true);
+        fixture.hooks.onVoiceStarted.mockClear();
+        own.callbacks.wake();
+        expect(fixture.state.realtimeStatus).toBe('connected');
+        expect(fixture.hooks.onVoiceStarted).toHaveBeenCalledWith('A');
+        expect(own.sendContextualUpdate).toHaveBeenCalledWith('context:A');
+    });
+
+    it('does not retry a failed session through stale callbacks', async () => {
+        expect(await voice.startVoice('A')).toBe(true);
+        const own = fixture.FakeLocalVoiceSession.instances[0];
+        own.callbacks.failed(new Error('lost connection'));
+        expect(fixture.state.realtimeStatus).toBe('error');
+        expect(fixture.hooks.onVoiceDisconnected).toHaveBeenCalled();
+        own.callbacks.mode('agent-speaking');
+        expect(fixture.state.realtimeMode).toBe('idle');
+        voice.wakeForEvent('A');
+        await tick();
+        expect(fixture.FakeLocalVoiceSession.instances).toHaveLength(2);
+        expect(fixture.state.realtimeStatus).toBe('connected');
     });
 });

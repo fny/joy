@@ -42,7 +42,7 @@ export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: 
     switch (realtimeStatus) {
         case 'connecting':
             color = theme.colors.status.connecting; pulsing = true;
-            text = t('voice.statusConnecting'); hint = '';
+            text = t('voice.statusConnecting'); hint = t('voice.tapToEnd');
             break;
         case 'connected':
             color = theme.colors.status.connected;
@@ -58,7 +58,7 @@ export const VoiceAssistantStatusBar = React.memo(({ variant = 'full', style }: 
     }
 
     const handlePress = () => {
-        if (realtimeStatus === 'connecting') return;
+        if (realtimeStatus === 'connecting') { void endVoice(); return; }
         if (realtimeStatus === 'connected') { void (classic ? endVoice() : hangUp()); return; }
         if (armedSessionId) void startVoice(armedSessionId);
     };
