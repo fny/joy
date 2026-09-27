@@ -211,6 +211,21 @@ describe('useGroupedMessages', () => {
         ]);
     });
 
+    it('keeps a turn a reader is in unfolded after the next prompt arrives (openPromptIds)', () => {
+        const user = (id: string, createdAt: number): Message => ({ kind: 'user-text', id, localId: null, createdAt, text: id });
+        const agent = (id: string, createdAt: number): Message => ({ kind: 'agent-text', id, localId: null, createdAt, text: id });
+        const messages: Message[] = [
+            user('p2', 10),
+            agent('answer-1', 5), toolMessage('tool-b', 4), agent('progress-1', 3), toolMessage('tool-a', 2),
+            user('p1', 1),
+        ];
+        // Without the hold, the previous turn folds into one work row the
+        // moment p2 lands — the rows the reader was looking at disappear.
+        expect(groupMessagesForDisplay(messages, true).map((i) => i.id)).toEqual(['p2', 'answer-1', 'work-tool-a', 'p1']);
+        const held = groupMessagesForDisplay(messages, true, { openPromptIds: new Set(['p1']) });
+        expect(held.map((i) => i.id)).toEqual(['p2', 'answer-1', 'tool-b', 'progress-1', 'tool-a', 'p1']);
+    });
+
     it('still groups adjacent current-turn tools while the agent is working', () => {
         const messages: Message[] = [
             {

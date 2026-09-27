@@ -19,7 +19,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { resolveRevealScroll, rowContainsMessage, RevealLayout, RevealTarget } from './searchReveal';
 import { useSessionSearch } from '@/hooks/useSessionSearch';
-import { performBottomFollow, isFollowInteracting, updateFollowScroll, heldOpenTurn, type FollowScrollState } from './chatFollow';
+import { distanceFromBottom, heldOpenTurn, initialScrollState, mayFollow, nextScrollState, type Metrics, type Mode, type ScrollEffect, type ScrollEvent } from './chatScroll';
 
 const SCROLL_THRESHOLD = 300;
 
@@ -171,10 +171,22 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     const sessionId = props.sessionId;
     // Newest message id, readable from the stable scroll callback — stamped
     // into snapshots for diagnostics ('live' mode) — reading snapshots restore
-    // their anchor regardless of new content (see restoreViewport).
+    // their anchor regardless of new content (see runRestore).
     const newestIdRef = React.useRef<string | null>(null);
     newestIdRef.current = props.messages[0]?.id ?? null;
     const session = useSession(props.sessionId);
+
+    // ── Viewport ownership (chatScroll.ts) ───────────────────────────────
+    // Every event is reduced SYNCHRONOUSLY into this ref: a frame scheduled
+    // earlier must read the current permission, not the last render's. The
+    // mode is mirrored into state only for what renders from it (the down
+    // button, the fold hold).
+    const scrollStateRef = React.useRef(initialScrollState());
+    const [mode, setMode] = React.useState<Mode>('following');
+    // Filled in below, once the list's callbacks exist; events arriving
+    // before then (none do — they all come from the list) would be dropped.
+    const dispatchRef = React.useRef<(event: ScrollEvent) => void>(() => {});
+    const dispatch = useCallback((event: ScrollEvent) => dispatchRef.current(event), []);
 
     // Collapse agent work between a user prompt and the final answer.
     // Nested tool groups remain expandable inside the work block.
@@ -184,16 +196,36 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     );
     // The latest turn stays unfolded from the moment it starts thinking until
     // the next prompt arrives — folding it the instant the turn ended pulled
-    // the rows out from under the viewport (chatFollow.ts, heldOpenTurn).
+    // the rows out from under the viewport (chatScroll.ts, heldOpenTurn).
     const latestPromptId = React.useMemo(() => props.messages.find((m) => m.kind === 'user-text')?.id ?? null, [props.messages]);
     const [heldOpen, setHeldOpen] = React.useState<string | null>(null);
     React.useEffect(() => {
         setHeldOpen((held) => heldOpenTurn(held, session?.thinking === true, latestPromptId));
     }, [session?.thinking, latestPromptId]);
     const collapseCurrentTurn = session?.thinking !== true && !hasPendingPermission && heldOpen !== latestPromptId;
+    // A reader keeps the turn they were in unfolded until they follow again:
+    // when the next prompt lands, that turn's rows would otherwise fold into
+    // one work row under them — a jump no follow policy can prevent, since
+    // it is the rows themselves that move (gpt-6-astra, round 2).
+    // Every turn that is open at any point while reading is held, not just the
+    // first — the reader may move down into a later one. Decided during render
+    // from the machine's synchronous mode, and from the PREVIOUS render's open
+    // turn too: when the reader leaving following and the next prompt land in
+    // one commit, the turn that was open is the one to keep.
+    const openTurnPrompt = collapseCurrentTurn ? null : latestPromptId;
+    const prevOpenTurnRef = React.useRef(openTurnPrompt);
+    const holdRef = React.useRef<Set<string>>(new Set());
+    if (scrollStateRef.current.mode === 'reading') {
+        if (prevOpenTurnRef.current) holdRef.current.add(prevOpenTurnRef.current);
+        if (openTurnPrompt) holdRef.current.add(openTurnPrompt);
+    } else if (holdRef.current.size > 0) {
+        holdRef.current = new Set();
+    }
+    prevOpenTurnRef.current = openTurnPrompt;
+    const holdKey = [...holdRef.current].join(',');
     const groupingOptions = React.useMemo(
-        () => ({ collapseCurrentTurn }),
-        [collapseCurrentTurn],
+        () => ({ collapseCurrentTurn, openPromptIds: holdKey ? new Set(holdKey.split(',')) : undefined }),
+        [collapseCurrentTurn, holdKey],
     );
     const displayItems = useGroupedMessages(props.messages, groupToolCalls, groupingOptions);
     // displayItems is newest-first (messages are sorted newest-first). FlashList
@@ -224,13 +256,6 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // indexing the wrong array anchors to the mirrored end of the conversation.
     const orderedItemsRef = React.useRef(orderedItems);
     orderedItemsRef.current = orderedItems;
-
-    // Whether the user is live (returns within 48px and has not scrolled away).
-    // Content can grow beyond that band before a follow catches up. Starts true:
-    // a blur before the first scroll event must not manufacture a 'reading'
-    // snapshot out of default-initialized refs.
-    const nearBottomRef = React.useRef(true);
-    const followScrollRef = React.useRef<FollowScrollState | null>(null);
 
     // Tracks which groups are explicitly collapsed. Groups start collapsed;
     // pending approval groups are the only ones we auto-expand.
@@ -349,10 +374,17 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         return null;
     }, [props.messages]);
 
+    // Deferred while reading: collapsing the groups a reader has open moves
+    // the rows under them. It runs when they follow again.
     const prevUserMsgIdRef = React.useRef(latestUserMsgId);
+    const collapsePendingRef = React.useRef(false);
     React.useEffect(() => {
         if (latestUserMsgId && latestUserMsgId !== prevUserMsgIdRef.current) {
             prevUserMsgIdRef.current = latestUserMsgId;
+            collapsePendingRef.current = true;
+        }
+        if (collapsePendingRef.current && mode === 'following') {
+            collapsePendingRef.current = false;
             manuallyCollapsedRef.current.clear();
             setCollapsedGroups((prev) => {
                 const next = new Set(prev);
@@ -364,7 +396,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 return next;
             });
         }
-    }, [latestUserMsgId]);
+    }, [latestUserMsgId, mode]);
 
     const handleToggleGroup = useCallback((groupId: string) => {
         setCollapsedGroups((prev) => {
@@ -396,17 +428,23 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // The coarse row scroll is the fallback for rows that never report (bare
     // message rows) and the way to mount a row that is virtualized out — its
     // anchor then reports and refines.
+    // The navigate operation a reveal runs under: the reader scrolling
+    // (or a newer jump) takes it over, and its late steps stop.
+    const revealGenRef = React.useRef(-1);
+    const isCurrentOp = useCallback((gen: number) => scrollStateRef.current.op?.gen === gen, []);
     const handleRevealLayout = useCallback((layout: RevealLayout) => {
         const target = revealTargetRef.current;
         if (!target || layout.nonce !== target.nonce || layout.messageId !== target.messageId) return;
         if (revealHandledRef.current === target.nonce) return;
+        const gen = revealGenRef.current;
+        if (!isCurrentOp(gen)) return;
         const list = flatListRef.current;
         if (!list) return;
         const scroll = resolveRevealScroll(orderedItemsRef.current, target.messageId, layout, list.getWindowSize().height);
         if (!scroll) return;
         revealHandledRef.current = target.nonce;
-        void list.scrollToIndex({ ...scroll, animated: true });
-    }, []);
+        void list.scrollToIndex({ ...scroll, animated: true }).finally(() => dispatch({ type: 'opDone', gen, now: Date.now() }));
+    }, [dispatch, isCurrentOp]);
     React.useImperativeHandle(ref, () => ({
         scrollToMessageId: (messageId: string) => {
             const items = orderedItemsRef.current;
@@ -415,12 +453,18 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             const row = items[index];
             const target: RevealTarget = { messageId, nonce: ++revealNonceRef.current };
             revealTargetRef.current = target;
+            dispatch({ type: 'navigate', now: Date.now() });
+            const gen = scrollStateRef.current.op?.gen ?? -1;
+            revealGenRef.current = gen;
             // Bare message rows have nothing to open or measure.
             setRevealTarget(row.type === 'message' ? null : target);
             const coarse = () => {
-                if (revealTargetRef.current !== target || revealHandledRef.current === target.nonce) return;
+                if (revealTargetRef.current !== target || revealHandledRef.current === target.nonce || !isCurrentOp(gen)) return;
                 const scroll = resolveRevealScroll(orderedItemsRef.current, messageId, null, 0);
-                if (scroll) void flatListRef.current?.scrollToIndex({ ...scroll, animated: true });
+                if (!scroll) return;
+                const done = flatListRef.current?.scrollToIndex({ ...scroll, animated: true });
+                // A bare row never reports a layout: its coarse jump is the whole operation.
+                if (row.type === 'message') void done?.finally(() => dispatch({ type: 'opDone', gen, now: Date.now() }));
             };
             if (row.type !== 'message' && collapsedGroupsRef.current.has(row.id)) {
                 manuallyCollapsedRef.current.delete(row.id); // a search reveal is not a manual collapse
@@ -438,7 +482,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             coarse();
             return true;
         },
-    }), []);
+    }), [dispatch, isCurrentOp]);
 
     const keyExtractor = useCallback((item: DisplayItem) => item.id, []);
 
@@ -500,51 +544,77 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         );
     }, [props.metadata, props.sessionId, handleToggleGroup, handleRevealLayout]);
 
-    // Non-inverted list: the newest messages sit at the visual bottom. Show the
-    // scroll-to-bottom button once the user has scrolled UP far enough from the
-    // bottom. Following new content to the bottom is decided HERE (see
-    // followBottom below), not by FlashList's autoscrollToBottomThreshold:
-    // that ran on every streamed data change with no idea whether a finger
-    // was down or a fling still moving, inside a band of 20% of the viewport,
-    // so scrolling up from the bottom mid-stream was answered by an animated
-    // scroll straight back down (chatFollow.ts). Only one of the two may run —
-    // both together fight the viewport mid-stream.
-    const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-        const { contentOffset } = e.nativeEvent;
-        const scroll = updateFollowScroll(followScrollRef.current, e.nativeEvent);
-        followScrollRef.current = scroll;
-        const { distanceFromBottom } = scroll;
-        // Refs only — the snapshot is committed at lifecycle boundaries, never
-        // from the scroll stream (see SavedViewport).
-        nearBottomRef.current = scroll.nearBottom;
-        const next = distanceFromBottom > SCROLL_THRESHOLD;
+    // ── Scroll facts, intent and effects (chatScroll.ts) ──────────────────
+    // Non-inverted list: the newest messages sit at the visual bottom. Whether
+    // new content pulls the viewport down is decided by the scroll machine,
+    // from the reader's own input — never from where a scroll report landed
+    // (that inference was the "scroll up → jumps to the bottom" bug: content
+    // shrinking under a reader clamped them to the end, and the end re-armed
+    // following). FlashList's autoscrollToBottomThreshold stays off: only one
+    // owner may move the viewport.
+
+    // Buttons: the down arrow shows whenever the reader is reading — also
+    // right at the bottom, where it is the way back to following — or far
+    // from the end; the prompt stepper keeps its distance thresholds.
+    const updateButtons = useCallback((m: Metrics) => {
+        const next = distanceFromBottom(m) > SCROLL_THRESHOLD;
         if (next !== showScrollButtonRef.current) {
             showScrollButtonRef.current = next;
             setShowScrollButton(next);
         }
-        // Up button shows once we're scrolled down from the very top.
-        const up = contentOffset.y > SCROLL_THRESHOLD;
+        const up = m.offset > SCROLL_THRESHOLD;
         if (up !== showUpButtonRef.current) {
             showUpButtonRef.current = up;
             setShowUpButton(up);
         }
-    }, [sessionId]);
+    }, []);
+
+    const metricsOf = (e: NativeSyntheticEvent<NativeScrollEvent>): Metrics => {
+        const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+        return { offset: contentOffset.y, maxOffset: Math.max(0, contentSize.height - layoutMeasurement.height) };
+    };
+
+    // Native: FlashList's filtered onScroll. Web reads the scroller's own
+    // 'scroll' events instead (below) — FlashList drops these for 100ms after
+    // each data-length correction.
+    const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        if (Platform.OS === 'web') return;
+        const m = metricsOf(e);
+        dispatch({ type: 'scroll', metrics: m, now: Date.now() });
+        updateButtons(m);
+    }, [dispatch, updateButtons]);
+    // Native drag and momentum bypass that filter and carry the offset.
+    const handleScrollBeginDrag = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        if (Platform.OS === 'web') return;
+        dispatch({ type: 'dragStart', metrics: metricsOf(e), now: Date.now() });
+    }, [dispatch]);
+    const handleScrollEndDrag = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        if (Platform.OS === 'web') return;
+        dispatch({ type: 'dragEnd', metrics: metricsOf(e), now: Date.now() });
+    }, [dispatch]);
+    const handleMomentumBegin = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        if (Platform.OS === 'web') return;
+        dispatch({ type: 'momentumStart', metrics: metricsOf(e), now: Date.now() });
+    }, [dispatch]);
+    const handleMomentumEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        if (Platform.OS === 'web') return;
+        dispatch({ type: 'momentumEnd', metrics: metricsOf(e), now: Date.now() });
+    }, [dispatch]);
 
     // ── Viewport save/restore ─────────────────────────────────────────────
     // Commit points: navigation blur (terminal-pane push RETAINS this screen —
     // no unmount, no AppState change), app background, and unmount as a
     // fallback. Restore points: first onLoad (remount) and refocus of a
-    // retained screen (onLoad never re-fires there).
-
-    // True while restoreViewport's staged scrollToIndex is running. A blur
-    // mid-restore must NOT snapshot the intermediate scroll position —
-    // FlashList can't cancel a started scroll, so the pre-restore snapshot
-    // (exactly what was being restored) stays the best record.
-    const restoreInFlightRef = React.useRef(false);
+    // retained screen (onLoad never re-fires there). A restore is an
+    // operation of the scroll machine: the reader taking over cancels it.
     const captureViewport = useCallback(() => {
-        if (restoreInFlightRef.current) return;
+        const state = scrollStateRef.current;
+        // Mid-restore, the viewport is an intermediate position — FlashList
+        // can't cancel a started scroll, so the pre-restore snapshot (exactly
+        // what was being restored) stays the best record.
+        if (state.op?.kind === 'restore' || state.restoreInterrupted) return;
         const newestMessageId = newestIdRef.current;
-        if (nearBottomRef.current) {
+        if (state.mode === 'following') {
             rememberViewport(sessionId, { mode: 'live', newestMessageId });
             return;
         }
@@ -588,22 +658,30 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         });
     }, [sessionId]);
 
-    // Guards a restore across its awaits: any newer capture/restore cycle
-    // (refocus, remount) invalidates in-flight completions so a late async
-    // scroll can't yank a viewport the user has since taken over.
-    const restoreGenRef = React.useRef(0);
-    const restoreViewport = useCallback(async (opts: { retained: boolean }) => {
-        const gen = ++restoreGenRef.current;
-        const list = flatListRef.current;
-        if (!list) return;
+    // Ask the machine to restore the saved viewport: a live snapshot follows,
+    // a reading one starts a restore operation (runRestore below).
+    // `token` is the machine generation when the restore was SCHEDULED: if the
+    // reader has touched the list since (or anything else took over), the
+    // queued restore is stale and does nothing.
+    const requestRestore = useCallback((token: number) => {
+        if (scrollStateRef.current.gen !== token) return;
         const saved = savedViewport.get(sessionId);
         if (!saved) return;
-        if (saved.mode === 'live') {
-            // Fresh mounts already start at the bottom; a retained screen may
-            // have drifted while hidden (rows grew, groups regrouped) — assert.
-            if (opts.retained) list.scrollToEnd({ animated: false });
-            return;
-        }
+        dispatch({ type: 'restore', live: saved.mode === 'live', now: Date.now() });
+    }, [sessionId, dispatch]);
+    const scheduleRestore = useCallback(() => {
+        const token = scrollStateRef.current.gen;
+        return InteractionManager.runAfterInteractions(() => requestRestore(token));
+    }, [requestRestore]);
+
+    // A reading restore, under operation `gen`: every step first checks that
+    // the operation is still current — the reader scrolling, a newer restore,
+    // a blur all end it.
+    const runRestore = useCallback(async (gen: number) => {
+        const finish = () => dispatch({ type: 'opDone', gen, now: Date.now() });
+        const list = flatListRef.current;
+        const saved = savedViewport.get(sessionId);
+        if (!list || !saved || saved.mode !== 'reading') { finish(); return; }
         // A reading anchor is restored even when new content arrived while
         // away (the OLD rule discarded it and jumped to the bottom — which
         // fired on essentially every terminal round-trip during a busy
@@ -632,6 +710,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             // Nothing to anchor to. On a retained screen the native list is
             // still sitting near the old offset — leaving it alone preserves
             // more of the user's position than yanking to the bottom ever did.
+            finish();
             return;
         }
         // A collapsed-while-away group is shorter than the saved offset into
@@ -646,10 +725,9 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             v > l.height - 1 ? Math.max(0, l.height - 1) : v;
         const layout = list.getLayout(index);
         if (layout && isMeasured(layout) && layout.height > 0) intra = clampIntra(layout, intra);
-        restoreInFlightRef.current = true;
         try {
             await list.scrollToIndex({ index, animated: false, viewPosition: 0, viewOffset: intra });
-            if (restoreGenRef.current !== gen) return;
+            if (!isCurrentOp(gen)) return;
             // scrollToIndex staged its own re-measurement passes. At most one
             // corrective call, for either: the data shifted under it (same id
             // now at a new index), or the anchor's real measured height turned
@@ -668,83 +746,149 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 await list.scrollToIndex({ index: idx2, animated: false, viewPosition: 0, viewOffset: intra2 });
             }
         } finally {
-            restoreInFlightRef.current = false;
+            finish();
         }
-    }, [sessionId]);
+    }, [sessionId, dispatch, isCurrentOp]);
+
+    // Web: the DOM scroller, once the list has one. Resolved on load and on
+    // every layout, so the listeners attach late if they must, and move to a
+    // replacement node.
+    const [scrollNode, setScrollNode] = React.useState<HTMLElement | null>(null);
+    const scrollNodeRef = React.useRef<HTMLElement | null>(null);
+    const resolveScrollNode = useCallback(() => {
+        if (Platform.OS !== 'web') return;
+        const node = ((flatListRef.current as any)?.getScrollableNode?.() as HTMLElement | undefined) ?? null;
+        if (node !== scrollNodeRef.current) { scrollNodeRef.current = node; setScrollNode(node); }
+    }, []);
+    /** Web can read the metrics synchronously; native reports them itself. */
+    const webMetrics = useCallback((): Metrics | undefined => {
+        const n = scrollNodeRef.current;
+        return n ? { offset: n.scrollTop, maxOffset: Math.max(0, n.scrollHeight - n.clientHeight) } : undefined;
+    }, []);
 
     // Remount path: onLoad fires once after the initial window is laid out.
+    // Until then FlashList's startRenderingFromBottom owns the position.
     const restoredRef = React.useRef(false);
     const handleLoad = useCallback(() => {
         if (restoredRef.current) return;
         restoredRef.current = true;
-        void restoreViewport({ retained: false });
-    }, [restoreViewport]);
+        resolveScrollNode();
+        const saved = savedViewport.get(sessionId);
+        if (saved?.mode === 'reading') requestRestore(scrollStateRef.current.gen);
+        else dispatch({ type: 'geometry', now: Date.now() });
+    }, [sessionId, requestRestore, dispatch, resolveScrollNode]);
 
-    // ── Follow new content ───────────────────────────────────────────────
-    // With maintainVisibleContentPosition the viewport stays anchored to the
-    // row it was on, so new content at the bottom simply extends below it;
-    // someone pinned to the newest message has to be moved down explicitly.
-    // Done only while the viewport is 'live': not scrolling away, even by a
-    // few pixels. A downward return within 48px re-arms it;
-    // releasing an upward drag does not. Native drag/momentum also guards it.
-    // Content growth keeps live mode until the follow catches up.
-    // RN-Web has no drag/momentum callbacks: wheel input supplies its guard,
-    // and scroll direction keeps follow disabled after an upward gesture ends.
-    // The down button is the explicit way back (chatFollow.ts).
-    const interactingRef = React.useRef(false);
-    const wheelUntilRef = React.useRef(0);
-    const handleScrollBeginDrag = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-        interactingRef.current = true;
-        handleScroll(e); // Seed direction even before the first onScroll.
-    }, [handleScroll]);
-    const handleScrollEndDrag = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-        handleScroll(e); // The final drag position can precede a throttled onScroll.
-        interactingRef.current = false;
-    }, [handleScroll]);
-    const handleMomentumBegin = useCallback(() => { interactingRef.current = true; }, []);
-    const handleMomentumEnd = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-        handleScroll(e);
-        interactingRef.current = false;
-    }, [handleScroll]);
-    const followBottom = useCallback(() => {
-        performBottomFollow({
-            loaded: restoredRef.current,
-            restoring: restoreInFlightRef.current,
-            nearBottom: nearBottomRef.current,
-            interacting: isFollowInteracting(interactingRef.current, wheelUntilRef.current, Date.now()),
-        }, flatListRef.current);
+    // ── Effects ──────────────────────────────────────────────────────────
+    // followBottom is coalesced to one native command per frame and checked
+    // again when it runs: the permission may have been revoked meanwhile.
+    // It goes straight to the native scroller, not through FlashList's
+    // deferred scrollToEnd wrapper, whose queued command could land after
+    // the reader took over.
+    const followFrameRef = React.useRef<number | null>(null);
+    const nativeScrollToEnd = useCallback((animated: boolean) => {
+        flatListRef.current?.getNativeScrollRef()?.scrollToEnd({ animated });
     }, []);
-    // New rows and streamed growth: after the list has committed them (next
-    // frame), then again when the real measured content size lands — the
-    // first follow ran against estimated heights and can fall short.
+    const runEffect = useCallback((effect: ScrollEffect) => {
+        switch (effect.type) {
+            case 'followBottom':
+                if (followFrameRef.current !== null) return;
+                followFrameRef.current = requestAnimationFrame(() => {
+                    followFrameRef.current = null;
+                    if (!restoredRef.current || !mayFollow(scrollStateRef.current, Date.now())) return;
+                    nativeScrollToEnd(false);
+                });
+                return;
+            case 'scrollToBottom':
+                nativeScrollToEnd(effect.animated);
+                return;
+            case 'startOp':
+                if (effect.kind === 'restore') void runRestore(effect.gen);
+                return; // navigate: the caller runs the jump
+        }
+    }, [nativeScrollToEnd, runRestore]);
+
+    // Timed phases (wheel, key, a drag's release) end by going quiet: one
+    // timer, re-armed on every event, delivers the tick that ends them.
+    const tickTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const modeSetRef = React.useRef<Mode>('following');
+    dispatchRef.current = (event: ScrollEvent) => {
+        const r = nextScrollState(scrollStateRef.current, event);
+        scrollStateRef.current = r.state;
+        if (r.state.mode !== modeSetRef.current) { modeSetRef.current = r.state.mode; setMode(r.state.mode); }
+        if (tickTimerRef.current) { clearTimeout(tickTimerRef.current); tickTimerRef.current = null; }
+        const until = r.state.interaction?.until;
+        if (until != null) {
+            tickTimerRef.current = setTimeout(() => {
+                tickTimerRef.current = null;
+                dispatchRef.current({ type: 'tick', metrics: webMetrics(), now: Date.now() });
+            }, Math.max(0, until - event.now) + 5);
+        }
+        for (const effect of r.effects) runEffect(effect);
+    };
+    React.useEffect(() => () => {
+        if (tickTimerRef.current) clearTimeout(tickTimerRef.current);
+        if (followFrameRef.current !== null) cancelAnimationFrame(followFrameRef.current);
+    }, []);
+
+    // ── Geometry ─────────────────────────────────────────────────────────
+    // New rows and streamed growth, the measured content size landing, and
+    // the list's own height changing (the composer growing, the keyboard):
+    // facts for the machine, which follows only a following reader.
     React.useEffect(() => {
-        const id = requestAnimationFrame(followBottom);
-        return () => cancelAnimationFrame(id);
-    }, [orderedItems, followBottom]);
-    const handleContentSizeChange = useCallback(() => { followBottom(); }, [followBottom]);
-    // The list's own height changes too: the composer growing to a second
-    // line, the Android keyboard padding the screen. A non-inverted list keeps
-    // its offset through a relayout, so the bottom rows would slide out of
-    // view and the next data follow would snap them back — re-pin now, in the
-    // layout pass itself, while the reader is live.
+        dispatch({ type: 'geometry', metrics: webMetrics(), now: Date.now() });
+    }, [orderedItems, dispatch, webMetrics]);
+    const handleContentSizeChange = useCallback(() => {
+        dispatch({ type: 'geometry', metrics: webMetrics(), now: Date.now() });
+    }, [dispatch, webMetrics]);
     const layoutHeightRef = React.useRef<number | null>(null);
     const handleLayout = useCallback((e: LayoutChangeEvent) => {
+        resolveScrollNode();
         const h = e.nativeEvent.layout.height;
         const changed = layoutHeightRef.current !== null && layoutHeightRef.current !== h;
         layoutHeightRef.current = h;
-        if (changed) followBottom();
-    }, [followBottom]);
+        if (changed) dispatch({ type: 'geometry', metrics: webMetrics(), now: Date.now() });
+    }, [dispatch, webMetrics, resolveScrollNode]);
+
+    // Sending a prompt from THIS client is a request to watch the reply. A
+    // send is a NEW row at deliveryStage 'local' (only rows this client sent
+    // carry a stage, and only an unacknowledged one is 'local'). Keyed by the
+    // row id, which the reducer keeps through the server's acknowledgment
+    // (localId does not survive it: it turns null). Every id seen is kept, so
+    // an older prompt resurfacing as the newest row is not a send either.
+    const seenSendsRef = React.useRef<Set<string> | null>(null);
+    if (seenSendsRef.current === null) {
+        seenSendsRef.current = new Set(props.messages.filter((m) => m.kind === 'user-text' && m.deliveryStage !== undefined).map((m) => m.id));
+    }
+    const newest = props.messages[0];
+    const freshSendId = newest?.kind === 'user-text' && newest.deliveryStage === 'local' ? newest.id : null;
+    React.useEffect(() => {
+        if (!freshSendId || seenSendsRef.current!.has(freshSendId)) return;
+        seenSendsRef.current!.add(freshSendId);
+        dispatch({ type: 'sent', now: Date.now() });
+    }, [freshSendId, dispatch]);
 
     // Retained-screen path: capture on blur, restore on refocus. The first
     // focus of a mount is skipped — onLoad owns that one (the list may not
     // even have laid out yet). Restore waits for the navigation transition so
     // it measures the settled viewport, and a blur cancels it via the token.
+    // Route visibility and app activity are separate facts for the machine:
+    // returning to the app does not un-hide a route still under another
+    // screen, and refocusing does not resume a backgrounded app.
     const blurredSinceMountRef = React.useRef(false);
+    // App activity is a fact for the machine whatever route is focused — a
+    // focus-scoped listener missed the app returning while another screen
+    // was on top, and left the chat suspended for good.
+    React.useEffect(() => {
+        const sub = AppState.addEventListener('change', (state) => {
+            dispatch({ type: state === 'active' ? 'appActive' : 'appBackground', now: Date.now() });
+        });
+        return () => sub.remove();
+    }, [dispatch]);
     useFocusEffect(
         useCallback(() => {
-            let task = blurredSinceMountRef.current
-                ? InteractionManager.runAfterInteractions(() => { void restoreViewport({ retained: true }); })
-                : null;
+            dispatch({ type: AppState.currentState === 'active' || AppState.currentState == null ? 'appActive' : 'appBackground', now: Date.now() });
+            dispatch({ type: 'routeShown', now: Date.now() });
+            let task = blurredSinceMountRef.current ? scheduleRestore() : null;
             // App background/foreground does NOT blur the route, so it's
             // handled here — and ONLY while this chat is the focused route: a
             // chat retained under the terminal must not overwrite the good
@@ -763,17 +907,17 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 } else if (bgCaptured) {
                     bgCaptured = false;
                     task?.cancel();
-                    task = InteractionManager.runAfterInteractions(() => { void restoreViewport({ retained: true }); });
+                    task = scheduleRestore();
                 }
             });
             return () => {
                 sub.remove();
                 task?.cancel();
-                restoreGenRef.current++; // invalidate any in-flight restore
                 blurredSinceMountRef.current = true;
                 captureViewport();
+                dispatch({ type: 'routeHidden', now: Date.now() });
             };
-        }, [captureViewport, restoreViewport]),
+        }, [captureViewport, scheduleRestore, dispatch]),
     );
 
     // Unmount fallback (layout-effect cleanup runs before children detach, so
@@ -784,8 +928,19 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         // Don't pin topVisibleIndex to MAX here: onViewableItemsChanged corrects
         // it to the real viewport top after the scroll, and a stale MAX would make
         // the next Up press target the (already-visible) newest prompt → a no-op.
-        flatListRef.current?.scrollToEnd({ animated: true });
-    }, []);
+        dispatch({ type: 'bottomPressed', now: Date.now() });
+    }, [dispatch]);
+
+    // A prompt-stepper jump, as a navigate operation: the reader reads there.
+    // FlashList's scrollToIndex cannot be cancelled once started (its
+    // preparation passes run to completion) — the operation's generation at
+    // least keeps follow from fighting it, and ends it cleanly.
+    const jumpToIndex = useCallback((index: number) => {
+        dispatch({ type: 'navigate', now: Date.now() });
+        const gen = scrollStateRef.current.op?.gen ?? -1;
+        void flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0 })
+            .finally(() => dispatch({ type: 'opDone', gen, now: Date.now() }));
+    }, [dispatch]);
 
     // Track the topmost visible row so scrubbing steps relative to the current
     // viewport, not a stored pointer that manual scrolling would invalidate.
@@ -813,8 +968,8 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         }
         if (target < 0) return; // already above every prompt
         topVisibleIndexRef.current = target; // optimistic — survives rapid presses
-        void flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
-    }, []);
+        jumpToIndex(target);
+    }, [jumpToIndex]);
 
     // Down: jump to the nearest user prompt BELOW the current viewport, or to the
     // very bottom once we've stepped past the last one.
@@ -830,14 +985,14 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             return;
         }
         topVisibleIndexRef.current = target; // optimistic — survives rapid presses
-        void flatListRef.current?.scrollToIndex({ index: target, animated: true, viewPosition: 0 });
-    }, [scrollToBottom]);
+        jumpToIndex(target);
+    }, [scrollToBottom, jumpToIndex]);
 
     // Older history lives at the visual TOP now, so `onStartReached` fires when
     // the user scrolls up toward it. Initial fetch only loads the latest 100
     // messages (see sync.fetchInitialLatestPage), so we lazy-load earlier pages
-    // here; maintainVisibleContentPosition.autoscrollToTopThreshold keeps the
-    // viewport anchored as older pages prepend (no jump).
+    // here; maintainVisibleContentPosition keeps the viewport anchored as
+    // older pages prepend.
     const hasMoreOlder = props.hasMoreOlder;
     const isLoadingOlder = props.isLoadingOlder;
     // A failed page is reported (the spinner has already cleared); scrolling
@@ -847,23 +1002,82 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         guarded(() => sync.loadOlderMessages(sessionId), alertError())();
     }, [sessionId, hasMoreOlder, isLoadingOlder]);
 
-    // RN-Web has no wheel gesture boundaries. Keep the guard through wheel
-    // bursts (including trackpad inertia) and past its 100ms final onScroll.
-    // Also restore vertical scrolling when Shift+wheel swaps deltaX/deltaY.
+    // Web intent, read from the scroller itself — sources FlashList cannot
+    // swallow. RN-Web has no drag/momentum callbacks; wheel, keyboard and
+    // pointer (scrollbar, touch) are the reader's hands. Also restores
+    // vertical scrolling when Shift+wheel swaps deltaX/deltaY.
     React.useEffect(() => {
-        if (Platform.OS !== 'web') return;
-        const node = (flatListRef.current as any)?.getScrollableNode?.() as HTMLElement | undefined;
-        if (!node) return;
-        const handler = (e: WheelEvent) => {
-            wheelUntilRef.current = Date.now() + 150;
-            if (e.shiftKey && Math.abs(e.deltaX) > 0 && Math.abs(e.deltaY) < 1) {
-                node.scrollTop += e.deltaX;
+        const node = scrollNode;
+        if (Platform.OS !== 'web' || !node) return;
+        const metrics = (): Metrics => ({ offset: node.scrollTop, maxOffset: Math.max(0, node.scrollHeight - node.clientHeight) });
+        const onScroll = () => {
+            const m = metrics();
+            dispatch({ type: 'scroll', metrics: m, now: Date.now() });
+            updateButtons(m);
+        };
+        // Decide who owns the wheel BEFORE anything moves: a nested scroller
+        // with room takes it, and the chat is only moved (Shift+wheel) after
+        // the machine has heard the reader's direction.
+        const onWheel = (e: WheelEvent) => {
+            if (e.ctrlKey) return; // pinch / zoom
+            const swapped = e.shiftKey && Math.abs(e.deltaX) > 0 && Math.abs(e.deltaY) < 1;
+            if (!swapped && Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // horizontal: a code block or table
+            const dy = swapped ? e.deltaX : e.deltaY;
+            if (dy === 0 || nestedScrollerTakes(e.target, node, dy)) return;
+            dispatch({ type: 'wheel', dy, now: Date.now() });
+            if (swapped) {
+                node.scrollTop += dy;
                 e.preventDefault();
             }
         };
-        node.addEventListener('wheel', handler, { passive: false });
-        return () => node.removeEventListener('wheel', handler);
-    }, []);
+        const onKey = (e: KeyboardEvent) => {
+            if (e.defaultPrevented || isEditable(e.target)) return;
+            const active = document.activeElement;
+            if (active && active !== document.body && !node.contains(active)) return;
+            const dir = KEY_DIRECTION[e.key];
+            if (!dir) return;
+            const older = dir === 'older' || (e.key === ' ' && e.shiftKey);
+            // A focused nested scroller with room takes its keys.
+            if (active && active !== node && node.contains(active) && nestedScrollerTakes(active, node, older ? -1 : 1)) return;
+            dispatch({ type: 'key', dir: older ? 'older' : 'newer', now: Date.now() });
+        };
+        // A scroll grab only: a touch, or a mouse press on the scrollbar. A
+        // click inside the content (expanding a group, selecting text) is
+        // not one — offset changes during it are the list's own (MVCP) and
+        // must not be read as the reader's direction.
+        const onPointerDown = (e: PointerEvent) => {
+            if (e.pointerType === 'mouse') {
+                if (e.button !== 0) return;
+                const r = node.getBoundingClientRect();
+                if (e.clientX < r.left + node.clientWidth) return;
+            }
+            dispatch({ type: 'pointerDown', metrics: metrics(), now: Date.now() });
+        };
+        // The release can land outside the scroller (a scrollbar drag), or
+        // never arrive (window blur): listen on the window for every end.
+        const onPointerUp = () => dispatch({ type: 'pointerUp', metrics: metrics(), now: Date.now() });
+        node.addEventListener('scroll', onScroll, { passive: true });
+        node.addEventListener('wheel', onWheel, { passive: false });
+        node.addEventListener('pointerdown', onPointerDown, { passive: true });
+        window.addEventListener('pointerup', onPointerUp, true);
+        window.addEventListener('pointercancel', onPointerUp, true);
+        window.addEventListener('blur', onPointerUp);
+        window.addEventListener('keydown', onKey);
+        return () => {
+            node.removeEventListener('scroll', onScroll);
+            node.removeEventListener('wheel', onWheel);
+            node.removeEventListener('pointerdown', onPointerDown);
+            window.removeEventListener('pointerup', onPointerUp, true);
+            window.removeEventListener('pointercancel', onPointerUp, true);
+            window.removeEventListener('blur', onPointerUp);
+            window.removeEventListener('keydown', onKey);
+        };
+    }, [scrollNode, dispatch, updateButtons]);
+
+    // The way back to following: whenever the reader is reading (even at the
+    // bottom — clamped there by content shrinking, or a few px above it), or
+    // far from the end.
+    const showLiveButton = mode === 'reading' || showScrollButton;
 
     return (
         <View style={{ flex: 1 }}>
@@ -877,11 +1091,12 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                     // (newest) — the fast path; FlashList only mounts the visible
                     // window instead of every message.
                     startRenderingFromBottom: true,
-                    // No autoscrollToBottomThreshold: following the newest
-                    // message is this component's job (followBottom), gated on
-                    // the live band and on the user's hands being off.
-                    // Anchor the viewport when older pages prepend at the top.
-                    autoscrollToTopThreshold: 100,
+                    // No autoscroll thresholds. Following the newest message
+                    // is the scroll machine's job (chatScroll.ts). The top
+                    // threshold never anchored anything: on iOS it animates to
+                    // offset 0 after an anchor correction near the top — a
+                    // jump to the oldest message while paging (gpt-6-astra).
+                    // Anchoring prepended pages is MVCP itself.
                 }}
                 keyboardShouldPersistTaps="handled"
                 keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
@@ -903,7 +1118,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 onStartReached={handleLoadOlder}
                 onStartReachedThreshold={0.5}
             />
-            {(showScrollButton || showUpButton) && (
+            {(showScrollButton || showUpButton || showLiveButton) && (
                 <View style={styles.scrollButtonContainer} pointerEvents="box-none">
                     {/* Scrubbing arrows (chevrons = step between your prompts) */}
                     {showUpButton && (
@@ -933,7 +1148,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                         </Pressable>
                     )}
                     {/* Jump straight to the latest message (solid arrow = go to live) */}
-                    {showScrollButton && (
+                    {showLiveButton && (
                         <Pressable
                             style={({ pressed }) => [
                                 styles.scrollButton,
@@ -951,6 +1166,30 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         </View>
     )
 }));
+
+/** Keys that scroll the chat when nothing editable has focus. */
+const KEY_DIRECTION: Record<string, 'older' | 'newer'> = {
+    PageUp: 'older', ArrowUp: 'older', Home: 'older',
+    PageDown: 'newer', ArrowDown: 'newer', End: 'newer', ' ': 'newer',
+};
+
+function isEditable(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || !el.tagName) return false;
+    return el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.tagName === 'BUTTON';
+}
+
+/** A wheel over a nested scroller (a long tool output, a code block) that
+ *  can still scroll that way moves IT, not the chat. */
+function nestedScrollerTakes(target: EventTarget | null, list: HTMLElement, dy: number): boolean {
+    for (let el = target as HTMLElement | null; el && el !== list; el = el.parentElement) {
+        if (el.scrollHeight <= el.clientHeight + 1) continue;
+        const overflowY = getComputedStyle(el).overflowY;
+        if (overflowY !== 'auto' && overflowY !== 'scroll') continue;
+        if (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
+    }
+    return false;
+}
 
 function isCollapsibleDisplayItem(item: DisplayItem): item is ToolGroupItem | Extract<DisplayItem, { type: 'agent-work-group' }> {
     return item.type === 'tool-group' || item.type === 'agent-work-group';

@@ -1,6 +1,11 @@
 {
   "entries": [
     {
+      "title": "Sep 27 — Scrolling up in a chat stays where you put it",
+      "summary": "",
+      "markdown": "- **Scroll up and the chat stays there.** The list used to decide whether to follow new messages from where the view happened to land, whatever put it there. If something below you got shorter — a reply re-rendering, a group folding — the view slid to the end, the list took that as you returning, and the next streamed line pulled you down and kept you there. Following is now your decision only: scroll up and it stops; scroll back down to the end, press the down arrow, or send a message and it starts again.\n- **The down arrow is there whenever you are not following,** even a few pixels from the end, so there is always one press back to the newest message.\n- **The turn you are reading stays open.** When the next prompt arrives while you are scrolled up, the agent's work you were looking at no longer folds into one row under you; it folds once you are back at the bottom.\n- **Paging older messages no longer throws you to the top on iPhone.** A setting meant to hold your place while older messages load was instead scrolling to the very first message whenever you were near the top."
+    },
+    {
       "title": "Sep 25 — The session list reads twice, and identicons can mean something else",
       "summary": "",
       "markdown": "- **Pinned, then everything else, then the machines.** The top of the list is now two flat sections in one visual language: what you pinned, and every other live session in the same order. Below them the same sessions appear again grouped by machine, for when the machine is what you are thinking about — so a session is always in both places, and pinning no longer moves a row out of the machine you last saw it under.\n- **Both flat sections fold.** Press the title of Pinned or Everything else to collapse it; the order control beside it (\"by state\" / \"by project\") is now its own button rather than sharing the press. The machine groups below start collapsed, since they repeat what is directly above them, and each remembers being opened.\n- **An identicon can mean a machine, a session or an agent.** Appearance → *What an identicon means* picks what the generated face is drawn from. It still defaults to the project — a folder on a machine, which is what it has always been — but you can make every session its own face, or give one face to each machine or each agent, so a column of rows groups at a glance without reading the text."
@@ -536,5 +541,5 @@
       "markdown": "- E2E encrypted sessions.\n- Voice assistant.\n- File manager with syntax highlighting.\n- Real-time sync across devices."
     }
   ],
-  "latestTitle": "Sep 25 — The session list reads twice, and identicons can mean something else"
+  "latestTitle": "Sep 27 — Scrolling up in a chat stays where you put it"
 }

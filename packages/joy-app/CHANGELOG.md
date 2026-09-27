@@ -1,3 +1,10 @@
+# Sep 27 — Scrolling up in a chat stays where you put it
+
+- **Scroll up and the chat stays there.** The list used to decide whether to follow new messages from where the view happened to land, whatever put it there. If something below you got shorter — a reply re-rendering, a group folding — the view slid to the end, the list took that as you returning, and the next streamed line pulled you down and kept you there. Following is now your decision only: scroll up and it stops; scroll back down to the end, press the down arrow, or send a message and it starts again.
+- **The down arrow is there whenever you are not following,** even a few pixels from the end, so there is always one press back to the newest message.
+- **The turn you are reading stays open.** When the next prompt arrives while you are scrolled up, the agent's work you were looking at no longer folds into one row under you; it folds once you are back at the bottom.
+- **Paging older messages no longer throws you to the top on iPhone.** A setting meant to hold your place while older messages load was instead scrolling to the very first message whenever you were near the top.
+
 # Sep 25 — The session list reads twice, and identicons can mean something else
 
 - **Pinned, then everything else, then the machines.** The top of the list is now two flat sections in one visual language: what you pinned, and every other live session in the same order. Below them the same sessions appear again grouped by machine, for when the machine is what you are thinking about — so a session is always in both places, and pinning no longer moves a row out of the machine you last saw it under.

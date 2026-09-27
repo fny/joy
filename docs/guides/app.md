@@ -75,6 +75,7 @@ The chat shows your messages, the agent's replies, and its tool calls. A few thi
 - **Tool calls.** Settings → Features → **Group Tool Calls** collapses runs of consecutive tool calls into one container. Settings → Appearance → **Inline Tool Calls** shows them directly in the chat.
 - **Answer chips.** When the agent offers a set of answers, they appear as buttons under its reply. Tap one to send it, or type your own.
 - **Images.** Images the agent shows appear inline; tap to zoom.
+- **Following the reply.** While you are at the bottom, the chat follows new messages as they arrive. Scroll up and it stops, and stays where you put it however much the agent writes. To follow again, scroll back down to the end, press the down arrow (it shows whenever you are not following), or send a message. The up and down chevrons step between your own prompts. While you are scrolled up, the turn you are reading stays unfolded; it folds into one row once you are back at the bottom.
 
 Sending, queueing, editing and stopping are covered in [Messages and the queue](messages.md).
 

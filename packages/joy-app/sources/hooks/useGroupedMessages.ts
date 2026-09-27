@@ -40,21 +40,30 @@ export type DisplayItem = TextItem | ToolGroupItem | AgentWorkGroupItem;
  * that remain outside a work group are collapsed only when adjacent visible
  * tool calls form a run. When disabled, every message passes through.
  */
+export interface GroupingOptions {
+    collapseCurrentTurn?: boolean;
+    /** Turns (by the id of the prompt that started them) that stay unfolded
+     *  whatever their age: the turn a reader is in the middle of must not
+     *  fold into one row under them when the next prompt arrives. */
+    openPromptIds?: ReadonlySet<string>;
+}
+
 export function useGroupedMessages(
     messages: Message[],
     enabled: boolean = true,
-    options: { collapseCurrentTurn?: boolean } = {},
+    options: GroupingOptions = {},
 ): DisplayItem[] {
     const collapseCurrentTurn = options.collapseCurrentTurn ?? true;
+    const openPromptIds = options.openPromptIds;
     return React.useMemo(() => {
-        return groupMessagesForDisplay(messages, enabled, { collapseCurrentTurn });
-    }, [messages, enabled, collapseCurrentTurn]);
+        return groupMessagesForDisplay(messages, enabled, { collapseCurrentTurn, openPromptIds });
+    }, [messages, enabled, collapseCurrentTurn, openPromptIds]);
 }
 
 export function groupMessagesForDisplay(
     messages: Message[],
     enabled: boolean = true,
-    options: { collapseCurrentTurn?: boolean } = {},
+    options: GroupingOptions = {},
 ): DisplayItem[] {
     if (!enabled) {
         return messages.map((msg) => ({ type: 'message', id: msg.id, message: msg } as TextItem));
@@ -62,7 +71,7 @@ export function groupMessagesForDisplay(
 
     const collapseCurrentTurn = options.collapseCurrentTurn ?? true;
     const turnOf = getTurnAssignments(messages);
-    const workGroups = collectAgentWorkGroups(messages, turnOf, collapseCurrentTurn);
+    const workGroups = collectAgentWorkGroups(messages, turnOf, collapseCurrentTurn, options.openPromptIds);
     const hiddenWorkIndexes = new Set<number>();
     const workGroupByOldestIndex = new Map<number, AgentWorkGroupItem>();
 
@@ -241,7 +250,7 @@ function collectToolRuns(
     return runsByIndex;
 }
 
-function collectAgentWorkGroups(messages: Message[], turnOf: number[], collapseCurrentTurn: boolean): Array<{
+function collectAgentWorkGroups(messages: Message[], turnOf: number[], collapseCurrentTurn: boolean, openPromptIds?: ReadonlySet<string>): Array<{
     item: AgentWorkGroupItem;
     hiddenIndexes: number[];
     oldestIdx: number;
@@ -264,6 +273,10 @@ function collectAgentWorkGroups(messages: Message[], turnOf: number[], collapseC
     for (const [turn, indexes] of segments) {
         if (turn === 0 && !collapseCurrentTurn) {
             continue;
+        }
+        if (openPromptIds && openPromptIds.size > 0) {
+            const promptIdx = indexes.find((index) => messages[index].kind === 'user-text');
+            if (promptIdx !== undefined && openPromptIds.has(messages[promptIdx].id)) continue;
         }
 
         const visibleAgentIndexes = indexes.filter((index) => {
