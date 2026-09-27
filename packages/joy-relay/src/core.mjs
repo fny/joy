@@ -12,7 +12,7 @@
 // runtime-fact idempotency, daemon↔account binding, and admission quotas.
 import { createHash, randomUUID } from 'node:crypto';
 
-export const MAX_CIPHERTEXT = 256 * 1024;   // bytes of base64 payload accepted inline
+export const MAX_CIPHERTEXT = 4 * 1024 * 1024; // bytes of base64 payload accepted inline
 export const MAX_QUEUED_TURNS = 100;
 export const MAX_SESSIONS_PER_ACCOUNT = 200;
 export const MAX_DAEMONS_PER_ACCOUNT = 50;

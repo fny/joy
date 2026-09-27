@@ -15,26 +15,33 @@
 // "orphaned" is the honest mayHaveDelivered case: the daemon died mid-flight
 // and reconcile has not yet proven what happened.
 import { randomUUID } from 'node:crypto';
-import { ApiError, hashToken, nextSeq, appendEvent, messageStatusOf } from './core.mjs';
+import { ApiError, hashToken, nextSeq, appendEvent, messageStatusOf, MAX_CIPHERTEXT } from './core.mjs';
 
 import { relayStatus } from './status.mjs';
 const CLAIM_WAIT_MS = 25_000;
 const TUNNEL_REQUEST_MAX = 32 * 1024 * 1024;
 const ATTACH_REQUEST_MAX = 32 * 1024 * 1024;
 
+// Over the limit: stop buffering and answer 413, but never destroy the
+// request. A reset before the 413 is written reaches the daemon through the
+// proxy as a 502 (transient), so it retried the record forever and every
+// later record of that session queued behind it. Node discards the unread
+// rest of the body once the response ends.
 function readRaw(req, limit) {
   return new Promise((resolve, reject) => {
-    let size = 0; const chunks = [];
+    let size = 0; let over = false; const chunks = [];
     req.on('data', (c) => {
+      if (over) return;
       size += c.length;
-      if (size > limit) { reject(new ApiError(413, 'body_too_large')); req.destroy(); return; }
+      if (size > limit) { over = true; chunks.length = 0; reject(new ApiError(413, 'body_too_large')); return; }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => { if (!over) resolve(Buffer.concat(chunks)); });
     req.on('error', reject);
   });
 }
-function readJson(req, limit = 512 * 1024) {
+// A record's ciphertext plus the JSON around it.
+function readJson(req, limit = MAX_CIPHERTEXT + 64 * 1024) {
   return readRaw(req, limit).then((b) => {
     if (b.length === 0) return {};
     try { return JSON.parse(b.toString('utf8')); } catch { throw new ApiError(400, 'bad_json'); }

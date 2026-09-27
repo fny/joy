@@ -182,6 +182,16 @@ describe('(2) admission happens before the body is buffered', () => {
     r.socket.destroy();
   });
 
+  it('a JSON body over the cap is answered 413 in full, never a socket reset (a proxy turns a reset into a 502)', async () => {
+    const r = await rawPost('/joy/v2/sessions/nope/messages', { authorization: 'Bearer app-token', 'content-type': 'application/json' }, 5 * MIB, 5 * MIB);
+    let closedEarly = false; r.socket.on('close', () => { closedEarly = true; });
+    const resp = await r.response(3000);
+    expect(resp?.status).toBe(413);
+    expect(resp.json.error).toBe('body_too_large');
+    expect(closedEarly).toBe(false);
+    r.socket.destroy();
+  });
+
   it('a full inbox refuses the next upload immediately, and in-flight uploads count against the inbox', async () => {
     const d = makeDaemon('mach-f2-full'); await d.acquire(); await attach(d);
     const release = await park('mach-f2-full', 16);
