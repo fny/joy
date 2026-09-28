@@ -130,7 +130,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     relayStatus({ db, notify, dataDir, version, startedAt }));
 
   // ── client: sessions ──────────────────────────────────────────────────────
-  route('GET', '/sessions', {}, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
+  route('GET', '/sessions', { summary: "The account's sessions (sealed card, lifecycle state, head seq, revision): the list the app polls" }, async (ctx) => ({ sessions: await core.listSessions(ctx.accountId) }));
   // What each session costs the relay: its event rows and their ciphertext
   // bytes, oldest and newest. On demand for the storage page only — never on
   // the list the app polls, which must stay a plain row read.
@@ -149,14 +149,14 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       })),
     };
   });
-  route('POST', '/sessions', {}, async (ctx, m, body) => core.createSession(ctx.accountId, ctx.actorId, body));
-  route('GET', '/sessions/([\\w-]+)', {}, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
+  route('POST', '/sessions', { summary: "Create a session and queue its spawn for the target machine's daemon" }, async (ctx, m, body) => core.createSession(ctx.accountId, ctx.actorId, body));
+  route('GET', '/sessions/([\\w-]+)', { summary: 'One session: sealed card, lifecycle state, head seq and active turn', params: ['sessionId'] }, async (ctx, m) => core.sessionState(ctx.accountId, m[1]));
   // Optional `?ifStatus=a,b` (#173): the record goes only while its state is
   // one of those AT THE DELETE — else 409 status_mismatch with the current
   // state — mirroring the daemon kill's `ifStatus`. The app's folder cleanup
   // passes the not-live states so a record whose agent may still be working
   // (or restarted while the dialog was open) is never deleted unstopped.
-  route('DELETE', '/sessions/([\\w-]+)', {}, async (ctx, m, body, url) => {
+  route('DELETE', '/sessions/([\\w-]+)', { summary: 'Delete a session with its events, turns and attachments; `?ifStatus=a,b` deletes only while its state is one of those (else 409 status_mismatch)', params: ['sessionId'] }, async (ctx, m, body, url) => {
     const ifStatus = url.searchParams.get('ifStatus');
     let expected = null;
     if (ifStatus !== null) {
@@ -176,15 +176,15 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     notify.pokeAccount(ctx.accountId, m[1], ['state']);
     return { ok: true };
   });
-  route('GET', '/sessions/([\\w-]+)/events', {}, async (ctx, m, body, url) =>
+  route('GET', '/sessions/([\\w-]+)/events', { summary: "Page the session's append-only event log (sealed payloads): `after` or `before` a seq, `limit`", params: ['sessionId'] }, async (ctx, m, body, url) =>
     core.sessionEvents(ctx.accountId, m[1], url.searchParams.get('after'), url.searchParams.get('limit'), url.searchParams.get('before')));
   // Retry a spawn that FAILED (e.g. cwd missing), opting into directory
   // creation — the durable-queue analog of v1's 'Create directory?' approval.
-  route('POST', '/sessions/([\\w-]+)/spawn/retry', {}, async (ctx, m, body) =>
+  route('POST', '/sessions/([\\w-]+)/spawn/retry', { summary: 'Retry a failed spawn; `createDir: true` lets the daemon create a missing folder', params: ['sessionId'] }, async (ctx, m, body) =>
     core.retrySpawn(ctx.accountId, ctx.actorId, m[1], body.createDir === true));
 
   // ── client: SSE doorbell (same stream contract as v1) ─────────────────────
-  route('GET', '/events/stream', {}, async (ctx, m, body, url, req, res) => {
+  route('GET', '/events/stream', { summary: "Server-sent events for the account: `hello` with every session's head seq, then change pokes and ephemeral output; a ping every 15s" }, async (ctx, m, body, url, req, res) => {
     const handle = notify.addSse(ctx.accountId, res);
     if (!handle) throw new ApiError(429, 'too_many_streams');
     // Cleanup is registered BEFORE the snapshot read (#619): a client that
@@ -209,7 +209,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   });
 
   // ── client: messages ──────────────────────────────────────────────────────
-  route('GET', '/sessions/([\\w-]+)/messages', {}, async (ctx, m, body, url) => {
+  route('GET', '/sessions/([\\w-]+)/messages', { summary: "A session's messages (prompt + turn state), oldest first; `status` filters, `limit` up to 500", params: ['sessionId'] }, async (ctx, m, body, url) => {
     const status = url.searchParams.get('status');
     const limit = Math.min(Number(url.searchParams.get('limit') ?? 100), 500);
     const rows = await db.tx(async (t) => {
@@ -225,7 +225,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     if (status) messages = messages.filter((x) => x.status === status).slice(0, limit);
     return { messages };
   });
-  route('POST', '/sessions/([\\w-]+)/messages', {}, async (ctx, m, body) => {
+  route('POST', '/sessions/([\\w-]+)/messages', { summary: 'Send a prompt (ciphertext, optional attachment ids) as a durable turn; idempotent by `clientIntentId`; 202 with messageId, turnId and seq', params: ['sessionId'] }, async (ctx, m, body) => {
     if (typeof body.ciphertext !== 'string') throw new ApiError(400, 'missing_ciphertext');
     // Bytes-first-reference-second: every cited attachment must exist for this
     // session BEFORE the message is accepted. Validation and the sweep-guard
@@ -245,14 +245,14 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     });
     return { status: 202, body: { messageId: accepted.commandId, turnId: accepted.turnId, seq: accepted.seq, disposition: accepted.disposition } };
   });
-  route('GET', '/sessions/([\\w-]+)/messages/([\\w-]+)', {}, async (ctx, m) => {
+  route('GET', '/sessions/([\\w-]+)/messages/([\\w-]+)', { summary: 'One message with its delivery status', params: ['sessionId', 'messageId'] }, async (ctx, m) => {
     const r = await db.tx(async (t) => {
       await ownedSession(t, m[1], ctx.accountId);
       return loadMessage(t, m[1], m[2]);
     });
     return rowToMessage(r);
   });
-  route('PATCH', '/sessions/([\\w-]+)/messages/([\\w-]+)', {}, async (ctx, m, body) => {
+  route('PATCH', '/sessions/([\\w-]+)/messages/([\\w-]+)', { summary: "Edit a queued message's ciphertext and/or move it (`position`: zero-based among queued messages); 409 not_editable once it left the queue", params: ['sessionId', 'messageId'] }, async (ctx, m, body) => {
     const out = await db.tx(async (t) => {
       await ownedSession(t, m[1], ctx.accountId);
       const r = await loadMessage(t, m[1], m[2]);
@@ -313,7 +313,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     notify.pokeAccount(ctx.accountId, m[1], ['events', 'state']);
     return rowToMessage(out);
   });
-  route('DELETE', '/sessions/([\\w-]+)/messages/([\\w-]+)', {}, async (ctx, m) => {
+  route('DELETE', '/sessions/([\\w-]+)/messages/([\\w-]+)', { summary: 'Cancel a message while it is still queued', params: ['sessionId', 'messageId'] }, async (ctx, m) => {
     // Delete = cancel while still queued. Delegated to the cancellation core
     // (terminalization, barrier bookkeeping, late-start CAS all shared). The
     // queued-only precondition is checked INSIDE the cancellation
@@ -328,7 +328,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       { clientIntentId: intent('v2d'), scope: 'turn' }, { requireQueued: true });
     return { ok: true, disposition: out.disposition };
   });
-  route('POST', '/sessions/([\\w-]+)/messages/([\\w-]+)/retry', {}, async (ctx, m) => {
+  route('POST', '/sessions/([\\w-]+)/messages/([\\w-]+)/retry', { summary: 'Requeue an orphaned message (its daemon lost the turn); 409 not_retryable for any other state', params: ['sessionId', 'messageId'] }, async (ctx, m) => {
     // Only an ORPHANED turn is retryable: the human saw mayHaveDelivered and
     // authorized a re-attempt of the SAME message. Everything else is 409.
     let daemonId = null;
@@ -370,7 +370,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   });
 
   // ── client: turns ─────────────────────────────────────────────────────────
-  route('GET', '/sessions/([\\w-]+)/turns/([\\w-]+)', {}, async (ctx, m) => {
+  route('GET', '/sessions/([\\w-]+)/turns/([\\w-]+)', { summary: 'One turn: state, terminal state, its message, whether a cancel was requested', params: ['sessionId', 'turnId'] }, async (ctx, m) => {
     const row = await db.tx(async (t) => {
       await ownedSession(t, m[1], ctx.accountId);
       const { rows: [r] } = await t.query(`SELECT * FROM turns WHERE id = $1 AND session_id = $2`, [m[2], m[1]]);
@@ -382,7 +382,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       messageId: row.prompt_command_id, cancelRequested: !!row.cancel_requested,
     };
   });
-  route('POST', '/sessions/([\\w-]+)/turns/([\\w-]+)/cancellations', {}, async (ctx, m, body) => {
+  route('POST', '/sessions/([\\w-]+)/turns/([\\w-]+)/cancellations', { summary: 'Cancel the running turn; it must be the active one (else 409 different_turn_active)', params: ['sessionId', 'turnId'] }, async (ctx, m, body) => {
     // turnId is a PRECONDITION: cancelling a turn that is not the active one
     // answers 409 with the actual active turn, and nothing is aborted.
     const { rows: [s] } = await db.query(
@@ -402,14 +402,14 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   });
 
   // ── client: attachments (device-born sealed bytes only) ───────────────────
-  route('POST', '/attachments', { raw: true }, async (ctx, m, body, url, req) => {
+  route('POST', '/attachments', { raw: true, summary: 'Upload a sealed attachment as the raw body (`X-Session`, `X-Cipher-Hash` headers); 201 stored, 200 deduplicated' }, async (ctx, m, body, url, req) => {
     const sessionId = String(req.headers['x-session'] ?? '');
     if (!sessionId) throw new ApiError(400, 'missing_session');
     const payload = await readRaw(req, ATTACH_REQUEST_MAX);
     const r = await attachments.store(ctx.accountId, sessionId, String(req.headers['x-cipher-hash'] ?? '') || null, payload);
     return { status: r.deduped ? 200 : 201, body: { attachmentId: r.attachmentId, size: r.size } };
   });
-  route('GET', '/attachments/([\\w-]+)', {}, async (ctx, m, body, url, req, res) => {
+  route('GET', '/attachments/([\\w-]+)', { summary: "Download a sealed attachment's bytes (application/octet-stream)", params: ['attachmentId'] }, async (ctx, m, body, url, req, res) => {
     const buf = await attachments.fetch(ctx.accountId, m[1]);
     res.writeHead(200, {
       'content-type': 'application/octet-stream',
@@ -426,26 +426,26 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   //
   // Direct challenge login (secret-key restore): the ONE call that turns an
   // account secret into a bearer token. No auth — it IS the login.
-  route('POST', '/auth', { auth: false }, async (ctx, m, body) => accounts.login(body));
+  route('POST', '/auth', { auth: false, summary: 'Log in with a challenge signed by the account secret; returns the bearer token' }, async (ctx, m, body) => accounts.login(body));
   // Pairing handshake, two flavours with identical mechanics: `terminal`
   // (a daemon being paired) and `account` (a new device restoring the
   // account). The requester posts an ephemeral key and polls (POST doubles
   // as the poll); an authorized device answers with the sealed secret.
-  route('POST', '/auth/request', { auth: false }, async (ctx, m, body) => accounts.pairingRequest('terminal', body));
-  route('GET', '/auth/request/status', { auth: false }, async (ctx, m, body, url) =>
+  route('POST', '/auth/request', { auth: false, summary: 'Start pairing a terminal (a daemon) with an ephemeral public key; posting again polls' }, async (ctx, m, body) => accounts.pairingRequest('terminal', body));
+  route('GET', '/auth/request/status', { auth: false, summary: 'Status of a terminal pairing request (`?publicKey=`)' }, async (ctx, m, body, url) =>
     accounts.pairingStatus('terminal', url.searchParams.get('publicKey')));
-  route('POST', '/auth/response', {}, async (ctx, m, body) => accounts.pairingRespond('terminal', ctx.accountId, body));
-  route('POST', '/auth/account/request', { auth: false }, async (ctx, m, body) => accounts.pairingRequest('account', body));
-  route('GET', '/auth/account/request/status', { auth: false }, async (ctx, m, body, url) =>
+  route('POST', '/auth/response', { summary: 'Approve a terminal pairing: answer with the account secret sealed to its key' }, async (ctx, m, body) => accounts.pairingRespond('terminal', ctx.accountId, body));
+  route('POST', '/auth/account/request', { auth: false, summary: 'Start adding a device to the account with an ephemeral public key; posting again polls' }, async (ctx, m, body) => accounts.pairingRequest('account', body));
+  route('GET', '/auth/account/request/status', { auth: false, summary: 'Status of a device pairing request (`?publicKey=`)' }, async (ctx, m, body, url) =>
     accounts.pairingStatus('account', url.searchParams.get('publicKey')));
-  route('POST', '/auth/account/response', {}, async (ctx, m, body) => accounts.pairingRespond('account', ctx.accountId, body));
-  route('GET', '/account/profile', {}, async (ctx) => accounts.profile(ctx.accountId));
+  route('POST', '/auth/account/response', { summary: 'Approve a new device: answer with the account secret sealed to its key' }, async (ctx, m, body) => accounts.pairingRespond('account', ctx.accountId, body));
+  route('GET', '/account/profile', { summary: "The account's profile" }, async (ctx) => accounts.profile(ctx.accountId));
 
   // Account settings: one sealed blob the relay stores and never reads.
   // POST with `expectedVersion` is a conditional replace; a mismatch answers
   // 409 with the current version and blob so the client can merge and retry.
-  route('GET', '/account/settings', {}, async (ctx) => accounts.getSettings(ctx.accountId));
-  route('POST', '/account/settings', {}, async (ctx, m, body) => accounts.putSettings(ctx.accountId, body));
+  route('GET', '/account/settings', { summary: "The account's sealed settings blob and its version" }, async (ctx) => accounts.getSettings(ctx.accountId));
+  route('POST', '/account/settings', { summary: 'Replace the sealed settings; `expectedVersion` makes it conditional (409 with the current version and blob on a mismatch)' }, async (ctx, m, body) => accounts.putSettings(ctx.accountId, body));
 
   // Automations: a folder + a prompt + a trigger, and the runs it produces.
   // The relay schedules and arbitrates; `spec` is sealed under the target
@@ -459,39 +459,39 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   // BEFORE /automations/:id so the literal path is not eaten by the id regex.
   route('GET', '/automations/failures', { summary: 'Unacknowledged automation failures' },
     async (ctx) => automations.unacknowledgedFailures(ctx.accountId));
-  route('GET', '/automations/([\\w-]+)', {}, async (ctx, m) => automations.get(ctx.accountId, m[1]));
-  route('PATCH', '/automations/([\\w-]+)', { summary: 'Partial update; `expectedSpecVersion` makes the spec write conditional' },
+  route('GET', '/automations/([\\w-]+)', { summary: 'One automation with its triggers and latest run', params: ['automationId'] }, async (ctx, m) => automations.get(ctx.accountId, m[1]));
+  route('PATCH', '/automations/([\\w-]+)', { summary: 'Partial update; `expectedSpecVersion` makes the spec write conditional', params: ['automationId'] },
     async (ctx, m, body) => automations.patch(ctx.accountId, m[1], body));
-  route('DELETE', '/automations/([\\w-]+)', {}, async (ctx, m) => automations.remove(ctx.accountId, m[1]));
-  route('POST', '/automations/([\\w-]+)/runs', { summary: 'Fire a run now; an overlapping firing is recorded as cancelled/skipped_overlap' },
+  route('DELETE', '/automations/([\\w-]+)', { summary: 'Delete an automation', params: ['automationId'] }, async (ctx, m) => automations.remove(ctx.accountId, m[1]));
+  route('POST', '/automations/([\\w-]+)/runs', { summary: 'Fire a run now; an overlapping firing is recorded as cancelled/skipped_overlap', params: ['automationId'] },
     async (ctx, m, body) => ({ status: 201, body: await automations.trigger(ctx.accountId, ctx.actorId, m[1], body ?? {}) }));
-  route('GET', '/automations/([\\w-]+)/runs', {}, async (ctx, m, body, url) =>
+  route('GET', '/automations/([\\w-]+)/runs', { summary: "An automation's runs (`limit`)", params: ['automationId'] }, async (ctx, m, body, url) =>
     automations.listRuns(ctx.accountId, m[1], url.searchParams.get('limit')));
   // The daemon's word on how a run ended. Terminal states are final.
-  route('POST', '/automation-runs/([\\w-]+)/report', { summary: 'Daemon reports a run terminal state' },
+  route('POST', '/automation-runs/([\\w-]+)/report', { summary: 'Daemon reports a run terminal state', params: ['runId'] },
     async (ctx, m, body) => automations.report(ctx.accountId, m[1], body ?? {}));
-  route('POST', '/automation-runs/([\\w-]+)/ack', { summary: 'Dismiss a failure so it leaves the sidebar' },
+  route('POST', '/automation-runs/([\\w-]+)/ack', { summary: 'Dismiss a failure so it leaves the sidebar', params: ['runId'] },
     async (ctx, m) => automations.acknowledge(ctx.accountId, m[1]));
 
   // Machines: sealed metadata + daemonState with CAS versions; presence is
   // derived from lease liveness (see accounts.liveness).
-  route('GET', '/machines', {}, async (ctx) => accounts.listMachines(ctx.accountId));
+  route('GET', '/machines', { summary: 'Machines on the account: sealed metadata, daemon state, presence from lease liveness' }, async (ctx) => accounts.listMachines(ctx.accountId));
   // POST replaces the sealed blob; with `expectedMetadataVersion` it is a
   // conditional replace (409 metadata_version_mismatch on any other version).
-  route('POST', '/machines', {}, async (ctx, m, body) => accounts.upsertMachine(ctx.accountId, body));
-  route('GET', '/machines/([\\w.-]+)', {}, async (ctx, m) => accounts.getMachine(ctx.accountId, m[1]));
-  route('PATCH', '/machines/([\\w.-]+)', {}, async (ctx, m, body) => accounts.patchMachine(ctx.accountId, m[1], body));
-  route('DELETE', '/machines/([\\w.-]+)', {}, async (ctx, m) => accounts.deleteMachine(ctx.accountId, m[1]));
+  route('POST', '/machines', { summary: 'Register a machine or replace its sealed metadata; `expectedMetadataVersion` makes it conditional (409 metadata_version_mismatch)' }, async (ctx, m, body) => accounts.upsertMachine(ctx.accountId, body));
+  route('GET', '/machines/([\\w.-]+)', { summary: 'One machine', params: ['machineId'] }, async (ctx, m) => accounts.getMachine(ctx.accountId, m[1]));
+  route('PATCH', '/machines/([\\w.-]+)', { summary: "Update a machine's sealed metadata or daemon state (versioned)", params: ['machineId'] }, async (ctx, m, body) => accounts.patchMachine(ctx.accountId, m[1], body));
+  route('DELETE', '/machines/([\\w.-]+)', { summary: 'Remove a machine from the account', params: ['machineId'] }, async (ctx, m) => accounts.deleteMachine(ctx.accountId, m[1]));
 
   // Push: token registry + delivery. Daemons ask the relay to deliver so no
   // device token ever has to leave the relay.
-  route('POST', '/push-tokens', {}, async (ctx, m, body) => accounts.registerPushToken(ctx.accountId, body.token));
-  route('GET', '/push-tokens', {}, async (ctx) => accounts.listPushTokens(ctx.accountId));
-  route('DELETE', '/push-tokens/([^/]+)', {}, async (ctx, m) => accounts.deletePushToken(ctx.accountId, decodeURIComponent(m[1])));
-  route('POST', '/push', {}, async (ctx, m, body) => accounts.sendPush(ctx.accountId, body));
+  route('POST', '/push-tokens', { summary: "Register this device's push token" }, async (ctx, m, body) => accounts.registerPushToken(ctx.accountId, body.token));
+  route('GET', '/push-tokens', { summary: "The account's registered push tokens" }, async (ctx) => accounts.listPushTokens(ctx.accountId));
+  route('DELETE', '/push-tokens/([^/]+)', { summary: 'Unregister a push token', params: ['token'] }, async (ctx, m) => accounts.deletePushToken(ctx.accountId, decodeURIComponent(m[1])));
+  route('POST', '/push', { summary: "Send a push notification to the account's devices (daemons ask the relay, so device tokens never leave it)" }, async (ctx, m, body) => accounts.sendPush(ctx.accountId, body));
 
   // ── client: E2E tunnel to a machine (endpoint-agnostic, relay-blind) ──────
-  route('POST', '/machines/([\\w.-]+)/http', { raw: true }, async (ctx, m, body, url, req, res) => {
+  route('POST', '/machines/([\\w.-]+)/http', { raw: true, summary: "End-to-end encrypted tunnel to a machine's daemon: the sealed request body is relayed unread and the sealed reply streamed back", params: ['machineId'] }, async (ctx, m, body, url, req, res) => {
     // Ownership, liveness and capacity FIRST, before a single body byte is
     // buffered: an offline daemon or a full inbox used to cost the relay the
     // whole 32 MiB upload before it said no. The admission reserves the
@@ -511,11 +511,11 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   });
 
   // ── daemon surface (lease auth) ───────────────────────────────────────────
-  route('POST', '/daemon/leases', {}, async (ctx, m, body) => {
+  route('POST', '/daemon/leases', { summary: "Acquire a machine's lease (account bearer): exclusive control under a new epoch" }, async (ctx, m, body) => {
     if (!body.machineId) throw new ApiError(400, 'missing_machineId');
     return core.acquireLease(ctx.accountId, String(body.machineId), body);
   });
-  route('PUT', '/daemon/leases/([\\w-]+)', { auth: false }, async (ctx, m, body, url, req) => {
+  route('PUT', '/daemon/leases/([\\w-]+)', { auth: false, summary: 'Renew a lease (`x-joy-lease-token`)', params: ['leaseId'] }, async (ctx, m, body, url, req) => {
     const token = req.headers['x-joy-lease-token'];
     if (!token) throw new ApiError(401, 'missing_lease_token');
     return core.renewLease(m[1], hashToken(String(token)));
@@ -546,9 +546,9 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     await waited;
     return fn(lease.id, lease.token_hash);
   };
-  route('POST', '/daemon/leases/([\\w-]+)/claims/work', { auth: false }, claimHandler('work'));
-  route('POST', '/daemon/leases/([\\w-]+)/claims/control', { auth: false }, claimHandler('control'));
-  route('POST', '/daemon/leases/([\\w-]+)/claims/tunnel', { auth: false }, claimHandler('tunnel'));
+  route('POST', '/daemon/leases/([\\w-]+)/claims/work', { auth: false, summary: 'Long-poll for work: spawns and queue-head prompts to deliver (`waitMs` up to 30s, `noWait`)', params: ['leaseId'] }, claimHandler('work'));
+  route('POST', '/daemon/leases/([\\w-]+)/claims/control', { auth: false, summary: 'Long-poll for control: cancellations to apply', params: ['leaseId'] }, claimHandler('control'));
+  route('POST', '/daemon/leases/([\\w-]+)/claims/tunnel', { auth: false, summary: 'Long-poll for tunnel requests addressed to this machine', params: ['leaseId'] }, claimHandler('tunnel'));
 
   // Lifecycle writes: the lease REFERENCE comes from headers (id + token +
   // MANDATORY epoch); the core fences it inside the mutation's transaction.
@@ -561,9 +561,9 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
     const leaseRef = { id: String(leaseId), token_hash: hashToken(String(token)), epoch: String(epoch) };
     return fn(leaseRef, m, body);
   };
-  route('POST', '/daemon/deliveries/([\\w-]+)/received', { auth: false },
+  route('POST', '/daemon/deliveries/([\\w-]+)/received', { auth: false, summary: 'Acknowledge a claimed delivery; refused when it was superseded (the message was edited or moved)', params: ['deliveryId'] },
     withLeaseHeaders((lease, m) => core.deliveryReceived(m[1], lease).then(() => ({ ok: true }))));
-  route('POST', '/daemon/sessions/([\\w-]+)/bind', { auth: false },
+  route('POST', '/daemon/sessions/([\\w-]+)/bind', { auth: false, summary: 'Bind a spawned local session to its relay session (`localSessionId`, sealed `sessionKeyEnvelope`)', params: ['sessionId'] },
     withLeaseHeaders((lease, m, body) => {
       if (!body.localSessionId || !body.sessionKeyEnvelope) throw new ApiError(400, 'missing_bind_fields');
       return core.bindSession(m[1], lease, body).then(() => ({ ok: true }));
@@ -571,20 +571,20 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
   // Card publish: the daemon keeps the session's ENCRYPTED metadata (sealed
   // with the session content key) and lifecycle state current, so clients can
   // render the session list from v2 alone.
-  route('PATCH', '/daemon/sessions/([\\w-]+)', { auth: false },
+  route('PATCH', '/daemon/sessions/([\\w-]+)', { auth: false, summary: 'Publish the session card: sealed metadata and lifecycle state', params: ['sessionId'] },
     withLeaseHeaders((lease, m, body) => core.updateSessionCard(m[1], lease, body).then(() => ({ ok: true }))));
-  route('POST', '/daemon/sessions/([\\w-]+)/facts', { auth: false, summary: 'Daemon output outside a turn (sealed adapter record); lease-fenced' },
+  route('POST', '/daemon/sessions/([\\w-]+)/facts', { auth: false, summary: 'Daemon output outside a turn (sealed adapter record); lease-fenced', params: ['sessionId'] },
     withLeaseHeaders((lease, m, body) => core.sessionFact(m[1], lease, body ?? {})));
   // `deliveryId` (optional) names the spawn attempt the report belongs to;
   // a report for a superseded attempt is acknowledged but not applied (#612).
-  route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false },
+  route('POST', '/daemon/sessions/([\\w-]+)/spawn-failed', { auth: false, summary: 'Report a failed spawn (`reason`; optional `deliveryId` names the attempt)', params: ['sessionId'] },
     withLeaseHeaders((lease, m, body) => core.spawnFailed(m[1], lease, body.reason ?? 'spawn_failed',
       { deliveryId: typeof body.deliveryId === 'string' ? body.deliveryId : undefined })));
-  route('POST', '/daemon/turns/([\\w-]+)/submitted', { auth: false },
+  route('POST', '/daemon/turns/([\\w-]+)/submitted', { auth: false, summary: 'Mark a turn submitted to the agent (typed in, not yet confirmed)', params: ['turnId'] },
     withLeaseHeaders((lease, m) => core.turnSubmitted(m[1], lease).then(() => ({ ok: true }))));
-  route('POST', '/daemon/turns/([\\w-]+)/start', { auth: false },
+  route('POST', '/daemon/turns/([\\w-]+)/start', { auth: false, summary: 'Mark a turn started (the agent confirmed it is running)', params: ['turnId'] },
     withLeaseHeaders((lease, m, body) => core.turnStarted(m[1], lease, body ?? {})));
-  route('POST', '/daemon/turns/([\\w-]+)/facts', { auth: false },
+  route('POST', '/daemon/turns/([\\w-]+)/facts', { auth: false, summary: 'Turn facts: output records, receipts and the terminal state; `ephemeral: true` output fans out over SSE without being stored', params: ['turnId'] },
     withLeaseHeaders(async (lease, m, body) => {
       if (!body.type) throw new ApiError(400, 'missing_type');
       // Ephemeral lane: streaming deltas fan out over SSE and are NEVER
@@ -621,12 +621,12 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
       }
       return core.turnFact(m[1], lease, body);
     }));
-  route('POST', '/daemon/turns/([\\w-]+)/reconcile', { auth: false },
+  route('POST', '/daemon/turns/([\\w-]+)/reconcile', { auth: false, summary: 'Resolve an orphaned turn after a restart (`resolution`)', params: ['turnId'] },
     withLeaseHeaders((lease, m, body) => {
       if (!body.resolution) throw new ApiError(400, 'missing_resolution');
       return core.reconcileTurn(m[1], lease, body);
     }));
-  route('POST', '/daemon/tunnel/([\\w-]+)/frames', { auth: false, raw: true }, async (ctx, m, body, url, req) => {
+  route('POST', '/daemon/tunnel/([\\w-]+)/frames', { auth: false, raw: true, summary: 'Answer a tunnel request: stream the sealed response frames back to the waiting client', params: ['requestId'] }, async (ctx, m, body, url, req) => {
     const leaseId = String(req.headers['x-joy-lease-id'] ?? '');
     if (!leaseId) throw new ApiError(401, 'missing_lease_id');
     const lease = await leaseCtx(leaseId, req);
@@ -696,7 +696,7 @@ export function createV2Router({ core, auth, notify, db, tunnel, attachments, ac
    *  drift from dispatch). */
   const routeTable = () => routes.map((r) => ({
     method: r.method, pattern: `/joy/v2${r.pattern}`, auth: r.opts.auth !== false,
-    summary: r.opts.summary, params: [], sse: r.pattern === '/events/stream',
+    summary: r.opts.summary, params: r.opts.params ?? [], sse: r.pattern === '/events/stream',
   }));
   return { handle, routeTable };
 }

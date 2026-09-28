@@ -1,0 +1,4915 @@
+{
+  "generatedBy": "scripts/openapi-types/gen-daemon.mjs",
+  "results": {
+    "abort": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "agentConfigRead": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "agent": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "format": {
+              "type": "string"
+            },
+            "exists": {
+              "type": "boolean"
+            },
+            "raw": {
+              "type": "string"
+            },
+            "parsed": {},
+            "parseError": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ok",
+            "agent",
+            "path",
+            "format",
+            "exists",
+            "raw",
+            "parsed",
+            "parseError"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "agentConfigSchema": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "schema": {}
+          },
+          "required": [
+            "ok",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "agentConfigSet": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "raw": {
+              "type": "string"
+            },
+            "applied": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ok",
+            "raw",
+            "applied"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "agentConfigWrite": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "agyModels": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/AgyModel"
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "models"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "not": {}
+              }
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "models",
+            "error"
+          ]
+        }
+      ]
+    },
+    "approvalsAnswer": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "approvalsList": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "approvals": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "since": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "kind",
+                  "title",
+                  "since"
+                ]
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "approvals"
+          ]
+        }
+      ]
+    },
+    "bash": {
+      "$ref": "#/components/schemas/BashResponse"
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "codexModels": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CodexModel"
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "models"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "not": {}
+              }
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "models",
+            "error"
+          ]
+        }
+      ]
+    },
+    "compacting": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "create": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "session": {
+              "$ref": "#/components/schemas/SessionRecord"
+            },
+            "relaySessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "session"
+          ]
+        }
+      ]
+    },
+    "deleteFile": {
+      "$ref": "#/components/schemas/DeleteFileResponse"
+    },
+    "difftastic": {
+      "$ref": "#/components/schemas/DifftasticResponse"
+    },
+    "envList": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "names"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "envSet": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "envUnset": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "existed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok",
+            "existed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "fork": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "session": {
+              "$ref": "#/components/schemas/SessionRecord"
+            },
+            "localSessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "session",
+            "localSessionId"
+          ]
+        }
+      ]
+    },
+    "get": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/SessionRecord"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "getDirectoryTree": {
+      "$ref": "#/components/schemas/GetDirectoryTreeResponse"
+    },
+    "handback": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "pending": {
+              "type": "boolean"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "pending",
+            "note"
+          ]
+        }
+      ]
+    },
+    "handoff": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": false
+            },
+            "error": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "pending": {
+              "type": "boolean"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "pending",
+            "note"
+          ]
+        }
+      ]
+    },
+    "harnessCapabilities": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "harnesses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/HarnessCapabilities"
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "harnesses"
+      ]
+    },
+    "hookEvent": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "kill": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "starting",
+                "active",
+                "ended"
+              ]
+            }
+          },
+          "required": [
+            "ok",
+            "error",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        }
+      ]
+    },
+    "killAll": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "killed": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ok",
+        "killed"
+      ]
+    },
+    "killSession": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "success",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "success",
+            "error"
+          ]
+        }
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "claude": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "limits": {
+                  "$ref": "#/components/schemas/ClaudeLimits"
+                }
+              },
+              "required": [
+                "ok",
+                "limits"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ok",
+                "error"
+              ]
+            }
+          ]
+        },
+        "codex": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "limits": {
+                  "$ref": "#/components/schemas/CodexLimits"
+                }
+              },
+              "required": [
+                "ok",
+                "limits"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "ok": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ok",
+                "error"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "ok",
+        "claude",
+        "codex"
+      ]
+    },
+    "list": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/SessionRecord"
+      }
+    },
+    "listDirectory": {
+      "$ref": "#/components/schemas/ListDirectoryResponse"
+    },
+    "listLogs": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "directory": {
+              "type": "string"
+            },
+            "logs": {
+              "type": "array",
+              "items": {
+                "not": {}
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "error",
+            "directory",
+            "logs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "directory": {
+              "type": "string"
+            },
+            "logs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sessionId": {
+                    "type": "string"
+                  },
+                  "sizeBytes": {
+                    "type": "number"
+                  },
+                  "mtimeMs": {
+                    "type": "number"
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "titleSource": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "agent",
+                      "ai",
+                      "prompt",
+                      "user"
+                    ]
+                  }
+                },
+                "required": [
+                  "sessionId",
+                  "sizeBytes",
+                  "mtimeMs",
+                  "title",
+                  "titleSource"
+                ]
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "directory",
+            "logs"
+          ]
+        }
+      ]
+    },
+    "notify": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "sent": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ok",
+            "sent"
+          ]
+        }
+      ]
+    },
+    "opencodeModels": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/OpencodeCatalogModel"
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "models"
+      ]
+    },
+    "opencodeSessions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "not": {}
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "error",
+            "sessions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "updatedAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "updatedAt"
+                ]
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "sessions"
+          ]
+        }
+      ]
+    },
+    "opencodeSetModel": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "pane": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "const": true
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "pastSessions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "harness": {},
+            "directory": {
+              "type": "string"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "not": {}
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "error",
+            "harness",
+            "directory",
+            "sessions"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "harness": {
+              "type": "string",
+              "enum": [
+                "claude",
+                "codex",
+                "opencode",
+                "pi",
+                "agy"
+              ]
+            },
+            "directory": {
+              "type": "string"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/PastSession"
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "harness",
+            "directory",
+            "sessions"
+          ]
+        }
+      ]
+    },
+    "piModels": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/PiCatalogModel"
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "models"
+      ]
+    },
+    "queueAdd": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "error": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "error",
+            "detail"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "ok",
+            "id"
+          ]
+        }
+      ]
+    },
+    "queueCancel": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "ok"
+          ]
+        }
+      ]
+    },
+    "queueEdit": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "ok"
+          ]
+        }
+      ]
+    },
+    "queueGet": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "createdAt": {
+              "type": "number"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "running",
+                "unknown",
+                "queued",
+                "submitting",
+                "accepted",
+                "cancelling",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            },
+            "terminalReason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attemptId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The attempt the state describes — the latest one: the delivered attempt\nof a running / completed command, the terminal one of a failed or\ninterrupted command. null while the command is still queued."
+            },
+            "runtimeTurnId": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The runtime's own turn id for that attempt — the `turn` its records\ncarry — once the runtime named it (codex, opencode, pi name their turns\nin the echo; claude's session names the transcript turn its dispatch\nopened, #498); null before that."
+            },
+            "turnStarted": {
+              "type": "boolean",
+              "description": "Did the runtime start a turn for that attempt at all (a `turn_started`\nobservation)? A command with none — a slash / `!` command the runtime\nhandled, a message the daemon handled itself — has no runtime output to\nattribute: its completion IS its result."
+            },
+            "attempts": {
+              "type": "number"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "createdAt",
+            "state",
+            "terminalReason",
+            "attemptId",
+            "runtimeTurnId",
+            "turnStarted",
+            "attempts",
+            "ok"
+          ]
+        }
+      ]
+    },
+    "queueList": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "ok"
+          ]
+        }
+      ]
+    },
+    "queueReorder": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "ok"
+          ]
+        }
+      ]
+    },
+    "queueResume": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "queue": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "pendingCount": {
+              "type": "number"
+            },
+            "hidden": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "createdAt": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text",
+                  "createdAt"
+                ]
+              }
+            },
+            "inFlight": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            },
+            "pauseReason": {
+              "type": "string",
+              "enum": [
+                "input_dirty",
+                "dispatch_timeout",
+                "dispatch_mismatch",
+                "dispatch_failed"
+              ]
+            },
+            "running": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/CommandSummary"
+                }
+              ],
+              "description": "The command whose turn is executing (running | cancelling), if any."
+            },
+            "busy": {
+              "type": "boolean",
+              "description": "Something is executing: a command, or a turn started at the terminal."
+            },
+            "provenance": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "command",
+                "terminal"
+              ]
+            },
+            "unresolvedCancels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Commands whose interrupt budget is spent without confirmation (R10)."
+            },
+            "drafts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "A human draft the driver cleared for a dispatch and will restore."
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CommandSummary"
+              },
+              "description": "Non-terminal commands in FIFO order, with their states."
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "queue",
+            "pendingCount",
+            "hidden",
+            "inFlight",
+            "paused",
+            "running",
+            "busy",
+            "provenance",
+            "unresolvedCancels",
+            "drafts",
+            "commands",
+            "ok"
+          ]
+        }
+      ]
+    },
+    "readFile": {
+      "$ref": "#/components/schemas/ReadFileResponse"
+    },
+    "readLog": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "not": {}
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "error",
+            "messages"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "messages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "user",
+                      "assistant"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "ts": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "role",
+                  "text",
+                  "ts"
+                ]
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "sessionId",
+            "messages"
+          ]
+        }
+      ]
+    },
+    "refreshCommands": {
+      "type": "object",
+      "properties": {
+        "slashCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "slashCommands"
+      ]
+    },
+    "resize": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "restart": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "session": {
+              "$ref": "#/components/schemas/SessionRecord"
+            },
+            "relaySessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "session"
+          ]
+        }
+      ]
+    },
+    "restartDaemon": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "restorable": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/Restorable"
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "sessions"
+      ]
+    },
+    "restore": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "restored": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "ok": {
+                "type": "boolean"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "cwd",
+              "ok"
+            ]
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "restored"
+      ]
+    },
+    "ripgrep": {
+      "$ref": "#/components/schemas/RipgrepResponse"
+    },
+    "send": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "from"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "chain": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "chain",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "replyTo": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "replyTo"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error",
+            "detail"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "chat_id": {
+              "type": "string"
+            },
+            "queued_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "chat_id",
+            "queued_id"
+          ]
+        }
+      ]
+    },
+    "sendKeys": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "segments": {
+              "type": "number"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "segments"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "sessionLog": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "filename": {
+              "type": "string"
+            },
+            "size": {
+              "type": "number"
+            },
+            "contentBase64": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "filename",
+            "size",
+            "contentBase64"
+          ]
+        }
+      ]
+    },
+    "sessionProcesses": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "roots": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "sampledAt": {
+              "type": "number"
+            },
+            "totals": {
+              "type": "object",
+              "properties": {
+                "cpuPercent": {
+                  "type": "number"
+                },
+                "rssBytes": {
+                  "type": "number"
+                },
+                "processCount": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "cpuPercent",
+                "rssBytes",
+                "processCount"
+              ]
+            },
+            "processes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/ProcessRow"
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "roots",
+            "sampledAt",
+            "totals",
+            "processes"
+          ]
+        }
+      ]
+    },
+    "sessionUsage": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "entry": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "startedAt": {
+                  "type": "string"
+                },
+                "cost": {
+                  "type": "number"
+                },
+                "calls": {
+                  "type": "number"
+                },
+                "turns": {
+                  "type": "number"
+                },
+                "models": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "cost": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "cost"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "project",
+                "startedAt",
+                "cost",
+                "calls",
+                "turns",
+                "models"
+              ]
+            }
+          },
+          "required": [
+            "ok",
+            "entry"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "startedAt": {
+                    "type": "string"
+                  },
+                  "cost": {
+                    "type": "number"
+                  },
+                  "calls": {
+                    "type": "number"
+                  },
+                  "turns": {
+                    "type": "number"
+                  },
+                  "models": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "cost": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "cost"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "project",
+                  "startedAt",
+                  "cost",
+                  "calls",
+                  "turns",
+                  "models"
+                ]
+              }
+            }
+          },
+          "required": [
+            "ok",
+            "sessions"
+          ]
+        }
+      ]
+    },
+    "setEffort": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "setMode": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "setModel": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "setNotifications": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "muted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok",
+            "muted"
+          ]
+        }
+      ]
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "messages": {
+          "type": "number"
+        },
+        "sessions": {
+          "type": "number"
+        },
+        "clients": {
+          "type": "number"
+        },
+        "version": {
+          "type": "string"
+        },
+        "uptimeMs": {
+          "type": "number"
+        },
+        "claude": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "version"
+          ]
+        },
+        "pid": {
+          "type": "number"
+        },
+        "os": {
+          "type": "object",
+          "properties": {
+            "platform": {
+              "type": "string",
+              "enum": [
+                "aix",
+                "android",
+                "darwin",
+                "freebsd",
+                "haiku",
+                "linux",
+                "openbsd",
+                "sunos",
+                "win32",
+                "cygwin",
+                "netbsd"
+              ]
+            },
+            "release": {
+              "type": "string"
+            },
+            "arch": {
+              "type": "string",
+              "enum": [
+                "arm",
+                "arm64",
+                "ia32",
+                "loong64",
+                "mips",
+                "mipsel",
+                "ppc64",
+                "riscv64",
+                "s390x",
+                "x64"
+              ]
+            },
+            "hostname": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "platform",
+            "release",
+            "arch",
+            "hostname"
+          ]
+        }
+      },
+      "required": [
+        "ok",
+        "messages",
+        "sessions",
+        "clients",
+        "version",
+        "uptimeMs",
+        "claude",
+        "pid",
+        "os"
+      ]
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "homeDir": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/SessionFootprint"
+          }
+        },
+        "shared": {
+          "$ref": "#/components/schemas/SharedFootprint"
+        },
+        "looseTmux": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/LooseTmux"
+          },
+          "description": "Servers and stale sockets under the tmux socket dir that nothing owns."
+        },
+        "totalBytes": {
+          "type": "number"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "homeDir",
+        "sessions",
+        "shared",
+        "looseTmux",
+        "totalBytes",
+        "ok"
+      ]
+    },
+    "storageNuke": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "bytesFreed": {
+          "type": "number"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/NukeResult"
+          }
+        },
+        "tmux": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "killed": {
+                "type": "boolean"
+              },
+              "unlinked": {
+                "type": "boolean"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "killed",
+              "unlinked"
+            ]
+          }
+        }
+      },
+      "required": [
+        "ok",
+        "bytesFreed",
+        "results",
+        "tmux"
+      ]
+    },
+    "teleportExport": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "claudeSessionId": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "permissionMode": {
+              "type": "string"
+            },
+            "bytes": {
+              "type": "number"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "transcriptBase64": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "agent",
+            "claudeSessionId",
+            "cwd",
+            "permissionMode",
+            "bytes",
+            "truncated",
+            "transcriptBase64"
+          ]
+        }
+      ]
+    },
+    "teleportImport": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            },
+            "session": {
+              "$ref": "#/components/schemas/SessionRecord"
+            },
+            "localSessionId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ok",
+            "session",
+            "localSessionId"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "transcript": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "lines": {
+              "type": "array",
+              "items": {}
+            }
+          },
+          "required": [
+            "lines"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "generated": {
+          "type": "string"
+        },
+        "currency": {
+          "type": "string",
+          "const": "USD"
+        },
+        "overview": {
+          "type": "object",
+          "properties": {
+            "cost": {
+              "type": "number"
+            },
+            "netCost": {
+              "type": "number"
+            },
+            "savings": {
+              "type": "number"
+            },
+            "calls": {
+              "type": "number"
+            },
+            "sessions": {
+              "type": "number"
+            },
+            "cacheHitPercent": {
+              "type": "number"
+            },
+            "tokens": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "type": "number"
+                },
+                "output": {
+                  "type": "number"
+                },
+                "cacheRead": {
+                  "type": "number"
+                },
+                "cacheWrite": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "input",
+                "output",
+                "cacheRead",
+                "cacheWrite"
+              ]
+            }
+          },
+          "required": [
+            "cost",
+            "netCost",
+            "savings",
+            "calls",
+            "sessions",
+            "cacheHitPercent",
+            "tokens"
+          ]
+        },
+        "daily": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string"
+              },
+              "cost": {
+                "type": "number"
+              },
+              "calls": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "date",
+              "cost",
+              "calls"
+            ]
+          }
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "cost": {
+                "type": "number"
+              },
+              "calls": {
+                "type": "number"
+              },
+              "sessions": {
+                "type": "number"
+              },
+              "avgCostPerSession": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "path",
+              "cost",
+              "calls",
+              "sessions",
+              "avgCostPerSession"
+            ]
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "cost": {
+                "type": "number"
+              },
+              "calls": {
+                "type": "number"
+              },
+              "inputTokens": {
+                "type": "number"
+              },
+              "outputTokens": {
+                "type": "number"
+              },
+              "cacheReadTokens": {
+                "type": "number"
+              },
+              "cacheWriteTokens": {
+                "type": "number"
+              },
+              "oneShotRate": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "name",
+              "cost",
+              "calls",
+              "inputTokens",
+              "outputTokens",
+              "cacheReadTokens",
+              "cacheWriteTokens",
+              "oneShotRate"
+            ]
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "calls": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "calls"
+            ]
+          }
+        },
+        "mcpServers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "calls": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "calls"
+            ]
+          }
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "period": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generated",
+        "currency",
+        "overview",
+        "daily",
+        "projects",
+        "models",
+        "tools",
+        "mcpServers",
+        "ok",
+        "period"
+      ]
+    },
+    "writeFile": {
+      "$ref": "#/components/schemas/WriteFileResponse"
+    }
+  },
+  "schemas": {
+    "AgyModel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "isDefault": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "displayName",
+        "isDefault"
+      ]
+    },
+    "BashResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "ClaudeLimitBucket": {
+      "type": "object",
+      "properties": {
+        "utilization": {
+          "type": "number"
+        },
+        "resets_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "utilization",
+        "resets_at"
+      ]
+    },
+    "ClaudeLimits": {
+      "type": "object",
+      "properties": {
+        "five_hour": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/components/schemas/ClaudeLimitBucket"
+            }
+          ]
+        },
+        "seven_day": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/components/schemas/ClaudeLimitBucket"
+            }
+          ]
+        },
+        "seven_day_opus": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/components/schemas/ClaudeLimitBucket"
+            }
+          ]
+        },
+        "seven_day_sonnet": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/components/schemas/ClaudeLimitBucket"
+            }
+          ]
+        },
+        "extra_usage": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {}
+        }
+      }
+    },
+    "CodexLimitWindow": {
+      "type": "object",
+      "properties": {
+        "used_percent": {
+          "type": "number"
+        },
+        "window_minutes": {
+          "type": "number"
+        },
+        "resets_in_seconds": {
+          "type": "number"
+        },
+        "resets_at": {
+          "type": "number"
+        }
+      }
+    },
+    "CodexLimits": {
+      "type": "object",
+      "properties": {
+        "primary": {
+          "$ref": "#/components/schemas/CodexLimitWindow"
+        },
+        "secondary": {
+          "$ref": "#/components/schemas/CodexLimitWindow"
+        },
+        "observedAt": {
+          "type": "string",
+          "description": "Timestamp of the rollout event the data came from (staleness signal)."
+        }
+      }
+    },
+    "CodexModel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "supportedReasoningEfforts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultReasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "model",
+        "displayName",
+        "hidden",
+        "isDefault",
+        "supportedReasoningEfforts",
+        "defaultReasoningEffort"
+      ]
+    },
+    "CommandSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "running",
+            "unknown",
+            "queued",
+            "submitting",
+            "accepted",
+            "cancelling",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        "origin": {
+          "type": "string"
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "createdAt",
+        "state",
+        "origin",
+        "visible"
+      ]
+    },
+    "DeleteFileResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "DifftasticResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "exitCode": {
+          "type": "number"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "DirectoryEntry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "directory",
+            "file",
+            "other"
+          ]
+        },
+        "size": {
+          "type": "number"
+        },
+        "modified": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "GetDirectoryTreeResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "tree": {
+          "$ref": "#/components/schemas/TreeNode"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "HarnessCapabilities": {
+      "type": "object",
+      "properties": {
+        "harness": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "opencode",
+            "pi",
+            "agy"
+          ]
+        },
+        "models": {
+          "type": "object",
+          "properties": {
+            "pick": {
+              "type": "boolean",
+              "description": "The app shows a model picker."
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "static",
+                "live",
+                "none"
+              ],
+              "description": "Where the catalog comes from: a fixed list in the app (claude), the\nmachine (codex/opencode/pi/agy: GET /v2/harnesses/:h/models), or none."
+            },
+            "switchLive": {
+              "type": "boolean",
+              "description": "The model can be changed on a running session (joy-set-model)."
+            }
+          },
+          "required": [
+            "pick",
+            "source",
+            "switchLive"
+          ]
+        },
+        "effort": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "levels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Fixed levels; empty when `perModel` (read them off the catalog entry)."
+            },
+            "default": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "perModel": {
+              "type": "boolean"
+            },
+            "switchLive": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "levels",
+            "default",
+            "perModel",
+            "switchLive"
+          ],
+          "description": "null = the harness has no effort/thinking knob."
+        },
+        "permissions": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "modes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/HarnessPermissionMode"
+              }
+            },
+            "default": {
+              "type": "string"
+            },
+            "switchLive": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "modes",
+            "default",
+            "switchLive"
+          ],
+          "description": "null = no permission surface at all."
+        },
+        "resume": {
+          "type": "object",
+          "properties": {
+            "continueLast": {
+              "type": "boolean"
+            },
+            "byId": {
+              "type": "boolean"
+            },
+            "pastList": {
+              "type": "boolean",
+              "description": "GET /v2/harnesses/:h/sessions?directory= lists resumable conversations."
+            },
+            "fork": {
+              "type": "boolean",
+              "description": "`forkSession` with `resume_id` on create."
+            }
+          },
+          "required": [
+            "continueLast",
+            "byId",
+            "pastList",
+            "fork"
+          ]
+        },
+        "extraArgs": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "cli",
+            "config"
+          ],
+          "description": "\"cli\": raw arguments appended to the launch line; \"config\": codex\n`key=value` config overrides; null: nothing to append to (a server)."
+        },
+        "fallbackModel": {
+          "type": "boolean"
+        },
+        "resumeLimitMb": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "harness",
+        "models",
+        "effort",
+        "permissions",
+        "resume",
+        "extraArgs",
+        "fallbackModel",
+        "resumeLimitMb"
+      ]
+    },
+    "HarnessPermissionMode": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "name",
+        "description"
+      ]
+    },
+    "ListDirectoryResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/DirectoryEntry"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "LooseTmux": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The session id the label names, if it parses as one."
+        },
+        "socketPath": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "alive": {
+          "type": "boolean"
+        },
+        "windows": {
+          "type": "number"
+        },
+        "panes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/TmuxPane"
+          }
+        },
+        "createdAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "activityAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "socketPath",
+        "label",
+        "alive",
+        "windows",
+        "panes",
+        "createdAt",
+        "activityAt"
+      ]
+    },
+    "NukeResult": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "bytesFreed": {
+          "type": "number"
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "ok",
+        "bytesFreed",
+        "removed"
+      ]
+    },
+    "OpencodeCatalogModel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "\"<providerID>/<modelID>\" — the app's stable handle; providerIDs never contain \"/\"."
+        },
+        "providerID": {
+          "type": "string"
+        },
+        "modelID": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "recommended": {
+          "type": "boolean",
+          "description": "The curated pair: what a fresh allowlist shows."
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Reasoning variants (the model's `variants` keys) — its effort levels."
+        }
+      },
+      "required": [
+        "id",
+        "providerID",
+        "modelID",
+        "displayName",
+        "isDefault",
+        "recommended",
+        "variants"
+      ]
+    },
+    "PastSession": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": "number"
+        },
+        "sizeBytes": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "updatedAt",
+        "sizeBytes"
+      ]
+    },
+    "PiCatalogModel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "\"<provider>/<model id>\" — what `pi --model` takes."
+        },
+        "providerID": {
+          "type": "string"
+        },
+        "modelID": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "recommended": {
+          "type": "boolean",
+          "description": "The curated pair: what a fresh allowlist shows."
+        },
+        "thinking": {
+          "type": "boolean",
+          "description": "pi reports whether the model supports thinking (the --thinking knob)."
+        }
+      },
+      "required": [
+        "id",
+        "providerID",
+        "modelID",
+        "displayName",
+        "isDefault",
+        "recommended",
+        "thinking"
+      ]
+    },
+    "ProcessRow": {
+      "type": "object",
+      "properties": {
+        "pid": {
+          "type": "number"
+        },
+        "ppid": {
+          "type": "number"
+        },
+        "depth": {
+          "type": "number",
+          "description": "Distance from the root: 0 for the agent, 1 for its direct children…"
+        },
+        "name": {
+          "type": "string",
+          "description": "Executable name (comm)."
+        },
+        "args": {
+          "type": "string",
+          "description": "Full command line where readable; else the name."
+        },
+        "cpuPercent": {
+          "type": "number",
+          "description": "Percent of one core, this process alone, over the sample window."
+        },
+        "rssBytes": {
+          "type": "number"
+        },
+        "elapsedSeconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Seconds since the process started."
+        }
+      },
+      "required": [
+        "pid",
+        "ppid",
+        "depth",
+        "name",
+        "args",
+        "cpuPercent",
+        "rssBytes",
+        "elapsedSeconds"
+      ]
+    },
+    "ReadFileResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "content": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "Restorable": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "opencode",
+            "pi",
+            "agy"
+          ]
+        },
+        "resumeId": {
+          "type": "string",
+          "description": "The conversation to resume, in whatever the agent calls it. Absent means\nthe folder can be reopened but the history cannot — worth restoring, and\nworth saying so."
+        },
+        "model": {
+          "type": "string"
+        },
+        "permissionMode": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "extraArgs": {
+          "type": "string"
+        },
+        "lastSeenAt": {
+          "type": "number",
+          "description": "When this session was last touched, from its record's mtime. The record\nis written on every material change, so it is the closest thing to \"when\ndid you last work on this\" that survives a reboot — and it is what both\n\"most recent first\" and \"restore the latest in this project\" need."
+        }
+      },
+      "required": [
+        "id",
+        "cwd",
+        "agent"
+      ]
+    },
+    "RipgrepResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "exitCode": {
+          "type": "number"
+        },
+        "stdout": {
+          "type": "string"
+        },
+        "stderr": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    },
+    "SessionFootprint": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "v2SessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "running",
+            "detached",
+            "record"
+          ]
+        },
+        "live": {
+          "type": "boolean",
+          "description": "A live process in the registry right now (running or detached)."
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tmux": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/components/schemas/TmuxServerInfo"
+            }
+          ],
+          "description": "This session's own tmux server, when one is up (or its socket lingers)."
+        },
+        "bytes": {
+          "type": "number"
+        },
+        "files": {
+          "type": "number"
+        },
+        "ledgerRows": {
+          "type": "number"
+        },
+        "newestAt": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Newest mtime across its files (and the record's updatedAt), epoch ms."
+        },
+        "oldestAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What was found, for the row's detail line."
+        }
+      },
+      "required": [
+        "id",
+        "v2SessionId",
+        "cwd",
+        "title",
+        "kind",
+        "live",
+        "status",
+        "tmux",
+        "bytes",
+        "files",
+        "ledgerRows",
+        "newestAt",
+        "oldestAt",
+        "parts"
+      ]
+    },
+    "SessionRecord": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "process": {
+          "type": "object",
+          "properties": {
+            "cpuPercent": {
+              "type": "number"
+            },
+            "rssBytes": {
+              "type": "number"
+            },
+            "processCount": {
+              "type": "number"
+            },
+            "sampledAt": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "cpuPercent",
+            "rssBytes",
+            "processCount",
+            "sampledAt"
+          ],
+          "description": "Live CPU/RAM of the agent's process tree — stamped by the single-session\n`get` op only (sampled; see domain/procStats)."
+        },
+        "agent": {
+          "type": "string",
+          "description": "Which harness runs this session (claude|codex|opencode|pi)."
+        },
+        "claude_session_id": {
+          "type": "string"
+        },
+        "current_model": {
+          "type": "string"
+        },
+        "current_effort": {
+          "type": "string",
+          "description": "The effort / thinking level the harness is running with (codex: next\nturn's; opencode: the model variant; pi/agy: the launch flag)."
+        },
+        "permission_mode": {
+          "type": "string",
+          "description": "The permission mode the harness is running with, where the daemon owns\nit (codex/opencode/pi/agy; claude's is read off the pane)."
+        },
+        "pid": {
+          "type": "number"
+        },
+        "tmux_window": {
+          "type": "string"
+        },
+        "tmux_socket": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Per-session tmux server socket label (-L), null on the shared server."
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "starting",
+            "active",
+            "ended"
+          ]
+        },
+        "started_at": {
+          "type": "number"
+        },
+        "last_active_at": {
+          "type": "number"
+        },
+        "end_reason": {
+          "type": "string"
+        },
+        "transcript_path": {
+          "type": "string"
+        },
+        "relay_session_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Conversation title (Claude's ai-title or a manual /title), aka the relay summary."
+        },
+        "busy": {
+          "type": "boolean",
+          "description": "Turn/dispatch/queue activity — the scripting \"can I ask now?\" signal (see busy())."
+        }
+      },
+      "required": [
+        "id",
+        "tmux_window",
+        "cwd",
+        "flags",
+        "status",
+        "started_at",
+        "last_active_at"
+      ]
+    },
+    "SharedFootprint": {
+      "type": "object",
+      "properties": {
+        "ledgerBytes": {
+          "type": "number"
+        },
+        "usageCacheBytes": {
+          "type": "number"
+        },
+        "importedBytes": {
+          "type": "number"
+        },
+        "orphanBytes": {
+          "type": "number",
+          "description": "Files under the state dirs whose session no record names."
+        },
+        "orphanFiles": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "ledgerBytes",
+        "usageCacheBytes",
+        "importedBytes",
+        "orphanBytes",
+        "orphanFiles"
+      ]
+    },
+    "TmuxPane": {
+      "type": "object",
+      "properties": {
+        "pid": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "command": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "command",
+        "title"
+      ]
+    },
+    "TmuxServerInfo": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "alive": {
+          "type": "boolean"
+        },
+        "windows": {
+          "type": "number"
+        },
+        "panes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/TmuxPane"
+          }
+        },
+        "createdAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "activityAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "label",
+        "alive",
+        "windows",
+        "panes",
+        "createdAt",
+        "activityAt"
+      ]
+    },
+    "TreeNode": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "directory",
+            "file"
+          ]
+        },
+        "size": {
+          "type": "number"
+        },
+        "modified": {
+          "type": "number"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/TreeNode"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "type"
+      ]
+    },
+    "WriteFileResponse": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success"
+      ]
+    }
+  }
+}

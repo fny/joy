@@ -4,7 +4,25 @@
 // user-facing orientation lives in docs/reference/api.md.
 // The perimeter gate wraps these like everything else once it's flipped.
 
+import fs from 'node:fs';
+
 const P = { type: 'object', additionalProperties: true };
+
+// Request/response types for the routes the app calls, from the app's own
+// TypeScript types (scripts/openapi-types/gen-relay.mjs; the relay is plain
+// JavaScript and has none of its own). Matched to routes by method + path.
+// A route's own `doc` block wins; /daemon/* routes have no typed caller.
+const GENERATED = (() => {
+  try { return JSON.parse(fs.readFileSync(new URL('./openapi.types.json', import.meta.url), 'utf8')); }
+  catch { return { routes: [], schemas: {} }; }
+})();
+
+/** The generated types for a route-table entry, if a typed caller exists. */
+function generatedFor(r) {
+  const re = new RegExp(`^${r.pattern.replace(/^\/joy\/v2/, '')}$`);
+  const hit = GENERATED.routes.find((g) => g.method === r.method && re.test(g.samplePath));
+  return hit ? { body: hit.body, result: hit.result, sources: hit.sources } : null;
+}
 
 /** Paths generated from the router's own table — docs cannot drift from
  *  dispatch. Per-route `doc` blocks (body/result/errors) are optional. */
@@ -13,7 +31,8 @@ function nativePaths(routeTable) {
   for (const r of routeTable) {
     let i = 0;
     const path = r.pattern.replace(/\([^)]*\)/g, () => `{${r.params[i++] ?? `p${i}`}}`);
-    const doc = r.doc ?? {};
+    const gen = r.doc ? null : generatedFor(r);
+    const doc = r.doc ?? gen ?? {};
     const parameters = [
       ...(r.params ?? []).map((name) => ({ name, in: 'path', required: true, schema: { type: 'string' } })),
       ...Object.entries(doc.query ?? {}).map(([name, schema]) => ({ name, in: 'query', required: false, schema })),
@@ -37,6 +56,7 @@ function nativePaths(routeTable) {
       tags: [doc.tag ?? 'joy/v2'],
       ...(r.auth ? {} : { security: [] }),
       ...(r.sse ? { 'x-sse': true } : {}),
+      ...(gen ? { 'x-types-from': gen.sources } : {}),
       parameters,
       ...(doc.body && r.method !== 'GET' ? { requestBody: { required: true, content: { 'application/json': { schema: doc.body } } } } : {}),
       responses,
@@ -69,6 +89,7 @@ export function buildRelaySpec({ version, host, routeTable = null }) {
     },
     servers: [{ url: host }],
     components: {
+      schemas: GENERATED.schemas,
       securitySchemes: {
         bearer: { type: 'http', scheme: 'bearer', description: 'Account token from POST /joy/v2/auth' },
         relayKey: { type: 'apiKey', in: 'header', name: 'x-joy-relay-key', description: 'Perimeter key (only when the gate is enabled; derived from the account secret)' },

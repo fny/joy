@@ -9,6 +9,7 @@
         "daemon": "pnpm --filter @fny/joy-daemon dev",
         "relay": "pnpm --filter joy-relay start",
         "release": "node ./scripts/release.cjs",
+        "openapi:types": "node scripts/openapi-types/gen-daemon.mjs && node scripts/openapi-types/gen-relay.mjs",
         "codium": "pnpm --filter codium dev",
         "postinstall": "node ./scripts/postinstall.cjs"
     },

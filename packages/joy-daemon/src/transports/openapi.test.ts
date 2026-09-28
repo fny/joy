@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { buildOpenApiSpec } from "./openapi";
 import { machineOps } from "../domain/operations";
@@ -32,6 +33,30 @@ describe("buildOpenApiSpec", () => {
     expect(Object.keys(bodyProps)).not.toContain("id");
     expect(queueEdit.parameters.map((p: any) => p.name)).toEqual(["id", "qid"]);
   });
+
+  it("responses carry the handlers' own TypeScript types, and every $ref resolves", () => {
+    const status = spec.paths["/status"].get.responses["200"].content["application/json"].schema;
+    expect(status.properties.uptimeMs).toEqual({ type: "number" });
+    const list = spec.paths["/sessions"].get.responses["200"].content["application/json"].schema;
+    expect(JSON.stringify(list)).toContain("#/components/schemas/SessionRecord");
+    expect(spec.components.schemas.SessionRecord.properties.id).toBeTruthy();
+    const refs = [...JSON.stringify(spec).matchAll(/"#\/components\/schemas\/([^"]+)"/g)].map((m) => m[1]);
+    for (const name of refs) expect(spec.components.schemas[name], name).toBeTruthy();
+    // No HTTP op falls back to the permissive placeholder for its success body.
+    for (const [path, ops] of Object.entries<any>(spec.paths)) {
+      for (const [method, op] of Object.entries<any>(ops)) {
+        const ok = op.responses["200"] ?? op.responses["201"];
+        expect(ok.content["application/json"].schema, `${method} ${path}`).not.toEqual({ type: "object", additionalProperties: true });
+      }
+    }
+  });
+
+  it("openapi.types.json matches what the handlers' types generate (else: node scripts/openapi-types/gen-daemon.mjs)", async () => {
+    // @ts-expect-error — a plain .mjs script outside the package
+    const { generateDaemonTypes } = await import("../../../../scripts/openapi-types/gen-daemon.mjs");
+    const committed = JSON.parse(readFileSync(new URL("./openapi.types.json", import.meta.url), "utf8"));
+    expect(generateDaemonTypes()).toEqual(committed);
+  }, 60_000);
 
   it("GET query params come from the request schema", () => {
     const usage = spec.paths["/usage"].get;

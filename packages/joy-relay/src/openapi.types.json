@@ -1,0 +1,1548 @@
+{
+  "generatedBy": "scripts/openapi-types/gen-relay.mjs",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/account/profile",
+      "samplePath": "/account/profile",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:180"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/account/settings",
+      "samplePath": "/account/settings",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:184"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "settings": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "settings",
+          "version"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/account/settings",
+      "samplePath": "/account/settings",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:189"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "settings": {
+            "type": "string"
+          },
+          "expectedVersion": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "settings",
+          "expectedVersion"
+        ]
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "settings": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "settings",
+          "version"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/attachments/{}",
+      "samplePath": "/attachments/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:325"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/attachments",
+      "samplePath": "/attachments",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:308"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/account/request",
+      "samplePath": "/auth/account/request",
+      "sources": [
+        "packages/joy-app/sources/auth/authQRStart.ts:30",
+        "packages/joy-app/sources/auth/authQRWait.ts:209"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "publicKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "publicKey"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/auth/account/response",
+      "samplePath": "/auth/account/response",
+      "sources": [
+        "packages/joy-app/sources/auth/authAccountApprove.ts:8"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "publicKey": {
+            "type": "string"
+          },
+          "response": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "publicKey",
+          "response"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/auth/request/status",
+      "samplePath": "/auth/request/status",
+      "sources": [
+        "packages/joy-app/sources/auth/authApprove.ts:51"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/response",
+      "samplePath": "/auth/response",
+      "sources": [
+        "packages/joy-app/sources/auth/authApprove.ts:82"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "publicKey": {
+            "type": "string"
+          },
+          "response": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "publicKey",
+          "response"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/auth",
+      "samplePath": "/auth",
+      "sources": [
+        "packages/joy-app/sources/auth/authGetToken.ts:10"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "challenge": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "publicKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge",
+          "signature",
+          "publicKey"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/automation-runs/{}/ack",
+      "samplePath": "/automation-runs/x0/ack",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:212"
+      ],
+      "body": {
+        "type": "object"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/automations/{}/runs",
+      "samplePath": "/automations/x0/runs",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:208"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2AutomationRun"
+            }
+          }
+        },
+        "required": [
+          "runs"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/automations/{}/runs",
+      "samplePath": "/automations/x0/runs",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:206"
+      ],
+      "body": {
+        "type": "object"
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/V2AutomationRun"
+          },
+          "skipped": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "run"
+        ]
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/automations/{}",
+      "samplePath": "/automations/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:204"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/automations/{}",
+      "samplePath": "/automations/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:195"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "automation": {
+            "$ref": "#/components/schemas/V2Automation"
+          }
+        },
+        "required": [
+          "automation"
+        ]
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/automations/{}",
+      "samplePath": "/automations/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:203"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "machineId": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "spec": {
+            "type": "string"
+          },
+          "expectedSpecVersion": {
+            "type": "number"
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "filter": {
+                  "type": "string"
+                },
+                "timezone": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "automation": {
+            "$ref": "#/components/schemas/V2Automation"
+          }
+        },
+        "required": [
+          "automation"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/automations/failures",
+      "samplePath": "/automations/failures",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:211"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "failures": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "automationId": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "queued",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "cancelled"
+                  ]
+                },
+                "triggerKind": {
+                  "type": "string"
+                },
+                "sessionId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "errorCode": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "errorMessage": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "acknowledgedAt": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "startedAt": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "finishedAt": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "createdAt": {
+                  "type": "number"
+                },
+                "automationName": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "automationId",
+                "state",
+                "triggerKind",
+                "sessionId",
+                "errorCode",
+                "errorMessage",
+                "acknowledgedAt",
+                "startedAt",
+                "finishedAt",
+                "createdAt",
+                "automationName"
+              ]
+            }
+          }
+        },
+        "required": [
+          "failures"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/automations",
+      "samplePath": "/automations",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:194"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "automations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2Automation"
+            }
+          }
+        },
+        "required": [
+          "automations"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/automations",
+      "samplePath": "/automations",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:199"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "machineId": {
+            "type": "string"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "spec": {
+            "type": "string"
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "filter": {
+                  "type": "string"
+                },
+                "timezone": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "machineId",
+          "directory",
+          "spec",
+          "triggers"
+        ]
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "automation": {
+            "$ref": "#/components/schemas/V2Automation"
+          }
+        },
+        "required": [
+          "automation"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/capabilities",
+      "samplePath": "/capabilities",
+      "sources": [
+        "packages/joy-app/sources/auth/relayCheck.ts:26"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/events/stream",
+      "samplePath": "/events/stream",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:366"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/machines/{}",
+      "samplePath": "/machines/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:172"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/machines/{}",
+      "samplePath": "/machines/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:179"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "metadata": {
+            "type": "string"
+          },
+          "expectedMetadataVersion": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "metadata",
+          "expectedMetadataVersion"
+        ]
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "result": {
+            "type": "string",
+            "enum": [
+              "success",
+              "version-mismatch",
+              "error"
+            ]
+          },
+          "metadataVersion": {
+            "type": "number"
+          },
+          "metadata": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/machines",
+      "samplePath": "/machines",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:171"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "machines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2Machine"
+            }
+          }
+        },
+        "required": [
+          "machines"
+        ]
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/push-tokens/{}",
+      "samplePath": "/push-tokens/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/apiPush.ts:165"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/push-tokens",
+      "samplePath": "/push-tokens",
+      "sources": [
+        "packages/joy-app/sources/sync/apiPush.ts:147"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/push-tokens",
+      "samplePath": "/push-tokens",
+      "sources": [
+        "packages/joy-app/sources/sync/apiPush.ts:126",
+        "packages/joy-app/sources/sync/v2/api.ts:213"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/relay/status",
+      "samplePath": "/relay/status",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:168"
+      ],
+      "result": {
+        "$ref": "#/components/schemas/RelayStatus"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sessions/{}/events",
+      "samplePath": "/sessions/x0/events",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/reads.ts:157"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/sessions/{}/messages",
+      "samplePath": "/sessions/x0/messages",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:298"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ciphertext": {
+            "type": "string"
+          },
+          "clientIntentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ciphertext",
+          "clientIntentId"
+        ]
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "messageId",
+          "turnId"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sessions/{}/spawn/retry",
+      "samplePath": "/sessions/x0/spawn/retry",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:271"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "createDir": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "createDir"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sessions/{}/turns/{}/cancellations",
+      "samplePath": "/sessions/x0/turns/x0/cancellations",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:339"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "clientIntentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientIntentId"
+        ]
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/sessions/{}",
+      "samplePath": "/sessions/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:267"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/sessions/{}",
+      "samplePath": "/sessions/x0",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:214",
+        "packages/joy-app/sources/sync/v2/api.ts:334"
+      ],
+      "result": {
+        "$ref": "#/components/schemas/V2SessionState"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sessions/storage",
+      "samplePath": "/sessions/storage",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:170"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "sessionId": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "events": {
+                  "type": "number"
+                },
+                "bytes": {
+                  "type": "number"
+                },
+                "oldest": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "newest": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "sessionId",
+                "state",
+                "events",
+                "bytes",
+                "oldest",
+                "newest"
+              ]
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/sessions",
+      "samplePath": "/sessions",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:166"
+      ],
+      "result": {
+        "type": "object",
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/V2SessionRow"
+            }
+          }
+        },
+        "required": [
+          "sessions"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/sessions",
+      "samplePath": "/sessions",
+      "sources": [
+        "packages/joy-app/sources/sync/v2/api.ts:253"
+      ],
+      "body": {
+        "type": "object",
+        "properties": {
+          "spawnSpec": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "daemonId": {
+            "type": "string"
+          },
+          "creationIntentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "daemonId",
+          "creationIntentId"
+        ]
+      }
+    }
+  ],
+  "schemas": {
+    "RelayDisk": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "totalBytes": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "freeBytes": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "usedPercent": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "totalBytes",
+        "freeBytes",
+        "usedPercent"
+      ]
+    },
+    "RelayStatus": {
+      "type": "object",
+      "properties": {
+        "relay": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node": {
+          "type": "string"
+        },
+        "uptimeSeconds": {
+          "type": "number"
+        },
+        "startedAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "now": {
+          "type": "number"
+        },
+        "host": {
+          "type": "object",
+          "properties": {
+            "hostname": {
+              "type": "string"
+            },
+            "platform": {
+              "type": "string"
+            },
+            "cpuCount": {
+              "type": "number"
+            },
+            "cpuModel": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cpuPercent": {
+              "type": "number"
+            },
+            "load1": {
+              "type": "number"
+            },
+            "memTotalBytes": {
+              "type": "number"
+            },
+            "memAvailableBytes": {
+              "type": "number"
+            },
+            "memUsedPercent": {
+              "type": "number"
+            },
+            "processRssBytes": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "hostname",
+            "platform",
+            "cpuCount",
+            "cpuModel",
+            "cpuPercent",
+            "load1",
+            "memTotalBytes",
+            "memAvailableBytes",
+            "memUsedPercent",
+            "processRssBytes"
+          ]
+        },
+        "disk": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "$ref": "#/components/schemas/RelayDisk"
+            },
+            "data": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/RelayDisk"
+                }
+              ]
+            }
+          },
+          "required": [
+            "root",
+            "data"
+          ]
+        },
+        "db": {
+          "type": "object",
+          "properties": {
+            "dataDir": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dataDirBytes": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sizeBytes": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "accounts": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "machines": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sessions": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sessionsLive": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "events": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "dataDir",
+            "dataDirBytes",
+            "sizeBytes",
+            "accounts",
+            "machines",
+            "sessions",
+            "sessionsLive",
+            "events"
+          ]
+        },
+        "live": {
+          "type": "object",
+          "properties": {
+            "daemonLeases": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sseClients": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sseAccounts": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "daemonLeases",
+            "sseClients",
+            "sseAccounts"
+          ]
+        }
+      },
+      "required": [
+        "relay",
+        "version",
+        "node",
+        "uptimeSeconds",
+        "startedAt",
+        "now",
+        "host",
+        "disk",
+        "db",
+        "live"
+      ]
+    },
+    "V2Automation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "machineId": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "spec": {
+          "type": "string",
+          "description": "Sealed under the machine's spawn-spec key; opaque unless this device\ncan derive that machine's key."
+        },
+        "specVersion": {
+          "type": "number"
+        },
+        "lastRunAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "filter": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string"
+              },
+              "nextRunAt": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "kind",
+              "filter"
+            ]
+          }
+        },
+        "latestRun": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/components/schemas/V2AutomationRun"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "machineId",
+        "directory",
+        "name",
+        "enabled",
+        "spec",
+        "specVersion",
+        "lastRunAt",
+        "createdAt",
+        "updatedAt",
+        "triggers"
+      ]
+    },
+    "V2AutomationRun": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "automationId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "triggerKind": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorMessage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "acknowledgedAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "startedAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "automationId",
+        "state",
+        "triggerKind",
+        "sessionId",
+        "errorCode",
+        "errorMessage",
+        "acknowledgedAt",
+        "startedAt",
+        "finishedAt",
+        "createdAt"
+      ]
+    },
+    "V2Machine": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadataVersion": {
+          "type": "number"
+        },
+        "daemonState": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "daemonStateVersion": {
+          "type": "number"
+        },
+        "dataEncryptionKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seq": {
+          "type": "number"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "activeAt": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        },
+        "leaseAlive": {
+          "type": "boolean",
+          "description": "Merged by the relay from v2 lease liveness — the queue's own authority."
+        }
+      },
+      "required": [
+        "id",
+        "metadata",
+        "metadataVersion",
+        "daemonState",
+        "daemonStateVersion",
+        "dataEncryptionKey",
+        "seq",
+        "active",
+        "activeAt",
+        "createdAt",
+        "updatedAt",
+        "leaseAlive"
+      ]
+    },
+    "V2SessionRow": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "daemonId": {
+          "type": "string"
+        },
+        "localSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "headSeq": {
+          "type": "string"
+        },
+        "queuedTurns": {
+          "type": "number"
+        },
+        "sessionKeyEnvelope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "encryptedMetadata": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        },
+        "lastTurnAt": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "daemonId",
+        "localSessionId",
+        "state",
+        "revision",
+        "headSeq",
+        "queuedTurns",
+        "sessionKeyEnvelope",
+        "encryptedMetadata",
+        "online",
+        "createdAt",
+        "updatedAt",
+        "lastTurnAt"
+      ]
+    },
+    "V2SessionState": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "headSeq": {
+          "type": "string"
+        },
+        "sessionState": {
+          "type": "string"
+        },
+        "recoveryRequired": {
+          "type": "boolean"
+        },
+        "spawnFailure": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Set when a spawn failed pre-bind (e.g. 'dir_missing:/path'); the client\noffers to create the directory and calls retrySpawn."
+        },
+        "daemon": {
+          "type": "object",
+          "properties": {
+            "daemonId": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "online",
+                "offline"
+              ]
+            },
+            "lastSeenAt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "epoch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "daemonId",
+            "status",
+            "lastSeenAt",
+            "epoch"
+          ]
+        },
+        "queue": {
+          "type": "object",
+          "properties": {
+            "queuedTurns": {
+              "type": "number"
+            },
+            "deliveredTurns": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "queuedTurns",
+            "deliveredTurns"
+          ]
+        },
+        "execution": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "running",
+                "idle",
+                "dispatching",
+                "cancelling",
+                "orphaned"
+              ]
+            },
+            "turnId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lastProgressAt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "suspectedStalled": {
+              "type": "boolean"
+            },
+            "cancelRequested": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "state",
+            "turnId",
+            "lastProgressAt",
+            "suspectedStalled",
+            "cancelRequested"
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "revision",
+        "headSeq",
+        "sessionState",
+        "recoveryRequired",
+        "daemon",
+        "queue",
+        "execution"
+      ]
+    }
+  }
+}
