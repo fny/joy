@@ -5,3 +5,5 @@ require('../patches/fix-pierre-trees-preact-hooks.cjs');
 // Voice: force the /rtc (v0) LiveKit path and fix a size_t build error.
 require('../patches/fix-livekit-room-reuse.cjs');
 require('../patches/fix-react-native-audio-api-size-t.cjs');
+// The chat owns FlashList's place-keeping (see the patch header).
+require('../patches/flash-list-app-owned-correction.cjs');

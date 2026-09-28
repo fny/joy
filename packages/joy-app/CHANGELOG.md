@@ -3,6 +3,8 @@
 - **Scroll up and the chat stays there.** The list used to decide whether to follow new messages from where the view happened to land, whatever put it there. If something below you got shorter — a reply re-rendering, a group folding — the view slid to the end, the list took that as you returning, and the next streamed line pulled you down and kept you there. Following is now your decision only: scroll up and it stops; scroll back down to the end, press the down arrow, or send a message and it starts again.
 - **The down arrow is there whenever you are not following,** even a few pixels from the end, so there is always one press back to the newest message.
 - **The turn you are reading stays open.** When the next prompt arrives while you are scrolled up, the agent's work you were looking at no longer folds into one row under you; it folds once you are back at the bottom.
+- **What you are reading stays put while older messages load,** and while messages above you finish laying out. Keeping your place is now done by the app, row by row, instead of left to the list component, which sometimes corrected from an outdated position and nudged the view.
+- **Jumping to a prompt or a search result lands on it and stays there,** and if you scroll right after a jump, your scroll wins — the jump no longer finishes on top of it, and it never falls back to the bottom of the chat.
 - **Paging older messages no longer throws you to the top on iPhone.** A setting meant to hold your place while older messages load was instead scrolling to the very first message whenever you were near the top.
 
 # Sep 25 — The session list reads twice, and identicons can mean something else

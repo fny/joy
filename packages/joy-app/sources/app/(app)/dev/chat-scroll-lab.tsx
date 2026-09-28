@@ -137,7 +137,7 @@ export default React.memo(function ChatScrollLab() {
         if (roll < 0.15) msgs.push(toolCall(`cargo test step ${seq}`));
         else if (last?.kind === 'agent-text') {
             msgs[msgs.length - 1] = { ...last, text: last.text + ' ' + LOREM };
-        } else msgs.push(agentText('Streaming reply. '));
+        } else msgs.push(agentText(`Streaming reply ${seq}. `));
         write(msgs, true);
         trace.push({ t: performance.now(), kind: 'stream', note: roll < 0.15 ? 'tool' : 'grow' });
     }, []);
@@ -171,7 +171,17 @@ export default React.memo(function ChatScrollLab() {
         // Identity is the element's text, not the node: FlashList recycles
         // cells, so a connected node can come to hold another message.
         let anchor: Element | null = null; let anchorText = ''; let anchorTop = 0; let raf = 0;
-        const textOf = (el: Element | null) => (el?.textContent ?? '').slice(0, 80);
+        // The whole ROW's text (FlashList cells are absolutely positioned):
+        // rows begin with a unique "Prompt N" / "Answer N", while the filler
+        // paragraphs inside them repeat — a recycled node holding another
+        // row with the same paragraph must not count as the same row.
+        const rowOf = (el: Element | null): Element | null => {
+            for (let e = el as HTMLElement | null; e && e !== node; e = e.parentElement) {
+                if (getComputedStyle(e).position === 'absolute' && e.parentElement && e.parentElement !== node) return e;
+            }
+            return el;
+        };
+        const textOf = (el: Element | null) => (rowOf(el)?.textContent ?? '').slice(0, 160);
         const frame = () => {
             raf = requestAnimationFrame(frame);
             const n = node; if (!n) return;
@@ -205,6 +215,17 @@ export default React.memo(function ChatScrollLab() {
                 }
                 write(msgs, streamingRef.current !== null);
                 trace.push({ t: performance.now(), kind: 'stream', note: 'shrink' });
+            },
+            // Content ABOVE the reader shrinks (older replies cut to one line):
+            // a fold above a reader near the end, the clamp-then-shift case.
+            shrinkAbove: (from: number, to: number) => {
+                const msgs = messagesRef.current;
+                for (let i = Math.max(0, msgs.length - from); i < msgs.length - to; i++) {
+                    const m = msgs[i];
+                    if (m.kind === 'agent-text') msgs[i] = { ...m, text: 'Short.' };
+                }
+                write(msgs, streamingRef.current !== null);
+                trace.push({ t: performance.now(), kind: 'stream', note: 'shrinkAbove' });
             },
             tall: () => { messagesRef.current.push(agentText(para(14))); write(messagesRef.current, streamingRef.current !== null); },
             pause: () => { if (streamingRef.current) { clearInterval(streamingRef.current); streamingRef.current = null; } },

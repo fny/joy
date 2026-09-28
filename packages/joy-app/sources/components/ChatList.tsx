@@ -19,9 +19,14 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { alertError, guarded } from '@/utils/guardAsync';
 import { resolveRevealScroll, rowContainsMessage, RevealLayout, RevealTarget } from './searchReveal';
 import { useSessionSearch } from '@/hooks/useSessionSearch';
+import { anchorAt, offsetForRowTop, reanchor, restoreTopFor, rowAt, rowTopFor, SHIFT_EPSILON, type PlaceAnchor, type PlaceList } from './chatPlace';
 import { distanceFromBottom, heldOpenTurn, initialScrollState, mayFollow, nextScrollState, type Metrics, type Mode, type ScrollEffect, type ScrollEvent } from './chatScroll';
 
 const SCROLL_THRESHOLD = 300;
+/** A jump is settled once its target has stopped moving for this long... */
+const JUMP_SETTLE_MS = 250;
+/** ...or, at the latest, this long after it started. */
+const JUMP_DEADLINE_MS = 3000;
 
 // Saved viewport per session, surviving unmounts AND screen retention (the
 // terminal-pane push keeps this screen mounted — only navigation focus moves).
@@ -137,10 +142,13 @@ const ListHeader = React.memo((props: { isLoadingOlder: boolean }) => {
     );
 });
 
-const ListFooter = React.memo((props: { sessionId: string }) => {
+const ListFooter = React.memo((props: { sessionId: string; onHeight: (h: number) => void }) => {
     const session = useSession(props.sessionId)!;
+    // Its height is part of the content's end, which native jumps clamp to.
     return (
-        <ChatFooter controlledByUser={session.agentState?.controlledByUser || false} />
+        <View onLayout={(e) => props.onHeight(e.nativeEvent.layout.height)}>
+            <ChatFooter controlledByUser={session.agentState?.controlledByUser || false} />
+        </View>
     )
 });
 
@@ -432,6 +440,257 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // (or a newer jump) takes it over, and its late steps stop.
     const revealGenRef = React.useRef(-1);
     const isCurrentOp = useCallback((gen: number) => scrollStateRef.current.op?.gen === gen, []);
+
+    // ── Place-keeping and jumps (chatPlace.ts) ────────────────────────────
+    // FlashList only renders and measures; keeping the reader's row still
+    // while content changes, and every jump, is decided here
+    // (appOwnedCorrection: patches/flash-list-app-owned-correction.cjs).
+
+    // Web: the DOM scroller, once the list has one. Resolved on load and on
+    // every layout, so the listeners attach late if they must, and move to a
+    // replacement node.
+    const [scrollNode, setScrollNode] = React.useState<HTMLElement | null>(null);
+    const scrollNodeRef = React.useRef<HTMLElement | null>(null);
+    const resolveScrollNode = useCallback(() => {
+        if (Platform.OS !== 'web') return;
+        const node = ((flatListRef.current as any)?.getScrollableNode?.() as HTMLElement | undefined) ?? null;
+        if (node !== scrollNodeRef.current) { scrollNodeRef.current = node; setScrollNode(node); }
+    }, []);
+    /** Web can read the metrics synchronously; native reports them itself. */
+    const webMetrics = useCallback((): Metrics | undefined => {
+        const n = scrollNodeRef.current;
+        return n ? { offset: n.scrollTop, maxOffset: Math.max(0, n.scrollHeight - n.clientHeight) } : undefined;
+    }, []);
+
+    // The list as the place-keeper sees it, rebuilt with the rows.
+    const placeList = React.useMemo((): PlaceList => {
+        const byKey = new Map<string, number>();
+        const byMessage = new Map<string, number>();
+        orderedItems.forEach((item, i) => {
+            byKey.set(item.id, i);
+            if (item.type === 'message') byMessage.set(item.message.id, i);
+            else for (const m of item.messages) byMessage.set(m.id, i);
+        });
+        return {
+            count: orderedItems.length,
+            indexOfKey: (key) => byKey.get(key) ?? -1,
+            indexOfMessage: (id) => byMessage.get(id) ?? -1,
+            keyAt: (i) => orderedItems[i]?.id,
+            messageIdAt: (i) => (orderedItems[i] ? anchorMessageIdFor(orderedItems[i]) : null),
+            layout: (i) => {
+                const l = i >= 0 && i < orderedItems.length ? flatListRef.current?.getLayout(i) : undefined;
+                return l ? { y: l.y, height: l.height } : undefined;
+            },
+        };
+    }, [orderedItems]);
+    const placeListRef = React.useRef(placeList);
+    placeListRef.current = placeList;
+
+    // Native geometry the scroller does not hand us synchronously: the last
+    // reported offset (the machine's metrics), bumped per report so a jump
+    // waits for its last move to land before measuring again; the footer's
+    // height, for the content's end.
+    const nativeReportSeqRef = React.useRef(0);
+    const lastNativeShiftAtRef = React.useRef(0);
+    const footerHeightRef = React.useRef(0);
+    const handleFooterHeight = useCallback((h: number) => { footerHeightRef.current = h; }, []);
+    /** Where the scroller is now: exact on web, the last report on native. */
+    const currentOffset = useCallback((): number | undefined => {
+        const node = scrollNodeRef.current;
+        return node ? node.scrollTop : scrollStateRef.current.metrics?.offset;
+    }, []);
+    /** The furthest the scroller can go with the content as laid out now. */
+    const maxOffset = useCallback((): number | undefined => {
+        const node = scrollNodeRef.current;
+        if (node) return Math.max(0, node.scrollHeight - node.clientHeight);
+        const list = flatListRef.current;
+        if (!list) return undefined;
+        return Math.max(0, list.getFirstItemOffset() + list.getChildContainerDimensions().height + footerHeightRef.current - list.getWindowSize().height);
+    }, []);
+    /** Move to `target`: absolutely on web (the browser's own clamp can never
+     *  be counted twice); on native through the fling-safe anchor, relative
+     *  to where the scroller is now. */
+    const moveTo = useCallback((target: number, from: number) => {
+        const node = scrollNodeRef.current;
+        if (Platform.OS === 'web') { if (node) node.scrollTop = target; return; }
+        const delta = target - from;
+        if (Math.abs(delta) < SHIFT_EPSILON) return;
+        flatListRef.current?.shiftContentOffset(delta);
+        lastNativeShiftAtRef.current = Date.now();
+    }, []);
+
+    /** The row kept still: the reader's top row while reading (with where
+     *  its top sat on screen), nothing while following (the bottom is), and
+     *  nothing during a jump (the jump keeps its own target). */
+    const placeRef = React.useRef<(PlaceAnchor & { screenTop: number }) | null>(null);
+    const syncAnchorToViewport = useCallback(() => {
+        const s = scrollStateRef.current;
+        if (s.op || s.mode === 'following') { placeRef.current = null; return; }
+        const list = flatListRef.current;
+        const offset = currentOffset();
+        if (!list || offset === undefined) { placeRef.current = null; return; }
+        const first = list.getFirstItemOffset();
+        const i = rowAt(offset - first, placeListRef.current);
+        const anchor = i >= 0 ? anchorAt(i, placeListRef.current) : null;
+        placeRef.current = anchor ? { ...anchor, screenTop: first + anchor.y - offset } : null;
+    }, [currentOffset]);
+
+    // ── Jumps ──
+    // A jump keeps its REQUESTED placement — "this row's top at that screen
+    // position", worked out from the row's current height — and reconciles
+    // it on every commit and content-size change until the target is
+    // measured and still. An unmeasured target is first brought to the top
+    // of the view, where it renders and measures; a placement the content
+    // could not reach yet (estimated end too short) is reached once it can.
+    // It ends in place, whatever happened to the target: never at the bottom.
+    type Jump = {
+        gen: number;
+        key: string;
+        messageId: string | null;
+        topFor: (rowHeight: number, measured: boolean) => number;
+        settle: ReturnType<typeof setTimeout> | null;
+        deadline: number;
+        reportSeq: number;
+    };
+    const jumpRef = React.useRef<Jump | null>(null);
+    const targetOf = useCallback((j: Jump) => {
+        const list = flatListRef.current;
+        const pl = placeListRef.current;
+        let index = pl.indexOfKey(j.key);
+        if (index < 0 && j.messageId) index = pl.indexOfMessage(j.messageId);
+        const layout = index >= 0 ? list?.getLayout(index) : undefined;
+        if (!list || !layout) return null;
+        const measured = Boolean((layout as { isHeightMeasured?: boolean }).isHeightMeasured);
+        return { index, measured, offset: offsetForRowTop(list.getFirstItemOffset(), layout.y, j.topFor(layout.height, measured)) };
+    }, []);
+    const finishJump = useCallback((gen: number) => {
+        const j = jumpRef.current;
+        if (j?.gen === gen) {
+            if (j.settle) clearTimeout(j.settle);
+            jumpRef.current = null;
+        }
+        dispatch({ type: 'opDone', gen, now: Date.now() });
+        // The reader is now reading wherever the jump left them: hand the
+        // anchor to the row actually at the top of the view.
+        syncAnchorToViewport();
+    }, [dispatch, syncAnchorToViewport]);
+    const armSettle = useCallback((gen: number) => {
+        const j = jumpRef.current;
+        if (!j || j.gen !== gen) return;
+        if (j.settle) clearTimeout(j.settle);
+        j.settle = setTimeout(() => {
+            const cur = jumpRef.current;
+            if (!cur || cur.gen !== gen) return;
+            const t = targetOf(cur);
+            // Not settled while the target is still an estimate, up to the deadline.
+            if (t && !t.measured && Date.now() < cur.deadline) { armSettle(gen); return; }
+            finishJump(gen);
+        }, Math.max(0, Math.min(JUMP_SETTLE_MS, j.deadline - Date.now())));
+    }, [targetOf, finishJump]);
+    /** One reconcile pass: move toward the requested placement if needed. */
+    const reconcileJump = useCallback(() => {
+        const j = jumpRef.current;
+        if (!j) return;
+        if (!isCurrentOp(j.gen)) {
+            // Taken over (the reader's input, a newer operation): stop, and
+            // the reader's viewport is the anchor from here.
+            if (j.settle) clearTimeout(j.settle);
+            jumpRef.current = null;
+            syncAnchorToViewport();
+            return;
+        }
+        const t = targetOf(j);
+        if (!t) { finishJump(j.gen); return; }
+        // Native: wait for the previous move to be reported before measuring
+        // where the scroller is again, or it would be moved twice.
+        if (Platform.OS !== 'web' && j.reportSeq === nativeReportSeqRef.current && Date.now() - lastNativeShiftAtRef.current < 150) return;
+        const from = currentOffset();
+        const max = maxOffset();
+        if (from === undefined) return;
+        const target = max === undefined ? t.offset : Math.min(t.offset, max);
+        if (Math.abs(target - from) >= 1) {
+            moveTo(target, from);
+            j.reportSeq = nativeReportSeqRef.current;
+            armSettle(j.gen);
+        }
+    }, [isCurrentOp, targetOf, finishJump, syncAnchorToViewport, currentOffset, maxOffset, moveTo, armSettle]);
+    const startJump = useCallback((key: string, messageId: string | null, topFor: Jump['topFor'], gen: number) => {
+        if (!isCurrentOp(gen)) return;
+        const list = flatListRef.current;
+        if (!list) { finishJump(gen); return; }
+        // FlashList's initial "go to the last row" must not land on top of this.
+        list.cancelInitialScroll();
+        // Native: an anchor shift still queued would land AFTER an absolute
+        // scroll and add to it — let it land first.
+        if (Platform.OS !== 'web' && Date.now() - lastNativeShiftAtRef.current < 50) {
+            requestAnimationFrame(() => requestAnimationFrame(() => startJump(key, messageId, topFor, gen)));
+            return;
+        }
+        if (jumpRef.current?.settle) clearTimeout(jumpRef.current.settle);
+        const j: Jump = { gen, key, messageId, topFor, settle: null, deadline: Date.now() + JUMP_DEADLINE_MS, reportSeq: nativeReportSeqRef.current };
+        jumpRef.current = j;
+        placeRef.current = null;
+        const t = targetOf(j);
+        if (!t) { finishJump(gen); return; }
+        const node = scrollNodeRef.current;
+        if (Platform.OS === 'web') { if (node) node.scrollTop = t.offset; }
+        else {
+            list.getNativeScrollRef()?.scrollTo({ y: t.offset, animated: false });
+            // Pending until the scroller reports it: reconcile must not
+            // measure from the old offset and stack a shift on top (A-R2).
+            lastNativeShiftAtRef.current = Date.now();
+        }
+        armSettle(gen);
+    }, [isCurrentOp, targetOf, finishJump, armSettle]);
+    /** Put a row where `topFor` says, under operation `gen`. The row is held
+     *  by identity from here on: a deferred start re-finds it, so a page
+     *  prepended meanwhile cannot redirect the jump to another row. */
+    const jumpTo = useCallback((index: number, topFor: Jump['topFor'], gen: number) => {
+        const item = orderedItemsRef.current[index];
+        if (!item) { finishJump(gen); return; }
+        startJump(item.id, anchorMessageIdFor(item), topFor, gen);
+    }, [finishJump, startJump]);
+
+    // Every layout commit: a jump reconciles; otherwise whatever moved the
+    // reader's row moved the content around them — put it back where it was.
+    const handleCommit = useCallback(() => {
+        if (jumpRef.current) { reconcileJump(); return; }
+        const anchor = placeRef.current;
+        if (!anchor) return;
+        const s = scrollStateRef.current;
+        if (s.mode === 'following' && !s.op) { placeRef.current = null; return; }
+        const r = reanchor(anchor, placeListRef.current);
+        if (!r.anchor) { placeRef.current = null; return; }
+        placeRef.current = { ...r.anchor, screenTop: anchor.screenTop };
+        if (Math.abs(r.delta) < SHIFT_EPSILON) return;
+        const list = flatListRef.current;
+        const from = currentOffset();
+        if (!list || from === undefined) return;
+        if (Platform.OS === 'web') {
+            // Absolute: where the row's top must be for it to sit where it sat,
+            // plus any scrolling the reader did since the anchor was taken
+            // that the scroll event has not reported yet. Movement that is
+            // really the browser's clamp at a shrunk end is not theirs: added
+            // to the delta it would be applied twice.
+            const first = list.getFirstItemOffset();
+            const syncedOffset = first + anchor.y - anchor.screenTop;
+            const max = maxOffset();
+            const clamped = max !== undefined && syncedOffset > max && from >= max - 1;
+            const readerMoved = clamped ? 0 : from - syncedOffset;
+            moveTo(first + r.anchor.y - anchor.screenTop + readerMoved, from);
+            return;
+        }
+        // Native: relative through the anchor. Android clamps the offset when
+        // the content shrinks below it, before our shift lands: account for the
+        // part of the move the clamp already made.
+        let start = from;
+        if (Platform.OS === 'android') {
+            const max = maxOffset();
+            if (max !== undefined && from > max) start = max;
+        }
+        moveTo(from + r.delta, start);
+    }, [reconcileJump, currentOffset, maxOffset, moveTo]);
+    React.useEffect(() => () => { if (jumpRef.current?.settle) clearTimeout(jumpRef.current.settle); }, []);
     const handleRevealLayout = useCallback((layout: RevealLayout) => {
         const target = revealTargetRef.current;
         if (!target || layout.nonce !== target.nonce || layout.messageId !== target.messageId) return;
@@ -440,11 +699,12 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         if (!isCurrentOp(gen)) return;
         const list = flatListRef.current;
         if (!list) return;
-        const scroll = resolveRevealScroll(orderedItemsRef.current, target.messageId, layout, list.getWindowSize().height);
+        const windowHeight = list.getWindowSize().height;
+        const scroll = resolveRevealScroll(orderedItemsRef.current, target.messageId, layout, windowHeight);
         if (!scroll) return;
         revealHandledRef.current = target.nonce;
-        void list.scrollToIndex({ ...scroll, animated: true }).finally(() => dispatch({ type: 'opDone', gen, now: Date.now() }));
-    }, [dispatch, isCurrentOp]);
+        jumpTo(scroll.index, (h) => rowTopFor(scroll.viewPosition, scroll.viewOffset ?? 0, windowHeight, h), gen);
+    }, [isCurrentOp, jumpTo]);
     React.useImperativeHandle(ref, () => ({
         scrollToMessageId: (messageId: string) => {
             const items = orderedItemsRef.current;
@@ -462,9 +722,10 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 if (revealTargetRef.current !== target || revealHandledRef.current === target.nonce || !isCurrentOp(gen)) return;
                 const scroll = resolveRevealScroll(orderedItemsRef.current, messageId, null, 0);
                 if (!scroll) return;
-                const done = flatListRef.current?.scrollToIndex({ ...scroll, animated: true });
-                // A bare row never reports a layout: its coarse jump is the whole operation.
-                if (row.type === 'message') void done?.finally(() => dispatch({ type: 'opDone', gen, now: Date.now() }));
+                const windowHeight = flatListRef.current?.getWindowSize().height ?? 0;
+                // A group row then reports the hit's layout and refines
+                // (handleRevealLayout) under the same operation.
+                jumpTo(scroll.index, (h) => rowTopFor(scroll.viewPosition, scroll.viewOffset ?? 0, windowHeight, h), gen);
             };
             if (row.type !== 'message' && collapsedGroupsRef.current.has(row.id)) {
                 manuallyCollapsedRef.current.delete(row.id); // a search reveal is not a manual collapse
@@ -482,7 +743,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             coarse();
             return true;
         },
-    }), [dispatch, isCurrentOp]);
+    }), [dispatch, isCurrentOp, jumpTo]);
 
     const keyExtractor = useCallback((item: DisplayItem) => item.id, []);
 
@@ -677,7 +938,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // A reading restore, under operation `gen`: every step first checks that
     // the operation is still current — the reader scrolling, a newer restore,
     // a blur all end it.
-    const runRestore = useCallback(async (gen: number) => {
+    const runRestore = useCallback((gen: number) => {
         const finish = () => dispatch({ type: 'opDone', gen, now: Date.now() });
         const list = flatListRef.current;
         const saved = savedViewport.get(sessionId);
@@ -713,58 +974,13 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             finish();
             return;
         }
-        // A collapsed-while-away group is shorter than the saved offset into
-        // it — clamp so the restore can't land past the row. Only against a
-        // MEASURED height: on a remount the anchor usually starts as an
-        // estimate (often ~100px), and clamping a legitimate intra=500 against
-        // it would permanently truncate the restore before scrollToIndex ever
-        // measures the row.
-        const isMeasured = (l: ReturnType<typeof list.getLayout>) =>
-            Boolean(l && (l as { isHeightMeasured?: boolean }).isHeightMeasured);
-        const clampIntra = (l: NonNullable<ReturnType<typeof list.getLayout>>, v: number) =>
-            v > l.height - 1 ? Math.max(0, l.height - 1) : v;
-        const layout = list.getLayout(index);
-        if (layout && isMeasured(layout) && layout.height > 0) intra = clampIntra(layout, intra);
-        try {
-            await list.scrollToIndex({ index, animated: false, viewPosition: 0, viewOffset: intra });
-            if (!isCurrentOp(gen)) return;
-            // scrollToIndex staged its own re-measurement passes. At most one
-            // corrective call, for either: the data shifted under it (same id
-            // now at a new index), or the anchor's real measured height turned
-            // out shorter than the saved intra (collapsed-while-away group).
-            const itemsAfter = orderedItemsRef.current;
-            let idx2 = index;
-            if (itemsAfter[index]?.id !== saved.anchorDisplayId) {
-                idx2 = itemsAfter.findIndex((i) => i.id === saved.anchorDisplayId);
-            }
-            if (idx2 < 0) return;
-            const layoutAfter = list.getLayout(idx2);
-            const intra2 = layoutAfter && isMeasured(layoutAfter) && layoutAfter.height > 0
-                ? clampIntra(layoutAfter, intra)
-                : intra;
-            if (idx2 !== index || intra2 !== intra) {
-                await list.scrollToIndex({ index: idx2, animated: false, viewPosition: 0, viewOffset: intra2 });
-            }
-        } finally {
-            finish();
-        }
-    }, [sessionId, dispatch, isCurrentOp]);
+        // The row's top goes `intra` px above the viewport top — once it is
+        // measured, clamped to its real height (a group that folded while
+        // away is shorter than the saved offset into it) — and stays there
+        // while the rows around it are measured (chatPlace.restoreTopFor).
+        jumpTo(index, restoreTopFor(intra), gen);
+    }, [sessionId, dispatch, jumpTo]);
 
-    // Web: the DOM scroller, once the list has one. Resolved on load and on
-    // every layout, so the listeners attach late if they must, and move to a
-    // replacement node.
-    const [scrollNode, setScrollNode] = React.useState<HTMLElement | null>(null);
-    const scrollNodeRef = React.useRef<HTMLElement | null>(null);
-    const resolveScrollNode = useCallback(() => {
-        if (Platform.OS !== 'web') return;
-        const node = ((flatListRef.current as any)?.getScrollableNode?.() as HTMLElement | undefined) ?? null;
-        if (node !== scrollNodeRef.current) { scrollNodeRef.current = node; setScrollNode(node); }
-    }, []);
-    /** Web can read the metrics synchronously; native reports them itself. */
-    const webMetrics = useCallback((): Metrics | undefined => {
-        const n = scrollNodeRef.current;
-        return n ? { offset: n.scrollTop, maxOffset: Math.max(0, n.scrollHeight - n.clientHeight) } : undefined;
-    }, []);
 
     // Remount path: onLoad fires once after the initial window is laid out.
     // Until then FlashList's startRenderingFromBottom owns the position.
@@ -812,6 +1028,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     const tickTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const modeSetRef = React.useRef<Mode>('following');
     dispatchRef.current = (event: ScrollEvent) => {
+        const prevOp = scrollStateRef.current.op;
         const r = nextScrollState(scrollStateRef.current, event);
         scrollStateRef.current = r.state;
         if (r.state.mode !== modeSetRef.current) { modeSetRef.current = r.state.mode; setMode(r.state.mode); }
@@ -824,6 +1041,23 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
             }, Math.max(0, until - event.now) + 5);
         }
         for (const effect of r.effects) runEffect(effect);
+        const s = r.state;
+        // The reader's hands end FlashList's initial "go to the last row".
+        if (event.type === 'wheel' || event.type === 'key' || event.type === 'dragStart' || event.type === 'pointerDown' || event.type === 'momentumStart') {
+            flatListRef.current?.cancelInitialScroll();
+        }
+        if (event.type === 'scroll' && Platform.OS !== 'web') {
+            nativeReportSeqRef.current++;
+            if (jumpRef.current) reconcileJump();
+        }
+        // The place-keeper follows the machine: no anchor while following;
+        // while reading, the reader's top row, re-taken on every scroll and
+        // whenever an operation ends or is taken over (a jump in flight keeps
+        // its own target instead).
+        if (!s.op) {
+            if (s.mode === 'following') placeRef.current = null;
+            else if (event.type === 'scroll' || placeRef.current === null || prevOp !== null) syncAnchorToViewport();
+        }
     };
     React.useEffect(() => () => {
         if (tickTimerRef.current) clearTimeout(tickTimerRef.current);
@@ -839,7 +1073,9 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     }, [orderedItems, dispatch, webMetrics]);
     const handleContentSizeChange = useCallback(() => {
         dispatch({ type: 'geometry', metrics: webMetrics(), now: Date.now() });
-    }, [dispatch, webMetrics]);
+        // A jump the estimated end could not reach may be reachable now.
+        if (jumpRef.current) reconcileJump();
+    }, [dispatch, webMetrics, reconcileJump]);
     const layoutHeightRef = React.useRef<number | null>(null);
     const handleLayout = useCallback((e: LayoutChangeEvent) => {
         resolveScrollNode();
@@ -931,16 +1167,12 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
         dispatch({ type: 'bottomPressed', now: Date.now() });
     }, [dispatch]);
 
-    // A prompt-stepper jump, as a navigate operation: the reader reads there.
-    // FlashList's scrollToIndex cannot be cancelled once started (its
-    // preparation passes run to completion) — the operation's generation at
-    // least keeps follow from fighting it, and ends it cleanly.
+    // A prompt-stepper jump, as a navigate operation: the reader reads there,
+    // with the prompt at the top of the view. The reader's input cancels it.
     const jumpToIndex = useCallback((index: number) => {
         dispatch({ type: 'navigate', now: Date.now() });
-        const gen = scrollStateRef.current.op?.gen ?? -1;
-        void flatListRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0 })
-            .finally(() => dispatch({ type: 'opDone', gen, now: Date.now() }));
-    }, [dispatch]);
+        jumpTo(index, () => 0, scrollStateRef.current.op?.gen ?? -1);
+    }, [dispatch, jumpTo]);
 
     // Track the topmost visible row so scrubbing steps relative to the current
     // viewport, not a stored pointer that manual scrolling would invalidate.
@@ -956,7 +1188,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
     // Always relative to the topmost visible row (symmetric with scrubToNextPrompt).
     // Do NOT special-case "at bottom" to target the newest prompt: at the bottom
     // that prompt is usually already on screen in the last screenful, so
-    // scrollToIndex(viewPosition:0) can't lift it to the top and the press is a
+    // a jump can't lift it above the end of the list and the press is a
     // no-op. Using the real viewport top always steps to a prompt above the fold.
     const scrubToPrevPrompt = useCallback(() => {
         const idxs = promptIndicesRef.current;
@@ -1086,6 +1318,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 data={orderedItems}
                 keyExtractor={keyExtractor}
                 getItemType={getItemType}
+                onCommitLayoutEffect={handleCommit}
                 maintainVisibleContentPosition={{
                     // startRenderingFromBottom: first paint starts at the bottom
                     // (newest) — the fast path; FlashList only mounts the visible
@@ -1096,7 +1329,9 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                     // threshold never anchored anything: on iOS it animates to
                     // offset 0 after an anchor correction near the top — a
                     // jump to the oldest message while paging (gpt-6-astra).
-                    // Anchoring prepended pages is MVCP itself.
+                    // Keeping the reader's place (prepended pages, rows measured
+                    // taller, folds) is chatPlace's, not the library's:
+                    appOwnedCorrection: true,
                 }}
                 keyboardShouldPersistTaps="handled"
                 keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'none'}
@@ -1114,7 +1349,7 @@ const ChatListInternal = React.memo(React.forwardRef<ChatListHandle, {
                 onViewableItemsChanged={handleViewableItemsChanged}
                 viewabilityConfig={VIEWABILITY_CONFIG}
                 ListHeaderComponent={<ListHeader isLoadingOlder={props.isLoadingOlder} />}
-                ListFooterComponent={<ListFooter sessionId={props.sessionId} />}
+                ListFooterComponent={<ListFooter sessionId={props.sessionId} onHeight={handleFooterHeight} />}
                 onStartReached={handleLoadOlder}
                 onStartReachedThreshold={0.5}
             />
