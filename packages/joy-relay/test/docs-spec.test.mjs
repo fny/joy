@@ -28,6 +28,8 @@ describe('relay OpenAPI spec', () => {
   it('describes every route and names every path parameter', () => {
     for (const { path, method, op } of ops()) {
       expect(op.summary, `${method} ${path}`).toBeTruthy();
+      expect(op.summary.split(' ').length, `short title: ${method} ${path}`).toBeLessThanOrEqual(5);
+      expect(op.description, `${method} ${path}`).toBeTruthy();
       expect(path, `${method} ${path}`).not.toMatch(/\{p\d+\}/);
     }
     expect(spec.paths['/joy/v2/push-tokens/{token}'].delete.summary).toMatch(/push token/i);

@@ -52,11 +52,19 @@ describe("buildOpenApiSpec", () => {
   });
 
   it("openapi.types.json matches what the handlers' types generate (else: node scripts/openapi-types/gen-daemon.mjs)", async () => {
-    // @ts-expect-error — a plain .mjs script outside the package
     const { generateDaemonTypes } = await import("../../../../scripts/openapi-types/gen-daemon.mjs");
     const committed = JSON.parse(readFileSync(new URL("./openapi.types.json", import.meta.url), "utf8"));
     expect(generateDaemonTypes()).toEqual(committed);
   }, 60_000);
+
+  it("every route has a short title and a description", () => {
+    for (const [path, ops] of Object.entries<any>(spec.paths)) {
+      for (const [method, op] of Object.entries<any>(ops)) {
+        expect(op.summary.split(" ").length, `short title: ${method} ${path}`).toBeLessThanOrEqual(5);
+        expect(op.description, `${method} ${path}`).toBeTruthy();
+      }
+    }
+  });
 
   it("GET query params come from the request schema", () => {
     const usage = spec.paths["/usage"].get;

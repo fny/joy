@@ -339,8 +339,10 @@ export interface MachineOp {
   scope: "machine";
   rpcName: string;
   http: { method: HttpMethod; path: string };
-  /** One-line human description — surfaces in /openapi.json. */
+  /** Short title in plain English — surfaces in /openapi.json. */
   summary?: string;
+  /** One or two plain sentences on what the operation does (/openapi.json). */
+  description?: string;
   /** Request params (query/body + path merged, JSON Schema `object`). */
   params?: OpSchema;
   /** Success response shape (JSON Schema). */
@@ -357,6 +359,7 @@ export interface SessionOp {
   /** null → no dedicated HTTP route (killSession is covered by DELETE /sessions/:id). */
   http: { method: HttpMethod; path: string } | null;
   summary?: string;
+  description?: string;
   params?: OpSchema;
   result?: OpSchema;
   handler: (session: AgentSession, params: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -453,7 +456,8 @@ export const machineOps: MachineOp[] = [
     name: "list",
     scope: "machine",
     rpcName: "joy-list-sessions",
-    summary: "List all sessions on this machine (includes agent flavor per record)",
+    summary: "List sessions",
+    description: "Returns every session on this machine. Each record includes the agent that runs it.",
     http: { method: "GET", path: "/sessions" },
     handler: (registry) => registry.list().map(s => s.toJSON()),
   },
@@ -461,7 +465,8 @@ export const machineOps: MachineOp[] = [
     name: "codexModels",
     scope: "machine",
     rpcName: "joy-codex-models",
-    summary: "Curated codex model list",
+    summary: "List Codex models",
+    description: "Returns the Codex models that joy offers.",
     http: { method: "GET", path: "/codex/models" },
     // The codex model catalog for the app's picker. FAST PATH: codex's own
     // on-disk cache ($CODEX_HOME/models_cache.json — codex refreshes it on
@@ -484,7 +489,8 @@ export const machineOps: MachineOp[] = [
     name: "agyModels",
     scope: "machine",
     rpcName: "joy-agy-models",
-    summary: "Antigravity (agy) model list — display names, as `agy --model` takes them",
+    summary: "List Antigravity models",
+    description: "Returns the Antigravity models by display name. These are the names that `agy --model` accepts.",
     http: { method: "GET", path: "/agy/models" },
     handler: async () => {
       try {
@@ -499,7 +505,8 @@ export const machineOps: MachineOp[] = [
     name: "opencodeModels",
     scope: "machine",
     rpcName: "joy-opencode-models",
-    summary: "opencode model catalog — what the server itself reports (GET /provider), the curated pair marked recommended",
+    summary: "List opencode models",
+    description: "Returns the models that the opencode server reports. The two recommended models are marked.",
     http: { method: "GET", path: "/opencode/models" },
     // Live: one short-lived server boot, memoised ten minutes; the curated
     // pair when the server cannot be asked. Rows: {id: "<providerID>/<modelID>",
@@ -515,7 +522,8 @@ export const machineOps: MachineOp[] = [
     name: "piModels",
     scope: "machine",
     rpcName: "joy-pi-models",
-    summary: "pi model catalog — `pi --list-models`, the curated pair marked recommended",
+    summary: "List pi models",
+    description: "Returns the models from `pi --list-models`. The two recommended models are marked.",
     http: { method: "GET", path: "/pi/models" },
     // Rows: {id: "<provider>/<model id>" (what `pi --model` takes), providerID,
     // modelID, displayName, isDefault, recommended, thinking}. Memoised ten
@@ -529,7 +537,8 @@ export const machineOps: MachineOp[] = [
     name: "harnessCapabilities",
     scope: "machine",
     rpcName: "joy-harness-capabilities",
-    summary: "What each harness can be asked for on create and live (models, effort, permissions, resume, extra args)",
+    summary: "Get agent capabilities",
+    description: "Returns what each agent supports when a session starts and while it runs: models, effort, permission modes, resume and extra arguments.",
     http: { method: "GET", path: "/harnesses/capabilities" },
     // The ONE table the app renders the new-session screen and the session
     // settings from, and the daemon validates create against
@@ -541,7 +550,8 @@ export const machineOps: MachineOp[] = [
     name: "pastSessions",
     scope: "machine",
     rpcName: "joy-past-sessions",
-    summary: "Resumable past conversations of one harness in one directory (the new-session picker)",
+    summary: "List past conversations",
+    description: "Returns the past conversations of one agent in one folder that a new session can resume.",
     http: { method: "GET", path: "/past-sessions" },
     params: { type: "object", required: ["harness", "directory"], properties: { harness: { type: "string", enum: [...HARNESSES] }, directory: { type: "string" } } },
     // {id, title, updatedAt, sizeBytes} newest first, for ANY harness —
@@ -565,7 +575,8 @@ export const machineOps: MachineOp[] = [
     name: "opencodeSessions",
     scope: "machine",
     rpcName: "joy-opencode-sessions",
-    summary: "List resumable opencode server sessions",
+    summary: "List opencode sessions",
+    description: "Returns the opencode server sessions that a new session can resume.",
     http: { method: "GET", path: "/opencode/sessions" },
     // Past-sessions picker: opencode sessions recorded for a directory,
     // newest first. Spawns a short-lived server (see listOpencodeSessionsForCwd).
@@ -585,7 +596,8 @@ export const machineOps: MachineOp[] = [
     name: "opencodeSetModel",
     scope: "machine",
     rpcName: "joy-opencode-set-model",
-    summary: "Switch a live opencode session's model",
+    summary: "Change opencode model",
+    description: "Changes the model of a running opencode session.",
     http: { method: "POST", path: "/sessions/:id/opencode/model" },
     // Mid-session model switch, allowlist-validated (same policy as create).
     handler: async (registry, params) => {
@@ -603,7 +615,8 @@ export const machineOps: MachineOp[] = [
     name: "refreshCommands",
     scope: "machine",
     rpcName: "joy-refresh-commands",
-    summary: "Re-scan slash commands on this machine",
+    summary: "Refresh slash commands",
+    description: "Scans this machine again for slash commands.",
     http: { method: "POST", path: "/commands/refresh" },
     // Machine-page refresh: re-scan personal + plugins + every known project
     // (prunes removed ones), push the union to machine metadata, and return it.
@@ -613,7 +626,8 @@ export const machineOps: MachineOp[] = [
     name: "get",
     scope: "machine",
     rpcName: "joy-get-session",
-    summary: "Fetch one session record",
+    summary: "Get session",
+    description: "Returns one session record.",
     http: { method: "GET", path: "/sessions/:id" },
     handler: async (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -633,7 +647,8 @@ export const machineOps: MachineOp[] = [
     name: "create",
     scope: "machine",
     rpcName: "joy-create-session",
-    summary: "Spawn an agent session (claude|codex|opencode|pi|agy) in a directory — what each harness accepts is GET /v2/harnesses (joy-harness-capabilities)",
+    summary: "Create session",
+    description: "Starts an agent session (claude, codex, opencode, pi or agy) in a folder. The agent capabilities route lists what each agent accepts.",
     http: { method: "POST", path: "/sessions" },
     params: {
       type: "object",
@@ -725,7 +740,8 @@ export const machineOps: MachineOp[] = [
     name: "fork",
     scope: "machine",
     rpcName: "joy-fork-session",
-    summary: "Fork a session from its last message into a NEW session (claude: --resume <id> --fork-session)",
+    summary: "Fork session",
+    description: "Starts a new session that continues from the last message of this session.",
     http: { method: "POST", path: "/sessions/:id/fork" },
     // ONE contract for every harness: {ok:true, localSessionId} or
     // {ok:false, error} with a sentence the app shows as-is. Claude forks
@@ -780,7 +796,8 @@ export const machineOps: MachineOp[] = [
     name: "handoff",
     scope: "machine",
     rpcName: "joy-handoff",
-    summary: "Hand a session's work to another model: the source writes a handoff note, a new session of the chosen harness/model picks it up in the same cwd",
+    summary: "Hand off session",
+    description: "Moves the work to another model. The session writes a handoff note, and a new session in the same folder continues from it.",
     http: { method: "POST", path: "/sessions/:id/handoff" },
     params: { type: "object", required: ["agent"], properties: { agent: { type: "string", enum: ["claude", "codex", "opencode", "pi", "agy"] }, model: { type: "string" }, effort: { type: "string" }, permissionMode: { type: "string" } } },
     // Returns at once with {ok, pending:true}; progress is published on the
@@ -815,7 +832,8 @@ export const machineOps: MachineOp[] = [
     name: "handback",
     scope: "machine",
     rpcName: "joy-handback",
-    summary: "Hand a picked-up session's work back to the session it came from (the target writes a note; the source receives it as a prompt)",
+    summary: "Hand back session",
+    description: "Returns handed-off work to the session that it came from. The new session writes a note, and the original session gets it as a prompt.",
     http: { method: "POST", path: "/sessions/:id/handback" },
     handler: async (registry, params) => {
       const id = String(params.id ?? "");
@@ -845,7 +863,8 @@ export const machineOps: MachineOp[] = [
     name: "teleportExport",
     scope: "machine",
     rpcName: "joy-teleport-export",
-    summary: "Package a session's conversation to continue it on ANOTHER machine (claude: the resumable transcript tail)",
+    summary: "Export session",
+    description: "Packages the conversation of a session so that another machine can continue it.",
     http: { method: "POST", path: "/sessions/:id/teleport-export" },
     // Files are NOT included — the folder is assumed to exist (synced) on the
     // target. Only the transcript travels, cut at the last compaction boundary
@@ -884,7 +903,8 @@ export const machineOps: MachineOp[] = [
     name: "teleportImport",
     scope: "machine",
     rpcName: "joy-teleport-import",
-    summary: "Receive a teleported conversation: write the transcript under the folder's project dir and resume it here",
+    summary: "Import session",
+    description: "Receives a conversation from another machine, writes its transcript for the folder and resumes it here.",
     http: { method: "POST", path: "/teleport-import" },
     params: {
       type: "object", required: ["cwd", "claudeSessionId", "transcriptBase64"],
@@ -1011,7 +1031,8 @@ export const machineOps: MachineOp[] = [
     name: "restart",
     scope: "machine",
     rpcName: "joy-restart-session",
-    summary: "Relaunch a session in place",
+    summary: "Restart session",
+    description: "Starts the agent of a session again in the same place.",
     http: { method: "POST", path: "/sessions/:id/restart" },
     // Kills the window and starts a fresh claude in the same cwd resuming
     // the same conversation (--resume, or --continue when the claude session
@@ -1035,7 +1056,8 @@ export const machineOps: MachineOp[] = [
     name: "kill",
     scope: "machine",
     rpcName: "joy-kill-session",
-    summary: "Kill one session",
+    summary: "Stop session",
+    description: "Stops one session and closes its agent.",
     http: { method: "DELETE", path: "/sessions/:id" },
     params: {
       type: "object",
@@ -1082,7 +1104,8 @@ export const machineOps: MachineOp[] = [
     name: "storage",
     scope: "machine",
     rpcName: "joy-storage",
-    summary: "What every session leaves under ~/.joy on this machine — media, record, queue, receipts, ledger rows — with size and age, plus the shared and orphaned remainder (domain/footprint.ts)",
+    summary: "Get storage use",
+    description: "Returns what each session keeps under ~/.joy on this machine, with size and age. It also lists shared and orphaned files.",
     http: { method: "GET", path: "/storage" },
     result: { type: "object", properties: { ok: { type: "boolean" }, homeDir: { type: "string" }, totalBytes: { type: "number" }, sessions: { type: "array", items: { type: "object" } }, shared: { type: "object" } } },
     handler: (registry) => {
@@ -1094,7 +1117,8 @@ export const machineOps: MachineOp[] = [
     name: "storageNuke",
     scope: "machine",
     rpcName: "joy-storage-nuke",
-    summary: "Remove everything the storage scan attributed to the given sessions: media, record, queue, receipts and ledger rows. A live session is killed first only with killLive; otherwise it is reported and left alone. The relay row is the app's to delete afterwards",
+    summary: "Delete session files",
+    description: "Deletes the files that the storage scan found for the given sessions. A running session stops first only with `killLive`. The app deletes the relay record separately.",
     http: { method: "POST", path: "/storage/nuke" },
     params: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, tmux: { type: "array", items: { type: "string" }, description: "Loose tmux socket labels from the storage report (kill-server + unlink)" }, killLive: { type: "boolean" } } },
     result: { type: "object", properties: { ok: { type: "boolean" }, bytesFreed: { type: "number" }, results: { type: "array", items: { type: "object" } }, tmux: { type: "array", items: { type: "object" } } } },
@@ -1121,7 +1145,8 @@ export const machineOps: MachineOp[] = [
     name: "restorable",
     scope: "machine",
     rpcName: "joy-restorable-sessions",
-    summary: "Sessions this machine lost to a reboot and could bring back",
+    summary: "List lost sessions",
+    description: "Returns the sessions that a reboot stopped and that joy can start again.",
     // NOT /sessions/restorable: `GET /sessions/:id` is declared earlier and
     // routes are matched in declaration order, so the literal path lost to
     // the id pattern and the request became a lookup for a session called
@@ -1136,7 +1161,8 @@ export const machineOps: MachineOp[] = [
     name: "restore",
     scope: "machine",
     rpcName: "joy-restore-sessions",
-    summary: "Relaunch sessions lost to a reboot, resuming each conversation",
+    summary: "Restore sessions",
+    description: "Starts the sessions that a reboot stopped, and resumes each conversation.",
     params: {
       type: "object",
       properties: {
@@ -1156,7 +1182,8 @@ export const machineOps: MachineOp[] = [
     name: "killAll",
     scope: "machine",
     rpcName: "joy-kill-all-sessions",
-    summary: "Kill every session on this machine",
+    summary: "Stop all sessions",
+    description: "Stops every session on this machine.",
     http: { method: "POST", path: "/sessions/kill-all" },
     // Kill every session's tmux window (active AND detached) and archive them.
     handler: (registry) => ({ ok: true, killed: registry.killAll() }),
@@ -1165,7 +1192,8 @@ export const machineOps: MachineOp[] = [
     name: "restartDaemon",
     scope: "machine",
     rpcName: "joy-restart-daemon",
-    summary: "Exec-restart the daemon (tmux sessions survive)",
+    summary: "Restart daemon",
+    description: "Restarts the daemon process. The tmux sessions keep running.",
     http: { method: "POST", path: "/daemon/restart" },
     // Re-exec the daemon. Running Claude sessions live in tmux and survive;
     // recover() re-adopts them. Responds first, then restarts shortly after.
@@ -1175,7 +1203,8 @@ export const machineOps: MachineOp[] = [
     name: "notify",
     scope: "machine",
     rpcName: "joy-notify",
-    summary: "Send a push notification to all devices",
+    summary: "Send notification",
+    description: "Sends a push notification to all devices.",
     http: { method: "POST", path: "/notify" },
     // Push a notification to the user's devices, via the daemon's authed relay.
     handler: async (registry, params) => {
@@ -1194,7 +1223,8 @@ export const machineOps: MachineOp[] = [
     name: "send",
     scope: "machine",
     rpcName: "joy-send",
-    summary: "Deliver text to a session (queue-routed); optional provenance stamp for agent-to-agent messages",
+    summary: "Send message",
+    description: "Sends text to a session through its queue. A message from another agent can say where it came from.",
     params: {
       type: "object",
       required: ["id", "text"],
@@ -1315,7 +1345,8 @@ export const machineOps: MachineOp[] = [
     name: "queueList",
     scope: "machine",
     rpcName: "joy-queue-list",
-    summary: "List a session's dispatch queue",
+    summary: "List queue",
+    description: "Returns the queued messages of a session.",
     http: { method: "GET", path: "/sessions/:id/queue" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -1329,7 +1360,8 @@ export const machineOps: MachineOp[] = [
     name: "queueGet",
     scope: "machine",
     rpcName: "joy-queue-get",
-    summary: "One command by id — durable state, terminal reason and the runtime turn attributed to it (what joy ask / wait --turn bind on)",
+    summary: "Get queued message",
+    description: "Returns one queued message: its state, why it ended and the agent turn that it started.",
     params: { type: "object", required: ["id", "qid"], properties: { id: { type: "string" }, qid: { type: "string", description: "the queued_id a send returned" } } },
     result: {
       type: "object",
@@ -1362,7 +1394,8 @@ export const machineOps: MachineOp[] = [
     name: "queueAdd",
     scope: "machine",
     rpcName: "joy-queue-add",
-    summary: "Append a message to the dispatch queue",
+    summary: "Add to queue",
+    description: "Adds a message to the end of the queue of a session.",
     http: { method: "POST", path: "/sessions/:id/queue" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -1398,7 +1431,8 @@ export const machineOps: MachineOp[] = [
     name: "queueResume",
     scope: "machine",
     rpcName: "joy-queue-resume",
-    summary: "Resume a paused queue",
+    summary: "Resume queue",
+    description: "Starts a paused queue again.",
     http: { method: "POST", path: "/sessions/:id/queue/resume" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -1412,7 +1446,8 @@ export const machineOps: MachineOp[] = [
     name: "queueEdit",
     scope: "machine",
     rpcName: "joy-queue-edit",
-    summary: "Edit a queued message's text",
+    summary: "Edit queued message",
+    description: "Changes the text of a message that is still in the queue.",
     http: { method: "POST", path: "/sessions/:id/queue/:qid" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -1428,7 +1463,8 @@ export const machineOps: MachineOp[] = [
     name: "queueCancel",
     scope: "machine",
     rpcName: "joy-queue-cancel",
-    summary: "Cancel a queued message",
+    summary: "Cancel queued message",
+    description: "Removes a message from the queue before the agent gets it.",
     http: { method: "DELETE", path: "/sessions/:id/queue/:qid" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -1442,7 +1478,8 @@ export const machineOps: MachineOp[] = [
     name: "queueReorder",
     scope: "machine",
     rpcName: "joy-queue-reorder",
-    summary: "Move a queued message within the queue",
+    summary: "Move queued message",
+    description: "Moves a message to a different place in the queue.",
     http: { method: "POST", path: "/sessions/:id/queue/:qid/move" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? params.session_id ?? ""));
@@ -1456,7 +1493,8 @@ export const machineOps: MachineOp[] = [
     name: "sendKeys",
     scope: "machine",
     rpcName: "joy-send-keys",
-    summary: "Type raw key tokens into the tmux pane (manual intervention)",
+    summary: "Send keys",
+    description: "Types raw keys into the tmux pane of the session. This is for manual fixes only.",
     http: { method: "POST", path: "/sessions/:id/keys" },
     // Raw keyboard intervention: bracketed key tokens (git commit<Enter><C-c>;
     // see keyTokens.ts for the dialect table). Unlike send, nothing is
@@ -1481,7 +1519,8 @@ export const machineOps: MachineOp[] = [
     name: "setModel",
     scope: "machine",
     rpcName: "joy-set-model",
-    summary: "Switch a live session's model (opencode: server-side now; codex: the next turn; others: refused)",
+    summary: "Change model",
+    description: "Changes the model of a running session. opencode changes it at once and codex on the next turn. Other agents refuse.",
     http: { method: "POST", path: "/sessions/:id/model" },
     params: { type: "object", required: ["model"], properties: { model: { type: "string", description: "A catalog id from GET /v2/harnesses/:harness/models" } } },
     // ONE contract for every harness: {ok, model} or {ok:false, error} with
@@ -1515,7 +1554,8 @@ export const machineOps: MachineOp[] = [
     name: "setEffort",
     scope: "machine",
     rpcName: "joy-set-effort",
-    summary: "Switch a live session's effort (codex: next turn; opencode: the model's reasoning variant; others: refused)",
+    summary: "Change effort",
+    description: "Changes the reasoning effort of a running session. codex changes it on the next turn. Other agents except opencode refuse.",
     http: { method: "POST", path: "/sessions/:id/effort" },
     params: { type: "object", required: ["effort"], properties: { effort: { type: "string", description: "A level from the harness's capabilities (codex) or a variant of the session's model (opencode); \"default\" clears" } } },
     handler: async (registry, params) => {
@@ -1547,7 +1587,8 @@ export const machineOps: MachineOp[] = [
     name: "setMode",
     scope: "machine",
     rpcName: "joy-set-mode",
-    summary: "Switch permission mode (claude: pane; codex: next turn; opencode: live; pi/agy: refused)",
+    summary: "Change permission mode",
+    description: "Changes the permission mode of a running session. pi and agy refuse.",
     http: { method: "POST", path: "/sessions/:id/mode" },
     // Absolute permission-mode set: detects the current mode from the pane
     // footer, walks Shift+Tab to the target, verifies the footer afterwards.
@@ -1568,7 +1609,8 @@ export const machineOps: MachineOp[] = [
     name: "setNotifications",
     scope: "machine",
     rpcName: "joy-set-notifications",
-    summary: "Silence (or restore) this session's push notifications on every device",
+    summary: "Mute or unmute session",
+    description: "Turns the push notifications of this session off or on for all devices.",
     http: { method: "POST", path: "/sessions/:id/notifications" },
     params: { type: "object", required: ["muted"], properties: { muted: { type: "boolean", description: "true silences turn-done, permission, question and agent <joy-notify> pushes" } } },
     // Enforced daemon-side because that is the last point before the relay
@@ -1599,7 +1641,8 @@ export const machineOps: MachineOp[] = [
     name: "sessionProcesses",
     scope: "machine",
     rpcName: "joy-session-processes",
-    summary: "Every process under the session's agent — pid, parent, depth, name, command line, CPU right now, resident memory, age — in tree order, with totals (domain/procStats.ts processTreeList). Rooted at the agent pid; a session without one (detached, record-only) is rooted at its tmux pane shells instead",
+    summary: "List processes",
+    description: "Returns every process under the agent of a session as a tree. Each row has the pid, parent, name, command, CPU, memory and age.",
     http: { method: "GET", path: "/sessions/:id/processes" },
     result: { type: "object", properties: { ok: { type: "boolean" }, roots: { type: "array", items: { type: "number" } }, sampledAt: { type: "number" }, totals: { type: "object" }, processes: { type: "array", items: { type: "object" } }, error: { type: "string" } } },
     handler: async (registry, params) => {
@@ -1630,7 +1673,8 @@ export const machineOps: MachineOp[] = [
     name: "pane",
     scope: "machine",
     rpcName: "joy-pane",
-    summary: "Capture the tmux pane (ANSI text)",
+    summary: "Get pane",
+    description: "Returns the current tmux pane of the session as ANSI text.",
     http: { method: "GET", path: "/sessions/:id/pane" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -1647,7 +1691,8 @@ export const machineOps: MachineOp[] = [
     name: "resize",
     scope: "machine",
     rpcName: "joy-resize",
-    summary: "Resize the tmux window (cols/rows)",
+    summary: "Resize pane",
+    description: "Sets the size of the tmux window in columns and rows.",
     http: { method: "POST", path: "/sessions/:id/resize" },
     // Set the pane's column/row size. The viewing client calls this on
     // connect and when its width changes — last connector drives the width.
@@ -1670,7 +1715,8 @@ export const machineOps: MachineOp[] = [
     name: "transcript",
     scope: "machine",
     rpcName: "joy-transcript",
-    summary: "Parsed transcript slice for a session",
+    summary: "Get transcript",
+    description: "Returns a part of the parsed transcript of a session.",
     http: { method: "GET", path: "/sessions/:id/transcript" },
     handler: (registry, params) => {
       const session = registry.get(String(params.id ?? ""));
@@ -1686,7 +1732,8 @@ export const machineOps: MachineOp[] = [
     name: "check",
     scope: "machine",
     rpcName: "joy-check",
-    summary: "Can this session be talked to right now? idle | busy | needs_input, with what it is waiting on",
+    summary: "Check session",
+    description: "Tells if the session can take a message now. The state is idle, busy or needs_input, with what it waits for.",
     params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
     result: { type: "object", properties: { state: { type: "string", enum: ["idle", "busy", "needs_input", "ended"] }, busySince: { type: "number" }, queue: { type: "number" }, approvals: { type: "array" }, question: { type: "string" } } },
     http: { method: "GET", path: "/sessions/:id/check" },
@@ -1697,7 +1744,8 @@ export const machineOps: MachineOp[] = [
     name: "approvalsList",
     scope: "machine",
     rpcName: "joy-approvals",
-    summary: "Tool-call approvals the harness is holding for a human (codex); empty for agents without the concept",
+    summary: "List approvals",
+    description: "Returns the tool calls that wait for a person to approve them. Only codex holds approvals. Other agents return an empty list.",
     params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
     result: { type: "object", properties: { ok: { type: "boolean" }, approvals: { type: "array" } } },
     http: { method: "GET", path: "/sessions/:id/approvals" },
@@ -1712,7 +1760,8 @@ export const machineOps: MachineOp[] = [
     name: "approvalsAnswer",
     scope: "machine",
     rpcName: "joy-approvals-answer",
-    summary: "Answer a held approval: { requestId, decision: 'allow' | 'deny' }",
+    summary: "Answer approval",
+    description: "Allows or denies a held tool call. The body gives the `requestId` and a `decision`: allow or deny.",
     params: { type: "object", required: ["id", "requestId", "decision"], properties: { id: { type: "string" }, requestId: { type: "string" }, decision: { type: "string", enum: ["allow", "deny"] } } },
     result: { type: "object", properties: { ok: { type: "boolean" }, error: { type: "string" } } },
     http: { method: "POST", path: "/sessions/:id/approvals" },
@@ -1728,7 +1777,8 @@ export const machineOps: MachineOp[] = [
     name: "envList",
     scope: "machine",
     rpcName: "joy-env-list",
-    summary: "Names in the sealed environment store (~/.joy/env.sealed) — values never leave the daemon",
+    summary: "List environment variables",
+    description: "Returns the names in the sealed environment store. The values never leave the daemon.",
     result: { type: "object", properties: { ok: { type: "boolean" }, names: { type: "array", items: { type: "string" } }, error: { type: "string" } } },
     http: { method: "GET", path: "/env" },
     handler: () => listEnvVars(),
@@ -1737,7 +1787,8 @@ export const machineOps: MachineOp[] = [
     name: "envSet",
     scope: "machine",
     rpcName: "joy-env-set",
-    summary: "Set a variable in the sealed store; reaches every agent spawned from now on",
+    summary: "Set environment variable",
+    description: "Saves a variable in the sealed store. Every agent that starts after this gets it.",
     params: { type: "object", required: ["name", "value"], properties: { name: { type: "string" }, value: { type: "string" } } },
     result: { type: "object", properties: { ok: { type: "boolean" }, error: { type: "string" } } },
     http: { method: "POST", path: "/env" },
@@ -1753,7 +1804,8 @@ export const machineOps: MachineOp[] = [
     name: "envUnset",
     scope: "machine",
     rpcName: "joy-env-unset",
-    summary: "Remove a variable from the sealed store",
+    summary: "Remove environment variable",
+    description: "Removes a variable from the sealed store.",
     params: { type: "object", required: ["name"], properties: { name: { type: "string" } } },
     result: { type: "object", properties: { ok: { type: "boolean" }, existed: { type: "boolean" }, error: { type: "string" } } },
     http: { method: "DELETE", path: "/env/:name" },
@@ -1764,7 +1816,8 @@ export const machineOps: MachineOp[] = [
     name: "status",
     scope: "machine",
     rpcName: "joy-status",
-    summary: "Daemon + sessions snapshot",
+    summary: "Get status",
+    description: "Returns the state of the daemon and a count of its sessions.",
     http: { method: "GET", path: "/status" },
     handler: (registry) => ({
       ok: true,
@@ -1782,7 +1835,8 @@ export const machineOps: MachineOp[] = [
     name: "sessionLog",
     scope: "machine",
     rpcName: "joy-session-log",
-    summary: "Raw session log tail",
+    summary: "Get session log",
+    description: "Returns the end of the raw log of a session.",
     http: { method: "GET", path: "/sessions/:id/log" },
     // Ship the session's transcript JSONL so the app can offer it as a
     // download. Base64 inside the encrypted RPC envelope — capped so a
@@ -1805,7 +1859,8 @@ export const machineOps: MachineOp[] = [
     name: "usage",
     scope: "machine",
     rpcName: "joy-usage",
-    summary: "Cost/token report from local transcripts (cached, background-warmed)",
+    summary: "Get usage",
+    description: "Returns cost and token totals from the local transcripts. The daemon caches the report.",
     params: {
       type: "object",
       properties: {
@@ -1827,7 +1882,8 @@ export const machineOps: MachineOp[] = [
     name: "limits",
     scope: "machine",
     rpcName: "joy-limits",
-    summary: "Server-truth account quota windows for claude (OAuth usage API) and codex (rollout rate_limits)",
+    summary: "Get limits",
+    description: "Returns the current quota windows of the Claude and Codex accounts, from their own services.",
     result: {
       type: "object",
       properties: {
@@ -1859,7 +1915,8 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigRead",
     scope: "machine",
     rpcName: "joy-agent-config-read",
-    summary: "Read an agent's config file (raw + parsed)",
+    summary: "Read agent configuration",
+    description: "Returns the configuration file of an agent, as raw text and parsed.",
     http: { method: "GET", path: "/agent-config/:agent" },
     // Raw + parsed view of the agent's own config file (claude settings.json,
     // codex config.toml, opencode opencode.json, pi settings.json).
@@ -1869,7 +1926,8 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigSet",
     scope: "machine",
     rpcName: "joy-agent-config-set",
-    summary: "Merge JSON-path assignment lines into an agent's config (backup kept)",
+    summary: "Update agent configuration",
+    description: "Merges JSON-path assignments into the configuration of an agent. The daemon keeps a backup.",
     http: { method: "POST", path: "/agent-config/:agent/set" },
     // Merge JSON-path assignment lines (`examples[0].title = "hi"`; value null
     // deletes) into the existing config — other keys untouched, previous file
@@ -1884,7 +1942,8 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigWrite",
     scope: "machine",
     rpcName: "joy-agent-config-write",
-    summary: "Replace an agent's config file (must parse)",
+    summary: "Replace agent configuration",
+    description: "Replaces the configuration file of an agent. The new file must parse.",
     http: { method: "POST", path: "/agent-config/:agent" },
     // Full raw replacement — refused unless it parses as the file's format.
     handler: async (_registry, params) => writeAgentConfigRaw(String(params.agent ?? ""), String(params.raw ?? "")),
@@ -1893,7 +1952,8 @@ export const machineOps: MachineOp[] = [
     name: "agentConfigSchema",
     scope: "machine",
     rpcName: "joy-agent-config-schema",
-    summary: "Published JSON Schema for an agent's config (fetched + cached)",
+    summary: "Get agent configuration schema",
+    description: "Returns the published JSON Schema for the configuration of an agent. The daemon caches it.",
     http: { method: "GET", path: "/agent-config/:agent/schema" },
     // Published JSON Schema (claude via schemastore, opencode via its own
     // $schema URL), fetched by the daemon and disk-cached for offline reuse.
@@ -1903,7 +1963,8 @@ export const machineOps: MachineOp[] = [
     name: "sessionUsage",
     scope: "machine",
     rpcName: "joy-session-usage",
-    summary: "Per-session cost rows (subagent burn rolled into parent)",
+    summary: "Get usage per session",
+    description: "Returns the cost of each session. The cost of a subagent counts toward its parent session.",
     http: { method: "GET", path: "/usage/sessions" },
     // Per-session cost rows from usage.ts (keyed by claude session id, with
     // subagent burn rolled into the parent and a per-model breakdown).
@@ -1924,7 +1985,8 @@ export const machineOps: MachineOp[] = [
     name: "listLogs",
     scope: "machine",
     rpcName: "joy-list-logs",
-    summary: "List past-session transcripts for a directory",
+    summary: "List past transcripts",
+    description: "Returns the past transcripts for a folder.",
     http: { method: "GET", path: "/logs" },
     // List every Claude transcript JSONL for a project directory (one per
     // conversation Claude has had in that cwd), newest first. `directory` is the
@@ -1960,7 +2022,8 @@ export const machineOps: MachineOp[] = [
     name: "readLog",
     scope: "machine",
     rpcName: "joy-read-log",
-    summary: "Read a past-session transcript's messages",
+    summary: "Read past transcript",
+    description: "Returns the messages of a past transcript.",
     http: { method: "GET", path: "/logs/messages" },
     // Last N back-and-forth messages (user + assistant) from one transcript, for
     // a quick preview without shipping the whole file (see joy-session-log for the
@@ -1990,7 +2053,8 @@ export const sessionOps: SessionOp[] = [
     name: "abort",
     scope: "session",
     rpcName: "abort",
-    summary: "Abort the running turn (Escape; does not clear the input box)",
+    summary: "Stop turn",
+    description: "Stops the running turn with Escape. The text in the input box stays.",
     http: { method: "POST", path: "/sessions/:id/abort" },
     handler: (session) => session.abort(),
   },
@@ -2007,7 +2071,8 @@ export const sessionOps: SessionOp[] = [
     name: "hookEvent",
     scope: "session",
     rpcName: "joy-hook",
-    summary: "Claude hook event ingress (state authority once live)",
+    summary: "Receive hook event",
+    description: "Receives a Claude hook event. After the session starts, these events decide its state.",
     http: { method: "POST", path: "/sessions/:id/hook" },
     handler: (session, params) => session.onHookEvent(params as Record<string, unknown>),
   },
@@ -2019,7 +2084,8 @@ export const sessionOps: SessionOp[] = [
     name: "compacting",
     scope: "session",
     rpcName: "compacting",
-    summary: "Mark the session as compacting (hook-driven)",
+    summary: "Mark compacting",
+    description: "Marks the session as compacting. A hook calls this route.",
     http: { method: "POST", path: "/sessions/:id/compacting" },
     handler: (session, params) => {
       session.markCompacting(typeof params.trigger === "string" ? params.trigger : "auto");
@@ -2030,7 +2096,8 @@ export const sessionOps: SessionOp[] = [
     name: "killSession",
     scope: "session",
     rpcName: "killSession",
-    summary: "Session-scope kill (RPC only; HTTP uses DELETE /sessions/:id)",
+    summary: "Stop session (RPC)",
+    description: "Stops the session. This operation is for RPC only. HTTP uses `DELETE /sessions/{id}`.",
     http: null, // covered by DELETE /sessions/:id
     handler: async (session) => {
       // Idempotent: the op is bound to an existing session, so killing one
@@ -2051,7 +2118,8 @@ export const sessionOps: SessionOp[] = [
     name: "bash",
     scope: "session",
     rpcName: "bash",
-    summary: "Run a shell command in the session cwd",
+    summary: "Run command",
+    description: "Runs a shell command in the folder of the session.",
     http: { method: "POST", path: "/sessions/:id/bash" },
     handler: (session, params) => handleBash(session.cwd, params as unknown as Parameters<typeof handleBash>[1]),
   },
@@ -2059,7 +2127,8 @@ export const sessionOps: SessionOp[] = [
     name: "readFile",
     scope: "session",
     rpcName: "readFile",
-    summary: "Read a file (inline base64)",
+    summary: "Read file",
+    description: "Returns a file as base64.",
     http: { method: "POST", path: "/sessions/:id/readFile" },
     // Second allowed root: the session's own ~/.joy/sessions/<id>/ so the app
     // can fetch joy-img media the agent saved there — scoped per session.
@@ -2087,7 +2156,8 @@ export const sessionOps: SessionOp[] = [
     name: "writeFile",
     scope: "session",
     rpcName: "writeFile",
-    summary: "Write a file in the session cwd or the session's own directory",
+    summary: "Write file",
+    description: "Writes a file in the folder of the session or in its own joy folder.",
     http: { method: "POST", path: "/sessions/:id/writeFile" },
     // The session's own dir (uploads, media) is writable too — but NOT the
     // temp roots readRoots() adds: reading /tmp is one thing, writing it is
@@ -2098,7 +2168,8 @@ export const sessionOps: SessionOp[] = [
     name: "deleteFile",
     scope: "session",
     rpcName: "deleteFile",
-    summary: "Delete a file in the session cwd",
+    summary: "Delete file",
+    description: "Deletes a file in the folder of the session.",
     http: { method: "POST", path: "/sessions/:id/deleteFile" },
     handler: (session, params) => handleDeleteFile(session.cwd, params as unknown as Parameters<typeof handleDeleteFile>[1], [joySessionDir(session.id)]),
   },
@@ -2106,7 +2177,8 @@ export const sessionOps: SessionOp[] = [
     name: "listDirectory",
     scope: "session",
     rpcName: "listDirectory",
-    summary: "List a directory",
+    summary: "List folder",
+    description: "Returns the entries of a folder.",
     http: { method: "POST", path: "/sessions/:id/listDirectory" },
     handler: (session, params) => handleListDirectory(session.cwd, params as unknown as Parameters<typeof handleListDirectory>[1], readRoots()),
   },
@@ -2114,7 +2186,8 @@ export const sessionOps: SessionOp[] = [
     name: "getDirectoryTree",
     scope: "session",
     rpcName: "getDirectoryTree",
-    summary: "Directory tree for the file browser",
+    summary: "Get folder tree",
+    description: "Returns a folder tree for the file browser.",
     http: { method: "POST", path: "/sessions/:id/getDirectoryTree" },
     handler: (session, params) => handleGetDirectoryTree(session.cwd, params as unknown as Parameters<typeof handleGetDirectoryTree>[1], readRoots()),
   },
@@ -2122,7 +2195,8 @@ export const sessionOps: SessionOp[] = [
     name: "ripgrep",
     scope: "session",
     rpcName: "ripgrep",
-    summary: "Search files with ripgrep",
+    summary: "Search files",
+    description: "Searches files with ripgrep.",
     http: { method: "POST", path: "/sessions/:id/ripgrep" },
     handler: (session, params) => handleRipgrep(session.cwd, params as unknown as Parameters<typeof handleRipgrep>[1], readRoots()),
   },
@@ -2130,7 +2204,8 @@ export const sessionOps: SessionOp[] = [
     name: "difftastic",
     scope: "session",
     rpcName: "difftastic",
-    summary: "Structural diff via difftastic",
+    summary: "Compare files",
+    description: "Returns a structural diff made with difftastic.",
     http: { method: "POST", path: "/sessions/:id/difftastic" },
     handler: (session, params) => handleDifftastic(session.cwd, params as unknown as Parameters<typeof handleDifftastic>[1]),
   },

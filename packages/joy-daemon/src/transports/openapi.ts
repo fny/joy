@@ -93,7 +93,7 @@ export function buildOpenApiSpec(opts: { port: number; version: string }): Recor
 
   const addOp = (op: MachineOp | SessionOp) => {
     if (!op.http) {
-      rpcOnly.push({ rpcName: op.rpcName, scope: op.scope, summary: op.summary });
+      rpcOnly.push({ rpcName: op.rpcName, scope: op.scope, summary: op.summary, description: op.description });
       return;
     }
     const { path, params: pathParams } = toOpenApiPath(op.http.path);
@@ -107,6 +107,7 @@ export function buildOpenApiSpec(opts: { port: number; version: string }): Recor
     const entry: Record<string, unknown> = {
       operationId: op.name === op.rpcName ? op.name : `${op.scope}.${op.name}`,
       summary: op.summary ?? op.name,
+      ...(op.description ? { description: op.description } : {}),
       tags: [op.scope],
       "x-rpc-name": op.rpcName,
       parameters: pathParams.map((name) => ({
@@ -151,7 +152,7 @@ export function buildOpenApiSpec(opts: { port: number; version: string }): Recor
     info: {
       title: "joy-daemon API",
       version: opts.version,
-      description: "Per-machine agent-session daemon. Same operation catalog as the relay RPC surface (x-rpc-name maps each route to its RPC form). All routes require the per-instance token.",
+      description: "The daemon runs the agent sessions on one machine. Every route needs the token of this daemon in the `X-Joy-Token` header. The app reaches the same operations through the relay: `x-rpc-name` gives the name of each one there.",
     },
     servers: [{ url: `http://127.0.0.1:${opts.port}` }],
     security: [{ joyToken: [] }],
@@ -162,7 +163,7 @@ export function buildOpenApiSpec(opts: { port: number; version: string }): Recor
           type: "apiKey",
           in: "header",
           name: "X-Joy-Token",
-          description: "Per-instance token from ~/.joy/**/state/daemon.json (printed at startup)",
+          description: "The token of this daemon. It is in ~/.joy/**/state/daemon.json, and the daemon prints it when it starts.",
         },
       },
     },
