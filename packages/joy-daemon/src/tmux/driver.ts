@@ -1,15 +1,17 @@
 // The ONE seam for all tmux interaction. Session + Registry call these methods
 // instead of run("tmux", …) directly, so the transport lives in one place.
 //
-// A persistent control-mode client (tmux -C attach-session) is the DEFAULT and only
-// transport: captureCached() reads a %output-invalidated snapshot, captureFresh()
-// awaits a control command, key/literal/command become control writes. The spawn
+// A persistent control-mode client (tmux -C attach-session) is the DEFAULT
+// transport: captureCached() reads a %output-invalidated snapshot, and
+// key/literal/command become control writes. Pane CAPTURES are the exception:
+// each runs as its own async `tmux capture-pane` process (#captureSpawn), since
+// tmux keeps every byte it answers a control-mode command with. The sync spawn
 // methods (run) remain as the reconnect/while-disconnected fallback and for the
 // bootstrap/teardown ops (runSync) that bracket the connection's lifetime. Callers
 // never touch run("tmux") or spawn directly and never branch on which is active.
 //
-// See CONTROL-MODE-MIGRATION.md for the history.
-import { run, tmuxArgv } from "./shell";
+// History: CONTROL-MODE-MIGRATION.md (deleted in 0aaf02ef; `git show 0aaf02ef^:…`).
+import { run, runAsync, tmuxArgv } from "./shell";
 import { TmuxControlClient } from "./controlClient";
 import { tmuxCommand } from "./serialize";
 
@@ -214,27 +216,49 @@ export class TmuxDriver {
 
   /**
    * FRESH awaited capture — for the decisions where a stale read causes data loss
-   * (the dispatch gate's empty-box check, abort, clear). Control mode: a capture-pane
-   * command over the connection; updates the cache. Falls back to a spawn capture on
-   * disconnect/error (or under the test runner, where there's no client).
+   * (the dispatch gate's empty-box check, abort, clear). An async spawned
+   * capture-pane (#captureSpawn), connected or not; updates the cache. Under the
+   * test runner (no client) a sync spawn capture.
    */
   async captureFresh(target: string, opts?: { color?: boolean; scrollbackLines?: number }): Promise<TmuxResult> {
-    if (this.#client?.connected) {
-      this.#track(target);
-      // -e keeps ANSI for the app's colour pane view; that text must NOT pollute the
-      // plain-text snapshot cache (the watchers read plain), so colour reads go over
-      // control but stay UNcached. Plain reads update the cache as before.
-      const args = ["capture-pane", "-p"];
-      if (opts?.color) args.push("-e");
-      if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
-      args.push("-t", target);
-      const r = await this.#client.command(tmuxCommand(args));
-      // Colour/scrollback reads must NOT pollute the plain visible-region
-      // snapshot cache the watchers and parsers read.
-      if (r.ok) { if (!opts?.color && !opts?.scrollbackLines) this.#snapshots.set(target, { text: r.out, ts: nowMs() }); return r; }
-      // disconnect / %error → fall through to spawn
+    if (this.#client) {
+      if (this.#client.connected) this.#track(target);
+      const r = await this.#captureSpawn(target, opts);
+      // -e keeps ANSI for the app's colour pane view; colour and scrollback
+      // reads must NOT pollute the plain visible-region snapshot cache the
+      // watchers and parsers read. Plain reads update the cache as before.
+      if (r.ok && !opts?.color && !opts?.scrollbackLines) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
+      return r;
     }
-    return this.capture(target, opts);
+    return this.capture(target, opts); // test runner: no control client, no async spawns
+  }
+
+  /**
+   * One capture as its own `tmux capture-pane` process, awaited — never over
+   * the control connection. tmux 3.4 keeps every byte it writes to a
+   * control-mode client in response to a COMMAND: its RSS grew 1:1 with the
+   * capture traffic, and fny's per-session servers reached 0.4-3.8 GB
+   * (2026-09-28; pane %output and small command replies do not grow it, and a
+   * reconnect does not free it). The same capture as a separate process
+   * leaves the server flat. Async, so the event loop never blocks the way the
+   * pre-control-mode spawnSync did; ordering is unchanged — every caller
+   * awaits the command before it (its %end) and then this capture.
+   */
+  async #captureSpawn(target: string, opts?: { color?: boolean; scrollbackLines?: number }): Promise<TmuxResult> {
+    const args = ["capture-pane", "-p"];
+    if (opts?.color) args.push("-e");
+    if (opts?.scrollbackLines && opts.scrollbackLines > 0) args.push("-S", `-${Math.floor(opts.scrollbackLines)}`);
+    args.push("-t", target);
+    const r = await runAsync(...this.#argv, ...args);
+    // Same framing as a control-mode capture: capture-pane -p ends with one "\n".
+    return r.ok && r.out.endsWith("\n") ? { ...r, out: r.out.slice(0, -1) } : r;
+  }
+
+  /** Whether the target still exists (a failed spawned capture carries no
+   *  error text to tell "gone" from a transient failure). */
+  async #paneExists(target: string): Promise<boolean> {
+    const r = await runAsync(...this.#argv, "display-message", "-p", "-t", target, "#{pane_id}");
+    return r.ok;
   }
 
   #onOutput(paneId: string): void {
@@ -268,9 +292,11 @@ export class TmuxDriver {
       this.#dirty.clear();
       for (const target of dirty) {
         if (!this.#targets.has(target)) continue; // untracked mid-sweep
-        const r = await this.#client.command(tmuxCommand(["capture-pane", "-p", "-t", target]));
+        // Spawned, not over control (#captureSpawn); still one at a time per
+        // server, since at most one sweep runs.
+        const r = await this.#captureSpawn(target);
         if (r.ok) this.#snapshots.set(target, { text: r.out, ts: nowMs() });
-        else if (r.error && /can't find/i.test(r.error)) this.untrack(target);
+        else if (!(await this.#paneExists(target))) this.untrack(target);
       }
     } finally {
       this.#refreshInFlight = false;

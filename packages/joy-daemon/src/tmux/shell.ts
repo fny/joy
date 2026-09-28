@@ -1,4 +1,5 @@
-// Tiny synchronous shell helper shared by session/registry (tmux invocations).
+// Tiny shell helpers shared by session/registry (tmux invocations).
+import { execFile } from "node:child_process";
 import { spawnSyncBounded } from "../domain/bounded";
 import { tmuxSocketArgs } from "../paths";
 
@@ -20,6 +21,25 @@ export function run(...args: string[]): { ok: boolean; out: string } {
   const r = spawnSyncBounded(cmd, rest, SYNC_RUN_TIMEOUT_MS);
   if (r.timedOut) process.stderr.write(`[run] ${args.join(" ")}: no exit within ${SYNC_RUN_TIMEOUT_MS}ms — killed (#594)\n`);
   return { ok: r.ok, out: r.out };
+}
+
+/** Output a pane capture may return (a colour capture with scrollback is the
+ *  big case). Past it the capture fails rather than buffering without bound. */
+export const ASYNC_RUN_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * `run`, without blocking the event loop: for the frequent calls (pane
+ * captures), where a synchronous child per call is what the control-mode
+ * migration removed. Same deadline and the same untrimmed stdout (#595).
+ */
+export function runAsync(...args: string[]): Promise<{ ok: boolean; out: string }> {
+  const [cmd, ...rest] = args;
+  return new Promise((resolve) => {
+    execFile(cmd, rest, { encoding: "utf8", timeout: SYNC_RUN_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: ASYNC_RUN_MAX_BYTES }, (err, stdout) => {
+      if (err && (err as { killed?: boolean }).killed) process.stderr.write(`[runAsync] ${args.join(" ")}: no exit within ${SYNC_RUN_TIMEOUT_MS}ms — killed (#594)\n`);
+      resolve({ ok: !err, out: stdout ?? "" });
+    });
+  });
 }
 
 /** The tmux argv prefix for THIS process's relay: plain "tmux" on the default
