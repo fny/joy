@@ -68,7 +68,7 @@ export default {
     expo: {
         name,
         slug: "joy",
-        version: "1.2.3",
+        version: "1.2.4",
         // The OTA fence. An update only reaches a binary whose runtime version
         // matches, so this MUST rise whenever the native surface changes —
         // a new Expo module, a native dependency, a config plugin.
