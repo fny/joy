@@ -16,6 +16,7 @@ import { DirectoryCreationApprovalRequired, type SessionRegistry } from "../doma
 import { sessionRecords, latestRecordSeq, subscribeRecords, type LoggedRecord } from "../relay/relay";
 import { buildOpenApiSpec } from "./openapi";
 import { handleV2 } from "./v2";
+import { acceptRtcOffer } from "./rtc";
 import { boundedWriter } from "../domain/bounded";
 
 /** Pending bytes one long-lived event client may hold before it is dropped
@@ -395,6 +396,24 @@ export function startHttpServer(opts: {
     // Token check on all mutating routes (PUT/PATCH exist on the v2 surface only)
     if (method === "POST" || method === "DELETE" || method === "PUT" || method === "PATCH") {
       if (req.headers["x-joy-token"] !== token) return json({ error: "unauthorized" }, 401);
+    }
+
+    // Direct access: answer a WebRTC offer (transports/rtc.ts). Reached
+    // through the sealed tunnel, so the relay never sees the SDP in clear.
+    if (method === "POST" && url.pathname === "/v2/rtc/connect") {
+      const body = await readJsonBody(req).catch(() => null) as { sdp?: unknown } | null;
+      if (!body || typeof body.sdp !== "string" || !body.sdp) return json({ error: "sdp required" }, 400);
+      try {
+        const sdp = await acceptRtcOffer(body.sdp, {
+          targetBase: `http://127.0.0.1:${req.socket.localPort}`,
+          targetHeaders: { "X-Joy-Token": token },
+          log: (line) => process.stderr.write(`[rtc] ${line}\n`),
+        });
+        return json({ sdp });
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        return json({ error }, error === "too_many_peers" ? 429 : 500);
+      }
     }
 
     // v2 machine-plane surface — additive, dispatched before the v1 catalog.

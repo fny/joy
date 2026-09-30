@@ -41,7 +41,7 @@ export interface ExecutorHandle { stop(): Promise<void>; leaseId: () => string |
 
 /** Blocked hop-by-hop / transport headers — the daemon-side fetch and the
  *  client re-add their own. Everything else passes through sealed. */
-const STRIP = new Set(["host", "connection", "content-length", "transfer-encoding", "keep-alive", "upgrade"]);
+export const STRIP = new Set(["host", "connection", "content-length", "transfer-encoding", "keep-alive", "upgrade"]);
 
 /** The relay perimeter key, when configured (#82). Every other relay client
  *  (nucleus lane, RelayClient, pairing, the app) sends it; the executor's
