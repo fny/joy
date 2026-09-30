@@ -2,21 +2,32 @@
 
 An agent can act in your own browser: read a page you are logged in to, fill a form, click through a flow, or change how a site looks every time you visit it. The Joy Browser extension makes that possible, in Chrome and in Firefox. It ties one session to your browser, puts a small chat button on the pages you visit, and runs the scripts that session's agent writes.
 
-The agent does not need to be on the same machine as the browser. The extension is a client of your account and talks only to your relay, exactly as the app does, so nothing on your computer is opened to the network.
+The agent does not need to be on the same machine as the browser. The extension is a client of your account and talks to your relay, exactly as the app does, so nothing on your computer is opened to the network. In [Direct mode](#direct-mode), it talks to the machine itself instead.
 
 ## Set it up
 
 1. Install the extension (see [Install the extension](#install-the-extension)).
 2. Click the extension's icon. Enter your relay's address and your backup code, then press **Continue**. Your backup code is in the app under Settings → Account.
-3. Pick the machine your session should run on, and a folder for it. The folder is created if it does not exist. Press **Start my session**.
+3. Pick the machine your session should run on, and a folder for it. The folder is created if it does not exist. Pick the **Connection**: **Relay** (the default) or **Direct** (see [Direct mode](#direct-mode)). Press **Start my session**.
 
 The extension starts a [headless session](sessions.md#headless-sessions) on that machine and links it to this browser. Your details and the link are remembered until you press **Clear everything**, so you do this once. If the session ever ends, the extension starts a fresh one in the same folder by itself.
+
+## Direct mode
+
+In Direct mode, the browser connects straight to the machine over WebRTC, and your messages never pass through the relay. Choose **Direct** as the **Connection** when you set up.
+
+- The relay only helps the browser and the machine find each other. It carries one sealed offer and one sealed answer, which it cannot read or change. After that, prompts, answers and the session's history go from the browser to the machine and back.
+- The session is local-only. It does not appear in the app, and it sends no notifications. Its history is kept only on the machine.
+- Everything else works the same: the chat button, scripts, saved scripts, excluded sites and Pause.
+- The machine's daemon must be recent enough to accept direct connections. Run `joy update` on it.
+
+The two ends find a route with the help of a STUN server, Cloudflare's by default. On the machine, set `JOY_STUN_URLS` to a comma-separated list of other servers, or to `off` to use the local network only. Some networks block every direct route between two devices. Then the connection fails, and Direct mode does not fall back to the relay. Use Relay mode on such a network.
 
 ## Talk to your session
 
 A round **J** button appears on every page. Click it to open a chat panel, and type what you want done: "what plan are we on?", "fill this form from my last invoice", "hide the sidebar on this site". Drag the button anywhere; it stays where you put it, on every site.
 
-The panel shows the conversation with the browser's own traffic folded away. A script the agent ran is one line you can open to read, and so is the browser's answer. When the agent offers choices, they appear as buttons. The same conversation is in the app, like any other session.
+The panel shows the conversation with the browser's own traffic folded away. A script the agent ran is one line you can open to read, and so is the browser's answer. When the agent offers choices, they appear as buttons. In Relay mode, the same conversation is in the app, like any other session.
 
 The dot on the button is green when the session is idle, yellow while it works, grey when you paused the browser, and red when the link is broken. Open the extension's popup to see why.
 
@@ -79,6 +90,8 @@ An add-on id belongs to the Mozilla account that first signs it. If you are not 
 - **"Start my session" fails.** The machine must be online, with a daemon that can start Claude Code. Run `joy doctor` on it.
 - **A script takes a while to run in Chrome.** Chrome puts idle extensions to sleep and wakes this one every 30 seconds. While the chat panel is open, the extension stays awake and responds at once. Firefox does not sleep.
 - **"this page cannot be scripted".** Browser pages such as `chrome://` and `about:` addresses and the browsers' add-on stores cannot be scripted. Have the agent open the page it needs.
+- **"no direct route to the machine".** Direct mode could not connect the browser and the machine. A firewall or the network blocks it. Use Relay mode, or try from another network.
+- **"this machine's daemon is too old for Direct mode".** Run `joy update` on the machine.
 - **No chat button on a page.** The site is on your excluded list, or setup is not finished. The button also does not appear on browser pages.
 
 ## Related

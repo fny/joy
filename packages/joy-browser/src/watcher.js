@@ -15,13 +15,17 @@
 //  3. AT MOST ONCE. The cursor is saved BEFORE a script runs. A service worker
 //     can die at any moment; re-running a script (a click, a form submit) on
 //     restart is worse than the agent having to ask again.
-import { openPayload, sealText } from './crypto.js';
+import { openPayload } from './crypto.js';
 import { extractBrowserTags, describeResult, browserMessage } from './tags.js';
 
-/** The agent's visible text in one relay event, or null. */
+/** An event's payload: already open when it came straight from the daemon
+ *  (Direct mode), sealed under the session key when it came from the relay. */
+export const payloadOf = (event, key) => event?.payload ?? (event?.content ? openPayload(event.content.ciphertext, key) : null);
+
+/** The agent's visible text in one event, or null. */
 export function agentTextOf(event, key) {
-  if (!event?.content || event.kind === 'turn.queued') return null;
-  const p = openPayload(event.content.ciphertext, key);
+  if (event?.kind === 'turn.queued') return null;
+  const p = payloadOf(event, key);
   if (!p || p.t !== 'record') return null;
   const ev = agentEventOf(p.record);
   return ev && ev.t === 'text' && typeof ev.text === 'string' && !ev.thinking ? ev.text : null;
@@ -69,7 +73,9 @@ export class Watcher {
     const { sessionId, key } = state;
     const pending = state.pendingResult;
     if (pending && !this.stopped) {
-      await this.relay.sendCiphertext(sessionId, pending.ciphertext, pending.id);
+      // `ciphertext` is a result saved before 0.3, sealed already.
+      if (pending.ciphertext) await this.relay.sendCiphertext(sessionId, pending.ciphertext, pending.id);
+      else await this.relay.sendText(sessionId, pending.text, key, pending.id);
       if (this.stopped || await this.store.clearResult?.(pending.id, state) === false) return;
     }
     let cursor = Number(state.cursor) || 0;
@@ -104,9 +110,9 @@ export class Watcher {
           } catch (err) { results.push({ tab: null, error: err?.message ?? String(err) }); }
         }
         const body = results.map((r, i) => describeResult(r, i, results.length)).join('\n\n');
-        const result = { id: crypto.randomUUID(), ciphertext: sealText(browserMessage(body), key) };
+        const result = { id: crypto.randomUUID(), text: browserMessage(body) };
         if (this.stopped || await this.store.saveResult?.(result, state) === false) return;
-        await this.relay.sendCiphertext(sessionId, result.ciphertext, result.id);
+        await this.relay.sendText(sessionId, result.text, key, result.id);
         await this.store.clearResult?.(result.id, state);
         this.note(`answered with ${results.length} result${results.length === 1 ? '' : 's'}${results.some((r) => r.error) ? ' (with errors)' : ''}`);
       }

@@ -56,7 +56,13 @@ async function renderMachine(st) {
   app.append(el('h1', { textContent: 'Where should your session run?' }), el('p', { textContent: `Paired with ${st.relayUrl}. A headless session starts on the machine you pick and stays linked to this browser.` }));
   const select = el('select'); const folder = el('input', { type: 'text', value: st.defaultFolder });
   const start = el('button', { textContent: 'Start my session', disabled: true });
-  app.append(el('label', {}, 'Machine', select), el('label', {}, 'Folder on that machine (created if missing)', folder), start, clearButton('Start over'));
+  const mode = el('select');
+  mode.append(el('option', { value: 'relay', textContent: 'Relay — the session syncs to the joy app' }), el('option', { value: 'direct', textContent: 'Direct — peer to peer, kept off the relay' }));
+  mode.value = st.mode ?? 'relay';
+  const modeNote = el('p', { className: 's' });
+  const explain = () => { modeNote.textContent = mode.value === 'direct' ? 'The browser connects straight to the machine over WebRTC. The relay only helps the two find each other; your messages never pass through it. The session stays on the machine and does not appear in the joy app.' : 'Messages go through your relay, end-to-end encrypted. The session also appears in the joy app.'; };
+  mode.onchange = explain; explain();
+  app.append(el('label', {}, 'Machine', select), el('label', {}, 'Folder on that machine (created if missing)', folder), el('label', {}, 'Connection', mode), modeNote, start, clearButton('Start over'));
   let machines = [];
   try { machines = (await ask('machines')).machines; } catch (e) { app.append(el('p', { className: 'err', textContent: e.message }), Object.assign(el('button', { textContent: 'Retry' }), { onclick: () => render() })); return; }
   if (!machines.length) { select.replaceWith(el('p', { className: 'err', textContent: 'This account has no machines yet. Install the joy daemon on one and pair it, then come back.' })); start.disabled = true; return; }
@@ -65,7 +71,7 @@ async function renderMachine(st) {
   start.onclick = async () => {
     busy(start, 'Starting… this can take a minute');
     const m = machines.find((x) => x.id === select.value);
-    try { await ask('start', { machineId: m.id, machineName: m.name, cwd: folder.value }); flash = { text: 'Your session is running. Use the round J button on any page to talk to it.' }; render(); } catch (e) { fail(e); }
+    try { await ask('start', { machineId: m.id, machineName: m.name, cwd: folder.value, mode: mode.value }); flash = { text: 'Your session is running. Use the round J button on any page to talk to it.' }; render(); } catch (e) { fail(e); }
   };
 }
 
@@ -76,7 +82,7 @@ function renderMain(st) {
   pause.onclick = async () => { try { await ask('pause', { paused: !st.paused }); render(); } catch (e) { fail(e); } };
   app.append(el('div', { className: 'row' }, el('h1', { textContent: 'Joy Browser' }), pause));
   if (st.starting) app.append(el('p', { textContent: 'Starting your session…' }));
-  else if (s) app.append(el('div', { className: 'card' }, el('div', { className: `t ${st.paused ? '' : 'ok'}`, textContent: s.title ?? `session ${s.localId}` }), el('div', { className: 's', textContent: `${s.localId} · ${st.machineName ?? '?'} · ${st.cwd ?? ''}` })));
+  else if (s) app.append(el('div', { className: 'card' }, el('div', { className: `t ${st.paused ? '' : 'ok'}`, textContent: s.title ?? `session ${s.localId}` }), el('div', { className: 's', textContent: `${s.localId} · ${st.machineName ?? '?'} · ${st.cwd ?? ''}${s.direct ? ' · direct' : ''}` })));
   else {
     const again = el('button', { textContent: 'Start a session' });
     again.onclick = async () => { busy(again, 'Starting…'); try { await ask('newSession'); render(); } catch (e) { fail(e); } };
@@ -107,8 +113,8 @@ function renderSession(st) {
     const list = el('ul');
     for (const r of recent) {
       const back = el('button', { className: 'sm', textContent: 'Connect' });
-      back.onclick = async () => { busy(back, '…'); try { await ask('connect', { ref: r.sessionId }); flash = { text: `Connected to ${r.localId}.` }; go('main'); } catch (e) { fail(e); } };
-      list.append(el('li', { className: 'row' }, el('div', { className: 'l' }, el('div', { className: 't', textContent: r.title ?? `session ${r.localId}` }), el('div', { className: 's', textContent: `${r.localId}${r.machine ? ` · ${r.machine}` : ''} · ${ago(r.at)}` })), back));
+      back.onclick = async () => { busy(back, '…'); try { await ask('connect', { ref: r.sessionId, direct: !!r.direct, machineId: r.machineId ?? null }); flash = { text: `Connected to ${r.localId}.` }; go('main'); } catch (e) { fail(e); } };
+      list.append(el('li', { className: 'row' }, el('div', { className: 'l' }, el('div', { className: 't', textContent: r.title ?? `session ${r.localId}` }), el('div', { className: 's', textContent: `${r.localId}${r.machine ? ` · ${r.machine}` : ''}${r.direct ? ' · direct' : ''} · ${ago(r.at)}` })), back));
     }
     app.append(el('label', {}, 'Sessions this browser used before'), list);
   }

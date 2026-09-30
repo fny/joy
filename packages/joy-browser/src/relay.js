@@ -1,7 +1,7 @@
 // The relay's account-side v2 API — the subset an attached browser needs.
 // A port of packages/joy-mcp/src/relay.mjs: same routes, same renewal on 401
 // (nobody is here to tap "sign in again"), fetch instead of node:crypto.
-import { b64, signKeyPair, sign, randomBytes } from './crypto.js';
+import { b64, signKeyPair, sign, randomBytes, sealText } from './crypto.js';
 
 const CLIENT = 'joy-browser';
 
@@ -98,6 +98,22 @@ export class RelayClient {
   /** The durable queue: a sealed prompt in, { messageId, turnId, seq } out. */
   sendCiphertext(sessionId, ciphertext, clientIntentId = crypto.randomUUID()) {
     return this.call('POST', `/sessions/${encodeURIComponent(sessionId)}/messages`, { ciphertext, clientIntentId });
+  }
+  /** A prompt in plain text: sealed here under the session key, then queued. */
+  sendText(sessionId, text, key, clientIntentId) { return this.sendCiphertext(sessionId, sealText(text, key), clientIntentId); }
+
+  /** Sealed bytes to a machine's daemon through the tunnel (src/tunnel.js
+   *  seals and opens them). Resolves the raw answer: the daemon's sealed
+   *  stream, or the relay's own JSON refusal. */
+  async postTunnel(machineId, wire, retryAuth = true) {
+    const res = await fetch(`${this.relayUrl}/joy/v2/machines/${encodeURIComponent(machineId)}/http`, {
+      method: 'POST', headers: this.headers({ 'content-type': 'application/octet-stream' }), body: wire,
+    });
+    if (res.status === 401 && retryAuth && this.renew) {
+      this.token = await this.renew();
+      return this.postTunnel(machineId, wire, false);
+    }
+    return { status: res.status, contentType: res.headers.get('content-type') ?? '', bytes: new Uint8Array(await res.arrayBuffer()) };
   }
 
   /** The doorbell: a long-lived SSE stream. `onPoke(sessionId)` says "something

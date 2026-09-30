@@ -1,11 +1,11 @@
-// Relay events → the rows the chat panel shows. Pure.
+// Session events (the relay's, or the daemon's in Direct mode) → the rows
+// the chat panel shows. Pure.
 //
 // The panel is a view of ONE session, the way the app's chat is — except that
 // the browser's own machinery is folded down: an agent's script is one line,
 // and so is the answer the extension sent back for it.
-import { openPayload } from './crypto.js';
 import { displaySegments, browserMessageBody } from './tags.js';
-import { agentEventOf } from './watcher.js';
+import { agentEventOf, payloadOf } from './watcher.js';
 
 /** One event → zero or one row, plus what it says about the turn. */
 /** One of OUR messages to the agent. The attach notice is not an answer to
@@ -22,7 +22,7 @@ export function rowOf(event, key) {
   // running: an adapter's turn-end record can be missing, a terminal never is.
   if (event?.kind === 'turn.started') return { seq, role: 'turn', working: true };
   if (event?.kind === 'turn.terminal') return { seq, role: 'turn', working: false, status: null };
-  const p = event?.content ? openPayload(event.content.ciphertext, key) : null;
+  const p = payloadOf(event, key);
   if (!p) return null;
   if (p.t === 'plain') {
     // A queued prompt: the person's words, or one of our own answers.

@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Joy Browser",
-  "version": "0.2.0",
-  "description": "Ties a joy session to this browser: chat with it from any page, and let its agent run scripts here. Talks only to your relay.",
+  "version": "0.3.0",
+  "description": "Ties a joy session to this browser: chat with it from any page, and let its agent run scripts here. Talks only to your relay, or straight to your own machine.",
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "debugger", "tabs", "alarms"],
+  "permissions": ["storage", "debugger", "tabs", "alarms", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Joy Browser", "default_popup": "popup.html" },

@@ -1,6 +1,6 @@
 {
   "name": "@fny/joy-browser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A browser extension (Chrome and Firefox) that ties a joy session to your browser",
   "type": "module",
@@ -11,7 +11,9 @@
     "lint:firefox": "node build.mjs && npx --yes web-ext@8 lint --source-dir dist/firefox",
     "sign:firefox": "node sign-firefox.mjs",
     "smoke:chrome": "node test/chrome-smoke.mjs",
-    "smoke:firefox": "node test/firefox-smoke.mjs"
+    "smoke:firefox": "node test/firefox-smoke.mjs",
+    "smoke:direct:chrome": "node test/direct-smoke-chrome.mjs",
+    "smoke:direct:firefox": "node test/direct-smoke-firefox.mjs"
   },
   "engines": {
     "npm": ">=11.10.0"

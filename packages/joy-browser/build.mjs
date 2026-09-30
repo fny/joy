@@ -15,7 +15,7 @@ const SHARED = ['background.js', 'content.js', 'popup.html', 'popup.js', 'src', 
 const version = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')).version;
 if (JSON.parse(readFileSync(join(root, 'manifest.firefox.json'), 'utf8')).version !== version) { console.error('manifest.json and manifest.firefox.json disagree on the version'); process.exit(1); }
 
-for (const [target, manifest, extra] of [['chrome', 'manifest.json', []], ['firefox', 'manifest.firefox.json', ['background.html']]]) {
+for (const [target, manifest, extra] of [['chrome', 'manifest.json', ['offscreen.html', 'offscreen.js']], ['firefox', 'manifest.firefox.json', ['background.html']]]) {
   const out = join(root, 'dist', target);
   rmSync(out, { recursive: true, force: true }); mkdirSync(out, { recursive: true });
   for (const f of [...SHARED, ...extra]) cpSync(join(root, f), join(out, f), { recursive: true });

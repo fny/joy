@@ -3,7 +3,7 @@
 // played by hand — a machine with a sealed card, a lease, and the verbs a
 // daemon uses to bind a spawn, take a prompt, speak and end a turn.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,7 +94,7 @@ export async function startWorld() {
   /** A message from another client of the account (the app, say). */
   const sendAsAccount = (text) => api('POST', `/sessions/${sessionId}/messages`, { ciphertext: N.sealText(text, sessionKey), clientIntentId: randomUUID() });
 
-  return { pageUrl, relayUrl, backupCode, takePrompt, say, endTurn, agentTurn, acceptSpawn, sendAsAccount };
+  return { pageUrl, relayUrl, backupCode, token, contentPub, api, takePrompt, say, endTurn, agentTurn, acceptSpawn, sendAsAccount };
 }
 
 /** The agent's first exchange, identical in both browsers: the hello, a script
@@ -111,4 +111,29 @@ export async function helloAndScripts(w) {
   step('scripts run in a real page; a throwing one comes back as status: error');
   await w.say(failure.turnId, 'Noted.'); await w.endTurn(failure.turnId);
   return answer;
+}
+
+/** Direct mode's machine: a second machine on the account whose daemon is the
+ *  stand-in (direct-daemon.ts) — the REAL tunnel executor and WebRTC
+ *  transport, with an agent the test plays. Nothing is relay-side but the
+ *  machine record and its lease. */
+export const DIRECT_MACHINE = 'direct-machine';
+export async function startDirectDaemon(w) {
+  const machineKey = new Uint8Array(randomBytes(32));
+  await w.api('POST', '/machines', { id: DIRECT_MACHINE, metadata: N.sealMachineMetadata({ host: 'direct', displayName: 'direct-box', capabilities: { spawnSpecSealed: true } }, machineKey), dataEncryptionKey: N.sealMachineKey(machineKey, w.contentPub) });
+  const tsx = [join(here, '../../joy-daemon/node_modules/.bin/tsx'), join(here, '../../../node_modules/.bin/tsx')].find(existsSync); // hoisted or not
+  if (!tsx) throw new Error('tsx not found — run pnpm install at the repo root');
+  const proc = spawn(tsx, [join(here, 'direct-daemon.ts')], { env: { ...process.env, RELAY_URL: w.relayUrl, TOKEN: w.token, MACHINE_ID: DIRECT_MACHINE, MACHINE_KEY: Buffer.from(machineKey).toString('base64') }, stdio: ['ignore', 'pipe', 'pipe'] });
+  cleanup.push(() => proc.kill('SIGTERM'));
+  let out = ''; let err = '';
+  proc.stdout.on('data', (d) => (out += d)); proc.stderr.on('data', (d) => (err += d));
+  const port = await until('the direct daemon', () => /listening (\d+)/.exec(out)?.[1]).catch((e) => { throw new Error(`${e.message}\n${err}`); });
+  const ctl = async (path, body) => (await fetch(`http://127.0.0.1:${port}/_test/${path}`, { method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined })).json();
+  let seen = 0;
+  /** The next prompt that reaches the agent, in order. */
+  const takePrompt = async (what) => until(what, async () => { const { prompts } = await ctl('prompts'); if (prompts.length > seen) return prompts[seen++]; return null; });
+  const say = (id, text, end = false) => ctl('say', { id, text, end });
+  const agentTurn = async (id, text, what) => { await say(id, text, true); return takePrompt(what); };
+  step('machine direct-box registered; its stand-in daemon runs the real tunnel executor and WebRTC transport');
+  return { takePrompt, say, agentTurn, state: () => ctl('prompts'), log: () => err };
 }

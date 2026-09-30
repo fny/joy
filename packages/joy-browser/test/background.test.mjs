@@ -31,7 +31,7 @@ async function rig(initial = {}, overrides = {}) {
     createSession: async () => ({ sessionId: 'new' }),
     sessionState: async () => ({ headSeq: 8, execution: 'idle', sessionState: 'active' }),
     eventsBefore: async () => ({ messages: [] }), events: async () => ({ messages: [] }),
-    stream: () => () => {}, sendCiphertext: async () => {}, ...overrides.relay,
+    stream: () => () => {}, sendCiphertext: async () => {}, sendText: async () => {}, ...overrides.relay,
   };
   const watchers = [];
   class FakeWatcher { constructor(options) { Object.assign(this, options); watchers.push(this); } stop() { this.stopped = true; } async poll() {} }

@@ -3,7 +3,8 @@
 // This is the subset of packages/joy-mcp/src/crypto.mjs an extension needs to
 // be a client of ONE account: log in, open session keys and cards, open the
 // agent's output, seal a prompt, name the machines and seal a spawn spec for
-// one. The tunnel is deliberately absent — this client never talks to a daemon.
+// one. The tunnel (src/tunnel.js) builds on the secretbox exported here; it
+// carries only the WebRTC setup of Direct mode.
 //
 // node:crypto is gone: SHA-512 is nacl.hash, HMAC-SHA512 is built on it, and
 // randomness is nacl.randomBytes (crypto.getRandomValues underneath). Formats:
@@ -87,6 +88,8 @@ export const signKeyPair = (secret) => nacl.sign.keyPair.fromSeed(secret);
 export const relayPerimeterKey = (secret) => hex(deriveKey(secret, 'Joy Relay', ['perimeter']));
 export const sign = (message, secretKey) => nacl.sign.detached(message, secretKey);
 export const randomBytes = (n) => nacl.randomBytes(n);
+export const secretbox = (msg, nonce, key) => nacl.secretbox(msg, nonce, key);
+export const secretboxOpen = (box, nonce, key) => nacl.secretbox.open(box, nonce, key);
 
 /** A backup code (dashed base32 as the app shows it, or bare base64url) →
  *  the 32-byte account secret. Same forgiveness as the daemon's. */

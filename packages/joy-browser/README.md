@@ -10,6 +10,12 @@ It is a client of your account, like the app and the MCP server. It talks only
 to your relay: nothing listens on your machine, no port is opened, and the agent
 can be on a different machine from the browser.
 
+In **Direct mode** the session is local-only on the machine (never announced to
+the relay), and the extension reaches the daemon's own API over a WebRTC data
+channel. The relay carries only the setup: the offer and the answer, sealed in
+the tunnel under the machine's key, so it cannot read or swap them. The daemon
+side is `joy-daemon/src/transports/rtc.ts` (`POST /v2/rtc/connect`).
+
 ```
  agent (any machine)             relay                     your browser
 ┌─────────────────────┐   ┌────────────────┐   ┌──────────────────────────────┐
@@ -88,6 +94,9 @@ load of a matching page. The same name replaces the earlier version.
 | `src/watcher.js` | Reads the session's events, finds tags in agent text, runs each once, queues the answers. |
 | `src/tags.js`, `src/patterns.js`, `src/conversation.js` | Pure: tag parsing and result formatting, site patterns, folding events into chat rows. |
 | `src/crypto.js`, `src/relay.js` | The account client: tweetnacl and WebCrypto only. |
+| `src/direct.js` | Direct mode: `DirectClient` has the relay client's methods, mapped onto the daemon API over the data channel (HTTP in JSON frames). Its events carry their payload open (`{ seq, payload }`). |
+| `src/tunnel.js` | The sealed tunnel, for the one call that uses it: the WebRTC offer and answer. |
+| `src/peer.js`, `offscreen.html`, `offscreen.js` | The peer connection. It needs a page: Firefox's background page holds it, and in Chrome the offscreen document does, driven over a port. |
 | `manifest.json`, `manifest.firefox.json` | One per browser. `build.mjs` writes `dist/chrome` and `dist/firefox`; keep the two versions equal. |
 
 Things that follow from the platform:
@@ -118,7 +127,14 @@ pnpm test             # crypto, tags, patterns, conversation, watcher — plain 
 pnpm lint:firefox     # web-ext lint on the Firefox build
 pnpm smoke:chrome     # real relay + real Chromium: [path to chrome]
 pnpm smoke:firefox    # real relay + real Firefox:  <path to firefox> <path to geckodriver>
+pnpm smoke:direct:chrome    # Direct mode, same arguments as above
+pnpm smoke:direct:firefox
 ```
+
+The Direct smoke tests start `test/direct-daemon.ts` with the daemon's tsx: the
+real tunnel executor and WebRTC transport, in front of the few daemon routes
+Direct mode calls and an agent the test plays. They prove the relay never lists
+a session for the account.
 
 The two smoke tests run one scenario (`test/smoke-lib.mjs` holds the relay and a
 hand-played daemon): pair in the popup, pick a machine, the extension spawns its

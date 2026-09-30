@@ -19,6 +19,7 @@ function rig(events, { cursor = 0, execute } = {}) {
   const relay = {
     events: async (_id, after) => ({ messages: events.filter((e) => e.seq > after) }),
     sendCiphertext: async (_id, ct) => { sent.push(openPayload(ct, key).text); return {}; },
+    sendText: async (_id, text) => { sent.push(text); return {}; },
   };
   const store = { load: async () => ({ ...state }), saveCursor: async (n) => { saved.push(n); state.cursor = n; } };
   const w = new Watcher({ relay, store, execute: execute ?? (async (tag) => { ran.push(tag.code); return { tab: { id: 1, url: 'https://a.test/' }, value: '"ok"' }; }) });
@@ -110,7 +111,7 @@ test('a remember tag is saved, not run, and answered in order with what did run'
   const sent = []; const ran = [];
   const state = { sessionId: 's1', key, cursor: 0 };
   const w = new Watcher({
-    relay: { events: async (_i, after) => ({ messages: events.filter((e) => e.seq > after) }), sendCiphertext: async (_i, ct) => { sent.push(openPayload(ct, key).text); } },
+    relay: { events: async (_i, after) => ({ messages: events.filter((e) => e.seq > after) }), sendText: async (_i, text) => { sent.push(text); } },
     store: { load: async () => ({ ...state }), saveCursor: async (n) => { state.cursor = n; } },
     execute: async (tag) => { ran.push(tag.code); return { tab: null, value: '1' }; },
     remember: async (tag) => { remembered.push(tag.attrs.name); return { note: `saved "${tag.attrs.name}" — waiting for the user to approve it` }; },
@@ -126,7 +127,7 @@ test('the chat sees new events before anything in them runs, and only once', asy
   const events = [agentText(1, TAG('return 1')), agentText(2, 'plain words')];
   const state = { sessionId: 's1', key, cursor: 0 };
   const w = new Watcher({
-    relay: { events: async (_i, after) => ({ messages: events.filter((e) => e.seq > after) }), sendCiphertext: async () => {} },
+    relay: { events: async (_i, after) => ({ messages: events.filter((e) => e.seq > after) }), sendText: async () => {} },
     store: { load: async () => ({ ...state }), saveCursor: async (n) => { state.cursor = n; } },
     execute: async () => { order.push('ran'); return { tab: null, value: '1' }; },
     onEvents: (evs) => { order.push('seen'); seen.push(...evs.map((e) => e.seq)); },
@@ -177,7 +178,7 @@ test('an undelivered result survives restart, with the same intent and no second
   r.w.store.saveResult = async (p) => { r.state.pendingResult = p; };
   r.w.store.clearResult = async () => { r.state.pendingResult = null; };
   const attempts = [];
-  r.w.relay.sendCiphertext = async (_id, ct, intent) => { attempts.push({ ct, intent }); if (attempts.length === 1) throw Error('reply lost'); };
+  r.w.relay.sendText = async (_id, text, _key, intent) => { attempts.push({ text, intent }); if (attempts.length === 1) throw Error('reply lost'); };
   await assert.rejects(r.w.poll(), /reply lost/);
   const restarted = new Watcher({ relay: r.w.relay, store: r.w.store, execute: () => assert.fail('replayed a script') });
   await restarted.poll();
@@ -203,4 +204,24 @@ test('the daemon\'s own wrapper is read: role session, data.role agent', () => {
   assert.equal(agentTextOf(flat, key), 'flat');
   const user = { ...ev, content: { ciphertext: sealV2Json({ v: 1, t: 'record', record: { role: 'session', content: { type: 'session', data: { role: 'user', ev: { t: 'text', text: 'not me' } } } } }, key) } };
   assert.equal(agentTextOf(user, key), null);
+});
+
+test('a result saved sealed by an older version is still delivered as it was', async () => {
+  const r = rig([]);
+  r.state.pendingResult = { id: 'old', ciphertext: sealText('status: ok', key) };
+  const got = [];
+  r.w.relay.sendCiphertext = async (_id, ct, intent) => { got.push([openPayload(ct, key).text, intent]); };
+  r.w.store.clearResult = async () => { r.state.pendingResult = null; };
+  await r.w.poll();
+  assert.deepEqual(got, [['status: ok', 'old']]);
+});
+
+test('Direct mode: events carry their payload open, and a tag in one runs', async () => {
+  const direct = (seq, record) => ({ seq, payload: { t: 'record', record } });
+  const agent = { role: 'session', content: { type: 'session', data: { role: 'agent', ev: { t: 'text', text: TAG('direct') } } } };
+  assert.equal(agentTextOf(direct(1, agent), null), TAG('direct'));
+  assert.equal(agentTextOf(direct(2, { role: 'user', content: { type: 'text', text: TAG('echo') } }), null), null);
+  const r = rig([direct(1, agent)]);
+  await r.w.poll();
+  assert.deepEqual(r.ran, ['direct']);
 });

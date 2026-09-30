@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Joy Browser",
-  "version": "0.2.0",
-  "description": "Ties a joy session to this browser: chat with it from any page, and let its agent run scripts here. Talks only to your relay.",
+  "version": "0.3.0",
+  "description": "Ties a joy session to this browser: chat with it from any page, and let its agent run scripts here. Talks only to your relay, or straight to your own machine.",
   "browser_specific_settings": {
     "gecko": {
       "id": "joy-browser@faraz.vip",

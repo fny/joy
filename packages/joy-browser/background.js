@@ -2,7 +2,10 @@
 // page in Firefox; the same code).
 //
 // A client of ONE joy account, paired from its backup code like the MCP
-// server, talking only to the relay. v1 ties ONE session to the browser: on
+// server. In Relay mode it talks only to the relay. In Direct mode the session
+// is local-only on the machine, and the extension reaches the daemon's API
+// peer to peer over WebRTC (src/direct.js) — the relay carries only the setup.
+// v1 ties ONE session to the browser: on
 // setup it starts a headless session on the machine you chose, links to it and
 // remembers it. From then on it
 //   · runs what that session's agent emits as <joy-browser-execute>,
@@ -12,7 +15,8 @@
 // all of it subject to two brakes the agent cannot reach: the pause switch and
 // the excluded-sites list.
 import { api } from './src/api.js';
-import { parseBackupCode, contentKeyPair, relayPerimeterKey, openSessionKeyEnvelope, openCard, openMachineKey, openMachineMetadata, sealSpawnSpec, sealText, b64, unb64 } from './src/crypto.js';
+import { parseBackupCode, contentKeyPair, relayPerimeterKey, openSessionKeyEnvelope, openCard, openMachineKey, openMachineMetadata, sealSpawnSpec, b64, unb64 } from './src/crypto.js';
+import { DirectClient, peerOpenerFor } from './src/direct.js';
 import { loginWithSecret, RelayClient, relayAddress, describeRelay } from './src/relay.js';
 import { Watcher } from './src/watcher.js';
 import { browserMessage, splitMatch } from './src/tags.js';
@@ -35,11 +39,11 @@ const wire = (what, fn) => { try { fn(); } catch (e) { startupErrors.push(`${wha
 // ── state ────────────────────────────────────────────────────────────────────
 // storage.local — the background can be stopped at any moment, so nothing that
 // matters lives only in memory:
-//   setup    { relayUrl, secret (b64), machineId, machineName, cwd }
-//   linked   { sessionId, token, localId, title, envelope } | null     cursor  number
-//   recent   [{ sessionId, localId, title, machine, at }]  — newest first, the linked one included; Settings → Session offers them back
+//   setup    { relayUrl, secret (b64), machineId, machineName, cwd, mode: 'relay' | 'direct' }
+//   linked   { sessionId, token, localId, title, envelope, direct?, machineId? } | null     cursor  number
+//   recent   [{ sessionId, localId, title, machine, at, direct? }]  — newest first, the linked one included; Settings → Session offers them back
 //   pendingSpawn { id, machineId, wire, relayId?, retried? } | null
-//   pendingResult { id, ciphertext } | null   — delivery retries never rerun code
+//   pendingResult { id, text } | null   — delivery retries never rerun code
 //   paused   boolean          excluded [pattern]          fab { x, y }
 //   scripts  [{ id, name, match[], code, enabled, approved, createdAt }]
 //   linkError string | null   log [line]
@@ -85,6 +89,33 @@ async function ensureClient() {
   try { return await job; } finally { if (clientJob === job) clientJob = null; }
 }
 const keyOf = (linked, c) => (linked?.envelope ? openSessionKeyEnvelope(linked.envelope, c.contentSecret) : null);
+
+/** Direct mode's client for one machine, built on first use. The relay is
+ *  asked once for the machine's key: both ends derive the tunnel key that
+ *  seals the WebRTC setup from it. */
+async function directOf(c, machineId) {
+  if (c.direct?.machineId === machineId) return c.direct;
+  const job = c.directJobs?.get(machineId);
+  if (job) return job;
+  c.directJobs ??= new Map();
+  const building = (async () => {
+    const { machines = [] } = await c.relay.listMachines();
+    const m = machines.find((x) => x.id === machineId);
+    if (!m) throw new Error('that machine is no longer on this account');
+    const machineKey = openMachineKey(m.dataEncryptionKey, c.contentSecret);
+    if (!machineKey) throw new Error('this browser cannot open the machine\'s key, so Direct mode cannot reach it — use Relay mode');
+    c.direct?.close();
+    c.direct = boundedRelay(new DirectClient({ relay: c.relay, machineId, machineKey, openPeer: peerOpenerFor(api) }), withTimeout);
+    return c.direct;
+  })().finally(() => c.directJobs.delete(machineId));
+  c.directJobs.set(machineId, building);
+  return building;
+}
+/** What a linked session is reached through: its daemon (Direct) or the relay. */
+async function via(linked, c) {
+  if (!linked?.direct) return c.relay;
+  return directOf(c, linked.machineId ?? (await get('setup')).setup?.machineId);
+}
 
 // ── the two brakes ───────────────────────────────────────────────────────────
 const brakes = async () => { const { paused = false, excluded = [] } = await get(['paused', 'excluded']); return { paused, excluded }; };
@@ -230,8 +261,9 @@ async function refreshConversation(gen) {
   const initial = convo.sessionId !== linked.sessionId || !convo.loaded;
   if (initial) convo = { sessionId: linked.sessionId, rows: new Map(), working: false, lastSeq: 0, loaded: false, pending: [] };
   const target = convo;
-  const st = await c.relay.sessionState(linked.sessionId);
-  const page = initial ? await c.relay.eventsBefore(linked.sessionId, Number(st.headSeq) + 1, 120) : await c.relay.events(linked.sessionId, target.lastSeq, 200);
+  const t = await via(linked, c);
+  const st = await t.sessionState(linked.sessionId);
+  const page = initial ? await t.eventsBefore(linked.sessionId, Number(st.headSeq) + 1, 120) : await t.events(linked.sessionId, target.lastSeq, 200);
   current(gen);
   if (convo !== target || !sameLink(linked, (await get('linked')).linked)) return;
   absorb(page?.messages ?? [], keyOf(linked, c));
@@ -259,7 +291,7 @@ async function sendAsUser(text, id) {
   if (!linked || !c) throw new Error('no session is linked');
   if (!text.trim()) throw new Error('enter a message');
   current(gen);
-  await c.relay.sendCiphertext(linked.sessionId, sealText(text, keyOf(linked, c)), id);
+  await (await via(linked, c)).sendText(linked.sessionId, text, keyOf(linked, c), id);
   background(() => ensureWatching());
 }
 
@@ -312,9 +344,10 @@ async function watchOnce(gen) {
   current(gen);
   if (linked && !sameLink(linked, (await get('linked')).linked)) return;
   if (!linked || !c) return stopWatching();
+  const t = await via(linked, c); current(gen);
   if (watching !== linked.sessionId) { stopWatching(); watching = linked.sessionId; }
   if (!watcher) {
-    watcher = new Watcher({ relay: c.relay, store, execute, remember, log: (line) => log(line, gen), onEvents: (events, key) => {
+    watcher = new Watcher({ relay: t, store, execute, remember, log: (line) => log(line, gen), onEvents: (events, key) => {
       if (gen !== epoch || convo.sessionId !== linked.sessionId) return;
       if (!convo.loaded) { convo.pending?.push(...events); return; }
       const rows = absorb(events, key);
@@ -322,7 +355,8 @@ async function watchOnce(gen) {
     } });
   }
   if (!stopStream) {
-    stopStream = c.relay.stream({
+    stopStream = t.stream({
+      sessionId: linked.sessionId,
       onPoke: (sessionId) => { if (gen === epoch && sessionId === linked.sessionId) background(() => ensureWatching()); },
       onError: (e) => { if (gen === epoch) background(() => report(e, gen)); },
     });
@@ -338,22 +372,31 @@ async function link(row, { announce, gen = epoch }) {
   const key = openSessionKeyEnvelope(row.sessionKeyEnvelope, c.contentSecret);
   const meta = row.encryptedMetadata ? openCard(row.encryptedMetadata, key) : null;
   const linked = { sessionId: row.sessionId, token: crypto.randomUUID(), localId: row.localSessionId ?? row.sessionId.slice(0, 8), title: meta?.summary?.text ?? null, envelope: row.sessionKeyEnvelope ?? null };
+  await attach(linked, { announce, gen, machine: meta?.host ?? null });
+}
+
+/** A Direct-mode session: its id on the daemon is the only id it has. */
+const directLink = (id, machineId, title = null) => ({ sessionId: id, token: crypto.randomUUID(), localId: id, title, envelope: null, direct: true, machineId });
+
+async function attach(linked, { announce, gen, machine = null }) {
+  const c = await ensureClient(); current(gen);
+  const t = await via(linked, c); current(gen);
   let pendingResult = null;
   if (announce) {
     const tab = await activeTab();
     const { excluded = [] } = await get('excluded');
     const here = tab && !matchesAny(tab.url, excluded) ? `The active tab is ${tab.id} · ${tab.url} · "${tab.title}".` : 'Open a page with the url attribute when you need one.';
-    pendingResult = { id: crypto.randomUUID(), ciphertext: sealText(browserMessage(`A browser is now attached to this session: the user's own, through the Joy Browser extension. You can run JavaScript in it with <joy-browser-execute> and offer to save scripts with <joy-browser-remember>, as your instructions describe. ${here} The user talks to you from a chat panel on the pages they browse. Nothing is being asked of you by this message — reply with one short line saying you are ready.`), key) };
+    pendingResult = { id: crypto.randomUUID(), text: browserMessage(`A browser is now attached to this session: the user's own, through the Joy Browser extension. You can run JavaScript in it with <joy-browser-execute> and offer to save scripts with <joy-browser-remember>, as your instructions describe. ${here} The user talks to you from a chat panel on the pages they browse. Nothing is being asked of you by this message — reply with one short line saying you are ready.`) };
   }
   // Use a fresh head, not the earlier list snapshot. Persist the notice with
   // the link: a failed delivery must not make the next attempt spawn again.
-  const st = await c.relay.sessionState(row.sessionId); current(gen);
+  const st = await t.sessionState(linked.sessionId); current(gen);
   if (!Number.isSafeInteger(Number(st.headSeq)) || Number(st.headSeq) < 0) throw new Error('the relay returned an invalid session cursor');
   await set({ linked, cursor: Number(st.headSeq), pendingResult, pendingSpawn: null, linkError: null, relayError: null }, gen);
   // Remember it, so a later switch can come straight back without the id.
-  await change(['recent', 'setup'], (s) => ({ recent: [{ sessionId: linked.sessionId, localId: linked.localId, title: linked.title, machine: meta?.host ?? s.setup?.machineName ?? null, at: Date.now() }, ...(s.recent ?? []).filter((r) => r.sessionId !== linked.sessionId)].slice(0, 8) }), gen);
+  await change(['recent', 'setup'], (s) => ({ recent: [{ sessionId: linked.sessionId, localId: linked.localId, title: linked.title, machine: machine ?? s.setup?.machineName ?? null, at: Date.now(), ...(linked.direct ? { direct: true, machineId: linked.machineId } : {}) }, ...(s.recent ?? []).filter((r) => r.sessionId !== linked.sessionId)].slice(0, 8) }), gen);
   stopWatching();
-  await log(`linked to session ${linked.localId}${linked.title ? ` — ${linked.title}` : ''}`, gen);
+  await log(`linked to session ${linked.localId}${linked.title ? ` — ${linked.title}` : ''}${linked.direct ? ' (direct)' : ''}`, gen);
   await ensureWatching(); await loadConversation(); await broadcastMeta();
 }
 
@@ -367,6 +410,15 @@ function startSession() {
       const c = await ensureClient();
       const { setup, pendingSpawn } = await get(['setup', 'pendingSpawn']); current(gen);
       if (!c || !setup?.machineId) throw new Error('setup is not finished');
+      if (setup.mode === 'direct') {
+        const d = await directOf(c, setup.machineId); current(gen);
+        const folder = setup.cwd || DEFAULT_FOLDER;
+        const rec = await d.createSession({ cwd: folder, agent: 'claude', createDir: true, headless: true }); current(gen);
+        if (!rec?.id) throw new Error('the machine did not return a session id');
+        await log(`started a direct session on ${setup.machineName ?? 'the machine'} in ${folder}`, gen);
+        await attach(directLink(rec.id, setup.machineId), { announce: true, gen });
+        return;
+      }
       let pending = pendingSpawn;
       if (!pending) {
         const { machines = [] } = await c.relay.listMachines(); current(gen);
@@ -433,7 +485,7 @@ async function refreshLink(gen) {
   const c = await ensureClient(); current(gen);
   if (!c) return;
   let gone = false;
-  try { gone = ['archived', 'deleted', 'failed'].includes((await c.relay.sessionState(linked.sessionId)).sessionState); }
+  try { gone = ['archived', 'deleted', 'failed'].includes((await (await via(linked, c)).sessionState(linked.sessionId)).sessionState); }
   catch (e) { if (e?.status !== 404) throw e; gone = true; }
   current(gen);
   if (!gone || connectionJob || !sameLink(linked, (await get('linked')).linked)) return;
@@ -474,7 +526,7 @@ const handlers = {
     const s = await get(['setup', 'linked', 'paused', 'excluded', 'scripts', 'linkError', 'relayError', 'log', 'draft', 'recent']);
     return {
       stage: !s.setup?.secret ? 'pair' : !s.setup?.machineId ? 'machine' : 'ready',
-      relayUrl: s.setup?.relayUrl ?? null, machineName: s.setup?.machineName ?? null, cwd: s.setup?.cwd ?? null,
+      relayUrl: s.setup?.relayUrl ?? null, machineName: s.setup?.machineName ?? null, cwd: s.setup?.cwd ?? null, mode: s.setup?.mode ?? 'relay',
       linked: s.linked ?? null, starting: !!spawning, linkError: s.linkError ?? s.relayError ?? null, paused: !!s.paused,
       excluded: s.excluded ?? [], scripts: (s.scripts ?? []).map(({ id, revision, name, match, code, enabled, approved }) => ({ id, revision, name, match, code, enabled, approved })),
       log: s.log ?? [], defaultFolder: DEFAULT_FOLDER, draft: s.draft ?? null, recent: s.recent ?? [],
@@ -499,24 +551,36 @@ const handlers = {
   },
   machines: async () => ({ machines: await machinesView() }),
   /** Step two: the machine and folder, then the session starts by itself. */
-  async start({ machineId, machineName, cwd }, gen) {
+  async start({ machineId, machineName, cwd, mode }, gen) {
     const { setup, pendingSpawn } = await get(['setup', 'pendingSpawn']);
     current(gen);
     if (!setup?.secret || !machineId) throw new Error('choose a machine after pairing');
     const folder = (cwd ?? '').trim() || DEFAULT_FOLDER;
     const pending = setup.machineId === machineId && (setup.cwd || DEFAULT_FOLDER) === folder ? pendingSpawn ?? null : null;
-    await set({ setup: { ...setup, machineId, machineName, cwd: folder }, linked: null, cursor: 0, pendingSpawn: pending, pendingResult: null }, gen);
+    await set({ setup: { ...setup, machineId, machineName, cwd: folder, mode: mode === 'direct' ? 'direct' : 'relay' }, linked: null, cursor: 0, pendingSpawn: pending, pendingResult: null }, gen);
     stopWatching();
     await startSession();
     return { ok: true };
   },
   async newSession(_msg, gen) { await set({ linked: null, cursor: 0, pendingResult: null }, gen); await startSession(); return { ok: true }; },
   /** Settings → connect to a session that already exists, by its id or a prefix. */
-  async connect({ ref }, gen) {
+  async connect({ ref, direct = null, machineId = null }, gen) {
     const c = await ensureClient();
     current(gen); if (!c) throw new Error('pair this browser first');
     const want = String(ref ?? '').trim().toLowerCase();
     if (!want) throw new Error('enter a session id');
+    const { setup } = await get('setup'); current(gen);
+    if (direct ?? setup?.mode === 'direct') {
+      // Direct: the session is looked up on the daemon, not on the relay.
+      const on = machineId ?? setup?.machineId;
+      const rows = (await (await directOf(c, on)).listSessions()).sessions ?? [];
+      const exact = rows.filter((s) => s.id === want);
+      const hits = exact.length ? exact : rows.filter((s) => String(s.id).startsWith(want));
+      if (!hits.length) throw new Error(`no session on the machine matches "${want}"`);
+      if (hits.length > 1) throw new Error(`${hits.length} sessions match "${want}" — use more of the id`);
+      await attach(directLink(hits[0].id, on, hits[0].summary ?? null), { announce: true, gen });
+      return { ok: true };
+    }
     const rows = ((await c.relay.listSessions()).sessions ?? []).filter((s) => s.state !== 'deleted');
     const exact = rows.filter((s) => s.sessionId === want || s.localSessionId === want);
     const hits = exact.length ? exact : rows.filter((s) => s.sessionId.startsWith(want) || (s.localSessionId ?? '').startsWith(want));
@@ -548,7 +612,7 @@ const handlers = {
     await broadcastMeta(); return { ok: true };
   },
   async clear() {
-    epoch++; stopWatching(); client = clientJob = spawning = connectionJob = null;
+    epoch++; stopWatching(); client?.direct?.close(); client = clientJob = spawning = connectionJob = null;
     await writes(() => api.storage.local.clear()); post({ type: 'gone' }); return { ok: true };
   },
   /** The page button asks: should I be here? */
@@ -562,6 +626,7 @@ const handlers = {
     const s = await get(['setup', 'linked', 'cursor', 'paused', 'excluded', 'scripts', 'linkError', 'relayError', 'pendingSpawn', 'pendingResult', 'log']);
     return {
       manifestVersion: api.runtime.getManifest?.().manifest_version ?? null, version: api.runtime.getManifest?.().version ?? null,
+      direct: { mode: s.setup?.mode ?? 'relay', rtcHere: typeof globalThis.RTCPeerConnection === 'function', offscreen: !!api.offscreen, connected: !!client?.direct?.peer },
       apis: { alarms: !!api.alarms, debugger: !!api.debugger, tabsExecuteScript: typeof api.tabs?.executeScript === 'function', scripting: !!api.scripting, tabsQuery: typeof api.tabs?.query === 'function', storageOnChanged: !!api.storage?.onChanged, webCrypto: !!globalThis.crypto?.subtle, randomUUID: typeof globalThis.crypto?.randomUUID === 'function' },
       startupErrors,
       state: { paired: !!s.setup?.secret, machine: s.setup?.machineName ?? null, relay: s.setup?.relayUrl ?? null, linked: s.linked ? { localId: s.linked.localId, hasEnvelope: !!s.linked.envelope } : null, cursor: s.cursor ?? null, paused: !!s.paused, excluded: (s.excluded ?? []).length, scripts: (s.scripts ?? []).length, pendingSpawn: !!s.pendingSpawn, pendingResult: !!s.pendingResult, linkError: s.linkError ?? null, relayError: s.relayError ?? null, spawning: !!spawning, watching: !!watcher, ports: ports.size },
