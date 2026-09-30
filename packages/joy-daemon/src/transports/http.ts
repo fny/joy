@@ -6,6 +6,8 @@
 // Every catalog op is reachable here — same handlers the relay RPCs use, so
 // the two surfaces cannot drift.
 
+import { isLocalOnly } from "../domain/localOnly";
+import { lastLocalRecords, localHeadSeq, pageLocalRecords, subscribeLocalLog } from "../domain/localLog";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -463,8 +465,14 @@ export function startHttpServer(opts: {
       // the subscription the streamer opens first): anything appended later
       // is live, buffered and delivered after it — never read twice. The
       // log is PAGED by seq, a batch at a time, not read whole (Wave C).
-      const upTo = latestRecordSeq(sid);
-      const tail = last !== undefined ? sessionRecords(sid, { after, last }) : null;
+      // A local-only session's log is the durable one on disk (its only
+      // store — there is no relay copy); every other session reads the
+      // in-memory log, bounded, with the relay behind it.
+      const local = isLocalOnly(sid);
+      const upTo = local ? localHeadSeq(sid) : latestRecordSeq(sid);
+      const tail = last !== undefined
+        ? (local ? lastLocalRecords(sid, last).filter((r) => after === undefined || r.seq > after) : sessionRecords(sid, { after, last }))
+        : null;
       const start = tail ? (tail.length > 0 ? tail[0].seq - 1 : upTo) : (after ?? 0);
       await streamHistoryThenFollow<LoggedRecord>({
         res, label: `/sessions/${sid}/events`, ...eventStream,
@@ -473,7 +481,7 @@ export function startHttpServer(opts: {
           start,
           read: (cursor, limit) => {
             const page: LoggedRecord[] = [];
-            for (const r of sessionRecords(sid, { after: cursor })) {
+            for (const r of (local ? pageLocalRecords(sid, { after: cursor, limit }) as LoggedRecord[] : sessionRecords(sid, { after: cursor }))) {
               if (r.seq > upTo || page.length >= limit) break;
               page.push(r);
             }
@@ -482,7 +490,9 @@ export function startHttpServer(opts: {
           cursor: (r) => r.seq,
           frame: (r) => JSON.stringify(r) + "\n",
         },
-        subscribe: follow ? (fn) => subscribeRecords(sid, (r) => fn(JSON.stringify(r) + "\n")) : null,
+        subscribe: follow
+          ? (fn) => (local ? subscribeLocalLog(sid, (r) => fn(JSON.stringify(r) + "\n")) : subscribeRecords(sid, (r) => fn(JSON.stringify(r) + "\n")))
+          : null,
       });
       return;
     }

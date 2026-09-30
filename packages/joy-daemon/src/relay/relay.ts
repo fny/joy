@@ -16,6 +16,7 @@
  * Self-contained — no deps on joy-daemon internals beyond paths + the card
  * seam. External deps: tweetnacl.
  */
+import { isLocalOnly } from "../domain/localOnly";
 import { loadWindowRecord } from "../domain/windowRecord";
 import { setTimeout as sleep } from "timers/promises";
 import { execSync } from 'node:child_process';
@@ -574,6 +575,9 @@ export class RelayClient {
    * undici pool warms; a dropped notification is user-visible.
    */
   async sendSessionPushEvent(localSessionId: string, kind: 'done' | 'permission' | 'question', title: string, body: string): Promise<void> {
+    // A push travels through the relay and names the session: a local-only
+    // session sends none.
+    if (isLocalOnly(localSessionId)) return;
     // DEEP LINK IDENTITY: the app keys every session by the RELAY id, so a push
     // stamped with the daemon's local id routes to a session the app has never
     // heard of — the tap landed on "Session has been deleted" for every

@@ -12,6 +12,7 @@
 // routes reuse the same result; the few legacy HTTP divergences (create's
 // unwrapped 201, kill's 404) are expressed via the optional httpShape.
 
+import { markLocalOnly } from "./localOnly";
 import { parseJoyCommand, type Session } from "../claude/session";
 import { DAEMON_VERSION_LABEL } from "../version";
 import { sessionRecords } from "../relay/relay";
@@ -669,6 +670,7 @@ export const machineOps: MachineOp[] = [
         resume_limit_mb: { type: "number", description: "claude only" },
         forkSession: { type: "boolean", description: "With resume_id: continue under a NEW id (claude: --fork-session; codex/pi/agy: the history is copied first; opencode: refused)" },
         extraArgs: { type: "string", description: "claude/pi/agy: raw CLI arguments appended to the launch (pi/agy shell-split); codex: `key=value` config overrides; opencode: refused" },
+        localOnly: { type: "boolean", description: "Keep the session off the relay: it is never announced, nothing it produces is uploaded, and it sends no push. Its history lives only on this machine (GET /sessions/{id}/records)." },
         headless: { type: "boolean", description: "Nobody is watching: kept out of the app's session list and sends no turn-done push. A session that needs a HUMAN (approval, sign-in) still surfaces and still pushes — hiding the one case you must act on is how an unattended job wedges unnoticed" },
       },
     },
@@ -700,7 +702,12 @@ export const machineOps: MachineOp[] = [
         try { cwd = await cloneForSpawn(gitUrl, cwd); }
         catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
       }
+      // A local-only session is marked BEFORE it exists: the relay lane's
+      // announce sweep sees a session while create() is still awaiting.
+      const localOnlyId = params.localOnly === true ? crypto.randomUUID().replace(/-/g, "").slice(0, 8) : undefined;
+      if (localOnlyId) markLocalOnly(localOnlyId);
       const session = await registry.create({
+        ...(localOnlyId ? { id: localOnlyId } : {}),
         cwd,
         agent: agentRaw === "codex" || agentRaw === "opencode" || agentRaw === "pi" || agentRaw === "agy" ? agentRaw : undefined,
         createDir: params.createDir === true,
@@ -722,8 +729,8 @@ export const machineOps: MachineOp[] = [
       // per-harness create paths: the record is what a later attach reads, and
       // the relay session is what suppresses the push. Set before the first
       // turn can end, so no "finished" escapes a headless session.
-      if (params.headless === true) {
-        saveWindowRecord(session.id, { headless: true });
+      if (params.headless === true || localOnlyId) {
+        saveWindowRecord(session.id, { headless: true, ...(localOnlyId ? { localOnly: true } : {}) });
         relaySessionFor(session.id)?.setHeadless(true);
       }
       return { ok: true, session: session.toJSON(), relaySessionId: session.relaySessionId };

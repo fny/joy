@@ -21,6 +21,8 @@
 // disabled) the acquire loop logs once and retries quietly — local sessions
 // keep running; only app reachability waits.
 
+import { isLocalOnly } from "../domain/localOnly";
+import { appendLocalRecord } from "../domain/localLog";
 import { randomUUID, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import tweetnacl from "tweetnacl";
@@ -854,6 +856,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   function forwardRecord(localId: string, wire: WireRecord, recLocalId?: string): void {
+    // A local-only session's records never leave the machine: the local event
+    // log is their durable store, read over the daemon's own API.
+    if (isLocalOnly(localId)) { appendLocalRecord(localId, wire); return; }
     // The app's user row IS the relay's turn.queued event; lane-dispatched
     // prompts enqueue with mirrorToRelay:false, and the claude tailer only
     // mirrors what the app did NOT send — so a user record here is a prompt
@@ -2595,6 +2600,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   async function announceLocalSession(session: AgentSession): Promise<void> {
+    if (isLocalOnly(session.id)) return; // never gets a relay row
     if (!lease() || announcing.has(session.id)) return;
     // Already bound: there is no row to announce, but there may be no CARD
     // PUBLISHER either. A session whose runtime died with the machine (reboot:
