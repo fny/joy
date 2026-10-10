@@ -568,6 +568,7 @@ export const storage = create<StorageState>()((set, get) => {
 
             // Merge new sessions with existing ones
             const mergedSessions: Record<string, Session> = { ...state.sessions };
+            let sessionsChanged = false;
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
@@ -607,7 +608,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const keepAgent = existing && typeof existing.agentStateVersion === 'number'
                     && (typeof session.agentStateVersion !== 'number' || existing.agentStateVersion > session.agentStateVersion);
 
-                mergedSessions[session.id] = {
+                const next: Session = {
                     ...session,
                     presence,
                     draft: existingDraft || savedDraft || session.draft || null,
@@ -626,7 +627,16 @@ export const storage = create<StorageState>()((set, get) => {
                     agentState: keepAgent ? existing!.agentState : session.agentState,
                     agentStateVersion: keepAgent ? existing!.agentStateVersion : session.agentStateVersion,
                 };
+                // An unchanged session keeps its object: every poll rebuilt all
+                // of them, so everything that reads a session re-rendered every
+                // 2.5 s with nothing to show for it.
+                if (existing && equal(existing, next)) return;
+                mergedSessions[session.id] = next;
+                sessionsChanged = true;
             });
+
+            // Nothing moved: keep the whole state, so no subscriber wakes.
+            if (!sessionsChanged) return state;
 
             // Build active set from all sessions (including existing ones)
             const activeSet = new Set<string>();
@@ -1404,19 +1414,32 @@ export const storage = create<StorageState>()((set, get) => {
             // Either replace all machines or merge updates
             let mergedMachines: Record<string, Machine>;
 
+            // An unchanged machine keeps its object, and a fetch that changed
+            // nothing changes no state: fetchMachines runs every poll, and used
+            // to rebuild the session list and rewrite the machine cache each time.
+            let changed = false;
+            const settle = (machine: Machine): Machine => {
+                const next = reconcile(machine);
+                const prev = state.machines[machine.id];
+                if (prev && equal(prev, next)) return prev;
+                changed = true;
+                return next;
+            };
             if (replace) {
                 // Replace entire machine state (used by fetchMachines)
                 mergedMachines = {};
                 machines.forEach(machine => {
-                    mergedMachines[machine.id] = reconcile(machine);
+                    mergedMachines[machine.id] = settle(machine);
                 });
+                if (Object.keys(state.machines).some((id) => !(id in mergedMachines))) changed = true;
             } else {
                 // Merge individual updates (used by update-machine)
                 mergedMachines = { ...state.machines };
                 machines.forEach(machine => {
-                    mergedMachines[machine.id] = reconcile(machine);
+                    mergedMachines[machine.id] = settle(machine);
                 });
             }
+            if (!changed) return state;
 
             // Rebuild sessionListViewData to reflect machine changes
             const sessionListViewData = buildSessionListViewData(

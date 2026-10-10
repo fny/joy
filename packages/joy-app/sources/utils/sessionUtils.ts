@@ -5,7 +5,7 @@ import { Session } from '@/sync/storageTypes';
 import { t } from '@/text';
 import { buildResumeCommand, buildResumeCommandBlock, ResumeCommandBlock } from './resumeCommand';
 import { formatPathRelativeToHome } from './pathUtils';
-import { stabilizeOnline, sameOnlineState, OFFLINE_GRACE_MS, type OnlineHysteresisState } from './onlineHysteresis';
+import { stabilizeOnline, sameOnlineState, nextOnlineWake, OFFLINE_GRACE_MS, type OnlineHysteresisState } from './onlineHysteresis';
 import { sessionFacts, statusState, type SessionFacts } from '@/sync/sessionFacts';
 import { statusText as statusTextFor } from './statusLabel';
 
@@ -50,21 +50,28 @@ const SESSION_STALE_AFTER_MS = 90_000;
  *
  * Going offline replaces the whole composer with the Resume button, so a
  * momentary blip — one late keepalive against the 90s window — was showing
- * that button and taking it away again. It also ticks, because the raw
- * reading is time-based and would otherwise flip on an unrelated render.
+ * that button and taking it away again.
+ *
+ * The raw reading is time-based (`staleAt` is when it lapses), so something
+ * must re-render at that boundary or the flip lands on an unrelated render.
+ * That used to be a 2 s interval in EVERY caller — one per session row in the
+ * sidebar, each re-rendering its row forever (a third of the app's idle CPU
+ * with 150 sessions). Now one timeout wakes at the next moment the reading can
+ * actually change, and none runs while nothing can.
  */
-function useStableOnline(raw: boolean): boolean {
+function useStableOnline(raw: boolean, staleAt: number | null): boolean {
     const [state, setState] = React.useState<OnlineHysteresisState>(
         () => ({ stable: raw, offlineSince: raw ? null : Date.now() }),
     );
 
-    // Re-render on a cadence so the staleness boundary is crossed deliberately
-    // rather than whenever something else happens to render.
     const [, tick] = React.useReducer((c: number) => c + 1, 0);
+    const wakeAt = nextOnlineWake({ raw, staleAt, state, graceMs: OFFLINE_GRACE_MS });
     React.useEffect(() => {
-        const id = setInterval(tick, 2_000);
-        return () => clearInterval(id);
-    }, []);
+        if (wakeAt === null) return;
+        // A little past the boundary, so the re-render reads the far side of it.
+        const id = setTimeout(tick, Math.max(0, wakeAt - Date.now()) + 50);
+        return () => clearTimeout(id);
+    }, [wakeAt]);
 
     // Runs every render (the raw reading changes without a dep to key on) and
     // returns the SAME object when nothing moved, so this cannot loop.
@@ -78,12 +85,39 @@ function useStableOnline(raw: boolean): boolean {
     return state.stable;
 }
 
+/**
+ * One shared minute clock for "last seen 5 minutes ago": a single interval for
+ * the whole app, running only while something subscribes. An offline status
+ * subscribes so its relative time stays true; an online one never needs it.
+ */
+let minute = 0;
+let minuteTimer: ReturnType<typeof setInterval> | null = null;
+const minuteListeners = new Set<() => void>();
+function subscribeMinute(listener: () => void): () => void {
+    minuteListeners.add(listener);
+    if (!minuteTimer) minuteTimer = setInterval(() => { minute++; for (const l of minuteListeners) l(); }, 60_000);
+    return () => {
+        minuteListeners.delete(listener);
+        if (minuteListeners.size === 0 && minuteTimer) { clearInterval(minuteTimer); minuteTimer = null; }
+    };
+}
+const noSubscription = () => () => {};
+function useMinuteClock(enabled: boolean): void {
+    React.useSyncExternalStore(enabled ? subscribeMinute : noSubscription, () => (enabled ? minute : 0), () => 0);
+}
+
+/** When an online session's activity window lapses; null when it reads offline anyway. */
+function onlineStaleAt(session: Session): number | null {
+    return session.presence === "online" ? session.activeAt + SESSION_STALE_AFTER_MS : null;
+}
+
 export function useSessionStatus(session: Session): SessionStatus {
     // Instantaneous reading. It depends on Date.now(), so nothing re-renders
     // when the staleness window lapses — useStableOnline supplies both the
     // clock and the hysteresis (#649).
     const rawOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
-    const isOnline = useStableOnline(rawOnline);
+    const isOnline = useStableOnline(rawOnline, onlineStaleAt(session));
+    useMinuteClock(!isOnline); // keeps "last seen …" current
 
     // Every fact about the session, derived once. The nine-branch ladder that
     // used to be written out here — and again, separately, in storage.ts's
@@ -119,7 +153,7 @@ export function useSessionStatus(session: Session): SessionStatus {
  *  than the single badge `useSessionStatus` collapses them to. */
 export function useSessionFacts(session: Session): SessionFacts {
     const rawOnline = session.presence === "online" && (Date.now() - session.activeAt < SESSION_STALE_AFTER_MS);
-    return sessionFacts(session, useStableOnline(rawOnline));
+    return sessionFacts(session, useStableOnline(rawOnline, onlineStaleAt(session)));
 }
 
 /**

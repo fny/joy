@@ -28,11 +28,21 @@ export function v2Online(row: { online: boolean; state: string }): boolean {
     return row.online && LIVE_SESSION_STATES.has(row.state);
 }
 
+/** How old an online session's activeAt may grow before a poll moves it.
+ *  Well inside the 90 s staleness window, so an online session never reads
+ *  stale; coarse enough that a poll does not rewrite every online session. */
+export const ACTIVE_REFRESH_MS = 30_000;
+
 export function v2ActiveAt(
     row: { online: boolean; state: string; lastTurnAt: number | null; updatedAt: number },
     existingActiveAt: number | undefined,
     now: number = Date.now(),
 ): number {
-    if (v2Online(row)) return now;
+    // Stamping "now" on every poll made every online session a CHANGED session
+    // every 2.5 s, so the store never settled and the whole list re-rendered
+    // forever. Keep the stamp while it is fresh enough to mean "online".
+    if (v2Online(row)) {
+        return existingActiveAt !== undefined && existingActiveAt <= now && now - existingActiveAt < ACTIVE_REFRESH_MS ? existingActiveAt : now;
+    }
     return Math.max(existingActiveAt ?? 0, row.lastTurnAt ?? row.updatedAt);
 }

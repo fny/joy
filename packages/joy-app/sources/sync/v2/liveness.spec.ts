@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { v2ActiveAt, v2Online } from './liveness';
+import { v2ActiveAt, v2Online, ACTIVE_REFRESH_MS } from './liveness';
 import { isSessionInActiveGroup, SESSION_STALE_AFTER_MS } from '../sessionLiveness';
 
 const NOW = 1_800_000_000_000;
@@ -10,6 +10,13 @@ describe('v2ActiveAt — lease liveness as the activeAt heartbeat', () => {
         const row = { online: true, state: 'active', lastTurnAt: LONG_AGO, updatedAt: LONG_AGO };
         expect(v2ActiveAt(row, undefined, NOW)).toBe(NOW);
         expect(v2ActiveAt(row, LONG_AGO, NOW)).toBe(NOW);
+    });
+
+    it('online row: a fresh stamp is kept, so a poll does not rewrite every online session', () => {
+        const row = { online: true, state: 'active', lastTurnAt: LONG_AGO, updatedAt: LONG_AGO };
+        expect(v2ActiveAt(row, NOW - 10_000, NOW)).toBe(NOW - 10_000);
+        expect(v2ActiveAt(row, NOW - ACTIVE_REFRESH_MS, NOW)).toBe(NOW);
+        expect(ACTIVE_REFRESH_MS * 2).toBeLessThan(SESSION_STALE_AFTER_MS); // a kept stamp never reads stale
     });
 
     it('offline row: falls back to the last moment we saw it live, never older than its last turn', () => {

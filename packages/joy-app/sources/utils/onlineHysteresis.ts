@@ -57,6 +57,23 @@ export function stabilizeOnline(input: OnlineHysteresisInput): OnlineHysteresisS
     return { stable, offlineSince };
 }
 
+/**
+ * When the reading can next change on its own, by the clock alone: the moment
+ * the raw reading's activity window lapses (`staleAt`) while it reads online,
+ * or the end of the grace while an offline reading waits to be believed. Null
+ * when no amount of waiting changes anything — then nothing needs to wake.
+ *
+ * This is what lets a status re-render once at the boundary instead of on a
+ * fixed tick: every session row used to re-render every 2 s to notice a
+ * deadline that, for an online session, was minutes away.
+ */
+export function nextOnlineWake(input: { raw: boolean; staleAt: number | null; state: OnlineHysteresisState; graceMs: number }): number | null {
+    const { raw, staleAt, state, graceMs } = input;
+    if (raw) return staleAt;
+    if (state.stable && state.offlineSince !== null) return state.offlineSince + graceMs;
+    return null;
+}
+
 /** Same state? Lets a caller skip a re-render rather than loop on itself. */
 export function sameOnlineState(a: OnlineHysteresisState, b: OnlineHysteresisState): boolean {
     return a.stable === b.stable && a.offlineSince === b.offlineSince;

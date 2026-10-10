@@ -25,6 +25,11 @@ import { v2MessagesAfter, v2MessagesBefore, type V2Lifecycle } from './v2/reads'
 /** Relay poll cadence: the baseline live channel everywhere, and the ONLY one
  *  on native (SSE needs a streaming fetch body React Native lacks). */
 const POLL_INTERVAL_MS = 2500;
+/** The full poll while the SSE stream is up (web, desktop). The stream already
+ *  pokes the list and the session on every change, lease deaths included, so
+ *  the poll is only a backstop there — at 2.5 s it re-read and re-rendered the
+ *  whole account for nothing (half the app's idle CPU). */
+const STREAMING_POLL_MS = 15_000;
 /** How often to re-read account settings while the app is in front. Far slower
  *  than the session poll because settings change when a HUMAN changes them,
  *  not continuously — but not never, which is what it was. */
@@ -398,6 +403,7 @@ class Sync {
     private live: LiveDriverState = initialLiveDriver();
     private v2StreamStop: (() => void) | null = null;
     private v2PollTimer: ReturnType<typeof setInterval> | null = null;
+    private v2LastFullPollAt = 0;
     private v2ReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     private v2SessionIdIndex(): Map<string, string> {
@@ -471,21 +477,26 @@ class Sync {
         // Poll: the baseline everywhere, and the ONLY live channel on native.
         // Its own success/failure drives the connection indicator.
         this.v2PollTimer = setInterval(() => {
+            // While the stream carries changes, the full read is a backstop
+            // (STREAMING_POLL_MS); a session with a send still settling keeps
+            // its fast read either way.
+            const now = Date.now();
+            const full = this.live.conn.kind !== 'streaming' || now - this.v2LastFullPollAt >= STREAMING_POLL_MS;
+            if (full) this.v2LastFullPollAt = now;
             // Sessions FIRST: a bind lands the card's key envelope, and the
             // messages fetch for that session needs it (issue #3).
-            this.sessionsSync.invalidate();
+            if (full) this.sessionsSync.invalidate();
             // Only the session on screen (and any with a send still settling)
             // polls its messages. Polling EVERY session fetched and decrypted
             // the whole account every 2.5s, and re-anchored sessions the memory
             // limit had just evicted (#2). Everything else is woken by the SSE
             // poke or when it becomes visible.
             const viewing = storage.getState().currentViewingSessionId;
-            const now = Date.now();
             for (const sid of this.v2SessionIdIndex().values()) {
                 const recentSend = (this.recentSendAt.get(sid) ?? 0) > now - 60_000;
-                if (sid === viewing || recentSend) this.getMessagesSync(sid).invalidate();
+                if ((full && sid === viewing) || recentSend) this.getMessagesSync(sid).invalidate();
             }
-            this.machinesSync.invalidate();
+            if (full) this.machinesSync.invalidate();
         }, POLL_INTERVAL_MS);
     }
 
@@ -508,7 +519,7 @@ class Sync {
 
     /** The one notion of connected, derived from the driver's state. */
     private publishIndicator() {
-        const want = indicatorOf(this.live, Date.now(), POLL_INTERVAL_MS);
+        const want = indicatorOf(this.live, Date.now(), this.live.conn.kind === 'streaming' ? STREAMING_POLL_MS : POLL_INTERVAL_MS);
         if (storage.getState().socketStatus !== want) storage.getState().setSocketStatus(want);
     }
 

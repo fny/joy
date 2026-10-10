@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stabilizeOnline, sameOnlineState } from './onlineHysteresis';
+import { stabilizeOnline, sameOnlineState, nextOnlineWake } from './onlineHysteresis';
 
 const GRACE = 8_000;
 const step = (state: { stable: boolean; offlineSince: number | null }, raw: boolean, now: number) =>
@@ -57,5 +57,29 @@ describe('sameOnlineState', () => {
         expect(sameOnlineState({ stable: true, offlineSince: null }, { stable: true, offlineSince: null })).toBe(true);
         expect(sameOnlineState({ stable: true, offlineSince: null }, { stable: false, offlineSince: null })).toBe(false);
         expect(sameOnlineState({ stable: true, offlineSince: 1 }, { stable: true, offlineSince: 2 })).toBe(false);
+    });
+});
+
+describe('nextOnlineWake — when a status must look again', () => {
+    it('online: at the moment the activity window lapses, not before', () => {
+        expect(nextOnlineWake({ raw: true, staleAt: 90_000, state: { stable: true, offlineSince: null }, graceMs: GRACE })).toBe(90_000);
+    });
+    it('offline but still inside the grace: when the grace ends', () => {
+        expect(nextOnlineWake({ raw: false, staleAt: null, state: { stable: true, offlineSince: 5_000 }, graceMs: GRACE })).toBe(5_000 + GRACE);
+    });
+    it('settled offline, or online with no window: nothing to wake for', () => {
+        expect(nextOnlineWake({ raw: false, staleAt: null, state: { stable: false, offlineSince: 5_000 }, graceMs: GRACE })).toBeNull();
+        expect(nextOnlineWake({ raw: true, staleAt: null, state: { stable: true, offlineSince: null }, graceMs: GRACE })).toBeNull();
+    });
+    it('walked against stabilizeOnline: a lapsing session flips exactly once, at grace end', () => {
+        let s = { stable: true, offlineSince: null as number | null };
+        const staleAt = 90_000;
+        let wake = nextOnlineWake({ raw: true, staleAt, state: s, graceMs: GRACE })!;
+        s = step(s, false, wake);                             // first look past the window: raw is false
+        expect(s).toEqual({ stable: true, offlineSince: wake });
+        wake = nextOnlineWake({ raw: false, staleAt: null, state: s, graceMs: GRACE })!;
+        s = step(s, false, wake);
+        expect(s.stable).toBe(false);
+        expect(nextOnlineWake({ raw: false, staleAt: null, state: s, graceMs: GRACE })).toBeNull();
     });
 });
