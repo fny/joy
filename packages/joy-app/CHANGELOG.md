@@ -1,3 +1,9 @@
+# Oct 12 — Option buttons answer the first tap on iPhone
+
+- **Tapping an option at the end of a chat now registers the first time.** While a chat was following the newest message, the list could keep re-issuing its own "go to the end" scroll, many times a second. On iPhone a scroll that arrives while your finger is down takes the touch away from the button under it, so a tap on an option did nothing — no outline, no answer — until one happened to land between two scrolls. The list now scrolls to the end once and stops.
+- **An open chat that is sitting still uses less battery,** for the same reason: the repeated scroll is gone.
+- **The app does less work when nothing is changing.** The session list no longer redraws every row every two seconds, and a background refresh that finds nothing new changes nothing on screen.
+
 # Sep 27 — Scrolling up in a chat stays where you put it
 
 - **Scroll up and the chat stays there.** The list used to decide whether to follow new messages from where the view happened to land, whatever put it there. If something below you got shorter — a reply re-rendering, a group folding — the view slid to the end, the list took that as you returning, and the next streamed line pulled you down and kept you there. Following is now your decision only: scroll up and it stops; scroll back down to the end, press the down arrow, or send a message and it starts again.

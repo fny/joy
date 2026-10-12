@@ -56,6 +56,19 @@ describe('leaving following takes the reader', () => {
         expect(r.follows).toBe(0);
     });
 
+    it('the end of its own programmatic scroll never asks for another follow', () => {
+        // iOS reports a momentum end for every non-animated scrollTo. Following
+        // from it re-issued the scroll each frame, and each scroll report took
+        // the touch from the button under the reader's finger.
+        const r = run([
+            { type: 'geometry', now: 0 },
+            { type: 'scroll', metrics: at(2000), now: 16 },
+            { type: 'momentumEnd', metrics: at(2000), now: 16 },
+        ], live());
+        expect(r.effects.map((x) => x.on)).toEqual(['geometry']);
+        expect(r.state.mode).toBe('following');
+    });
+
     it('a momentum end from a programmatic animation does not end a new drag', () => {
         const r = run([
             { type: 'dragStart', metrics: at(2000), now: 0 },

@@ -249,7 +249,8 @@ export function nextScrollState(state: ScrollState, event: ScrollEvent): { state
     // a momentum start, which continues its drag's release however late the
     // callback arrives.
     const rescue = event.type === 'momentumStart' && s.interaction?.phase === 'release';
-    if (!rescue && s.interaction?.until != null && event.now >= s.interaction.until) {
+    const settled = !rescue && s.interaction?.until != null && event.now >= s.interaction.until;
+    if (settled) {
         s = end(s, event.type === 'tick' || event.type === 'geometry' ? event.metrics ?? null : null);
     }
     const effects: ScrollEffect[] = [];
@@ -291,7 +292,18 @@ export function nextScrollState(state: ScrollState, event: ScrollEvent): { state
             break;
         case 'momentumEnd':
             if (phase === 'momentum') s = end(s, event.metrics);
-            else if (event.metrics && !s.interaction) s = { ...s, metrics: event.metrics };
+            else {
+                // Not a fling's end: iOS reports one for every non-animated
+                // scrollTo, our own follow included. Following from it made
+                // the follow answer itself — scrollToEnd, its momentum end,
+                // scrollToEnd — every frame the offset did not land exactly
+                // on the target, and each of those scroll reports took the
+                // touch from whatever the reader was pressing (a scroll while
+                // a finger is down makes the ScrollView the responder): taps
+                // on option chips at the end of the chat did nothing.
+                if (event.metrics && !s.interaction) s = { ...s, metrics: event.metrics };
+                if (!settled) return { state: s, effects };
+            }
             break;
         case 'pointerDown':
             s = begin(takeOver(s), 'pointer', event.metrics, null);
