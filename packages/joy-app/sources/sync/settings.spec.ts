@@ -246,7 +246,7 @@ describe('settings', () => {
                 fileDiffsSidebar: false,
                 groupToolCalls: false,
                 joy__chatHistoryLimit: null,
-                joy__doubleTapEnabled: false,
+                joy__doubleTapEnabled: true,
                 joy__newSessionDefault: false,
                 pinnedSessions: [],
                 voiceAgents: [],

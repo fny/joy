@@ -132,7 +132,7 @@ export default function FeaturesSettingsScreen() {
                 />
                 <Item
                     title="Double tap"
-                    subtitle="Second tap within 2s required to commit choice selections"
+                    subtitle="On touch screens, a second tap within 2s commits a choice. Synced; never applies with a mouse"
                     icon={<Ionicons name="finger-print-outline" size={29} color="#FF9500" />}
                     rightElement={
                         <Switch

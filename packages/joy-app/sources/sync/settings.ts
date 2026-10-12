@@ -44,7 +44,7 @@ export const SettingsSchema = z.object({
     agentDefaultOverrides: AgentDefaultOverridesSchema.describe('User-selected agent defaults. Missing values use code defaults and are not sent as agent metadata.'),
     // Dismissed CLI warning banners (supports both per-machine and global dismissal)
     joy__chatHistoryLimit: z.number().nullable().describe('Mod 05: max messages to display per conversation (null = unlimited / off)'),
-    joy__doubleTapEnabled: z.boolean().describe('Mod 06: require double tap to commit AskUserQuestion option/submit selections'),
+    joy__doubleTapEnabled: z.boolean().describe('Mod 06: require double tap to commit AskUserQuestion option/submit selections. Applies on touch devices only (useDoubleTap); on by default'),
     joy__tmuxServerUrl: z.string().nullable().describe('URL of the joy-tmux server for session management'),
     joy__newSessionDefault: z.boolean().describe('Joy: New session buttons open the joy-tmux create page instead of /new'),
     // Voice (ElevenLabs Conversational AI, bring-your-own agent). Synced
@@ -128,7 +128,7 @@ export const settingsDefaults: Settings = {
     lastUsedPermissionMode: null,
     lastUsedModelMode: null,
     joy__chatHistoryLimit: null,
-    joy__doubleTapEnabled: false,
+    joy__doubleTapEnabled: true,
     joy__tmuxServerUrl: null,
     joy__newSessionDefault: false,
     pinnedSessions: [],
