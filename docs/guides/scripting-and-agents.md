@@ -177,6 +177,19 @@ joy env unset FIREWORKS_API_KEY
 
 Changes apply to sessions started afterwards. Agents are told not to change the store unless you ask, because it affects every future session on the machine.
 
+## Session secrets: `joy secret`
+
+Values a user sends in a secrets block go to one session, not to every session on the machine, and never into the agent's environment. Agents are told about them in the message (`[secrets saved: …]`) and read one when they need it, so it can go into a command or a form field. Agents can also save and remove them.
+
+```bash
+joy secret ls
+joy secret get password
+joy secret set api_token=abc123
+joy secret rm api_token
+```
+
+See [Messages](messages.md#secrets).
+
 ## Scheduled and chained work
 
 An automation is a folder, a prompt and a trigger. Each run is a headless session that fails as soon as it needs a human, so it never sits waiting. `joy automation run <id> --wait` exits with the run's outcome, so scripts and agents can call an automation like any other command.

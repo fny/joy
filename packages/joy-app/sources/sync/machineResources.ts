@@ -30,7 +30,7 @@
  */
 import { sync } from './sync';
 import {
-    machineEnvList, machineHarnesses, machineHarnessModels, machineHarnessSessions, machineHistoryLogs, machineListSessions,
+    machineEnvList, machineSecretList, machineHarnesses, machineHarnessModels, machineHarnessSessions, machineHistoryLogs, machineListSessions,
     machineOpencodeSessions, machineStatusOnly,
 } from './v2/machine';
 import { resolveHarnessTable, type HarnessCapabilities, type HarnessId } from './harnessCapabilities';
@@ -171,6 +171,29 @@ export function joySessionsSpec(machineId: string): ResourceSpec<JoySession[]> {
             const list = res.data?.sessions;
             if (!isDaemonSuccess(res) || !Array.isArray(list)) return { kind: 'error', reason: daemonError('list sessions', res) };
             return { kind: 'ok', data: list as unknown as JoySession[] };
+        },
+    };
+}
+
+// ── a session's secret names ────────────────────────────────────────────────
+
+/** Names of the secrets saved for one session (never values) — the session
+ *  info list and the composer's new/replaces marks read this. */
+export function sessionSecretsSpec(machineId: string, localSessionId: string): ResourceSpec<string[]> {
+    return {
+        key: `session-secrets:${machineId}:${localSessionId}`,
+        family: MACHINE_FAMILY,
+        staleTime: 5000,
+        // The agent can add or remove them (`joy secret set|rm`) while the app is away.
+        refetchOnFocus: true,
+        refetchOnReconnect: true,
+        fetch: async () => {
+            const ctx = sync.machineOnlyCtx(machineId);
+            if (!ctx) return { kind: 'unavailable', reason: NO_CTX };
+            const r = await machineSecretList(ctx, localSessionId);
+            const list = r.data?.secrets;
+            if (isDaemonSuccess(r) && Array.isArray(list)) return { kind: 'ok', data: list.map((e) => e.name) };
+            return { kind: 'error', reason: daemonError('list secrets', r) };
         },
     };
 }

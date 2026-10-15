@@ -445,3 +445,11 @@ export const machineEnvSet = (ctx: MachineOnlyCtx, name: string, value: string) 
     jm<{ ok?: boolean; error?: string }>(ctx, 'POST', '/v2/env', { name, value });
 export const machineEnvUnset = (ctx: MachineOnlyCtx, name: string) =>
     jm<{ ok?: boolean; existed?: boolean; error?: string }>(ctx, 'DELETE', `/v2/env/${encodeURIComponent(name)}`);
+
+// ── session secrets (names travel up, values only ever go down) ─────────────
+export const machineSecretList = (ctx: MachineOnlyCtx, localSessionId: string) =>
+    jm<{ ok?: boolean; secrets?: Array<{ name: string; at: number }>; error?: string }>(ctx, 'GET', `/v2/sessions/${localSessionId}/secrets`);
+export const machineSecretSet = (ctx: MachineOnlyCtx, localSessionId: string, secrets: Record<string, string>) =>
+    jm<{ ok?: boolean; names?: string[]; error?: string; name?: string }>(ctx, 'POST', `/v2/sessions/${localSessionId}/secrets`, { secrets });
+export const machineSecretRemove = (ctx: MachineOnlyCtx, localSessionId: string, name: string) =>
+    jm<{ ok?: boolean; existed?: boolean; error?: string }>(ctx, 'DELETE', `/v2/sessions/${localSessionId}/secrets/${encodeURIComponent(name)}`);

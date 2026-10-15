@@ -28,6 +28,7 @@ import { joyRelayCredsDir, joyRelayUrl, joyRelayAccessKey } from '../paths';
 import { publishV2Card, v2SessionIdFor } from './v2Card';
 import { classifyRunFailure } from '../domain/automationRun';
 import tweetnacl from 'tweetnacl';
+import { redactSecrets } from '../domain/secretsStore';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -1099,6 +1100,9 @@ export class RelaySession {
    * `localId` is the adapter's stable dedupe key (becomes the runtimeEventId).
    */
   send(wire: WireRecord, localId?: string): void {
+    // A secret the agent read with `joy secret get` and then printed is
+    // blanked here, before the local event log and the relay see the record.
+    wire = redactSecrets(this.relaySessionId, wire);
     // A joy-message wrapper on a user row carries provenance the daemon
     // stamped (operations joy-send): surface it as structured meta so the app
     // renders "from joy:<id>" without parsing XML.

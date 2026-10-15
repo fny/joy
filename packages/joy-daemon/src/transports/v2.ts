@@ -422,6 +422,13 @@ route("GET", "/v2/env", async (ctx) => ok(await mcall("envList", ctx.registry, {
 route("POST", "/v2/env", (ctx, _p, body) => mshaped("envSet", ctx.registry, body));
 route("DELETE", "/v2/env/:name", (ctx, p) => mshaped("envUnset", ctx.registry, { name: p.name }));
 
+// ── session secrets: names in, names out. There is no /v2 route that returns
+// a value — the app never reads one back; the agent does, locally, through
+// `joy secret get` on the daemon's own HTTP surface.
+route("GET", "/v2/sessions/:id/secrets", (ctx, p) => mshaped("secretList", ctx.registry, { id: p.id }));
+route("POST", "/v2/sessions/:id/secrets", (ctx, p, body) => mshaped("secretSet", ctx.registry, { ...body, id: p.id }));
+route("DELETE", "/v2/sessions/:id/secrets/:name", (ctx, p) => mshaped("secretRemove", ctx.registry, { id: p.id, name: p.name }));
+
 // ── talk-ability + held approvals (joy check / joy approvals) ──────────────
 route("GET", "/v2/sessions/:id/check", (ctx, p) => mshaped("check", ctx.registry, { id: p.id }));
 route("GET", "/v2/sessions/:id/approvals", (ctx, p) => mshaped("approvalsList", ctx.registry, { id: p.id }));

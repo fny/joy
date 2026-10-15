@@ -476,6 +476,23 @@ joy env set OPENAI_API_KEY=sk-...
 joy env ls
 ```
 
+## secret
+
+The secrets saved for one session: values the user sent in a secrets block or a `/secrets` line, or that an agent saved. Unlike `joy env`, they are never put in an agent's environment; an agent reads one when it needs it. Inside a session, the session comes from `$JOY_SESSION_ID`; from a shell, pass `--session <id>`.
+
+```text
+joy secret [ls]                         # list the names
+joy secret get NAME                     # print the value (no newline when piped)
+joy secret set NAME=value [NAME=value…]
+joy secret rm NAME
+```
+
+Names are letters, digits, `_`, `.` and `-`, and match without regard to case. A value the agent prints is blanked in the chat the app shows. See [Messages](../guides/messages.md#secrets).
+
+```bash
+curl -u "me:$(joy secret get password)" https://example.com/api
+```
+
 ## notify
 
 Send a push notification to every device on your account.

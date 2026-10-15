@@ -34,7 +34,7 @@ curl -s -X POST "http://127.0.0.1:$port/v2/sessions/1a2b3c4d/abort" -H "X-Joy-To
 ### Two route families
 
 - **The operation catalog** (`/status`, `/sessions`, `/send`, `/sessions/:id/check`, `/sessions/:id/queue`, `/sessions/:id/events` and more) is what the CLI calls.
-- **The machine surface under `/v2/`** is what the app reaches through the relay: sessions, the queue, approvals, files and git status, harness descriptions (`/v2/harnesses`, with each agent's models, config and usage limits), usage, and the sealed environment store.
+- **The machine surface under `/v2/`** is what the app reaches through the relay: sessions, the queue, approvals, files and git status, harness descriptions (`/v2/harnesses`, with each agent's models, config and usage limits), usage, the sealed environment store, and each session's secret names (`/v2/sessions/{id}/secrets`: save, list and remove; no `/v2` route returns a value — only the local `GET /sessions/{id}/secrets/{name}` that `joy secret get` uses).
 
 The OpenAPI document covers both. Two useful routes:
 

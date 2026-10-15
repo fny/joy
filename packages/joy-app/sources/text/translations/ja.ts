@@ -1112,6 +1112,21 @@ export const ja: TranslationStructure = {
         setupPrompt: '推奨システムプロンプト',
         setupPromptSubtitle: 'タップしてコピーし、ダッシュボードのエージェントのプロンプトに貼り付けてください。「つなぎっぱなし」モードでは、同じ内容が接続のたびにコンテキストとしても送られます。',
     },
+    secrets: {
+        stripTitle: 'シークレットとして保存され、チャットには表示されません',
+        new: '新規',
+        replaces: '上書き',
+        notSavedTitle: 'シークレットは保存されませんでした',
+        unreachable: '現在このセッションのマシンに接続できません。メッセージは入力欄に戻しました。',
+        invalid: ({ lines }: { lines: string }) => `次の行は 名前: 値 の形式ではありません: ${lines}`,
+        refused: ({ error }: { error: string }) => `マシンに拒否されました (${error})。メッセージは入力欄に戻しました。`,
+        title: 'シークレット',
+        footer: 'このセッション専用に保存されます。エージェントは joy secret get で読み取り、値がアプリに戻ることはありません。```secrets ブロックまたは /secrets 名前=値 を送信して追加します。',
+        none: 'シークレットなし',
+        removeTitle: 'シークレットを削除しますか？',
+        removeMessage: ({ name }: { name: string }) => `エージェントは ${name} を読み取れなくなります。`,
+    },
+
     machine: {
         environment: '環境変数',
         environmentFooter: 'このマシンで新しく起動する各セッションが引き継ぐプロバイダーのキー（FIREWORKS_API_KEY など）。マシン上に暗号化して保存され、値がアプリに戻ることはありません。',

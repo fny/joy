@@ -2179,6 +2179,68 @@ async function cmdEnv(rest: string[]): Promise<number> {
   return 2;
 }
 
+// joy secret ls | get NAME | set NAME=value… | rm NAME — the secrets the user
+// handed THIS session ($JOY_SESSION_ID, or --session <id> from a shell).
+// Unlike `joy env`, nothing here reaches an agent's environment: a value is
+// read when it is needed, and the daemon blanks it in the session's output.
+async function cmdSecret(rest: string[]): Promise<number> {
+  const args = [...rest];
+  let sid = process.env.JOY_SESSION_ID ?? "";
+  const at = args.indexOf("--session");
+  if (at >= 0) { sid = args[at + 1] ?? ""; args.splice(at, 2); }
+  const usage = "usage: joy secret [ls] | get NAME | set NAME=value [NAME=value…] | rm NAME   (inside a joy session, or with --session <id>)";
+  if (!/^[0-9a-f]{8}$/.test(sid)) { console.error(`${bad} no session: run this inside a joy session ($JOY_SESSION_ID) or pass --session <id>`); return 2; }
+  const sub = args[0];
+  const call = async (method: string, path: string, body?: unknown) => {
+    const r = await api(method, `/sessions/${sid}/secrets${path}`, body).catch(() => null);
+    return r ? { status: r.status, body: await r.json().catch(() => ({})) as any } : null;
+  };
+  const failed = (r: { body: any } | null, what: string): number => {
+    if (!r) { console.error(`${bad} daemon not running`); return 1; }
+    const e = r.body?.error;
+    console.error(`${bad} ${e === "not_found" ? `no secret named ${what}` : e === "session_not_found" ? `no session ${sid} on this daemon` : e === "bad_name" ? `bad name ${r.body?.name ?? what} (letters, digits, _ . -)` : e === "bad_value" ? `bad value for ${r.body?.name ?? what}` : e ?? "failed"}`);
+    return 1;
+  };
+  if (sub === undefined || sub === "ls" || sub === "list") {
+    const r = await call("GET", "");
+    if (!r || r.status !== 200) return failed(r, "");
+    if (!r.body.secrets?.length) { console.log("no secrets for this session"); return 0; }
+    for (const e of r.body.secrets) console.log(`  ${e.name}`);
+    return 0;
+  }
+  if (sub === "get") {
+    const name = args[1];
+    if (!name) { console.error(usage); return 2; }
+    const r = await call("GET", `/${encodeURIComponent(name)}`);
+    if (!r || r.status !== 200) return failed(r, name);
+    process.stdout.write(String(r.body.value) + (process.stdout.isTTY ? "\n" : ""));
+    return 0;
+  }
+  if (sub === "set") {
+    const pairs: Record<string, string> = {};
+    for (const kv of args.slice(1)) {
+      const eq = kv.indexOf("=");
+      if (eq <= 0) { console.error(usage); return 2; }
+      pairs[kv.slice(0, eq)] = kv.slice(eq + 1);
+    }
+    if (!Object.keys(pairs).length) { console.error(usage); return 2; }
+    const r = await call("POST", "", { secrets: pairs });
+    if (!r || r.status !== 200) return failed(r, Object.keys(pairs)[0]);
+    console.log(`${ok} saved ${r.body.names.join(", ")}`);
+    return 0;
+  }
+  if (sub === "rm" || sub === "remove" || sub === "unset") {
+    const name = args[1];
+    if (!name) { console.error(usage); return 2; }
+    const r = await call("DELETE", `/${encodeURIComponent(name)}`);
+    if (!r || r.status !== 200) return failed(r, name);
+    console.log(r.body.existed ? `${ok} ${name} removed` : `no secret named ${name}`);
+    return 0;
+  }
+  console.error(usage);
+  return 2;
+}
+
 export async function cmdKill(rest: string[]): Promise<number> {
   const target = rest[0];
   if (!target) { console.error("usage: joy kill <session>"); return 2; }
@@ -2238,6 +2300,7 @@ ${c.b("Usage:")} joy <command>
                daemon stamps it from JOY_SESSION_ID and the app shows who sent it. Exit codes:
                0 ok · 1 error · 2 usage · 3 busy · 4 timeout · 5 mode · 6 needs input.
   ${c.b("env")}          Sealed provider keys every new session inherits:  joy env [ls] | set KEY=value | unset KEY
+  ${c.b("secret")}       This session's secrets, read on demand:  joy secret [ls] | get NAME | set NAME=value | rm NAME
   ${c.b("doctor")}       Diagnose the environment (node, tmux, claude, auth, daemon)
   ${c.b("auth")}         Show whether this machine is paired, and with which relay
                joy auth <relay url>: pair this machine with a relay using your
@@ -2283,6 +2346,7 @@ async function main(): Promise<void> {
     case "mode": code = await cmdMode(rest); break;
     case "pane": code = await cmdPane(rest); break;
     case "env": code = await cmdEnv(rest); break;
+    case "secret": case "secrets": code = await cmdSecret(rest); break;
     case "jump": case "j": code = await cmdJump(rest); break;
     case "run": code = await cmdRun(rest); break;
     case "new": code = await cmdNew(rest); break;

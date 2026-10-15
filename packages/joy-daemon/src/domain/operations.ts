@@ -17,6 +17,8 @@ import { parseJoyCommand, type Session } from "../claude/session";
 import { DAEMON_VERSION_LABEL } from "../version";
 import { sessionRecords } from "../relay/relay";
 import { listEnvVars, setEnvVar, unsetEnvVar, isValidEnvName } from "./envStore";
+import { listSecrets, setSecrets, getSecret, removeSecret, copySessionSecrets, dropSessionSecrets } from "./secretsStore";
+
 import type { AgentSession } from "./agentSession";
 import { SessionEndedError } from "./ledger";
 import { queueFor } from "./queueFacade";
@@ -452,6 +454,13 @@ export function askCycle(registry: SessionRegistry, asker: string, target: strin
   return null;
 }
 
+/** not_found is a 404, a session that does not exist too; any other refusal a 400. */
+function secretShape(result: unknown): { status: number; body: unknown } {
+  const error = (result as { error?: string }).error;
+  if (!error) return { status: 200, body: result };
+  return { status: error === "not_found" || error === "session_not_found" ? 404 : 400, body: result };
+}
+
 export const machineOps: MachineOp[] = [
   {
     name: "list",
@@ -793,6 +802,7 @@ export const machineOps: MachineOp[] = [
           default:
             return { ok: false, error: `Fork isn't available for ${src.agentFlavor}: its sessions live inside the ${src.agentFlavor} server, which offers no way to branch one.` };
         }
+        copySessionSecrets(src.id, session.id); // the fork carries on the same work
         return { ok: true, session: session.toJSON(), localSessionId: session.id };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -1092,6 +1102,7 @@ export const machineOps: MachineOp[] = [
       // The REAL archive result: a failed archive must read as failure so the
       // app runs its fallback archive (Astra on 57fb90a3).
       if (!(await session.awaitArchive())) return { ok: false };
+      dropSessionSecrets(session.id);
       // A kill is done only once a termination marker is durably committed
       // (#567 residual): when the record's unlink AND its tombstone were both
       // refused, only this process's memory hid the record, the op still said
@@ -1142,6 +1153,7 @@ export const machineOps: MachineOp[] = [
           if (session.status === "ended") session.forceKill(); else session.end("killed");
           if (!(await session.awaitArchive())) { results.push({ id, ok: false, bytesFreed: 0, removed: [], error: "archive_failed" }); continue; }
         }
+        dropSessionSecrets(id);
         results.push(nukeSessionStorage(id, { ledger: ledgerFor() }));
       }
       const tmux = labels.map((label) => killTmuxServer(label));
@@ -1819,6 +1831,63 @@ export const machineOps: MachineOp[] = [
     handler: (_registry, params) => unsetEnvVar(String(params.name ?? "")),
     httpShape: (result) => (result as { error?: string }).error ? { status: 400, body: result } : { status: 200, body: result },
   },
+  // ── session secrets (secretsStore.ts) ── values the user hands one session
+  // without typing them into the chat. Never applied to an agent's
+  // environment: the agent reads one on demand with `joy secret get`.
+  {
+    name: "secretList",
+    scope: "machine",
+    rpcName: "joy-secret-list",
+    summary: "List session secrets",
+    description: "Returns the names of the secrets saved for a session. Values are not included.",
+    params: { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, secrets: { type: "array", items: { type: "object", properties: { name: { type: "string" }, at: { type: "number" } } } }, error: { type: "string" } } },
+    http: { method: "GET", path: "/sessions/:id/secrets" },
+    handler: (_registry, params) => listSecrets(String(params.id ?? "")),
+    httpShape: secretShape,
+  },
+  {
+    name: "secretSet",
+    scope: "machine",
+    rpcName: "joy-secret-set",
+    summary: "Save session secrets",
+    description: "Adds or replaces secrets for a session. A bad name or value refuses the whole set.",
+    params: { type: "object", required: ["id", "secrets"], properties: { id: { type: "string" }, secrets: { type: "object", additionalProperties: { type: "string" } } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, names: { type: "array", items: { type: "string" } }, error: { type: "string" }, name: { type: "string" } } },
+    http: { method: "POST", path: "/sessions/:id/secrets" },
+    handler: (registry, params) => {
+      const id = String(params.id ?? "");
+      if (!registry.get(id)) return { ok: false, error: "session_not_found" };
+      const secrets = params.secrets;
+      if (!secrets || typeof secrets !== "object" || Array.isArray(secrets)) return { ok: false, error: "no_secrets" };
+      return setSecrets(id, secrets as Record<string, unknown>);
+    },
+    httpShape: secretShape,
+  },
+  {
+    name: "secretGet",
+    scope: "machine",
+    rpcName: "joy-secret-get",
+    summary: "Read session secret",
+    description: "Returns one secret's value. The agent calls this through `joy secret get`; the app never does.",
+    params: { type: "object", required: ["id", "name"], properties: { id: { type: "string" }, name: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, name: { type: "string" }, value: { type: "string" }, error: { type: "string" } } },
+    http: { method: "GET", path: "/sessions/:id/secrets/:name" },
+    handler: (_registry, params) => getSecret(String(params.id ?? ""), String(params.name ?? "")),
+    httpShape: secretShape,
+  },
+  {
+    name: "secretRemove",
+    scope: "machine",
+    rpcName: "joy-secret-remove",
+    summary: "Remove session secret",
+    description: "Removes one secret from a session.",
+    params: { type: "object", required: ["id", "name"], properties: { id: { type: "string" }, name: { type: "string" } } },
+    result: { type: "object", properties: { ok: { type: "boolean" }, existed: { type: "boolean" }, error: { type: "string" } } },
+    http: { method: "DELETE", path: "/sessions/:id/secrets/:name" },
+    handler: (_registry, params) => removeSecret(String(params.id ?? ""), String(params.name ?? "")),
+    httpShape: secretShape,
+  },
   {
     name: "status",
     scope: "machine",
@@ -2116,6 +2185,7 @@ export const sessionOps: SessionOp[] = [
       // failure now surfaces success:false so the app runs its fallback archive
       // instead of leaving the killed session in the active list.
       const archived = await session.awaitArchive();
+      if (archived) dropSessionSecrets(session.id);
       return archived
         ? { success: true, message: "killed" }
         : { success: false, error: "archive failed" };

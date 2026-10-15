@@ -1111,6 +1111,21 @@ export const zhHant: TranslationStructure = {
         setupPrompt: '建議的系統提示詞',
         setupPromptSubtitle: '點按複製，然後貼到控制台中代理的提示詞裡。在「持續連線」模式下，同樣的說明也會在每次連線時作為情境傳送。',
     },
+    secrets: {
+        stripTitle: '已儲存為密鑰，不會顯示在聊天中',
+        new: '新增',
+        replaces: '取代',
+        notSavedTitle: '密鑰未儲存',
+        unreachable: '目前無法連線到此工作階段所在的機器。你的訊息已放回輸入框。',
+        invalid: ({ lines }: { lines: string }) => `這些行不是 名稱: 值 格式：${lines}`,
+        refused: ({ error }: { error: string }) => `機器拒絕了它們（${error}）。你的訊息已放回輸入框。`,
+        title: '密鑰',
+        footer: '僅為此工作階段儲存。代理程式用 joy secret get 讀取；值永遠不會回到應用程式。傳送 ```secrets 區塊或 /secrets 名稱=值 來新增。',
+        none: '沒有密鑰',
+        removeTitle: '刪除密鑰？',
+        removeMessage: ({ name }: { name: string }) => `代理程式將無法再讀取 ${name}。`,
+    },
+
     machine: {
         environment: '環境變數',
         environmentFooter: '此機器上每個新工作階段都會繼承的供應商金鑰（FIREWORKS_API_KEY 等）。以加密形式保存在機器上；值不會傳回應用程式。',

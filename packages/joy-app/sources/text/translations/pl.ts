@@ -1127,6 +1127,21 @@ export const pl: TranslationStructure = {
         setupPrompt: 'Sugerowany prompt systemowy',
         setupPromptSubtitle: 'Dotknij, aby skopiować, i wklej do promptu agenta w panelu. W trybie „Ciągła” te same uwagi są też wysyłane jako kontekst przy każdym połączeniu.',
     },
+    secrets: {
+        stripTitle: 'Zapisane jako sekrety, ukryte w czacie',
+        new: 'nowy',
+        replaces: 'zastępuje',
+        notSavedTitle: 'Sekrety nie zostały zapisane',
+        unreachable: 'Nie można teraz połączyć się z maszyną tej sesji. Twoja wiadomość wróciła do pola.',
+        invalid: ({ lines }: { lines: string }) => `Te linie nie są parami nazwa: wartość: ${lines}`,
+        refused: ({ error }: { error: string }) => `Maszyna je odrzuciła (${error}). Twoja wiadomość wróciła do pola.`,
+        title: 'Sekrety',
+        footer: 'Zapisane tylko dla tej sesji. Agent odczytuje je przez joy secret get; wartości nigdy nie wracają do aplikacji. Dodaj je, wysyłając blok ```secrets lub /secrets nazwa=wartość.',
+        none: 'Brak sekretów',
+        removeTitle: 'Usunąć sekret?',
+        removeMessage: ({ name }: { name: string }) => `Agent nie będzie już mógł odczytać ${name}.`,
+    },
+
     machine: {
         environment: 'Środowisko',
         environmentFooter: 'Klucze dostawców (FIREWORKS_API_KEY, …), które dziedziczy każda nowa sesja na tej maszynie. Przechowywane na maszynie w postaci zaszyfrowanej; wartości nie wracają do aplikacji.',

@@ -80,6 +80,31 @@ On web and desktop you can also paste an image straight into the message box, or
 
 A message can carry up to 20 files, each up to 10 MB. Attachments are encrypted on your device and saved on the machine in `~/.joy/sessions/<session id>/uploads/`, outside your project. The message tells the agent where each file is. You can browse them later under **Session files** in the session's Files view.
 
+## Secrets
+
+To give a session a password, token or anything else you don't want in the chat, put it in a secrets block or a `/secrets` line. Either can go anywhere in the message, on a line of its own:
+
+````text
+log in to the dashboard with these
+```secrets
+email: me@example.com
+password: hunter2
+```
+````
+
+```text
+/secrets email=me@example.com password="two words"
+```
+
+Each line of a block is `name: value` or `name=value`. On the `/secrets` line (`/secret` works too), quote a value that has spaces. While you type, a strip above the box lists each name and marks it **new** or **replaces**.
+
+When you send, the app saves the values to the session's machine first, over the encrypted machine connection, and only then sends the rest of your message. In place of the secrets the agent sees a note naming them, such as `[secrets saved: email, password — read one with joy secret get <name>]`, and reads a value with `joy secret get` when it needs one. If the machine can't be reached, nothing is sent and your message goes back into the box.
+
+- Secrets belong to the session. Its agent sees only its own; a fork or handoff gets a copy, and they're deleted when the session is killed.
+- The app never shows a value again. Session info lists the names, and you can delete them there.
+- If a value turns up in the agent's output, it's blanked in the chat. It is still in the agent's own conversation, which goes to the model provider.
+- A secrets block typed straight into the terminal is not intercepted.
+
 ## When the agent needs you
 
 Some turns stop and wait for an answer:

@@ -1112,6 +1112,21 @@ export const zhHans: TranslationStructure = {
         setupPrompt: '建议的系统提示词',
         setupPromptSubtitle: '点按复制，然后粘贴到控制台中代理的提示词里。在“持续在线”模式下，同样的说明也会在每次连接时作为上下文发送。',
     },
+    secrets: {
+        stripTitle: '已保存为密钥，不会显示在聊天中',
+        new: '新增',
+        replaces: '替换',
+        notSavedTitle: '密钥未保存',
+        unreachable: '目前无法连接此会话所在的机器。你的消息已放回输入框。',
+        invalid: ({ lines }: { lines: string }) => `这些行不是 名称: 值 格式：${lines}`,
+        refused: ({ error }: { error: string }) => `机器拒绝了它们（${error}）。你的消息已放回输入框。`,
+        title: '密钥',
+        footer: '仅为此会话保存。智能体用 joy secret get 读取；值永远不会回到应用。发送 ```secrets 代码块或 /secrets 名称=值 来添加。',
+        none: '没有密钥',
+        removeTitle: '删除密钥？',
+        removeMessage: ({ name }: { name: string }) => `智能体将无法再读取 ${name}。`,
+    },
+
     machine: {
         environment: '环境变量',
         environmentFooter: '此机器上每个新会话都会继承的提供商密钥（FIREWORKS_API_KEY 等）。以加密形式保存在机器上；值不会返回到应用。',

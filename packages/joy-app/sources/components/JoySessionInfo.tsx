@@ -11,7 +11,11 @@ import { View, Text, Animated, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { copyToClipboard } from '@/utils/clipboard';
-import { guarded } from '@/utils/guardAsync';
+import { alertError, guarded } from '@/utils/guardAsync';
+import { useResource } from '@/hooks/useResource';
+import { resources } from '@/sync/resource';
+import { sessionSecretsSpec } from '@/sync/machineResources';
+import { machineSecretRemove } from '@/sync/v2/machine';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { Item } from '@/components/Item';
@@ -429,6 +433,8 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                 />
             </ItemGroup>
 
+            {!!machineId && !!joySessionId && <SessionSecretsSection machineId={machineId} joySessionId={joySessionId} />}
+
             {/* IDs */}
             <ItemGroup title="IDs">
                 {joySessionId && (
@@ -486,5 +492,39 @@ export const JoySessionInfo = React.memo(({ session }: { session: Session }) => 
                 />
             </ItemGroup>
         </ItemList>
+    );
+});
+
+/**
+ * The secrets saved for this session (names only — values never come back to
+ * the app). Added from the message box (```secrets / /secrets), by the agent
+ * with `joy secret set`, removed here or with `joy secret rm`.
+ */
+const SessionSecretsSection = React.memo(({ machineId, joySessionId }: { machineId: string; joySessionId: string }) => {
+    const secrets = useResource(sessionSecretsSpec(machineId, joySessionId));
+    const names = secrets.data ?? null;
+    const remove = React.useCallback((name: string) => {
+        Modal.alert(t('secrets.removeTitle'), t('secrets.removeMessage', { name }), [
+            { text: t('common.cancel'), style: 'cancel' },
+            { text: t('common.delete'), style: 'destructive', onPress: guarded(async () => {
+                const ctx = sync.machineOnlyCtx(machineId);
+                if (!ctx) return;
+                const r = await machineSecretRemove(ctx, joySessionId, name);
+                if (!r.data?.ok) throw new Error(r.data?.error ?? `http_${r.status}`);
+                await resources.refresh(sessionSecretsSpec(machineId, joySessionId));
+            }, alertError()) },
+        ]);
+    }, [machineId, joySessionId]);
+    // Unreachable or not yet loaded: the section stays out of the way.
+    if (!names) return null;
+    return (
+        <ItemGroup title={t('secrets.title')} footer={t('secrets.footer')}>
+            {names.map((n) => (
+                <Item key={n} title={n} detail="••••••" icon={<Ionicons name="key-outline" size={29} color="#5856D6" />} onPress={() => remove(n)} showChevron={false} />
+            ))}
+            {names.length === 0 && (
+                <Item title={t('secrets.none')} icon={<Ionicons name="key-outline" size={29} color="#8E8E93" />} showChevron={false} />
+            )}
+        </ItemGroup>
     );
 });

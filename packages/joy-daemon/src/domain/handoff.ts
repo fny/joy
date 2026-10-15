@@ -58,6 +58,7 @@ export function loadHandoffJob(sessionId: string): HandoffJob | null {
 }
 import { joySessionDir } from "../paths";
 import { findCodexRollout, findPiSessionFile } from "./forkHarness";
+import { copySessionSecrets } from "./secretsStore";
 
 export type HandoffState = "writing" | "handed_off" | "picked_up" | "handed_back" | "returned" | "failed";
 
@@ -312,6 +313,7 @@ export async function runHandoffJob(registry: HandoffRegistry, src: AgentSession
       const body = await awaitNote(src, path);
       finalizeNote(path, body, src);
       dst = await registry.create({ cwd: src.cwd, agent: target.agent, model: target.model, effort: target.effort, permissionMode: target.permissionMode, createDir: false, forceNew: true });
+      copySessionSecrets(src.id, dst.id); // the target picks up the same work
       // The target exists; if THAT is not on record, a replay would create a
       // second one — so the prompt is not dispatched until it is.
       if (!advance({ dst: dst.id })) throw new HandoffNotPersistedError(src.id, `target ${dst.id} created`);

@@ -1,3 +1,11 @@
+# Oct 15 — Hand a session a password without putting it in the chat
+
+- **Type secrets into the message box.** Put them in a block that starts with ```` ```secrets ````, one `name: value` per line, or on a `/secrets name=value` line, anywhere in a message. A strip above the box lists each name and marks it new, or as replacing one already saved.
+- **The values never reach the chat.** When you send, they are saved to the session's machine first, over the encrypted machine connection, and the agent gets your message with a note naming them in their place. It reads one with `joy secret get` when it needs it: to log in, fill a form field or call an API. If the machine can't be reached, nothing is sent and your message goes back into the box.
+- **Each session has its own.** A fork or handoff gets a copy, and they are deleted when the session is killed. Session info lists the names, and you can delete them there; agents can save and remove them too.
+- **A value the agent prints is blanked in the chat.** It is still in the agent's own conversation.
+- **This needs the machine's daemon to be up to date.**
+
 # Oct 12 — Option buttons answer the first tap on iPhone
 
 - **Tapping an option at the end of a chat now registers the first time.** While a chat was following the newest message, the list could keep re-issuing its own "go to the end" scroll, many times a second. On iPhone a scroll that arrives while your finger is down takes the touch away from the button under it, so a tap on an option did nothing — no outline, no answer — until one happened to land between two scrolls. The list now scrolls to the end once and stops.

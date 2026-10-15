@@ -1160,6 +1160,21 @@ export const en = {
         setupPrompt: 'Suggested system prompt',
         setupPromptSubtitle: 'Tap to copy and paste into the agent\'s prompt on the dashboard. In "Stays on" mode the same notes are also sent as context on every connect.',
     },
+    secrets: {
+        stripTitle: 'Saved as secrets, hidden from the chat',
+        new: 'new',
+        replaces: 'replaces',
+        notSavedTitle: 'Secrets not saved',
+        unreachable: 'This session\'s machine can\'t be reached right now. Your message is back in the box.',
+        invalid: ({ lines }: { lines: string }) => `These lines aren't name: value pairs: ${lines}`,
+        refused: ({ error }: { error: string }) => `The machine refused them (${error}). Your message is back in the box.`,
+        title: 'Secrets',
+        footer: 'Saved for this session only. The agent reads one with joy secret get; values never come back to the app. Add some by sending a ```secrets block or /secrets name=value.',
+        none: 'No secrets',
+        removeTitle: 'Remove secret?',
+        removeMessage: ({ name }: { name: string }) => `The agent will no longer be able to read ${name}.`,
+    },
+
     machine: {
         environment: 'Environment',
         environmentFooter: 'Provider keys (FIREWORKS_API_KEY, …) every new session on this machine inherits. Stored sealed on the machine; values never come back to the app.',

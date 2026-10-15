@@ -82,7 +82,7 @@ export function __setEnvLockTimingForTests(t: Partial<typeof timing>): void { Ob
 const hooks: { beforePublish?: () => void } = {};
 export function __setEnvStoreHooksForTests(h: typeof hooks): void { Object.assign(hooks, h); }
 
-function withStoreLock<T>(fn: () => T): T | { ok: false; error: string } {
+export function withStoreLock<T>(fn: () => T): T | { ok: false; error: string } {
   mkdirSecure(joyHomeDir()); // 0700 — env.sealed + the content key live here (#48)
   const db = new DatabaseSync(lockPath());
   try {
@@ -109,7 +109,7 @@ function envDict(): Record<string, string> { return Object.create(null) as Recor
 
 // ── keys ─────────────────────────────────────────────────────────────────────
 
-function readLocalKey(): Uint8Array | null {
+export function readLocalKey(): Uint8Array | null {
   try {
     const k = Buffer.from(readFileSync(keyPath(), "utf8").trim(), "base64");
     return k.length === 32 ? new Uint8Array(k) : null;
@@ -120,7 +120,7 @@ function readLocalKey(): Uint8Array | null {
  *  EXCLUSIVE: the fully written candidate is hard-linked into place, which
  *  fails when a key already exists — then that key is adopted. A rename
  *  would silently replace a sibling daemon's key and orphan its store. */
-function ensureLocalKey(): Uint8Array {
+export function ensureLocalKey(): Uint8Array {
   const cur = readLocalKey();
   if (cur) return cur;
   mkdirSecure(joyHomeDir()); // 0700 — env.sealed + the content key live here (#48)

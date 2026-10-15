@@ -64,7 +64,10 @@ import { resolveAgentDefaultConfig } from '@/sync/agentDefaults';
 import { JOY_CLAUDE_MODELS } from '@/sync/joyModels';
 import { useHarnessCapabilities } from '@/hooks/useHarnessCapabilities';
 import { enabledModels } from '@/sync/modelAllowlist';
-import { modelKeyOf } from '@/sync/machineResources';
+import { modelKeyOf, sessionSecretsSpec } from '@/sync/machineResources';
+import { resources } from '@/sync/resource';
+import { parseSecretsMessage, messageWithSecretsNote } from '@/utils/secretsMessage';
+import { SecretsStrip } from './SecretsStrip';
 import { useJoyQueue } from '@/hooks/useJoyQueue';
 import { useSessionMessageBackstop } from '@/hooks/useSessionMessageBackstop';
 import { DraftQueueStrip } from './DraftQueueStrip';
@@ -84,7 +87,7 @@ import { isAgentBusy } from '@/sync/sessionLiveness';
 
 import { liveFacts, isTurnActive } from '@/sync/sessionFacts';
 import { steerRoute } from './steerRoute';
-import { machineSend } from '@/sync/v2/machine';
+import { machineSend, machineSecretSet } from '@/sync/v2/machine';
 // Slash commands that execute IMMEDIATELY mid-turn and therefore bypass the
 // app-side queue hold. Sources: official docs confirm /model and /effort
 // "switch immediately" mid-turn (model-config.md) and /btw runs while Claude
@@ -546,13 +549,16 @@ const ChatComposer = React.memo(function ChatComposer(props: ChatComposerProps) 
     }), [sessionId, composerHandleRef]);
 
     return (
-        <AgentInput
-            {...rest}
-            ref={inputHandleRef}
-            sessionId={sessionId}
-            initialValue={initialDraft}
-            onChangeText={handleChangeText}
-        />
+        <>
+            <SecretsStrip sessionId={sessionId} message={message} />
+            <AgentInput
+                {...rest}
+                ref={inputHandleRef}
+                sessionId={sessionId}
+                initialValue={initialDraft}
+                onChangeText={handleChangeText}
+            />
+        </>
     );
 });
 
@@ -963,10 +969,10 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         },
     }), []);
 
-    // handleSend reads the live message via the composer ref, so it doesn't
-    // need to re-create on every keystroke.
-    const handleSend = React.useCallback(() => {
-        const liveMessage = composerHandleRef.current?.getMessage() ?? '';
+    // sendText takes the message as typed (or, after secrets were saved, with
+    // the note in their place); handleSend below reads the live message via
+    // the composer ref, so neither re-creates on every keystroke.
+    const sendText = React.useCallback((liveMessage: string) => {
         const hasImages = selectedImages.length > 0;
         if (!liveMessage.trim() && !hasImages) return;
         const attachments = selectedImages;
@@ -1077,6 +1083,41 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             }
         });
     }, [sessionId, isJoyDaemon, selectedImages, clearImages, addImages]);
+
+    // Secrets in the message (```secrets block or /secrets line, utils/
+    // secretsMessage) are saved to the session's machine FIRST, over the
+    // sealed tunnel; only then does the message go, with a note naming them
+    // in their place. Nothing is sent when they could not be saved: the text
+    // stays in (or goes back to) the box.
+    const handleSend = React.useCallback(() => {
+        const liveMessage = composerHandleRef.current?.getMessage() ?? '';
+        const parsed = parseSecretsMessage(liveMessage);
+        const names = parsed ? Object.keys(parsed.secrets) : [];
+        if (!parsed || (names.length === 0 && parsed.invalid.length === 0)) { sendText(liveMessage); return; }
+        if (parsed.invalid.length > 0 || names.length === 0) {
+            Modal.alert(t('secrets.notSavedTitle'), t('secrets.invalid', { lines: parsed.invalid.join(', ') }));
+            return;
+        }
+        const latest = storage.getState().sessions[sessionId];
+        const machineIdNow = latest?.metadata?.machineId;
+        const joySessionIdNow = latest?.metadata?.joy__sessionId;
+        const ctx = isJoyDaemon && machineIdNow ? sync.machineOnlyCtx(machineIdNow) : null;
+        if (!ctx || !machineIdNow || !joySessionIdNow) {
+            Modal.alert(t('secrets.notSavedTitle'), t('secrets.unreachable'));
+            return;
+        }
+        composerHandleRef.current?.clearMessage();
+        const putBack = (message: string) => {
+            if (composerHandleRef.current) composerHandleRef.current.restoreMessage(liveMessage);
+            else useDraftQueueStore.getState().add(sessionId, liveMessage, 'draft');
+            Modal.alert(t('secrets.notSavedTitle'), message);
+        };
+        void machineSecretSet(ctx, joySessionIdNow, parsed.secrets).then((r) => {
+            if (!r.data?.ok) { putBack(t('secrets.refused', { error: r.data?.error ? `${r.data.error}${r.data.name ? `: ${r.data.name}` : ''}` : `http_${r.status}` })); return; }
+            void resources.refresh(sessionSecretsSpec(machineIdNow, joySessionIdNow));
+            sendText(messageWithSecretsNote(parsed.rest, names));
+        }).catch(() => putBack(t('secrets.unreachable')));
+    }, [sessionId, isJoyDaemon, sendText]);
 
     // Stash the current input as an on-device draft (queued at the bottom of the
     // chat) and clear the box so the user can compose the next one. Drafts are

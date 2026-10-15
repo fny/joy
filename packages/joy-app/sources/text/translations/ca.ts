@@ -1111,6 +1111,21 @@ export const ca: TranslationStructure = {
         setupPrompt: 'Prompt de sistema suggerit',
         setupPromptSubtitle: 'Toca per copiar i enganxa\'l al prompt de l\'agent al tauler. En mode "Sempre activa" aquestes notes també s\'envien com a context a cada connexió.',
     },
+    secrets: {
+        stripTitle: 'Desats com a secrets, amagats del xat',
+        new: 'nou',
+        replaces: 'substitueix',
+        notSavedTitle: 'Secrets no desats',
+        unreachable: 'Ara mateix no es pot contactar amb la màquina d\'aquesta sessió. El teu missatge ha tornat al quadre.',
+        invalid: ({ lines }: { lines: string }) => `Aquestes línies no són parells nom: valor: ${lines}`,
+        refused: ({ error }: { error: string }) => `La màquina els ha rebutjat (${error}). El teu missatge ha tornat al quadre.`,
+        title: 'Secrets',
+        footer: 'Desats només per a aquesta sessió. L\'agent en llegeix un amb joy secret get; els valors mai no tornen a l\'app. Afegeix-ne enviant un bloc ```secrets o /secrets nom=valor.',
+        none: 'Cap secret',
+        removeTitle: 'Eliminar el secret?',
+        removeMessage: ({ name }: { name: string }) => `L'agent ja no podrà llegir ${name}.`,
+    },
+
     machine: {
         environment: 'Entorn',
         environmentFooter: 'Claus de proveïdors (FIREWORKS_API_KEY, …) que hereta cada sessió nova en aquesta màquina. Es desen xifrades a la màquina; els valors mai tornen a l\'app.',

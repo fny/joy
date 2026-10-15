@@ -1110,6 +1110,21 @@ export const pt: TranslationStructure = {
         setupPrompt: 'Prompt de sistema sugerido',
         setupPromptSubtitle: 'Toque para copiar e cole no prompt do agente no painel. No modo "Sempre ligada" as mesmas notas também são enviadas como contexto a cada conexão.',
     },
+    secrets: {
+        stripTitle: 'Guardados como segredos, ocultos no chat',
+        new: 'novo',
+        replaces: 'substitui',
+        notSavedTitle: 'Segredos não guardados',
+        unreachable: 'Não é possível contactar a máquina desta sessão agora. A sua mensagem voltou para a caixa.',
+        invalid: ({ lines }: { lines: string }) => `Estas linhas não são pares nome: valor: ${lines}`,
+        refused: ({ error }: { error: string }) => `A máquina recusou-os (${error}). A sua mensagem voltou para a caixa.`,
+        title: 'Segredos',
+        footer: 'Guardados só para esta sessão. O agente lê um com joy secret get; os valores nunca voltam para a app. Adicione enviando um bloco ```secrets ou /secrets nome=valor.',
+        none: 'Sem segredos',
+        removeTitle: 'Remover segredo?',
+        removeMessage: ({ name }: { name: string }) => `O agente deixará de poder ler ${name}.`,
+    },
+
     machine: {
         environment: 'Ambiente',
         environmentFooter: 'Chaves de provedores (FIREWORKS_API_KEY, …) que toda nova sessão nesta máquina herda. Guardadas cifradas na máquina; os valores nunca voltam ao app.',

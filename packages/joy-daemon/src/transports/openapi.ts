@@ -61,6 +61,10 @@ const HTTP_SHAPED: Record<string, (op: MachineOp) => HttpResponses> = {
   approvalsAnswer: (op) => ({ "200": success(op), "400": err("unknown approval | approvals_unsupported") }),
   envSet: (op) => ({ "200": success(op), "400": err("bad_name | bad_value | no_machine_key | store_unreadable") }),
   envUnset: (op) => ({ "200": success(op), "400": err("bad_name | store_unreadable") }),
+  secretList: (op) => ({ "200": success(op), "400": err("bad_session | store_unreadable") }),
+  secretSet: (op) => ({ "200": success(op), "400": err("bad_session | no_secrets | bad_name | bad_value | store_busy | store_unreadable"), "404": err("session_not_found") }),
+  secretGet: (op) => ({ "200": success(op), "400": err("bad_session | store_unreadable"), "404": err("not_found") }),
+  secretRemove: (op) => ({ "200": success(op), "400": err("bad_session | store_busy | store_unreadable") }),
   // Refusals stay app-facing sentences at 200 ({ok:false, error}); only a
   // refused spool commit is a retryable 503, like send/queueAdd (#53).
   handoff: (op) => ({ "200": success(op), "503": err("not_durable") }),
