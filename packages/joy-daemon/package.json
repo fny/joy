@@ -1,6 +1,6 @@
 {
   "name": "@fny/joy-daemon",
-  "version": "1.11.4",
+  "version": "1.11.5",
   "description": "joy-daemon daemon + CLI — run Claude Code sessions in tmux, bridged to joy-relay.",
   "type": "module",
   "bin": {
