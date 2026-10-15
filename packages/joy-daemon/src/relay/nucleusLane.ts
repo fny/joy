@@ -43,8 +43,8 @@ import { queueFor, isTerminal } from "../domain/queueFacade";
 import { cloneForSpawn } from "../domain/operations";
 import { deriveSpawnSpecKey } from "../tunnel/sealedStream";
 import {
-  nextLeaseState, initialLeaseState, isLeaseDeath, reacquireBackoffMs, LEASE_RENEW_MS, LEASE_DEATH_RE, CONTROL_LANE_RETRY_MS,
-  type Lease, type LeaseEvent,
+  nextLeaseState, initialLeaseState, isLeaseDeath, reacquireBackoffMs, retryBackoffMs, RETRY_MAX_MS, LEASE_RENEW_MS, LEASE_RENEW_RETRY_MS, LEASE_TTL_MS, LEASE_DEATH_RE, CONTROL_LANE_RETRY_MS,
+  type Lease, type LeaseEvent, type LeaseTransition,
 } from "./leaseMachine";
 import { isKilledHandle } from "../domain/recordClass";
 import { nextBudgetState, isExhausted, lossOf, OK as BUDGET_OK, type BudgetState, type BudgetEvent, type PersistedBudget, type Loss } from "./budgetState";
@@ -58,6 +58,12 @@ import {
 // relayTurnMachine.ts); this file wires them to the relay and the runtime.
 const RENEW_MS = LEASE_RENEW_MS;  // lease TTL is 20s server-side
 const CLAIM_WAIT_MS = 25_000;
+/** A claim that has not answered this long after its long-poll should have
+ *  is stuck on a dead connection: give it up and claim again. Without it a
+ *  claim through a link that silently dropped hung for minutes. */
+const CLAIM_TIMEOUT_MS = CLAIM_WAIT_MS + 15_000;
+/** One renew attempt's budget, so a failing renew is retried inside the TTL. */
+const RENEW_TIMEOUT_MS = 5_000;
 /** How long a running turn may go with NO output before it is surfaced as
  *  stalled. It was a hard 30-minute cap on the turn's total age that ended it
  *  `interrupted` and, from a0ceefef, aborted the agent — which is exactly
@@ -78,7 +84,7 @@ const DELIVERY_WAIT_MS = 30 * 60_000;
 /** Once stalled, how often the turn is re-checked for output so a recovery
  *  clears the flag promptly. */
 const STALL_RECHECK_MS = 60_000;
-const ACQUIRE_RETRY_MS = 60_000;
+const RETRY_MAX_S = RETRY_MAX_MS / 1000;
 
 export interface NucleusLaneOpts {
   registry: SessionRegistry;
@@ -342,11 +348,21 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   // has run — the outbox may send". Every change is an event.
   let leaseState = initialLeaseState();
   const lease = (): Lease | null => leaseState.lease;
-  const leaseEvent = (ev: LeaseEvent): void => {
+  // Aborted when the lease it belongs to is dropped or replaced: a claim
+  // long-polling under a lease that is gone ends at once instead of holding
+  // its lane until the relay answers.
+  let leaseAbort = new AbortController();
+  const leaseEvent = (ev: LeaseEvent): LeaseTransition | null => {
     const t = nextLeaseState(leaseState, ev);
-    if (!t) return;
+    if (!t) return null;
+    const before = leaseState.lease;
     leaseState = t.to;
     if (t.clearFreshTerminals) freshTerminals.clear();
+    if (before && before !== leaseState.lease) {
+      leaseAbort.abort(new Error(`lease ${before.leaseId.slice(0, 8)} dropped`));
+      leaseAbort = new AbortController();
+    }
+    return t;
   };
   const leaseDeathCode = (e: unknown): string => LEASE_DEATH_RE.exec(String(e))?.[0] ?? "lease_unknown";
   // Chat-log ids are an in-memory counter reset on every boot — a bare
@@ -1040,8 +1056,9 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
   }
 
   async function acquire(): Promise<void> {
+    const at = now();
     const r = await api("POST", "/daemon/leases", { machineId, capabilities: { transport: "nucleus-lane" } });
-    leaseEvent({ type: "acquired", lease: { leaseId: r.leaseId, leaseToken: r.leaseToken, epoch: String(r.epoch) } });
+    leaseEvent({ type: "acquired", lease: { leaseId: r.leaseId, leaseToken: r.leaseToken, epoch: String(r.epoch) }, at });
     log(`lease ${r.leaseId.slice(0, 8)} epoch ${r.epoch}`);
   }
 
@@ -1450,6 +1467,7 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
       method: "POST",
       headers: { ...baseHeaders(), "x-joy-lease-token": l.leaseToken, "content-type": "application/json" },
       body: JSON.stringify({ waitMs: CLAIM_WAIT_MS }),
+      signal: AbortSignal.any([leaseAbort.signal, AbortSignal.timeout(CLAIM_TIMEOUT_MS)]),
     });
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok) {
@@ -2723,23 +2741,38 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
     // orphan sweep, whose per-session requests (15s each, serial) could push
     // the next PUT past the relay's 20s TTL — expiring the very lease they
     // run under (codex review, 2026-09-04, second pass).
+    let failing = false;
     while (!stopped) {
-      await sleep(RENEW_MS);
+      await sleep(failing ? LEASE_RENEW_RETRY_MS : RENEW_MS);
       const l = lease();
-      if (!l) continue;
+      if (!l) { failing = false; continue; }
+      const at = now();
       try {
+        // Never wait past the TTL: an answer after it is no use to the lease.
+        const left = (leaseState.renewedAt ?? at) + LEASE_TTL_MS - at;
         const res = await fetch(`${relayUrl}/joy/v2/daemon/leases/${l.leaseId}`, {
           method: "PUT",
           headers: { ...baseHeaders(), "x-joy-lease-token": l.leaseToken },
-          signal: AbortSignal.timeout(RENEW_MS),
+          signal: AbortSignal.timeout(Math.max(1, Math.min(RENEW_TIMEOUT_MS, left))),
         });
-        if (!res.ok) throw new Error(`renew -> ${res.status}`);
-        leaseEvent({ type: "renew_ok" });
+        if (!res.ok) {
+          const json = (await res.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(`renew -> ${res.status} ${json?.error ?? ""}`.trim());
+        }
+        if (lease() !== l) continue; // replaced while the renew was out
+        if (failing) log(`lease ${l.leaseId.slice(0, 8)} renewed again`);
+        failing = false;
+        leaseEvent({ type: "renew_ok", at });
       } catch (e) {
-        // The lease is forgotten (the work lane re-acquires) and the fresh
-        // terminals with it: whatever posts next does so under a new lease —
-        // reconcile, not facts.
-        leaseEvent({ type: "renew_failed", error: errText(e) });
+        if (lease() !== l) continue;
+        // Inside the TTL the lease is kept and the renew retried every
+        // second; past it, or when the relay says the lease is dead, it is
+        // forgotten (the work lane re-acquires) and the fresh terminals with
+        // it: whatever posts next does so under a new lease — reconcile,
+        // not facts.
+        const t = leaseEvent({ type: "renew_failed", error: errText(e), at: now() });
+        if (t?.to.phase === "lost") { log(`lease ${l.leaseId.slice(0, 8)} lost (renew: ${errText(e)})`); failing = false; }
+        else if (!failing) { log(`lease ${l.leaseId.slice(0, 8)} renew failed (${errText(e)}) — retrying every ${LEASE_RENEW_RETRY_MS / 1000}s while it lasts`); failing = true; }
       }
     }
   }
@@ -2821,6 +2854,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
 
   async function laneLoop(lane: "work" | "control"): Promise<void> {
     let announced = false;
+    // Consecutive failures to reach the relay (or to keep a lease on it),
+    // reset by the first claim that answers: the next wait is
+    // retryBackoffMs(failures) — 1 s, 2 s, 4 s … 10 s.
+    let failures = 0;
     while (!stopped) {
       try {
         if (!lease()) {
@@ -2835,10 +2872,10 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           leaseEvent({ type: "boot_done" }); // bindings + content keys loaded: the outbox may send
           sender.start(); // every session with unacked rows resumes from the ledger — in order
           resumeLedgerTurns(lease()!); // relay turns the ledger still carries get their loops back (R13)
-          announced = false;
         }
         const leaseRef = lease()!;
         const offers = await claim(lane, leaseRef);
+        if (announced || failures > 0) { if (announced) log(`${lane} lane: claiming again`); announced = false; failures = 0; }
         let anyNew = offers.length === 0; // empty = the long-poll waited; no spin
         for (const offer of offers) {
           if (stopped) break;
@@ -2881,19 +2918,30 @@ export function startNucleusLane(opts: NucleusLaneOpts): NucleusLaneHandle {
           // this machineId) or expired: it forgets the lease and backs off
           // with jitter, so two daemons misconfigured onto one machineId
           // thrash slowly and VISIBLY.
-          leaseEvent({ type: "lease_death", code: leaseDeathCode(e), lane });
+          //
+          // An EXPIRED lease is our own renews not landing (a network blip):
+          // re-acquire at once and back off only while it keeps happening.
+          // A superseded one (lease_unknown / lease_epoch_stale) keeps the
+          // 10–20 s wait.
+          const t = leaseEvent({ type: "lease_death", code: leaseDeathCode(e), lane });
           if (lane === "control") { await sleep(CONTROL_LANE_RETRY_MS); continue; }
-          log(`${lane} lane: lease lost (${String((e as Error).message ?? e)}) — re-acquiring after backoff`);
-          await sleep(reacquireBackoffMs());
+          const wait = t?.backoff === "reacquire" ? reacquireBackoffMs() : retryBackoffMs(failures++);
+          log(`${lane} lane: lease lost (${String((e as Error).message ?? e)}) — re-acquiring in ${(wait / 1000).toFixed(1)}s`);
+          await sleep(wait);
           continue;
         }
         if (lease()) sender.start(); // boot failed mid-way: the outbox still holds the rows
+        if (lane === "control") { await sleep(lease() ? 5_000 : CONTROL_LANE_RETRY_MS); continue; }
+        // A failed claim or acquire — the relay unreachable, a claim given up
+        // as stuck, or one cut short because its lease was dropped. It used
+        // to wait a flat 60 s; a blip now costs about a second.
+        const wait = retryBackoffMs(failures++);
         if (!announced) {
           const cause = (e as { cause?: { code?: string; message?: string } }).cause;
-          log(`${lane} lane idle (${String((e as Error).message ?? e)}${cause ? `: ${cause.code ?? cause.message ?? ""}` : ""}) — retrying every ${ACQUIRE_RETRY_MS / 1000}s`);
+          log(`${lane} lane idle (${String((e as Error).message ?? e)}${cause ? `: ${cause.code ?? cause.message ?? ""}` : ""}) — retrying with backoff from ${(wait / 1000).toFixed(1)}s up to ${RETRY_MAX_S}s`);
           announced = true;
         }
-        await sleep(lane === "work" ? ACQUIRE_RETRY_MS : 5_000);
+        await sleep(wait);
       }
     }
   }
